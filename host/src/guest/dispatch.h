@@ -257,7 +257,8 @@ public:
     // harness uses one Runtime per process for the main thread's Jit; worker
     // Jits share the same callbacks object... see ActiveJit routing).
     static GuestCallbacks* g_probe_cb;
-    static void ProbeDump(std::uint64_t r0, std::uint64_t r1);
+    static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
+    static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

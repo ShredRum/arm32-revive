@@ -430,6 +430,24 @@ dead subsystem, game degrades without it).
   POLICY (from pre-compact history): engine decrypts itself under Dynarmic —
   we only deliver bytes; key-origin is fallback-only if content must be
   fabricated (never break crypto, only recon format/which-file).
+- WALL FORENSICS 2026-10-10 (HARNESS_PROBE IR emitter: CallHostFunction with
+  live r0/r1/lr at any pc; +ProbeDump2 for r2/r3; class via vtable->typeinfo):
+  parser @0x2A5368 takes (ctx, {begin,end}-range) + called 4x from wrapper
+  0x2A52F8 (lr 0x2A5340): #1 big valid JSON (decrypted asset via
+  ZipEntryInputStream, caller 0x2AD968), #2/#3 literal "null" (caller
+  0x2A9D34), #4 EMPTY (caller chain 0x1A522C <- 0x1A413C). #4's string is
+  [{0,0}] at 0x1A522C entry. Owner: rcs::Configuration (vtable probe).
+  Key built at 0x1A40EC: "session_configuration" (21 chars, pool 0x425495).
+  Heap key-table maps it -> fusion.registry (backing file). Builder
+  0x17DDC8 refs rodata "cloud" (@0x5C8888) with empty short-circuit
+  (ldrb [sp+40], beq). No sockets/getc/fgets/read/fread for registry anywhere
+  (only 3 freads: lua seeds); registry fopen-rb x2 + .tmp rewrites but never
+  read via any thunk. Fresh-install test (registry removed): still throws
+  (svc 15322 vs 16700, registry NOT recreated) — throw is NOT caused by
+  corrupt registry content. jev_verify 4/5 auto (ParseError-cause 0.98,
+  4-calls 0.99, Configuration/cloud origin 1.0, no-I/O 0.94).
+  Git checkpoint repo initialized (source-only: host/src, CMakeLists,
+  AGENTS.md; tools/thirdparty/work/APK ignored — 3.7GB total).
 - TOOLING LESSONS: shell mangles quoted abs paths with spaces — use
   workdir=project + relative paths. Never bulk-delete without backup
   (harness.cpp main() reconstructed once, verified on 3 baselines). No mental

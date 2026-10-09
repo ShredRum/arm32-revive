@@ -2919,7 +2919,11 @@ std::uint16_t GuestCallbacks::MemoryRead16(VAddr a) { return Read<std::uint16_t>
 std::uint32_t GuestCallbacks::MemoryRead32(VAddr a) { return Read<std::uint32_t>(a, false); }
 std::uint64_t GuestCallbacks::MemoryRead64(VAddr a) { return Read<std::uint64_t>(a, false); }
 GuestCallbacks* GuestCallbacks::g_probe_cb = nullptr;
-void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1) {
+void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp) {
+    std::printf("[probe] r2=%08x r3=%08x sp=%08x\n", (std::uint32_t)r2, (std::uint32_t)r3,
+                (std::uint32_t)sp);
+}
+void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     static std::uint64_t n = 0;
     if (++n > 8) {
         if (n == 9) {
@@ -2928,26 +2932,56 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1) {
         return;
     }
     std::uint32_t len = (r1 > 256) ? 256 : (std::uint32_t)r1;
-    std::printf("[probe] #%llu r0=%08x r1=%u\n", (unsigned long long)n, (std::uint32_t)r0,
-                (std::uint32_t)r1);
+    std::printf("[probe] #%llu r0=%08x r1=%08x lr=%08x\n", (unsigned long long)n,
+                (std::uint32_t)r0, (std::uint32_t)r1, (std::uint32_t)lr);
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
     }
-    // Indirect string form: r1 = pointer to {data,len} (e.g. std::string).
-    // Dump w0=[r1] (data) and w1=[r1+4] (len) plus the buffer itself.
+    // C++ object form: [rX+0] = vtable -> [-1] = typeinfo -> [+4] = name.
+    // Applies to both r0 and r1 (caller decides which holds the object).
+    for (int which = 0; which < 2; which++) {
+        std::uint32_t rx = (which == 0) ? (std::uint32_t)r0 : (std::uint32_t)r1;
+        if (!cb->rt_->CheckRange(rx, 4, false)) {
+            continue;
+        }
+        std::uint32_t vt = 0;
+        std::memcpy(&vt, cb->rt_->H<const std::uint8_t>(rx), 4);
+        if (cb->rt_->CheckRange(vt - 4, 8, false)) {
+            std::uint32_t ti = 0, nm = 0;
+            std::memcpy(&ti, cb->rt_->H<const std::uint8_t>(vt - 4), 4);
+            if (cb->rt_->CheckRange(ti + 4, 4, false)) {
+                std::memcpy(&nm, cb->rt_->H<const std::uint8_t>(ti + 4), 4);
+                if (cb->rt_->CheckRange(nm, 1, false)) {
+                    char buf[129];
+                    std::uint32_t k = 0;
+                    for (; k < 128; k++) {
+                        char c = 0;
+                        std::memcpy(&c, cb->rt_->H<const std::uint8_t>(nm + k), 1);
+                        buf[k] = c;
+                        if (!c) {
+                            break;
+                        }
+                    }
+                    buf[k] = 0;
+                    std::printf("[probe] r%u class: %s\n", which, buf);
+                }
+            }
+        }
+    }
+    // Indirect range form: r1 = pointer to {begin,end} (iterator range).
     if (cb->rt_->CheckRange((std::uint32_t)r1, 8, false)) {
         const std::uint8_t* q = cb->rt_->H<const std::uint8_t>((std::uint32_t)r1);
-        std::uint32_t w0 = (std::uint32_t)q[0] | ((std::uint32_t)q[1] << 8) |
-                           ((std::uint32_t)q[2] << 16) | ((std::uint32_t)q[3] << 24);
-        std::uint32_t w1 = (std::uint32_t)q[4] | ((std::uint32_t)q[5] << 8) |
-                           ((std::uint32_t)q[6] << 16) | ((std::uint32_t)q[7] << 24);
-        std::printf("[probe] [r1]={%08x,%u}\n", w0, w1);
-        if (w1 <= 0x10000 && cb->rt_->CheckRange(w0, w1 ? w1 : 1, false)) {
-            std::uint32_t dl = (w1 > 256) ? 256 : w1;
-            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(w0);
+        std::uint32_t b = (std::uint32_t)q[0] | ((std::uint32_t)q[1] << 8) |
+                          ((std::uint32_t)q[2] << 16) | ((std::uint32_t)q[3] << 24);
+        std::uint32_t e = (std::uint32_t)q[4] | ((std::uint32_t)q[5] << 8) |
+                          ((std::uint32_t)q[6] << 16) | ((std::uint32_t)q[7] << 24);
+        std::printf("[probe] [r1]={%08x..%08x}\n", b, e);
+        if (e >= b && e - b <= 0x10000 && cb->rt_->CheckRange(b, e > b ? e - b : 1, false)) {
+            std::uint32_t dl = (e - b > 256) ? 256 : e - b;
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(b);
             for (std::uint32_t i = 0; i < dl; i += 16) {
-                std::printf("[probe] %08x:", w0 + i);
+                std::printf("[probe] %08x:", b + i);
                 for (std::uint32_t j = i; j < i + 16 && j < dl; j++) {
                     std::printf(" %02x", p[j]);
                 }
@@ -2956,6 +2990,9 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1) {
                     std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
                 }
                 std::printf("|\n");
+            }
+            if (e - b == 0) {
+                std::printf("[probe] (empty range)\n");
             }
             return;
         }
@@ -3006,7 +3043,16 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
                                 ir.ZeroExtendWordToLong(
-                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))));
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
+            ir.CallHostFunction(&ProbeDump2,
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(2))),
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(3))),
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))));
         }
     }
     if (tl > 0) {
