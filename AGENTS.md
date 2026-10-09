@@ -278,14 +278,46 @@ dead subsystem, game degrades without it).
   InitDataImports now allocates pointer cells (*V=table base / canary) and
   patches slots with &V. Killed the 0x20202021/0x464C45AD wild-pointer faults
   (table bytes were being read as pointers). Subagent #8 diagnosed.
-- GLES RECON (2026-10-11): 68 gl* imports, ZERO egl* imports (engine never
-  touches EGL — Java owns context/surfaces, confirmed). Host has NVIDIA
-  GLESv2 + mesa libGLESv2.so.2 + GLES2/GLES3/EGL headers; no Xvfb (forbidden
-  to install). Headless render tests feasible later via surfaceless EGL
-  (EGL_MESA_platform_surfaceless / EGLDevice, no X needed). Thunk approach:
-  forward to host GLESv2 with H() pointer marshalling (guest mem is
-  host-mapped, buffers direct; string arrays need rebuild). 68 funcs scaffold
-  AFTER update passes (untestable before). Subagent #9 on validation loop.
+- WALL #3 (update, 2026-10-10): io::IOException "Unsupported image file
+  format while reading data/fonts/864x480/FONT_BASIC.pvr" (message captured
+  with {0} substituted via probe at 0x292118). Mechanism: 0x2B0BD4 returns
+  NULL -> `sub r0,r5,#1; cmp #10; bhi` throw-branch at 0x291EC0. 0x2B0BD4
+  takes an io::InputStream stack wrapper (vtable @0x66ACF8) whose +28 virtual
+  forwards (0x2B07E0) to a heap io::BundleInputStream (vtable @0x66B1A0);
+  bundle reads return EOF. Bundle members: [+24]=0x31 [+28]=0x21 (pos>end
+  would explain EOF; subagent on layout). Resolver 0x2BD418 zeroes OUT when
+  accumulated < needed (0x2BD560-68); its 0x2BD498 path never executes.
+  Asset bytes are byte-exact (inflate verified). Format table in heap
+  (BMP/TGA/JPG/DDS/PSD/PNG seen) but NO .PVR/.WEBP/.ETC/.PNG found by
+  HEXFIND post-mortem (HEXFIND `break`-on-gap bug FIXED -> page-skip; still
+  zero — table may be transient/freed or addresses drift). BSS 0x674488 =
+  malloc-arena-ish block (writes at 0x2BD9DC/E0 are allocator free-list ops,
+  NOT manager registration — earlier theory corrected).
+- JNI TALLY (all verified vs NDK jni.h struct order +4 reserved): implemented
+  6,15,17,21,22,23,24,25,28,29,30,33,34,35,36,52,53,54,61,62,63,94?,113,114,
+  115,116,117,118,119,129,130,131,140,141,142,144,145,146,147,148,149,150,
+  151,164,167,168,169,170,171,184,192,221,222,227,228. MISLABELS FIXED (were
+  behaviorally OK): 52-54 were CallLong (not Int; now 0L), 140-142 StaticVoid
+  (not Boolean), 221 is UTFRegion (ASCII-equivalent), 222 is Critical (check!).
+  RULE: never insert between `case 116:` and `case 34:` (114-116 fall through
+  into 34-36; broke twice, caught by config baseline).
+- GLES SHIM: CreateShader/Program nonzero; Shaderiv/Programiv TRUE; InfoLog
+  empty; GetString static ARM/Mali/ES2.0 + ETC1 ext list (HARNESS_GLVENDOR /
+  GLRENDERER tunable; PC-only scaffolding, real driver answers on device);
+  GetIntegerv era limits (4096/8/16/...); display 800x480 (was 0).
+- FILES: /sys + /proc read-only passthrough (cpu topology sizing).
+- PORT LEDGER (do NOT ship): probe infra, fill-{} hack, GL shim+strings,
+  /sys/proc passthrough, mock JNI values, seeds. SHIP: loader, real thunks,
+  threads, asset bridge, build.
+  gl* imports (inventory == binary), zero egl. Signatures from
+  /usr/include/GLES2/gl2.h: 41 scalar-void + 2 scalar-ret + 27 with pointer
+  args (BufferData/ShaderSource/Gen*/Get*/ReadPixels/TexImage2D/...).
+  Highest-risk: ShaderSource (ptr-to-ptrs), multi-OUT Get*InfoLog,
+  GetString (RET-PTR — must copy to guest), VertexAttribPointer/DrawElements
+  (client-ptr vs VBO-offset duality). Current: all gl* hit the generic
+  [stub]->0 tail (dispatch.cpp:1849-1867), so CreateProgram/Shader return 0.
+  Host: libGLESv2.so.2.1.0 + NVIDIA 615.71.09, libEGL mesa+nvidia,
+  EGL_MESA_platform_surfaceless + KHR_surfaceless in headers (runtime TBD).
 - CORRECTION (2026-10-11): the 131K x 0x0C0F8C stack words are DATA, not
   return addresses — TRANSLOG proves 0x0C0F8C never translates in the update
   run. Each nesting level STORES the pad address (per-level exception/unwind

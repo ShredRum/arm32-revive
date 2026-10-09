@@ -1095,6 +1095,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return "/dev/null";  // Android alarm driver: no host equivalent;
                                      // timer ioctls are stubbed, sink is fine
             }
+            // Read-only host passthrough for /sys (CPU topology: the game
+            // sizes thread pools from /sys/devices/system/cpu) and /proc
+            // (cpuinfo/meminfo reads). Host values are fine for bring-up
+            // (sizing/info only). Writes to these trees fail on the host
+            // side naturally (read-only fs semantics), which is correct.
+            if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0) {
+                return g;
+            }
             if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
                 !files_hostbase_.empty()) {
                 return files_hostbase_ + g.substr(files_prefix_.size());
@@ -1781,11 +1789,21 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::vector<std::uint8_t> comp((std::size_t)found->csize);
                 std::fseek(f, (long)found->data_off, SEEK_SET);
                 if (std::fread(comp.data(), 1, comp.size(), f) == comp.size()) {
-                    uLongf dst = (uLongf)found->usize;
-                    // Guest buffer directly as inflate target (range-checked above).
-                    if (CheckRange(gbuf, (std::size_t)found->usize, true)) {
-                        ok = ::uncompress(H(gbuf), &dst, comp.data(), (uLong)comp.size()) == Z_OK &&
-                             dst == found->usize;
+                    // APK entries are RAW deflate (no zlib wrapper), so
+                    // ::uncompress (expects a zlib header) fails Z_DATA_ERROR.
+                    // Use raw inflate instead (verified offline vs python zlib).
+                    z_stream strm{};
+                    strm.next_in = comp.data();
+                    strm.avail_in = (uInt)comp.size();
+                    strm.next_out = H(gbuf);
+                    strm.avail_out = (uInt)found->usize;
+                    if (::inflateInit2(&strm, -MAX_WBITS) == Z_OK) {
+                        int zr = ::inflate(&strm, Z_FINISH);
+                        ::inflateEnd(&strm);
+                        ok = (zr == Z_STREAM_END && strm.total_out == found->usize);
+                    }
+                    if (!ok) {
+                        std::printf("[asset] inflate(\"%s\") failed\n", want.c_str());
                     }
                 }
             } else {
@@ -1846,6 +1864,124 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- libm: PURE-MATH-BEGIN ---
 #include "math_thunks.inc"
     // --- libm: PURE-MATH-END ---
+    // --- GLES fake-success shim (bring-up ONLY): lets shader/program setup
+    // pass so update->render progresses to the first frame. Real GLES thunks
+    // (surfaceless EGL + host forwarding) come next; this shim is LOUD about
+    // what it fakes. Nonzero handles, status queries report GL_TRUE, logs
+    // empty. Everything else falls to the generic [stub]->0 tail.
+    if (n.compare(0, 2, "gl") == 0) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "glGetString") {
+            // No GL context in the harness (real EGL comes later), so report
+            // era-correct 2014-Android strings. EXTENSIONS claims ETC1 (the
+            // game's sprite textures use it); real decode/forwarding is the
+            // GLES milestone's job. NULL here killed texture loading
+            // ("Unsupported image file format" -> io::IOException).
+            const char* s = "";
+            // HARNESS_GLVENDOR / HARNESS_GLRENDERER override (renderer-keyed
+            // texture quirk tables exist in-engine; candidates: Mali-400 MP,
+            // Adreno, PowerVR SGX 540, Tegra).
+            if (a0 == 0x1F00) {
+                s = "ARM";  // GL_VENDOR
+                if (const char* e = std::getenv("HARNESS_GLVENDOR")) {
+                    s = e;
+                }
+            } else if (a0 == 0x1F01) {
+                s = "Mali-400 MP";  // GL_RENDERER (era-plausible)
+                if (const char* e = std::getenv("HARNESS_GLRENDERER")) {
+                    s = e;
+                }
+            } else if (a0 == 0x1F02) {
+                s = "OpenGL ES 2.0";  // GL_VERSION
+            } else if (a0 == 0x1F03) {
+                s = "GL_OES_compressed_ETC1_RGB8_texture "
+                    "GL_OES_texture_npot "
+                    "GL_OES_vertex_half_float "
+                    "GL_OES_element_index_uint "
+                    "GL_OES_mapbuffer "
+                    "GL_EXT_texture_format_BGRA8888";  // GL_EXTENSIONS
+            } else if (a0 == 0x1F04) {
+                s = "2.0";  // GL_SHADING_LANGUAGE_VERSION
+            }
+            // One static guest slot per name (idx by low nibble-ish switch).
+            static std::uint32_t slots[5] = {0, 0, 0, 0, 0};
+            int si = (a0 == 0x1F00) ? 0 : (a0 == 0x1F01) ? 1 : (a0 == 0x1F02) ? 2
+                                        : (a0 == 0x1F03)   ? 3
+                                        : (a0 == 0x1F04)   ? 4
+                                                           : -1;
+            std::uint32_t out = 0;
+            if (si >= 0) {
+                if (!slots[si]) {
+                    slots[si] = GuestMalloc(512);
+                    if (slots[si]) {
+                        std::strncpy(reinterpret_cast<char*>(H(slots[si])), s, 511);
+                    }
+                }
+                out = slots[si];
+            }
+            std::printf("[gl] GetString(%04x) -> \"%s\"\n", a0, s);
+            Ret(regs, out);
+            return;
+        }
+        if (n == "glCreateShader" || n == "glCreateProgram") {
+            static std::uint32_t gl_next = 0;
+            Ret(regs, ++gl_next);
+            return;
+        }
+        if (n == "glGetIntegerv") {
+            // Era-correct Mali-400-ish limits (verified enum vs
+            // /usr/include/GLES2/gl2.h). A zero MAX_TEXTURE_SIZE made every
+            // texture "unsupported" (io::IOException on FONT_BASIC.pvr).
+            std::uint32_t v0 = 0, v1 = 0, cnt = 1;
+            switch (a1) {
+                case 0x0D33: v0 = 4096; break;                 // MAX_TEXTURE_SIZE
+                case 0x84E8: v0 = 4096; break;                 // MAX_RENDERBUFFER_SIZE
+                case 0x8872: v0 = 8; break;                   // MAX_TEXTURE_IMAGE_UNITS
+                case 0x8B4D: v0 = 8; break;                   // MAX_COMBINED_TIU
+                case 0x8869: v0 = 16; break;                  // MAX_VERTEX_ATTRIBS
+                case 0x8DFB: v0 = 128; break;                  // MAX_VERTEX_UNIFORM_VECTORS
+                case 0x8DFC: v0 = 8; break;                    // MAX_VARYING_VECTORS
+                case 0x8DFF: v0 = 16; break;                   // MAX_FRAGMENT_UNIFORM_VECTORS
+                case 0x86A2: v0 = 1; break;                    // NUM_COMPRESSED_TEXTURE_FORMATS
+                case 0x86A3: v0 = 0x8D64; break;               // COMPRESSED_FORMATS = ETC1
+                case 0x0D3A: v0 = 4096; v1 = 4096; cnt = 2; break;  // MAX_VIEWPORT_DIMS
+                case 0x0D50: v0 = 4; break;                    // SUBPIXEL_BITS
+                case 0x0D56: v0 = 16; break;                   // DEPTH_BITS
+                case 0x0D57: v0 = 8; break;                    // STENCIL_BITS
+                default: break;                                // unknown -> 0, logged
+            }
+            if (CheckRange(a2, 4 * cnt, true)) {
+                std::memcpy(H(a2), &v0, 4);
+                if (cnt > 1) {
+                    std::memcpy(H(a2 + 4), &v1, 4);
+                }
+            }
+            std::printf("[gl] GetIntegerv(%04x) -> %u%s\n", a1, v0,
+                        cnt > 1 ? ",..." : "");
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "glGetShaderiv" || n == "glGetProgramiv") {            if (CheckRange(a2, 4, true)) {
+                const std::uint32_t one = 1;  // COMPILE/LINK_STATUS = GL_TRUE
+                std::memcpy(H(a2), &one, 4);
+            }
+            std::printf("[gl] %s(%u,%04x) -> TRUE\n", n.c_str(), a0, a1);
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "glGetShaderInfoLog" || n == "glGetProgramInfoLog") {
+            if (a2 && CheckRange(a2, 4, true)) {
+                const std::uint32_t zero = 0;
+                std::memcpy(H(a2), &zero, 4);
+            }
+            if (a3 && CheckRange(a3, 1, true)) {
+                H(a3)[0] = 0;
+            }
+            std::printf("[gl] %s(%u) -> empty\n", n.c_str(), a0);
+            Ret(regs, 0);
+            return;
+        }
+    }
     {
         // Locked: worker threads share stub_hits_ with main.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2501,6 +2637,26 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(it->second.size()));  // ASCII: units==bytes
         return;
     }
+    case 167: {  // NewStringUTF(env, bytes) -> jstring (verified vs NDK jni.h
+                 // table order: 164/168/169/170/171 anchors match)
+        std::string s;
+        if (a1 != 0) {
+            if (!CheckRange(a1, 1, false)) {
+                std::printf("[jni] LOUD NewStringUTF bad ptr %08x -- halting\n", a1);
+                stop_step_ = true;
+                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                return;
+            }
+            const char* p = reinterpret_cast<const char*>(H(a1));
+            std::size_t n = 0;
+            while (n < 4096 && CheckRange(a1 + (std::uint32_t)n, 1, false) && p[n]) {
+                n++;
+            }
+            s.assign(p, n);
+        }
+        Ret(regs, JniNewString(s));
+        return;
+    }
     case 168: {  // GetStringUTFLength(env, str) -> jsize (bytes, no NUL)
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_strings_.find(a1);
@@ -2604,6 +2760,50 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 15:  // ExceptionOccurred(env) -> NULL (mock never raises)
         Ret(regs, 0);
         return;
+    case 28:  // NewObject(V/A)(env, class, method, ...) -> fresh mock object
+    case 29:   // (verified vs NDK jni.h; ctor args ignored, offline fine)
+    case 30: {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
+        const std::uint32_t o = jni_obj_next_;
+        jni_obj_next_ += 4;
+        if (std::uint64_t(o) + 4 > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
+            std::printf("[jni] LOUD object arena exhausted -- halting\n");
+            stop_step_ = true;
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        std::memcpy(H(o), &o, 4);
+        jni_objects_[o] = "newobj<" + mdesc + ">";
+        const char* vtag = (fn == 28) ? "" : ((fn == 29) ? "V" : "A");
+        std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
+        Ret(regs, o);
+        return;
+    }
+    case 61:  // CallVoidMethod(V/A)(env, obj, method, ...) -> void
+    case 62:   // (verified vs NDK jni.h)
+    case 63: {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        const char* vtag = (fn == 61) ? "" : ((fn == 62) ? "V" : "A");
+        std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
+        Ret(regs, 0);  // void JNI: zero r0
+        return;
+    }
     case 114:  // CallStaticObjectMethod(V/A)(env, class, method, ...) -> mock obj
     case 115:
     case 116:
@@ -2669,8 +2869,62 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, o);
         return;
     }
-    case 171: {  // GetArrayLength(env, array) -> jsize
+    case 145: {  // GetStaticObjectField(env, class, field) -> jobject
+        std::string fdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                fdesc = it->second;
+            }
+        }
+        // The game does NOT null-check (Build.MANUFACTURER NULL -> instant
+        // GetStringLength(NULL) death), so never return NULL here.
+        // String-typed -> registered empty jstring; else fresh mock object.
+        if (fdesc.size() >= 18 &&
+            fdesc.compare(fdesc.size() - 18, 18, "Ljava/lang/String;") == 0) {
+            const std::uint32_t js = JniNewString("");
+            std::printf("[jni] GetStaticObjectField %s -> str %08x\n", fdesc.c_str(), js);
+            Ret(regs, js);
+            return;
+        }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
+        const std::uint32_t o = jni_obj_next_;
+        jni_obj_next_ += 4;
+        std::memcpy(H(o), &o, 4);
+        jni_objects_[o] = "field<" + fdesc + ">";
+        std::printf("[jni] GetStaticObjectField %s -> %08x\n", fdesc.c_str(), o);
+        Ret(regs, o);
+        return;
+    }
+    case 146:  // GetStaticBooleanField -> jboolean (0/1 in r0)
+    case 147:  // GetStaticByteField / 148 Char / 149 Short / 150 Int / 151 Long
+    case 148:  // (verified vs NDK jni.h; readers for GetStaticFieldID cookies)
+    case 149:
+    case 150:
+    case 151: {
+        std::string fdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                fdesc = it->second;
+            }
+        }
+        // Offline default: 0/NULL for every static field (logged, tunable per
+        // name, e.g. android/location/Criteria.ACCURACY_COARSE).
+        std::printf("[jni] GetStaticField#%u %s -> 0\n", fn, fdesc.c_str());
+        if (fn == 145) {
+            Ret(regs, 0);
+        } else if (fn == 151) {
+            Ret(regs, 0, 0);
+        } else {
+            Ret(regs, 0);
+        }
+        return;
+    }
+    case 171: {  // GetArrayLength(env, array) -> jsize        std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_array_lens_.find(a1);
         if (it == jni_array_lens_.end()) {
             std::printf("[jni] LOUD GetArrayLength unknown array %08x -- halting\n", a1);
@@ -2680,12 +2934,25 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, it->second);
         return;
     }
+    case 117:  // CallStaticBooleanMethod(V/A)(env, class, method, ...) -> jboolean
+    case 118:   // (verified vs NDK jni.h; offline default false, logged)
+    case 119: {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        const char* vtag = (fn == 117) ? "" : ((fn == 118) ? "V" : "A");
+        std::printf("[jni] CallStaticBooleanMethod%s %s -> 0\n", vtag, mdesc.c_str());
+        Ret(regs, 0);
+        return;
+    }
     case 129:  // CallStaticIntMethod(V/A)(env, class, method, ...) -> jint
-    case 130:
-    case 131:
-    case 52:  // CallIntMethod(V/A)(env, obj, method, ...) -> jint
-    case 53:
-    case 54: {
+    case 130:   // (verified vs NDK jni.h)
+    case 131: {
         std::string mdesc = "?";
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2695,18 +2962,54 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         // Mock integer policy (tunable, logged): era-correct API level 21 for
-        // getAPILevel (2014 game, tested on 19-21; avoids unreleased-API forks);
-        // 0/unknown otherwise (discovery will show if a branch needs better).
+        // getAPILevel (2014 game; avoids unreleased-API forks); display
+        // 800x480 matching the harness nativeInit dims (0 broke layout and
+        // possibly texture sizing downstream); 0 otherwise.
         std::uint32_t v = 0;
         if (mdesc.find("getAPILevel") != std::string::npos) {
             v = 21;
+        } else if (mdesc.find("getDisplayWidth") != std::string::npos) {
+            v = 800;
+        } else if (mdesc.find("getDisplayHeight") != std::string::npos) {
+            v = 480;
         }
-        const bool is_static = fn >= 129;
-        const char* vtag = (fn == 129 || fn == 52) ? ""
-                           : ((fn == 130 || fn == 53) ? "V" : "A");
-        std::printf("[jni] Call%sIntMethod%s %s -> %u\n", is_static ? "Static" : "", vtag,
-                    mdesc.c_str(), v);
+        const char* vtag = (fn == 129) ? "" : ((fn == 130) ? "V" : "A");
+        std::printf("[jni] CallStaticIntMethod%s %s -> %u\n", vtag, mdesc.c_str(), v);
         Ret(regs, v);
+        return;
+    }
+    case 52:  // CallLongMethod(V/A)(env, obj, method, ...) -> jlong
+    case 53:   // (verified vs NDK jni.h; instance-int is 49/50/51, never hit)
+    case 54: {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        const char* vtag = (fn == 52) ? "" : ((fn == 53) ? "V" : "A");
+        std::printf("[jni] CallLongMethod%s %s -> 0\n", vtag, mdesc.c_str());
+        Ret(regs, 0, 0);  // jlong 0
+        return;
+    }
+    case 140:  // CallStaticDoubleMethodA(141/142 = CallStaticVoidMethod(V))
+    case 141:   // (verified vs NDK jni.h; game calls 142 = FlurryAgent.init V)
+    case 142: {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        // Offline default: 0 (0.0 for double-A, void for 141/142).
+        // Tunable per method if a branch needs better.
+        std::printf("[jni] CallStatic%s %s -> 0\n",
+                    fn == 140 ? "DoubleMethodA" : "VoidMethod", mdesc.c_str());
+        Ret(regs, 0, 0);
         return;
     }
     case 184: {  // GetByteArrayElements(env, array, isCopy) -> jbyte*
@@ -2760,7 +3063,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 33:   // GetMethodID(env, class, name, sig) -> jmethodID cookie
+    case 94:   // GetFieldID(env, class, name, sig) -> jfieldID cookie
     case 113:  // GetStaticMethodID(env, class, name, sig) -> jmethodID cookie
+    case 144:  // GetStaticFieldID(env, class, name, sig) -> jfieldID cookie
     {
         if (!CheckRange(a2, 1, false) || !CheckRange(a3, 1, false)) {
             std::printf("[jni] Get%sMethodID BAD name/sig -- halting\n",
@@ -2791,9 +3096,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         std::memcpy(H(c), &c, 4);
         jni_methods_[c] =
-            (fn == 33 ? std::string("") : std::string("static ")) + cname + "." + mname + msig;
-        std::printf("[jni] Get%sMethodID %s -> %08x\n", fn == 33 ? "" : "Static",
-                    jni_methods_[c].c_str(), c);
+            (fn == 33 ? std::string("")
+                      : fn == 113 ? std::string("static ")
+                                  : std::string("field ")) +
+            cname + "." + mname + msig;
+        std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
+                    (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);
         Ret(regs, c);
         return;
     }
@@ -2919,9 +3227,52 @@ std::uint16_t GuestCallbacks::MemoryRead16(VAddr a) { return Read<std::uint16_t>
 std::uint32_t GuestCallbacks::MemoryRead32(VAddr a) { return Read<std::uint32_t>(a, false); }
 std::uint64_t GuestCallbacks::MemoryRead64(VAddr a) { return Read<std::uint64_t>(a, false); }
 GuestCallbacks* GuestCallbacks::g_probe_cb = nullptr;
+std::uint32_t GuestCallbacks::g_probe_pc = 0;
 void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp) {
     std::printf("[probe] r2=%08x r3=%08x sp=%08x\n", (std::uint32_t)r2, (std::uint32_t)r3,
                 (std::uint32_t)sp);
+    // HARNESS_PROBE=<pc>,fill: if the 12B SSO string at [sp+28] is empty
+    // (all-zero, i.e. a missed typed-map lookup left OUT untouched), write
+    // "{}" (04 7B 7D): lets the JSON parser proceed with defaults instead
+    // of throwing Unexpected EOF on an empty range. Write-only-when-empty,
+    // range-checked; no guest code patched.
+    {
+        static std::int64_t fill = -2;
+        if (fill == -2) {
+            fill = 0;
+            if (const char* pe = std::getenv("HARNESS_PROBE")) {
+                if (std::strstr(pe, "fill")) {
+                    fill = 1;
+                }
+            }
+        }
+        if (fill > 0) {
+            GuestCallbacks* cb = g_probe_cb;
+            std::uint32_t so = (std::uint32_t)sp + 28;
+            // Fill is only valid at the 0x1A410C return site (OUT = sp+28 of
+            // the 0x1A40B0 frame). Anywhere else [sp+28] is unrelated stack.
+            if (cb && g_probe_pc == 0x1A410Cu &&
+                cb->rt_->CheckRange(so, 12, true)) {
+                std::uint8_t cur[12];
+                std::memcpy(cur, cb->rt_->H<const std::uint8_t>(so), 12);
+                bool empty = true;
+                for (int i = 0; i < 12; i++) {
+                    if (cur[i]) {
+                        empty = false;
+                        break;
+                    }
+                }
+                if (empty) {
+                    static const std::uint8_t js[12] = {0x04, 0x7B, 0x7D, 0x00, 0x00, 0x00,
+                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                    std::memcpy(cb->rt_->H<std::uint8_t>(so), js, 12);
+                    std::printf("[probe] filled {} at %08x\n", so);
+                } else {
+                    std::printf("[probe] OUT non-empty, kept\n");
+                }
+            }
+        }
+    }
 }
 void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     static std::uint64_t n = 0;
@@ -2969,14 +3320,52 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             }
         }
     }
-    // Indirect range form: r1 = pointer to {begin,end} (iterator range).
-    if (cb->rt_->CheckRange((std::uint32_t)r1, 8, false)) {
+    // Throw-site form: r1 = std::type_info*. Its [+4] is the mangled name.
+    // (Used with HARNESS_PROBE=<__cxa_throw entry> to identify the exception
+    // type at throw time; the exception object itself is still being built.)
+    if (cb->rt_->CheckRange((std::uint32_t)r1 + 4, 4, false)) {
+        std::uint32_t nm = 0;
+        std::memcpy(&nm, cb->rt_->H<const std::uint8_t>((std::uint32_t)r1 + 4), 4);
+        if (nm && cb->rt_->CheckRange(nm, 1, false)) {
+            char buf[129];
+            std::uint32_t k = 0;
+            for (; k < 128; k++) {
+                char c = 0;
+                if (!cb->rt_->CheckRange(nm + k, 1, false)) {
+                    break;
+                }
+                std::memcpy(&c, cb->rt_->H<const std::uint8_t>(nm + k), 1);
+                buf[k] = c;
+                if (!c) {
+                    break;
+                }
+            }
+            buf[k] = 0;
+            if (k > 0 && k < 128) {
+                std::printf("[probe] throw type: %s\n", buf);
+            }
+        }
+    }
+    // Indirect form: {begin,end} range, or a libc++ std::string (short:
+    // byte0&1==0, data=r1+1, len=byte0>>1; long: [+0]=cap|1, [+4]=len,
+    // [+8]=data — matches the 0x2A52F8 wrapper idiom).
+    if (cb->rt_->CheckRange((std::uint32_t)r1, 12, false)) {
         const std::uint8_t* q = cb->rt_->H<const std::uint8_t>((std::uint32_t)r1);
-        std::uint32_t b = (std::uint32_t)q[0] | ((std::uint32_t)q[1] << 8) |
-                          ((std::uint32_t)q[2] << 16) | ((std::uint32_t)q[3] << 24);
-        std::uint32_t e = (std::uint32_t)q[4] | ((std::uint32_t)q[5] << 8) |
-                          ((std::uint32_t)q[6] << 16) | ((std::uint32_t)q[7] << 24);
-        std::printf("[probe] [r1]={%08x..%08x}\n", b, e);
+        std::uint32_t b = 0, e = 0;
+        if (q[0] & 1) {
+            std::uint32_t len = (std::uint32_t)q[4] | ((std::uint32_t)q[5] << 8) |
+                                ((std::uint32_t)q[6] << 16) | ((std::uint32_t)q[7] << 24);
+            b = (std::uint32_t)q[8] | ((std::uint32_t)q[9] << 8) |
+                ((std::uint32_t)q[10] << 16) | ((std::uint32_t)q[11] << 24);
+            e = b + len;
+            std::printf("[probe] [r1]=longstr len=%u\n", len);
+        } else {
+            b = (std::uint32_t)q[0] | ((std::uint32_t)q[1] << 8) |
+                ((std::uint32_t)q[2] << 16) | ((std::uint32_t)q[3] << 24);
+            e = (std::uint32_t)q[4] | ((std::uint32_t)q[5] << 8) |
+                ((std::uint32_t)q[6] << 16) | ((std::uint32_t)q[7] << 24);
+            std::printf("[probe] [r1]={%08x..%08x}\n", b, e);
+        }
         if (e >= b && e - b <= 0x10000 && cb->rt_->CheckRange(b, e > b ? e - b : 1, false)) {
             std::uint32_t dl = (e - b > 256) ? 256 : e - b;
             const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(b);
@@ -2997,17 +3386,80 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             return;
         }
     }
-    const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
-    for (std::uint32_t i = 0; i < len; i += 16) {
-        std::printf("[probe] %08x:", (std::uint32_t)r0 + i);
-        for (std::uint32_t j = i; j < i + 16 && j < len; j++) {
-            std::printf(" %02x", p[j]);
+    // Wrapper idiom (io::InputStream stack wrapper): [r0+12]==r0 (self-ref)
+    // selects backing = [r0+8]. Dump backing vtable->class + first 32B.
+    // (Saw at 0x2B0BD4: wrapper on stack, backing on heap.)
+    if (cb->rt_->CheckRange((std::uint32_t)r0, 16, false)) {
+        std::uint32_t w8 = 0, w12 = 0;
+        std::memcpy(&w8, cb->rt_->H<const std::uint8_t>((std::uint32_t)r0 + 8), 4);
+        std::memcpy(&w12, cb->rt_->H<const std::uint8_t>((std::uint32_t)r0 + 12), 4);
+        if (w12 == (std::uint32_t)r0 && w8 != 0 &&
+            cb->rt_->CheckRange(w8, 36, false)) {
+            std::uint32_t bvt = 0;
+            std::memcpy(&bvt, cb->rt_->H<const std::uint8_t>(w8), 4);
+            std::printf("[probe] backing @%08x vtable=%08x\n", w8, bvt);
+            if (cb->rt_->CheckRange(bvt - 4, 8, false)) {
+                std::uint32_t bti = 0, bnm = 0;
+                std::memcpy(&bti, cb->rt_->H<const std::uint8_t>(bvt - 4), 4);
+                if (cb->rt_->CheckRange(bti + 4, 4, false)) {
+                    std::memcpy(&bnm, cb->rt_->H<const std::uint8_t>(bti + 4), 4);
+                    if (bnm && cb->rt_->CheckRange(bnm, 1, false)) {
+                        char buf[129];
+                        std::uint32_t k = 0;
+                        for (; k < 128; k++) {
+                            char c = 0;
+                            if (!cb->rt_->CheckRange(bnm + k, 1, false)) {
+                                break;
+                            }
+                            std::memcpy(&c, cb->rt_->H<const std::uint8_t>(bnm + k), 1);
+                            buf[k] = c;
+                            if (!c) {
+                                break;
+                            }
+                        }
+                        buf[k] = 0;
+                        if (k > 0 && k < 128) {
+                            std::printf("[probe] backing class: %s\n", buf);
+                        }
+                    }
+                }
+            }
+            const std::uint8_t* bp = cb->rt_->H<const std::uint8_t>(w8);
+            for (std::uint32_t i = 0; i < 96; i += 16) {
+                if (!cb->rt_->CheckRange(w8 + i, 16, false)) {
+                    break;
+                }
+                bp = cb->rt_->H<const std::uint8_t>(w8);
+                std::printf("[probe] %08x:", w8 + i);
+                for (std::uint32_t j = i; j < i + 16; j++) {
+                    std::printf(" %02x", bp[j]);
+                }
+                std::printf("  |");
+                for (std::uint32_t j = i; j < i + 16; j++) {
+                    std::printf("%c", (bp[j] >= 32 && bp[j] < 127) ? (char)bp[j] : '.');
+                }
+                std::printf("|\n");
+            }
         }
-        std::printf("  |");
-        for (std::uint32_t j = i; j < i + 16 && j < len; j++) {
-            std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+    }
+    if (!cb->rt_->CheckRange((std::uint32_t)r0, 64, false)) {
+        std::printf("[probe] [r0] BAD range\n");
+        return;
+    }
+    {
+        std::uint32_t dl = 64;
+        const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
+        for (std::uint32_t i = 0; i < dl; i += 16) {
+            std::printf("[probe] %08x:", (std::uint32_t)r0 + i);
+            for (std::uint32_t j = i; j < i + 16 && j < dl; j++) {
+                std::printf(" %02x", p[j]);
+            }
+            std::printf("  |");
+            for (std::uint32_t j = i; j < i + 16 && j < dl; j++) {
+                std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+            }
+            std::printf("|\n");
         }
-        std::printf("|\n");
     }
 }
 void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
@@ -3026,7 +3478,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
     // the emitted CallHostFunction runs on every execution with live regs.
     {
         static std::int64_t probe = -2;
-        static std::uint32_t probe_pc = 0, probe_len = 0;
+        static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0;
         if (probe == -2) {
             probe = 0;
             if (const char* pe = std::getenv("HARNESS_PROBE")) {
@@ -3037,8 +3489,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 }
                 probe = 1;
             }
+            if (const char* pe2 = std::getenv("HARNESS_PROBE2")) {
+                probe_pc2 = static_cast<std::uint32_t>(std::strtoul(pe2, nullptr, 16));
+                probe = 1;
+            }
         }
-        if (probe > 0 && pc == probe_pc) {
+        if (probe > 0 && (pc == probe_pc || pc == probe_pc2)) {
+            g_probe_pc = pc;
             ir.CallHostFunction(&ProbeDump,
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),

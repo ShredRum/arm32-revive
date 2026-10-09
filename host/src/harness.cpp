@@ -233,7 +233,13 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
         const std::size_t nl = std::strlen(hf);
         for (std::uint32_t a = lo; a + nl <= hi && shown < 5; a++) {
             if (!rt.CheckRange(a, nl, false)) {
-                break;
+                // Heap has mapping gaps (per-allocation commits); skip the
+                // page instead of aborting the whole scan (the old `break`
+                // silently missed everything above the first gap — e.g. the
+                // image-format table at 0x1230xxxx).
+                a = (a + 0xFFFu) & ~0xFFFu;
+                a -= 1;  // the loop's a++ lands on the page start
+                continue;
             }
             if (std::memcmp(rt.H(a), hf, nl) != 0) {
                 continue;
