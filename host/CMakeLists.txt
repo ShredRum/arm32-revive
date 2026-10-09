@@ -1,0 +1,46 @@
+cmake_minimum_required(VERSION 3.22)
+project(AbrHost CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Dynarmic: A32 frontend only, no tests — keeps the build lean.
+# Boost: portable headers in thirdparty/boost (verified tarball).
+# BOOST_ROOT must contain boost/version.hpp, i.e. thirdparty/ itself.
+set(BOOST_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty CACHE PATH "" FORCE)
+# Cross-compiling (Android NDK) confuses FindBoost's search; hand it the dir.
+set(Boost_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty CACHE PATH "" FORCE)
+set(Boost_NO_SYSTEM_PATHS ON CACHE BOOL "" FORCE)
+set(DYNARMIC_FRONTENDS A32 CACHE STRING "" FORCE)
+set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/dynarmic dynarmic)
+
+# Native smoke test: runs hand-assembled ARM code through the JIT.
+add_executable(smoke_a32 src/smoke_a32.cpp)
+target_link_libraries(smoke_a32 PRIVATE dynarmic)
+
+# Micro-test for isolated instruction checks.
+add_executable(cbnz_test src/cbnz_test.cpp)
+target_link_libraries(cbnz_test PRIVATE dynarmic)
+
+# distv: Dynarmic-based disassembler for the game .so.
+add_executable(distv src/distv.cpp)
+target_link_libraries(distv PRIVATE dynarmic)
+
+# Guest runtime library (ELF loader + SVC dispatch + heap).
+add_library(guest STATIC
+    src/guest/elf_loader.cpp
+    src/guest/dispatch.cpp
+)
+target_include_directories(guest PUBLIC src)
+target_link_libraries(guest PUBLIC dynarmic z)
+# Private frontend header (a32_ir_emitter.h) for the HARNESS_PROBE IR emitter.
+target_include_directories(guest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/dynarmic/externals/mcl/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty)
+
+# Bring-up harness: loads the real game .so, runs DT_INIT_ARRAY.
+add_executable(harness src/harness.cpp)
+target_link_libraries(harness PRIVATE guest)
