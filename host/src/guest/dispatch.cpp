@@ -5861,6 +5861,18 @@ bool Runtime::ApplyRedirect() {
     } else if (pending_flags_ & 1u) {
         regs[13] = pending_fp_ - 28;
     }
+    // HARNESS_TTZERO=1: resume sp = freshly zeroed 4KB scratch+2048 (pad
+    // temporaries all-zero: SSO-empty path). Last word (overrides fp-28).
+    // Decides temporaries-vs-state: fault changes => temporaries (sp);
+    // identical fault => regs/object.
+    if (std::getenv("HARNESS_TTZERO")) {
+        std::uint32_t scr = GuestMalloc(4096);
+        if (scr) {
+            std::memset(H(scr), 0, 4096);
+            regs[13] = scr + 2048;
+            std::printf("[redir] sp<=zero-scratch %08x\n", regs[13]);
+        }
+    }
     stop_step_ = false;
     if (std::getenv("HARNESS_TTUNW")) {
         std::printf("[redir] pre-run r4-r7=%08x %08x %08x %08x r8-r11=%08x %08x %08x %08x sp=%08x\n",
