@@ -1774,6 +1774,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             fd_map_.erase(it);
             return h;
         };
+        // Guest errno cell write (per-thread slot) + poll wait helper.
+        // Defined here (used by both the read cap below and the socket
+        // bridge further down).
+        auto set_guest_errno = [&](int e) {
+            const std::uint32_t s = ErrnoSlot();
+            if (CheckRange(s, 4, true)) {
+                const std::int32_t v = static_cast<std::int32_t>(e);
+                std::memcpy(H(s), &v, 4);
+            }
+        };
+        auto wait_fd = [&](int hfd, short ev, int ms) -> int {
+            struct pollfd p {};
+            p.fd = hfd;
+            p.events = ev;
+            return ::poll(&p, 1, ms);
+        };
         auto fill_stat = [&](std::uint32_t dst, const struct stat& st) -> bool {
             if (!CheckRange(dst, 96, true)) {
                 return false;
@@ -2116,6 +2132,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // Unlocked: pipes/sockets block here; the map lock must be free
             // so other threads keep running (2026-10-10 deadlock fix).
+            // Cap: FIFO/socket reads wait max 5s (poll) then fail EAGAIN —
+            // an uncapped ::read on a pipe whose writer (dead worker) never
+            // delivers message #2 froze the whole run (STUCK@300s, 2026-10-10).
+            // Regular files skip the cap (always fast). EOF semantics intact:
+            // closed write-ends still read 0 via the normal path below.
+            if (n == "read") {
+                struct stat fst {};
+                if (::fstat(hfd, &fst) == 0 &&
+                    (S_ISFIFO(fst.st_mode) || S_ISSOCK(fst.st_mode))) {
+                    if (wait_fd(hfd, POLLIN, 5000) <= 0) {
+                        set_guest_errno(EAGAIN);
+                        Ret(regs, static_cast<std::uint32_t>(-1));
+                        return;
+                    }
+                }
+            }
             ssize_t r = (n == "read") ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped).
@@ -2208,24 +2240,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // NOTE: fcntl/ioctl are still stub->0 (fake success, mode unchanged);
         // game retries cover it. sendmsg/recvmsg NOT marshalled (guest msghdr
         // is 32-bit layout) -> LOUD if ever called.
-        auto set_guest_errno = [&](int e) {
-            const std::uint32_t s = ErrnoSlot();
-            if (CheckRange(s, 4, true)) {
-                const std::int32_t v = static_cast<std::int32_t>(e);
-                std::memcpy(H(s), &v, 4);
-            }
-        };
-        auto wait_fd = [&](int hfd, short ev, int ms) -> int {
-            struct pollfd p {};
-            p.fd = hfd;
-            p.events = ev;
-            return ::poll(&p, 1, ms);
-        };
+        // (set_guest_errno/wait_fd live with the fd helpers above.)
         if (n == "socket") {
+            // HARNESS_NONET=1: airplane-mode-faithful failure (socket()
+            // itself SUCCEEDS on device — no network needed to create one;
+            // connect()/send()/recv() fail below). Failing socket() outright
+            // sent the game down a never-tested path (BAD read @0x1A343C).
             if (std::getenv("HARNESS_NONET")) {
-                set_guest_errno(ENETUNREACH);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+                std::printf("[netsock]%s NONET: socket layer down (connect/recv will fail)\n",
+                            GuestTid() == 1 ? "" : "(T2+)");
             }
             int hfd = ::socket((int)a0, (int)a1, (int)a2);
             if (hfd < 0) {
@@ -2256,7 +2279,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
                               (socklen_t)a2);
-            if (r != 0 && errno == EINPROGRESS) {
+            if (std::getenv("HARNESS_NONET")) {
+                // Airplane mode: connect never succeeds (DNS/server
+                // unreachable). Instant, no 10s waits per attempt.
+                errno = ENETUNREACH;
+                r = -1;
+            } else if (r != 0 && errno == EINPROGRESS) {
                 const int w = wait_fd(hfd, POLLOUT, 10000);
                 if (w > 0) {
                     int se = 0;

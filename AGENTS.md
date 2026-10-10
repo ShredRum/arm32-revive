@@ -806,3 +806,35 @@ dead subsystem, game degrades without it).
 - ROVIO STILL FINE (2026-10-10, rovio_check.png): NOWORKER 8upd renders the
   logo pixel-perfect — no render regression; worker runs just die earlier
   (3-7upd, DNS phase) before splashes + end-of-run screenshot.
+
+## 17. Session 2026-10-10 (part 8): pipe solved, cloud dead, throw theory
+- SUBAGENT (read-only statics, delivered): pipe owner +36=read/+40=write/
+  +44=pending (LDREX/STREX inc/drain), 1B per wake, reader 0x28E328 coalesces
+  (poll 1000ms + read min(pending,256)); senders = job-completion (strb#1
+  [job+4]+dmb, dequeue, run next), enqueue, queue-drain; creator 0x28D928
+  (pipe() + store fds). Subsystem = NDK TaskDispatcher ("Dispatcher
+  disposal"/"Job"/"Got exception" rodata; thread entry 0x189338 = functor
+  thread via helper 0x188060 = __thread_struct/__thread_local_data; pool
+  0x38C048 same helper). Crash-walk func = 0x1A3378 (ordered-map/SSO-key
+  lookup + memcmp; sole caller 0x1A3314 in 0x1A32E4; writer = head-insert
+  0x1A522C in Configuration chain; NO thread BL-edge into the map — writer
+  is main-thread; [r5]=0x5C005E3E likely wrong-object, not thread race).
+  0x45A778 = Thumb fragment (not ARM dispatcher body).
+- CLOUD DEAD (host recon): cloud.rovio.com = CloudFront, alive at TCP/TLS
+  but API gone: session/time=403, variantconfig=401, sessions POST=4xx error
+  page. Real users today take the FAILURE path too — so the offline/failure
+  path (not success) must lead to menu.
+- THROW THEORY (leads): failure path throws inside a dispatcher job (job
+  exception); device unwinder runs the catch ("Got exception") + fallback;
+  OUR unwinder through translated code is broken (§6/§10: begin_catch never
+  fires, every throw = fatal 513-spiral) -> worker halts HOLDING the queue
+  mutex -> main blocks in mutex_lock (frozen svc, silent log, TORN beats —
+  all consistent; join never called, sleeps capped, read capped).
+  NONET refined to airplane-faithful (socket() SUCCEEDS, connect()=ENETUNREACH
+  instantly; old socket()-fails sent game down never-tested path -> BAD
+  @0x1A343C). Read-cap added (FIFO/sock reads poll 5s -> EAGAIN; was the
+  STUCK@300s suspect, now exonerated — hang persists with frozen svc).
+- NEXT: (1) gdb-catch a hang (watcher script /tmp/opencode/watchhang.sh:
+  log-silence -> auto gdb bt) to CONFIRM main-in-mutex vs guest-spin;
+  (2) throw-type forensics (patched-/tmp-copy __cxa_throw probe, ParseError
+  playbook) on the worker job; (3) bypass/fallback to menu.
