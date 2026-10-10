@@ -2184,9 +2184,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     if (::fstat(hfd, &fst) == 0 && S_ISSOCK(fst.st_mode)) {
                         std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
                         q[1] = 0x03;
-                        q[2] = 0x03;
+                        q[2] = 0x01;
                         q[9] = 0x03;
-                        q[10] = 0x03;
+                        q[10] = 0x01;
                         std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301 (write path)\n",
                                     GuestTid() == 1 ? "" : "(T2+)", ov0, ov1, hv0, hv1);
                     }
@@ -4964,6 +4964,112 @@ void GuestCallbacks::ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_
         std::printf("|\n");
     }
 }
+namespace {
+int g_rdump_n = 0;
+}  // namespace
+void GuestCallbacks::RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2) {
+    // HARNESS_RDUMP=1: deep dump of the HTTP raiser (0x28A3DC) entry ABI.
+    // Harness-only discovery for success-injection (offline completion).
+    if (++g_rdump_n > 6) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    std::printf("[rdump] #%d r0=%08x r1=%08x r2=%08x\n", g_rdump_n, (std::uint32_t)r0,
+                (std::uint32_t)r1, (std::uint32_t)r2);
+    auto hex = [&](std::uint32_t a, int len, const char* tag) {
+        if (!cb->rt_->CheckRange(a, (std::uint32_t)len, false)) {
+            std::printf("[rdump] %s %08x: <unmapped>\n", tag, a);
+            return;
+        }
+        const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(a);
+        for (int o = 0; o < len; o += 16) {
+            std::printf("[rdump] %s +%02x:", tag, o);
+            for (int j = 0; j < 16 && o + j < len; j++) {
+                std::printf(" %02x", p[o + j]);
+            }
+            std::printf("  |");
+            for (int j = 0; j < 16 && o + j < len; j++) {
+                std::printf("%c", (p[o + j] >= 32 && p[o + j] < 127) ? (char)p[o + j] : '.');
+            }
+            std::printf("|\n");
+        }
+    };
+    auto chase = [&](std::uint32_t a, int nw, const char* tag) {
+        if (!cb->rt_->CheckRange(a, (std::uint32_t)(nw * 4), false)) {
+            return;
+        }
+        int shown = 0;
+        for (int i = 0; i < nw && shown < 10; i++) {
+            std::uint32_t w = 0;
+            std::memcpy(&w, cb->rt_->H(a + i * 4), 4);
+            if (w < 0x600000u || !cb->rt_->CheckRange(w, 48, false)) {
+                continue;
+            }
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(w);
+            std::printf("[rdump] %s[+%02x] -> %08x: ", tag, i * 4, w);
+            for (int j = 0; j < 600; j++) {
+                if (p[j] == 0) {
+                    break;
+                }
+                std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+            }
+            std::printf("\n");
+            shown++;
+        }
+    };
+    hex((std::uint32_t)r0, 256, "r0");
+    hex((std::uint32_t)r1, 128, "r1");
+    chase((std::uint32_t)r0, 64, "r0");
+    chase((std::uint32_t)r1, 32, "r1");
+}
+void GuestCallbacks::RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp) {
+    if (g_rdump_n > 6) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    std::printf("[rdump] r3=%08x lr=%08x sp=%08x\n", (std::uint32_t)r3, (std::uint32_t)lr,
+                (std::uint32_t)sp);
+    if (!cb->rt_->CheckRange((std::uint32_t)r3, 64, false)) {
+        std::printf("[rdump] r3 <unmapped>\n");
+        return;
+    }
+    const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r3);
+    for (int o = 0; o < 64; o += 16) {
+        std::printf("[rdump] r3 +%02x:", o);
+        for (int j = 0; j < 16; j++) {
+            std::printf(" %02x", p[o + j]);
+        }
+        std::printf("  |");
+        for (int j = 0; j < 16; j++) {
+            std::printf("%c", (p[o + j] >= 32 && p[o + j] < 127) ? (char)p[o + j] : '.');
+        }
+        std::printf("|\n");
+    }
+    int shown = 0;
+    for (int i = 0; i < 16 && shown < 8; i++) {
+        std::uint32_t w = 0;
+        std::memcpy(&w, cb->rt_->H((std::uint32_t)r3 + i * 4), 4);
+        if (w < 0x600000u || !cb->rt_->CheckRange(w, 48, false)) {
+            continue;
+        }
+        const std::uint8_t* q = cb->rt_->H<const std::uint8_t>(w);
+        std::printf("[rdump] r3[+%02x] -> %08x: ", i * 4, w);
+        for (int j = 0; j < 48; j++) {
+            if (q[j] == 0) {
+                break;
+            }
+            std::printf("%c", (q[j] >= 32 && q[j] < 127) ? (char)q[j] : '.');
+        }
+        std::printf("\n");
+        shown++;
+    }
+}
 void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     // HARNESS_REDIR=pad: throw-to-catch emulation (unwinder stand-in).
     // Fires at the __cxa_throw entry probe: records regs, parks a redirect
@@ -5643,6 +5749,23 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
+            // HARNESS_RDUMP=1: deep raiser-entry ABI dump (PROBE3 slot).
+            if (std::getenv("HARNESS_RDUMP") && pc == probe_pc3) {
+                ir.CallHostFunction(&RaiserDump,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(2))));
+                ir.CallHostFunction(&RaiserDump2,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(3))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))));
+            }
             // HARNESS_REDIR=pad[,..]: throw-to-catch emulation at the throw
             // entry (PROBE2 slot); HARNESS_RETFAIL=1: failing-return
             // emulation (same site); HARNESS_STACKBT/HARNESS_TTFILE observe.

@@ -930,6 +930,44 @@ dead subsystem, game degrades without it).
   typed entry (no match); single on-path begin_catch pad (0x38A270) rethrows.
 - TTMATCH base = 0x65E958 (live), catches filter base-never-derived; no
   dispatcher typed catch; compact entries hold the rest (catch-all shape).
+
+## 21. Session 2026-10-11 (part 12): phone revelations, TLS 1.0 origin
+- USER DEVICE (decisive): same build on old phone WITH internet reaches full
+  menu (loading animates, menu playable); in AIRPLANE MODE with old cache it
+  ALSO reaches menu. So an offline-from-cache path EXISTS. Our harness wipes
+  fusion.registry every run (= forced fresh-install = forced cloud path).
+  NO network-state queries exist in our logs (no ConnectivityManager/
+  NetworkInfo/WifiManager) — gating is via cached state, not Java APIs.
+- STATUS HONESTY: "LOADING hangs due to network" is INFERRED, not PROVEN.
+  Proven: workers die on throw, config never completes, no menu surface
+  requested. The cloud-success->menu link is exactly what TLS-origin tests.
+- RAISER ABI (live, PROBE3+RaiserDump): 0x28A3DC(r0=reqstruct, r1=HttpRequest
+  ti 0x660CC0, r2=2, r3=aux) lr=0x28B160 both calls. r0 struct: +0x0C "POST",
+  +0x4C request JSON body ({"access":{"clientId":"AngryBirdsRioFull",...),
+  +0x58 URL. Endpoints seen: .../time, .../sessions (apdrive later).
+- IOException ti 0x65DD5C, base 0x65E958 (SAME base as Http) — catches filter
+  the common base. ECONNREFUSED still throws (no error-code path); fresh-dir
+  runs without seeds throw IOException (contamination lesson: always seed +
+  always keep PROBE=1a410c,fill or boot dies at svc~17k).
+- EXTAB correction: extab w0 bit31 SET = compact (inline), CLEAR = generic
+  personality+LSDA. ttslots (988 gxx entries) stands; earlier "5831 pers"
+  histogram was misparse garbage (prel31 of compact descriptors).
+- WRITE-PATH REWRITE BUG (real, fixed): printf claimed 0301/0301 but code
+  wrote 0303/0303 (0x03 not 0x01). Client had been offering 0303 all along.
+- TLS 1.0 ORIGIN (hand-rolled, /tmp/opencode/fakeserv/tls10serv.py): RSA +
+  3DES/AES-CBC-SHA, PRF/MAC/Finished correct — LOOPBACK-GREEN (strict python
+  client completes handshake + HTTP). Server flight thereby RFC-clean.
+- GAME vs origin: ClientHello 0301 + 27 ciphers + ext(SNI/RI-float/EMS/
+  sigalgs/GREASE-3374/ALPN/ecpts/groups = BoringSSL-style hello). Answers
+  0301+0x0A / 0x2F / SH-only ALL get fatal alert 47 (0x022f), reason(247)
+  (same as vs CloudFront). Cipher pick is NOT the (only) issue.
+- SUBAGENT alert-47 pinpoint (PROVEN): sender 0x49CCFC; reason-247 site
+  0x4AF8DE in ssl3_get_server_hello (0x4AF4AC): CBS-read cipher -> lookup
+  0x4A33B0 -> NULL -> beq 0x4AF646 -> ERR(16,247)=0x100000F7 -> alert 47.
+  Prior 0x49D33C "version 1|2 vs 3" theory REFUTED (state dispatch, alert 50).
+  OPEN: why lookup NULLs offered ciphers (table subset? [sp+32] misland?).
+- NEXT: cipher sweep (0x35 running) -> ECDHE_RSA (0xC013, offered) with
+  ServerKeyExchange+ECDH+RSA-sign via cryptography lib if RSA-kx all NULL.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

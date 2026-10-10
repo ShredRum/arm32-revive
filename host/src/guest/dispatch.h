@@ -303,6 +303,9 @@ public:
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
     static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
     static void ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
+    // HARNESS_RDUMP=1: deep dump of the HTTP raiser entry ABI (PROBE3).
+    static void RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2);
+    static void RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp);
     // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
     static void PokeGateByte(std::uint64_t r7slot);
     // HARNESS_POKE180=1: loading render-state advance. At 0x263338
