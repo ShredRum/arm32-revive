@@ -670,3 +670,7 @@ dead subsystem, game degrades without it).
   (retracted). Mixing so far doesn't unblock loading.
 - SHOT/GL DIAG: RGBA reads (RGB=INVALID_OPERATION on alpha configs),
   swap-after-read, draw-state/MVP/texsize dumps, upload checksums, glScissor.
+- TMP-ARCHIVE (work/tmp-archive/, git-ignored): rescued from /tmp before a
+  shutdown — eng_idx11.so + eng_throwprobe.so (patched .so experiment copies),
+  registry_poisoned_128B.bin + regbak/ (0x01-wall forensics), milestone PNGs
+  (shot7 first frame, tap3/tap4 LOADING, menu5, notap20).
