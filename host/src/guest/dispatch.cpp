@@ -1,5 +1,7 @@
 #include "dispatch.h"
 
+#include "realgl.h"
+
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
 
 #include <algorithm>
@@ -22,6 +24,14 @@
 #include <cstring>
 
 namespace abr {
+
+// Real GLES backend instance (created on first gl* import).
+RealGL* Runtime::RealGLBackend() {
+    if (!realgl_) {
+        realgl_ = new RealGL(this);
+    }
+    return realgl_;
+}
 
 // TEMP-DIAG (registry ParseError): registry FILE* set + dump counter.
 static std::set<FILE*> g_regfiles;
@@ -91,16 +101,48 @@ bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool
 
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
+    // disease test for wall4: game memsets 255B into 144B objects; dense bump
+    // packing puts live neighbors in the blast radius, dlmalloc may not).
+    std::uint32_t pad = 0;
+    if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
+        pad = static_cast<std::uint32_t>(std::strtoul(pe, nullptr, 0));
+        if (pad > 4096) {
+            pad = 4096;
+        }
+    }
     size = (size + 7) & ~std::uint32_t(7);
     if (size == 0) {
         size = 8;
     }
-    if (heap_brk_ + size > kHeapBase + kHeapSize) {
+    if (heap_brk_ + size + pad > kHeapBase + kHeapSize) {
         return 0;
     }
     const std::uint32_t out = heap_brk_;
-    heap_brk_ += size;
+    heap_brk_ += size + pad;
     heap_sizes_[out] = size;
+    // TEMP-DIAG (wall4 overlap): log mallocs landing in the suspect window.
+    if (out >= 0x11654000u && out < 0x11656000u) {
+        std::uint32_t lr = 0;
+        if (jit_) {
+            lr = jit_->Regs()[14];
+        }
+        std::printf("[malloc] %08x size=%u (aligned %u) lr=%08x\n", out, size,
+                    (size + 7) & ~std::uint32_t(7), lr);
+    }
+    // TEMP-DIAG (wall4): exact sizes of the six 0x25E718 objects.
+    if (out == 0x11625A00u || out == 0x1163C640u || out == 0x11655000u || out == 0x1166E020u ||
+        out == 0x11686F20u || out == 0x116A0000u) {
+        std::uint32_t lr = 0, stk0 = 0;
+        if (jit_) {
+            lr = jit_->Regs()[14];
+            std::uint32_t sp = jit_->Regs()[13];
+            if (CheckRange(sp, 4, false)) {
+                std::memcpy(&stk0, H(sp), 4);
+            }
+        }
+        std::printf("[malloc] TARGET %08x size=%u lr=%08x stk0=%08x\n", out, size, lr, stk0);
+    }
     return out;
 }
 
@@ -425,16 +467,30 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "memset" || n == "__aeabi_memset" || n == "__aeabi_memset4" || n == "__aeabi_memset8" ||
         n == "__aeabi_memclr" || n == "__aeabi_memclr4" || n == "__aeabi_memclr8") {
+        // ABI SPLIT (wall4 root cause): plain C memset is (dest, c, n) but
+        // ARM EABI __aeabi_memset* is (dest, n, c) and __aeabi_memclr* is
+        // (dest, n). Swapping them filled 255B with 0x30 instead of 48B with
+        // 0xFF, poisoning every Technique/Pass vector header downstream.
         const bool is_clr = n.size() >= 14 && n.compare(0, 14, "__aeabi_memclr") == 0;
-        const std::uint32_t len = is_clr ? a1 : a2;
+        const bool is_aeabi_set =
+            !is_clr && n.size() >= 14 && n.compare(0, 14, "__aeabi_memset") == 0;
+        const std::uint32_t len = is_clr ? a1 : (is_aeabi_set ? a1 : a2);
+        const int fill = is_clr ? 0 : (is_aeabi_set ? (int)(a2 & 0xFF) : (int)(a1 & 0xFF));
         if (!CheckRange(a0, len, true)) {
             goto bad_ptr;
         }
-        if (is_clr) {
-            std::memset(H(a0), 0, a1);
-        } else {
-            std::memset(H(a0), a1 & 0xFF, a2);
+        // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
+        {
+            static int mcount = 0;
+            if (!is_clr && mcount < 400) {
+                mcount++;
+                std::uint32_t lr = ActiveJit() ? ActiveJit()->Regs()[14] : 0;
+                std::printf("[memset] %s dst=%08x len=%u fill=%02x lr=%08x\n", n.c_str(), a0, len,
+                            fill & 0xFF, lr);
+            }
         }
+        std::memset(H(a0), fill, len);
+        ScanWP(this, a0, len, n.c_str());
         Ret(regs, a0);
         return;
     }
@@ -1938,6 +1994,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // empty. Everything else falls to the generic [stub]->0 tail.
     if (n.compare(0, 2, "gl") == 0) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        // Real GLES backend (HARNESS_REALGL=1): EGL surfaceless + forward to
+        // the host driver. Falls through to the fake shim for unhandled calls
+        // (compressed textures) or when the flag is off.
+        if (RealGLBackend()->Handle(n.c_str(), regs, a0, a1, a2, a3)) {
+            return;
+        }
         if (n == "glGetString") {
             // No GL context in the harness (real EGL comes later), so report
             // era-correct 2014-Android strings. EXTENSIONS claims ETC1 (the
@@ -2082,6 +2144,58 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             n == "glVertexAttribPointer" || n == "glShaderSource") {
             // Accepted and ignored (no real GL yet): fake upload succeeds.
             // Bulk-pointer args are range-checked but not consumed.
+            // TEMP-DIAG (real-GLES prep): log call signatures to learn what
+            // the host GPU must accept (formats, sizes, shader sources).
+            if (n == "glShaderSource" && a1 > 0 && a1 < 16 && CheckRange(a2, 4 * a1, false)) {
+                std::printf("[glsrc] shader=%u count=%u\n", a0, a1);
+                for (std::uint32_t i = 0; i < a1; i++) {
+                    std::uint32_t sp = 0;
+                    std::memcpy(&sp, H(a2 + i * 4), 4);
+                    std::int32_t slen = -1;
+                    if (a3 && CheckRange(a3 + i * 4, 4, false)) {
+                        std::memcpy(&slen, H(a3 + i * 4), 4);
+                    }
+                    if (!sp || !CheckRange(sp, 1, false)) {
+                        std::printf("[glsrc] #%u NULL\n", i);
+                        continue;
+                    }
+                    std::size_t L = 0;
+                    const char* s = reinterpret_cast<const char*>(H(sp));
+                    if (slen < 0) {
+                        while (L < 4096 && CheckRange(sp + (std::uint32_t)L, 1, false) && s[L]) {
+                            L++;
+                        }
+                    } else {
+                        L = (std::size_t)slen > 65536 ? 65536 : (std::size_t)slen;
+                    }
+                    std::printf("[glsrc] #%u ptr=%08x slen=%d : %.200s\n", i, sp, slen,
+                                std::string(s, L > 200 ? 200 : L).c_str());
+                    // TEMP-DIAG (real-GLES prep): stash full source for
+                    // offline compile tests (host FS, harness-only).
+                    if (L > 16 && L <= 65536) {
+                        std::filesystem::create_directories("work/shaders");
+                        char fn[64];
+                        std::snprintf(fn, sizeof(fn), "work/shaders/src_%u_%u.glsl", a0, i);
+                        FILE* f = std::fopen(fn, "wb");
+                        if (f) {
+                            std::fwrite(s, 1, L, f);
+                            std::fclose(f);
+                        }
+                    }
+                }
+            }
+            if ((n == "glTexImage2D" || n == "glCompressedTexImage2D") && a1 <= 8) {
+                // APCS: (target,level,intfmt,width) in regs; the rest on guest
+                // stack: height,border,format,type,data.
+                std::uint32_t stk[5] = {0};
+                for (int i = 0; i < 5; i++) {
+                    if (CheckRange(regs[13] + (std::uint32_t)(i * 4), 4, false)) {
+                        std::memcpy(&stk[i], H(regs[13] + (std::uint32_t)(i * 4)), 4);
+                    }
+                }
+                std::printf("[gltex] %s tgt=%04x lvl=%u ifmt=%04x %ux%u fmt=%04x typ=%04x data=%08x\n",
+                            n.c_str(), a0, a1, a2, a3, stk[0], stk[2], stk[3], stk[4]);
+            }
             std::printf("[gl] %s accepted (fake)\n", n.c_str());
             Ret(regs, 0);
             return;
@@ -2916,6 +3030,18 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         jni_objects_[o] = "newobj<" + mdesc + ">";
         const char* vtag = (fn == 28) ? "" : ((fn == 29) ? "V" : "A");
         std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
+        // TEMP-DIAG (audio): capture the native audio handle (first stack
+        // words = J</init> args) so mixdata can be fed the real object.
+        if (mdesc.find("AudioOutput.<init>") != std::string::npos) {
+            std::uint32_t w0 = 0, w1 = 0;
+            if (CheckRange(regs[13], 4, false)) {
+                std::memcpy(&w0, H(regs[13]), 4);
+            }
+            if (CheckRange(regs[13] + 4, 4, false)) {
+                std::memcpy(&w1, H(regs[13] + 4), 4);
+            }
+            std::printf("[audio] AudioOutput ctor J: lo=%08x hi=%08x\n", w0, w1);
+        }
         Ret(regs, o);
         return;
     }

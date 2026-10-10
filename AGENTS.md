@@ -586,3 +586,45 @@ dead subsystem, game degrades without it).
   fns enumerated in dispatch ~glGen*/glTex*/glShaderSource...), 2) audio
   null-sink (nativeMixData needs boot context), 3) input, 4) wall-#4 revisit
   (threads), 5) RegisterNatives cleanup, 6) Android shell + packaging.
+
+## 11. Session 2026-10-10 (part 2): wall #4 DOWN, real GLES, FIRST FRAME
+- WALL #4 ROOT CAUSE (PROVEN): our `__aeabi_memset4/8` thunk had C arg order
+  (dest,c,n) but ARM EABI is (dest,n,c). Game's `memset(obj+8,48,255)` meant
+  48B of 0xFF; we wrote 255B of 0x30, poisoning Technique/Pass vector headers
+  with 0x30303030 ("0000"). Two self-inflicted wounds in one: (a) order swap,
+  (b) a broken `compare(0,13,...)`-vs-14-chars gate that silently disabled the
+  first fix attempt (std::string::compare with unequal lengths != 0).
+  RULE: EABI helpers (`__aeabi_memset/memclr/memcpy/memmove`) need per-name
+  order checks, never one shared shape. Verdict on the "layout disease"
+  detour (MALLOCPAD etc.): wrong theory, allocator is fine, all TEMP pad code
+  stays off by default.
+- Subagent (static, read-only) delivered the ownership map that made this
+  solvable: 828B object = `gr::gles2::GL_Pass` (clone 0x264C74/copy 0x264AF8),
+  vector owner = `gr::gles2::GL_Technique` (+20), readers = vector<16B>
+  push/grow (NOT map lookups), writer candidate = memset at 0x25E798.
+  Lesson: narrow read-only static tasks parallelize well with live forensics.
+- REAL GLES BACKEND (host/src/guest/realgl.{h,cpp}, HARNESS_REALGL=1): EGL
+  (X-window surface when available, pbuffer fallback; transient window only,
+  zero persistent system changes) + full forwarding: shaders (real compile,
+  \\x01 header separators sanitized to \\n — 2014 Mali/Adreno accepted them,
+  strict compilers don't; all 6 pairs compile+link on NVIDIA), programs,
+  attribs/uniforms (real locations), RGBA4444/8888 texture uploads with real
+  data (game decodes .pvr itself; no PVRTC reaches the driver), state,
+  VBO-offset-vs-client-pointer duality via bound-buffer tracking.
+  gltest tool validates shaders offline; eglmin is the minimal EGL path probe.
+- FIRST FRAME (PROVEN): 8 serial updates + render, all clean, Rovio logo
+  splash pixel-visible (work/shot.ppm + live X window). Draw path: prog 9,
+  NDC verts, identity MVP, texture 805x439, all err=0.
+- BLACK-FRAME SAGA (all harness bugs, not game): (1) RGB ReadPixels from an
+  alpha-bearing config = GL_INVALID_OPERATION -> zeros (read RGBA!); every
+  black screenshot before this fix was the read bug. (2) Live window stayed
+  black until eglSwapBuffers after readback (front/back). HARNESS_SCREENSHOT=1
+  + HARNESS_SHOW=N (keep window open for viewing).
+- DIAG ADDED (harness-only): HARNESS_JLAST (last-call r2/r3 override, for
+  mixdata), [glsrc]/[gltex] signature logs, work/shaders/*.glsl capture,
+  draw-state dump (prog/tex/vp/blend/scissor/attrib + MVP + texsize),
+  upload checksums, HARNESS_MALLOCPAD (layout test, default 0),
+  HARNESS_NOBLEND/HARNESS_SHOTCLEAR/HARNESS_SHOTSWAP/HARNESS_EGLD/HARNESS_EGLX
+  (readback experiments, keep for future GPU debugging).
+- NEXT: audio (mixdata needs the AudioOutput J handle from NewObjectV log +
+  null-sink), input, menu frames past splash, RegisterNatives, packaging.

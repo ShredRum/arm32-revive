@@ -33,9 +33,15 @@ target_link_libraries(distv PRIVATE dynarmic)
 add_library(guest STATIC
     src/guest/elf_loader.cpp
     src/guest/dispatch.cpp
+    src/guest/realgl.cpp
 )
 target_include_directories(guest PUBLIC src)
 target_link_libraries(guest PUBLIC dynarmic z)
+if(NOT ANDROID)
+    target_link_libraries(guest PUBLIC EGL GLESv2 X11)
+else()
+    target_link_libraries(guest PUBLIC EGL GLESv2)
+endif()
 # Private frontend header (a32_ir_emitter.h) for the HARNESS_PROBE IR emitter.
 target_include_directories(guest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/dynarmic/externals/mcl/include
@@ -44,3 +50,11 @@ target_include_directories(guest PRIVATE
 # Bring-up harness: loads the real game .so, runs DT_INIT_ARRAY.
 add_executable(harness src/harness.cpp)
 target_link_libraries(harness PRIVATE guest)
+
+# Harness-only real-GLES compile check (PC GPU validation of game shaders).
+if(NOT ANDROID)
+    add_executable(gltest src/gltest.cpp)
+    target_link_libraries(gltest PRIVATE EGL GLESv2 X11)
+    add_executable(eglmin src/eglmin.cpp)
+    target_link_libraries(eglmin PRIVATE EGL GLESv2)
+endif()

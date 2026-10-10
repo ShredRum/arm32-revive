@@ -151,7 +151,10 @@ private:
     using Regs = std::array<std::uint32_t, 16>;
     void CallImport(std::uint32_t idx, Regs& regs);
     void CallJni(std::uint32_t fn, Regs& regs);
+  public:
+    // Public for the RealGL backend (same-module forwarding).
     void Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1 = 0);
+  private:
     void RetVoid(Regs& regs) { Ret(regs, regs[0], regs[1]); }
 
     GuestMemory& mem_;
@@ -246,6 +249,11 @@ private:
         int prot;
     };
     std::vector<Mapping> mappings_;
+    // Real GLES backend (HARNESS_REALGL=1); null until first gl* call.
+    // Harness-only bring-up; same forwarding serves the device build later.
+    class RealGL* realgl_ = nullptr;
+  public:
+    class RealGL* RealGLBackend();
 };
 
 class GuestCallbacks : public Dynarmic::A32::UserCallbacks {

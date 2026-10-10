@@ -20,6 +20,7 @@
 #include "guest/elf_loader.h"
 #include "guest/guest_memory.h"
 #include "guest/layout.h"
+#include "guest/realgl.h"
 
 namespace {
 volatile int g_current_init = -1;
@@ -816,6 +817,25 @@ int main(int argc, char** argv) {
             flush();
         }
         bool ok = true;
+        // HARNESS_JLAST="r2,r3" (hex or A=array): overrides r2/r3 for the
+        // LAST call only (e.g. nativeMixData needs r3=array, others need dims).
+        std::uint32_t jlast2 = 0, jlast3 = 0;
+        bool have_jlast = false;
+        if (const char* jl = std::getenv("HARNESS_JLAST")) {
+            std::string s(jl), a, b;
+            auto c = s.find(',');
+            a = (c == std::string::npos) ? s : s.substr(0, c);
+            b = (c == std::string::npos) ? "" : s.substr(c + 1);
+            auto word = [&](const std::string& t) -> std::uint32_t {
+                if (t == "A" || t == "a") {
+                    return jbarray;
+                }
+                return static_cast<std::uint32_t>(std::strtoul(t.c_str(), nullptr, 16));
+            };
+            jlast2 = word(a);
+            jlast3 = word(b);
+            have_jlast = true;
+        }
         for (std::size_t i = 0; i < fns.size() && ok; i++) {
             // Call[0]: JSTR jstring (or legacy JA2/JA3 when alone without JSTR).
             // Calls[1..]: JA2/JA3 (dims for init/resize).
@@ -827,8 +847,26 @@ int main(int argc, char** argv) {
                 r2 = ja2;
                 r3 = ja3;
             }
+            if (have_jlast && i + 1 == fns.size()) {
+                r2 = jlast2;
+                r3 = jlast3;
+            }
             Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, jstk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
+        }
+        // HARNESS_SCREENSHOT=1: capture the real-GL drawable (needs
+        // HARNESS_REALGL=1) to work/shot.ppm after the JNI sequence.
+        if (std::getenv("HARNESS_SCREENSHOT")) {
+            rt.RealGLBackend()->Screenshot("work/shot.ppm", 800, 480);
+        }
+        // HARNESS_SHOW=N: keep the live GL window open N seconds (viewing).
+        if (const char* sh = std::getenv("HARNESS_SHOW")) {
+            int secs = std::atoi(sh);
+            if (secs > 0 && secs < 600) {
+                std::printf("[harness] window open %ds\n", secs);
+                std::fflush(stdout);
+                sleep((unsigned)secs);
+            }
         }
         _exit(ok ? 0 : 1);
     }
