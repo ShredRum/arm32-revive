@@ -205,6 +205,12 @@ private:
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
     std::uint32_t jvm_ = 0;         // guest VA of JavaVM* (word -> jvm_table_)
     std::uint32_t jni_obj_next_ = 0;  // bump pointer for class/method handles
+    // Recorded AudioOutput native handle (J) from <init>(JIIII)V, for
+    // mixdata arg synthesis (HARNESS_JLAST/JOVR "J").
+    std::uint32_t audio_j_lo_ = 0, audio_j_hi_ = 0;
+  public:
+    std::uint32_t AudioJLo() const { return audio_j_lo_; }
+    std::uint32_t AudioJHi() const { return audio_j_hi_; }
     std::unordered_map<std::uint32_t, std::string> jni_classes_;  // handle -> name
     std::unordered_map<std::uint32_t, std::string> jni_methods_;  // cookie -> desc
     std::unordered_map<std::uint32_t, std::string> jni_objects_;  // handle -> desc

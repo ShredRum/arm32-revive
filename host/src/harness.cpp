@@ -834,6 +834,11 @@ int main(int argc, char** argv) {
             };
             jlast2 = word(a);
             jlast3 = word(b);
+            // "J" = recorded AudioOutput handle (occupies r2+r3 as jlong).
+            if (a == "J" || a == "j" || b == "J" || b == "j") {
+                jlast2 = rt.AudioJLo();
+                jlast3 = rt.AudioJHi();
+            }
             have_jlast = true;
         }
         for (std::size_t i = 0; i < fns.size() && ok; i++) {
@@ -851,7 +856,75 @@ int main(int argc, char** argv) {
                 r2 = jlast2;
                 r3 = jlast3;
             }
-            Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, jstk);
+            // HARNESS_JOVR="idx=r2,r3[,s0,s1...]" (; separated): per-call
+            // overrides for input injection etc. (A = byte array). Stack
+            // override replaces jstk for that call only.
+            std::vector<std::uint32_t> stk = jstk;
+            if (const char* jo = std::getenv("HARNESS_JOVR")) {
+                std::string spec(jo), cur;
+                auto apply = [&](const std::string& s) {
+                    auto eq = s.find('=');
+                    if (eq == std::string::npos) {
+                        return;
+                    }
+                    std::size_t idx =
+                        static_cast<std::size_t>(std::strtoul(s.substr(0, eq).c_str(), nullptr, 10));
+                    if (idx != i) {
+                        return;
+                    }
+                    std::string rest = s.substr(eq + 1), tok;
+                    std::vector<std::string> parts;
+                    for (char ch : rest) {
+                        if (ch == ',') {
+                            parts.push_back(tok);
+                            tok.clear();
+                        } else if (ch != ' ') {
+                            tok += ch;
+                        }
+                    }
+                    parts.push_back(tok);
+                    auto word = [&](const std::string& t) -> std::uint32_t {
+                        if (t == "A" || t == "a") {
+                            return jbarray;
+                        }
+                        if (t.size() > 2 && t[0] == 'f') {
+                            float f = std::strtof(t.c_str() + 1, nullptr);
+                            std::uint32_t w = 0;
+                            std::memcpy(&w, &f, 4);
+                            return w;
+                        }
+                        return static_cast<std::uint32_t>(std::strtoul(t.c_str(), nullptr, 16));
+                    };
+                    if (parts.size() > 0 && !parts[0].empty()) {
+                        r2 = word(parts[0]);
+                    }
+                    if (parts.size() > 1 && !parts[1].empty()) {
+                        r3 = word(parts[1]);
+                    }
+                    // "J" = recorded AudioOutput handle (jlong in r2+r3).
+                    if ((parts.size() > 0 && (parts[0] == "J" || parts[0] == "j")) ||
+                        (parts.size() > 1 && (parts[1] == "J" || parts[1] == "j"))) {
+                        r2 = rt.AudioJLo();
+                        r3 = rt.AudioJHi();
+                    }
+                    if (parts.size() > 2) {
+                        stk.clear();
+                        for (std::size_t k = 2; k < parts.size(); k++) {
+                            stk.push_back(word(parts[k]));
+                        }
+                    }
+                };
+                for (char ch : spec) {
+                    if (ch == ';') {
+                        apply(cur);
+                        cur.clear();
+                    } else {
+                        cur += ch;
+                    }
+                }
+                apply(cur);
+            }
+            Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, stk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
         }
         // HARNESS_SCREENSHOT=1: capture the real-GL drawable (needs

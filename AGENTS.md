@@ -628,3 +628,30 @@ dead subsystem, game degrades without it).
   (readback experiments, keep for future GPU debugging).
 - NEXT: audio (mixdata needs the AudioOutput J handle from NewObjectV log +
   null-sink), input, menu frames past splash, RegisterNatives, packaging.
+
+## 12. Session 2026-10-10 (part 3): input proven, LOADING gate, audio live
+- INPUT (PROVEN): nativeInput(IFFI) @0xc23e4 takes (action,x,y,?) — down/up
+  at center return clean. 20 updates no-tap = Rovio splash; 20 with tap = Fox
+  splash. Tap ADVANCES boot. HARNESS_JOVR="idx=r2,r3,s0..” per-call overrides
+  (f-prefix = float bits, A = byte array) — general input/event injection.
+- BOOT PATH: Rovio -> Fox -> Angry Birds Rio LOADING (Blu+Red, Rio landscape,
+  real pixels, svc~1.8M, 48 updates + taps, all clean). Live window + shots.
+- LOADING GATE (stuck, idle redraws identical from ~upd40): late updates do
+  pure redraw (27 lines: memcmp3 + 4 draws, zero JNI). Main-thread asset queue
+  drains (422 in upd16, then trickle). Ruled OUT: network (zero socket calls),
+  worker (50-update live-worker run also LOADING), more updates (48 enough),
+  taps during loading (6x, no effect). RANKED hypotheses: (1) CONSENTS gate
+  (rcs::Consents NOT_ANSWERED with no UI to answer — the original wall-#1
+  owner; needs answer mock), (2) AUDIO clock (mixdata never in loop; see
+  below), (3) Lua timer/event.
+- AUDIO LIVE (milestone): AudioOutput.<init>(JIIII)V created by game;
+  NewObjectV varargs are at the a3 va_list pointer (NOT sp — first log was
+  garbage from misread). J recorded in Runtime (audio_j_lo/hi);
+  HARNESS_JLAST/JOVR "J" expands it. mixdata(J[BI) with real J + array RETURNS
+  CLEAN (GetByteArrayElements + Release, r0=0) — audio engine object EXISTS.
+  Sustained loop FAILED on 2nd call: game passes array=0 (reads it from a Java
+  object FIELD via GetObjectField on our mock -> 0). Real audio milestone =
+  Java object-field state emulation. PARKED here.
+- DIAG: HARNESS_JOVR, HARNESS_JLAST "J", [audio] ctor log, AudioJLo/Hi.
+- NEXT: (1) consents-answer mock (registry/state archaeology), (2) object
+  fields for audio, (3) menu + gameplay, (4) packaging.

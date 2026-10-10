@@ -3030,16 +3030,19 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         jni_objects_[o] = "newobj<" + mdesc + ">";
         const char* vtag = (fn == 28) ? "" : ((fn == 29) ? "V" : "A");
         std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
-        // TEMP-DIAG (audio): capture the native audio handle (first stack
-        // words = J</init> args) so mixdata can be fed the real object.
+        // TEMP-DIAG (audio): capture the native audio handle. NewObjectV
+        // varargs live at the va_list pointer (a3), NOT at sp. Recorded
+        // for HARNESS_JLAST/JOVR "J" expansion (mixdata synthesis).
         if (mdesc.find("AudioOutput.<init>") != std::string::npos) {
             std::uint32_t w0 = 0, w1 = 0;
-            if (CheckRange(regs[13], 4, false)) {
-                std::memcpy(&w0, H(regs[13]), 4);
+            if (CheckRange(a3, 4, false)) {
+                std::memcpy(&w0, H(a3), 4);
             }
-            if (CheckRange(regs[13] + 4, 4, false)) {
-                std::memcpy(&w1, H(regs[13] + 4), 4);
+            if (CheckRange(a3 + 4, 4, false)) {
+                std::memcpy(&w1, H(a3 + 4), 4);
             }
+            audio_j_lo_ = w0;
+            audio_j_hi_ = w1;
             std::printf("[audio] AudioOutput ctor J: lo=%08x hi=%08x\n", w0, w1);
         }
         Ret(regs, o);
