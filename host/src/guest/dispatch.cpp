@@ -2573,6 +2573,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, "opendir")) {
                 return;
             }
+            // TEMP-DIAG (worker dir scans): which trees does it list?
+            {
+                static int odlog = 0;
+                if (odlog < 15) {
+                    odlog++;
+                    std::printf("[files]%s opendir(\"%s\")%s\n", GuestTid() == 1 ? "" : "(T2+)",
+                                hp.c_str(), odlog == 15 ? " (quiet henceforth)" : "");
+                }
+            }
             DIR* d = ::opendir(hp.c_str());
             if (!d) {
                 Ret(regs, 0);

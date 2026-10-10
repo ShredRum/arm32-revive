@@ -768,3 +768,41 @@ dead subsystem, game degrades without it).
   UUID.randomUUID real, localtime_r/gmtime_r real, GetObjectClass #31 tracked,
   net.dns1/2 via __system_property_get. Taps (7 positions) no-op at LOADING;
   renders/frameClear/resume interleaves no-op; TIMEWARP +3600s no-op.
+
+## 16. Session 2026-10-10 (part 7): socket bridge, io_mutex_ deadlock fix
+- SOCKET BRIDGE (host/src/guest/dispatch.cpp, works on dev+device): game has
+  its own DNS-over-UDP resolver (raw socket/connect/send/recvfrom, no
+  getaddrinfo import). Old stub ->0 aliased stdin + faked success (4x retry
+  then null-call pc=0). Now real host sockets: guest fds via fd_map_,
+  per-thread errno via ErrnoSlot, sockets O_NONBLOCK, I/O poll-capped 5s,
+  TCP connect capped 10s (nonblocking+POLLOUT+SO_ERROR). HARNESS_NONET=1 ->
+  socket()=-1/ENETUNREACH (fast deterministic offline). Bionic/Linux errno +
+  sockaddr layouts match. fcntl/ioctl still stub->0; sendmsg/recvmsg LOUD.
+  Self-review fixed 3 bugs (getsockopt len check, listen backlog as pointer,
+  set/getsockopt read/write direction). TEMP-DIAG: [netsock] calls + inbound
+  hex (40-cap) + error lines; opendir path log (15-cap).
+- REAL DNS PROVEN (iofixA): socket->gfd132, connect->0, 33B query out,
+  4x recvfrom. Then main died @0x39A7F8 wild-index into table 0x66BCA8
+  (after DeviceID.getUniqueId) — unknown if DNS-reply-driven; inbound hex
+  log will show next time.
+- IO_MUTEX FIX (the worker-flake breakthrough): file bridge held mutex_
+  across ALL syscalls; a worker parked in blocking ::read (pipe, no writer)
+  froze every thread (main "stuck in fwrite/unlock", beats TORN at
+  clock_gettime slot — heartbeat location UNTRUSTWORTHY, again). Fix: outer
+  guard removed; leaf io_mutex_ with brief holds at each fd/file/dir map
+  touch (helpers host_fd_of/alloc_guest_fd/erase_guest_fd + guarded lambdas);
+  ALL blocking I/O runs unlocked. Baseline unchanged (54/54, svc=948).
+  Result: 2/2 worker runs progressed (no 300s виса that round).
+- NONET LONG (iofixB, 6upd): main 100% clean through 6 updates (r0=1);
+  worker died in throw-spiral (BAD read 0x464C458B [r2+12] @0x5C5B0 during
+  opendir/readdir — ELF-magic-as-pointer, same class as §5 stage slots:
+  worker reads a slot main hasn't written = race or orphan slot).
+- HANG SHAPE (nonetlong1, STUCK@300s): 7 updates, pipe wake delivered+read,
+  then poll-ret 0s, svc FROZEN (no SVCs at all — not a poll loop; heartbeat
+  pc=TORN garbage). Main is inside ONE blocking host call (prime suspect:
+  uncapped ::read on pipe, or join). Worker wrote ONE 0x00 byte then went
+  silent (exited? crashed? — thread-done lines exist, check them). Missing
+  2nd message = the hunt. gdb-attach plan queued (gdb2.log running).
+- ROVIO STILL FINE (2026-10-10, rovio_check.png): NOWORKER 8upd renders the
+  logo pixel-perfect — no render regression; worker runs just die earlier
+  (3-7upd, DNS phase) before splashes + end-of-run screenshot.
