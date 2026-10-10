@@ -210,6 +210,13 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
                      std::getenv("HARNESS_FULLTRACE") != nullptr);
     } else {
         hr = jit.Run();
+        // Throw-to-catch redirect (worker throws land here too via shared
+        // Runtime; ApplyRedirect is per-Jit so cross-talk is impossible).
+        int redirs = 0;
+        while (hr == Dynarmic::HaltReason::UserDefined1 && redirs++ < 4 && rt.ApplyRedirect()) {
+            alarm(60);
+            hr = jit.Run();
+        }
     }
     alarm(0);
     std::printf("hr=%d r0=%08x (%u) svc=%llu\n", static_cast<int>(hr), regs[0], regs[0],

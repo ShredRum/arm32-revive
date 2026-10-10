@@ -1684,10 +1684,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // side naturally (read-only fs semantics), which is correct.
             // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
             // stack reads them (observed: worker fopen("/etc/hosts") while
-            // resolving cloud.rovio.com). Read-only passthrough; format is
-            // identical on device, content naturally differs (correct).
+            // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
+            // synthetic hosts (see below) instead of the host file.
             if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
-                g == "/etc/hosts" || g == "/etc/resolv.conf") {
+                g == "/etc/resolv.conf") {
+                return g;
+            }
+            if (g == "/etc/hosts") {
+                if (std::getenv("HARNESS_HOSTSHACK")) {
+                    // Synthetic hosts for DNS-hack experiments (no system
+                    // change: only this guest path is virtualized).
+                    static std::string hackpath;
+                    if (hackpath.empty()) {
+                        hackpath = files_hostbase_ + "/synth.hosts";
+                        FILE* hf = std::fopen(hackpath.c_str(), "r");
+                        if (!hf) {
+                            hf = std::fopen(hackpath.c_str(), "w");
+                            if (hf) {
+                                std::fputs("127.0.0.1 localhost\n127.0.0.2 cloud.rovio.com\n",
+                                           hf);
+                                std::fclose(hf);
+                            }
+                        } else {
+                            std::fclose(hf);
+                        }
+                    }
+                    std::printf("[files] hosts HACK -> %s\n", hackpath.c_str());
+                    return hackpath;
+                }
                 return g;
             }
             if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
@@ -2133,19 +2157,38 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // Unlocked: pipes/sockets block here; the map lock must be free
             // so other threads keep running (2026-10-10 deadlock fix).
-            // Cap: FIFO/socket reads wait max 5s (poll) then fail EAGAIN —
+            // Cap: FIFO reads wait max 5s (poll) then fail EAGAIN —
             // an uncapped ::read on a pipe whose writer (dead worker) never
             // delivers message #2 froze the whole run (STUCK@300s, 2026-10-10).
+            // Sockets skip the cap (SO_RCVTIMEO governs; blocking semantics).
             // Regular files skip the cap (always fast). EOF semantics intact:
             // closed write-ends still read 0 via the normal path below.
             if (n == "read") {
                 struct stat fst {};
-                if (::fstat(hfd, &fst) == 0 &&
-                    (S_ISFIFO(fst.st_mode) || S_ISSOCK(fst.st_mode))) {
+                if (::fstat(hfd, &fst) == 0 && S_ISFIFO(fst.st_mode)) {
                     if (wait_fd(hfd, POLLIN, 5000) <= 0) {
                         set_guest_errno(EAGAIN);
                         Ret(regs, static_cast<std::uint32_t>(-1));
                         return;
+                    }
+                }
+            }
+            // TLS ClientHello version bump for write() path (the in-module
+            // TLS stack uses plain write, not send — same fix as send()).
+            // Pattern first (cheap), fstat only on match (not per-write).
+            if (n == "write" && !std::getenv("HARNESS_NOTLSFIX") && a2 >= 11 &&
+                CheckRange(a1, 11, true)) {
+                std::uint8_t* q = H(a1);
+                if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
+                    struct stat fst {};
+                    if (::fstat(hfd, &fst) == 0 && S_ISSOCK(fst.st_mode)) {
+                        std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
+                        q[1] = 0x03;
+                        q[2] = 0x03;
+                        q[9] = 0x03;
+                        q[10] = 0x03;
+                        std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301 (write path)\n",
+                                    GuestTid() == 1 ? "" : "(T2+)", ov0, ov1, hv0, hv1);
                     }
                 }
             }
@@ -2257,10 +2300,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            int fl = ::fcntl(hfd, F_GETFL, 0);
-            if (fl >= 0) {
-                ::fcntl(hfd, F_SETFL, fl | O_NONBLOCK);
-            }
+            // BLOCKING by default (faithful Bionic semantics: recv waits for
+            // the full length). O_NONBLOCK only during connect (below), then
+            // restored; stuck peers are bounded by SO_RCVTIMEO/SO_SNDTIMEO.
+            // (Leaving sockets nonblocking caused short reads: the TLS stack
+            // got 5B of a 115B ServerHello -> fatal alert 47. 2026-10-10.)
             const std::uint32_t g = alloc_guest_fd(hfd);
             std::printf("[netsock] socket(%u %u %u) -> gfd %u\n", a0, a1, a2, g);
             Ret(regs, g);
@@ -2277,6 +2321,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 set_guest_errno(EFAULT);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
+            }
+            // Nonblocking dance for the 10s cap, then RESTORE blocking +
+            // arm SO_RCVTIMEO/SO_SNDTIMEO (10s) so failed peers surface as
+            // EAGAIN instead of hanging, while healthy I/O keeps full
+            // blocking (short-read) semantics the game expects.
+            int fl = ::fcntl(hfd, F_GETFL, 0);
+            if (fl >= 0) {
+                ::fcntl(hfd, F_SETFL, fl | O_NONBLOCK);
+            }
+            // HARNESS_PORTMAP=1: rewrite TCP dst port 443 -> 8443 (lets a
+            // non-root fake origin serve the game's https:// URLs; the game
+            // itself always dials 443).
+            if (std::getenv("HARNESS_PORTMAP") && a2 >= 4 && CheckRange(a1, 4, true)) {
+                std::uint8_t* q = H(a1);
+                if (q[0] == 2 /*AF_INET*/ && q[1] == 0 && q[2] == 0x01 && q[3] == 0xBB) {
+                    q[2] = 0x20;
+                    q[3] = 0xFB;  // 8443
+                    std::printf("[netsock]%s portmap 443 -> 8443\n",
+                                GuestTid() == 1 ? "" : "(T2+)");
+                }
             }
             int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
                               (socklen_t)a2);
@@ -2319,6 +2383,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             if (r != 0) {
                 set_guest_errno(errno);
+            } else if (fl >= 0) {
+                // Connected: back to blocking + kernel timeouts.
+                ::fcntl(hfd, F_SETFL, fl);
+                struct timeval tv {};
+                tv.tv_sec = 10;
+                ::setsockopt(hfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                ::setsockopt(hfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             }
             std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
                         GuestTid() == 1 ? "" : "(T2+)", a0, r, r != 0 ? errno : 0);
@@ -2433,11 +2504,29 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (wait_fd(hfd, POLLOUT, 5000) <= 0) {
-                set_guest_errno(EAGAIN);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+            // TLS version DOWNGRADE (harness bridge): the in-module stack
+            // is capped at TLS 1.0 (any 0303 ServerHello record -> fatal
+            // alert 47 illegal_parameter, even though the hello body says
+            // 0303). Force offer 0301/0301 so a 1.0-tolerant server answers
+            // 0301. HARNESS_NOTLSFIX=1 disables (parity experiments).
+            // NOTE: needs a server whose policy still allows TLS 1.0;
+            // modern CloudFront usually does for old distributions.
+            if (!std::getenv("HARNESS_NOTLSFIX") && a2 >= 11 && CheckRange(a1, 11, true)) {
+                std::uint8_t* q = H(a1);
+                if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
+                    std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
+                    q[1] = 0x03;
+                    q[2] = 0x01;
+                    q[9] = 0x03;
+                    q[10] = 0x01;
+                    std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301\n",
+                                GuestTid() == 1 ? "" : "(T2+)", ov0, ov1, hv0, hv1);
+                }
             }
+            // Blocking I/O with kernel SO_RCVTIMEO/SO_SNDTIMEO (set at
+            // connect): full short-read semantics; timeouts surface as
+            // EAGAIN via errno. No poll short-circuit (it caused short
+            // reads on nonblocking fds -> TLS alert 47).
             ssize_t r =
                 (n == "send")
                     ? ::send(hfd, H(a1), a2, (int)a3)
@@ -2486,11 +2575,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (wait_fd(hfd, POLLIN, 5000) <= 0) {
-                set_guest_errno(EAGAIN);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
-            }
+            // Blocking I/O with kernel SO_RCVTIMEO (set at connect):
+            // full short-read semantics; timeout surfaces as EAGAIN.
+            // (The old poll short-circuit on nonblocking fds caused short
+            // reads -> TLS alert 47.)
             struct sockaddr_storage ss {};
             socklen_t sl = (socklen_t)(addrlen != 0 ? addrlen : sizeof(ss));
             ssize_t r =
@@ -2537,6 +2625,49 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::printf("[netsock] LOUD %s unmarshal TODO -- halting\n", n.c_str());
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        // getpeername/getsockname: the engine stringifies socket addrs
+        // (sa_addr inet_ntop) and logs "Trying %s...". Stubs left the
+        // buffers zeroed (family 0) -> ntop failed -> HttpRequestException.
+        if (n == "getpeername" || n == "getsockname") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            std::uint32_t len = 0;
+            if (a2 == 0 || !CheckRange(a2, 4, false)) {
+                set_guest_errno(EFAULT);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            std::memcpy(&len, H(a2), 4);
+            if (len > 128 || (len != 0 && !CheckRange(a1, len, true))) {
+                set_guest_errno(EFAULT);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            struct sockaddr_storage ss {};
+            socklen_t sl = (socklen_t)(len != 0 ? len : sizeof(ss));
+            int r = (n == "getpeername" ? ::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&ss),
+                                                       &sl)
+                                        : ::getsockname(hfd, reinterpret_cast<struct sockaddr*>(&ss),
+                                                        &sl));
+            if (r != 0) {
+                set_guest_errno(errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if ((std::uint32_t)sl <= len) {
+                std::memcpy(H(a1), &ss, sl);
+                const std::uint32_t back = (std::uint32_t)sl;
+                if (CheckRange(a2, 4, true)) {
+                    std::memcpy(H(a2), &back, 4);
+                }
+            }
+            Ret(regs, 0);
             return;
         }
         // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
@@ -3750,6 +3881,12 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
             regs[15] = start;
         }
         Dynarmic::HaltReason hr = jit.Run();
+        // Throw-to-catch redirect: resume at the landing pad (cap loops).
+        // NOTE: method on `this` (PthreadCreate is a Runtime member).
+        int redirs = 0;
+        while (hr == Dynarmic::HaltReason::UserDefined1 && redirs++ < 4 && ApplyRedirect()) {
+            hr = jit.Run();
+        }
         (void)hr;
         {
             std::lock_guard<std::mutex> lock(st->m);
@@ -4827,6 +4964,70 @@ void GuestCallbacks::ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_
         std::printf("|\n");
     }
 }
+void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
+    // HARNESS_REDIR=pad: throw-to-catch emulation (unwinder stand-in).
+    // Fires at the __cxa_throw entry probe: records regs, parks a redirect
+    // to the landing pad, halts cleanly. The Run wrapper resumes there.
+    // HARNESS_REDIR=pad[,pad2,...]: throw-to-catch emulation chain. Each
+    // throw consumes the next pad in order (level 1 -> pad1, level 2 ->
+    // pad2, ...). HARNESS_REDIRN caps total (default: list length).
+    static std::uint32_t pads[8] = {0};
+    static int npads = 0, used = 0;
+    static bool init = false;
+    if (!init) {
+        init = true;
+        if (const char* e = std::getenv("HARNESS_REDIR")) {
+            char tmp[128];
+            std::snprintf(tmp, sizeof(tmp), "%s", e);
+            for (char* tok = std::strtok(tmp, ","); tok && npads < 8;
+                 tok = std::strtok(nullptr, ",")) {
+                pads[npads++] = static_cast<std::uint32_t>(std::strtoul(tok, nullptr, 16));
+            }
+        }
+        if (const char* n = std::getenv("HARNESS_REDIRN")) {
+            int cap = std::atoi(n);
+            if (cap < npads) {
+                npads = cap;
+            }
+        }
+    }
+    if (used >= npads) {
+        return;
+    }
+    std::uint32_t pad = pads[used++];
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    auto& regs = cb->rt_->ActiveJit()->Regs();
+    std::printf("[redir] throw r0=%08x r1=%08x lr=%08x sp=%08x -> pad %08x%s\n", (std::uint32_t)r0,
+                (std::uint32_t)r1, (std::uint32_t)lr, regs[13], pad,
+                cb->rt_->GuestTid() == 1 ? "" : " (T2+)");
+    cb->rt_->ParkRedirect(pad);
+    cb->rt_->stop_step_ = true;
+    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+}
+void Runtime::ParkRedirect(std::uint32_t pad) {
+    pending_redir_ = pad;
+    pending_jit_ = ActiveJit();
+}
+bool Runtime::ApplyRedirect() {
+    if (pending_redir_ == 0 || ActiveJit() != pending_jit_) {
+        return false;
+    }
+    auto* jit = ActiveJit();
+    auto& regs = jit->Regs();
+    std::uint32_t cpsr = jit->Cpsr();
+    cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10);  // USER+ARM
+    jit->SetCpsr(cpsr);
+    regs[15] = pending_redir_;
+    stop_step_ = false;
+    std::printf("[redir] resume at %08x (r0=%08x sp=%08x)%s\n", pending_redir_, regs[0], regs[13],
+                GuestTid() == 1 ? "" : " (T2+)");
+    pending_redir_ = 0;
+    pending_jit_ = nullptr;
+    return true;
+}
 void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     static std::uint64_t n = 0;
     static std::int64_t cap = -2;
@@ -4947,8 +5148,51 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             if (k > 0 && k < 128) {
                 std::printf("[probe] throw type: %s\n", buf);
             }
-            // TEMP-DIAG (HttpRequestException reason): dump the exception
-            // object head [r0,80] with ASCII — usually vtable + code/message.
+            // TEMP-DIAG (unwinder bring-up): measure the exception header by
+            // scanning back from the thrown object for the exception-class
+            // magic. NDK = libc++ ("CLNGC++"), not libstdc++ ("GNUCC++").
+            // 16B... 8B-step guarded (heap-chunk edges fail whole checks).
+            {
+                const std::uint32_t eo = (std::uint32_t)r0;
+                static const char m_clng[8] = {'C', 'L', 'N', 'G', 'C', '+', '+', '\0'};
+                static const char m_gnu[8] = {'G', 'N', 'U', 'C', 'C', '+', '+', '\0'};
+                for (std::uint32_t back = 8; back <= 256; back += 8) {
+                    if (eo < back + 8) {
+                        break;
+                    }
+                    const std::uint32_t a = eo - back;
+                    if (!cb->rt_->CheckRange(a, 8, false)) {
+                        continue;
+                    }
+                    char w8[8];
+                    std::memcpy(w8, cb->rt_->H<const std::uint8_t>(a), 8);
+                    if (std::memcmp(w8, m_clng, 8) == 0 || std::memcmp(w8, m_gnu, 8) == 0) {
+                        std::printf("[probe] ue-magic at %08x (obj-%u)\n", a, back);
+                        break;
+                    }
+                }
+                // TEMP-DIAG: full backward dump [eo-128, eo] for eyeballing.
+                {
+                    const std::uint32_t lo = eo > 128 ? eo - 128 : 0;
+                    if (lo && cb->rt_->CheckRange(lo, 128, false)) {
+                        const std::uint8_t* q = cb->rt_->H<const std::uint8_t>(lo);
+                        for (int row = 0; row < 8; row++) {
+                            std::printf("[probe] ue-back @%08x:", lo + row * 16);
+                            for (int j = 0; j < 16; j++) {
+                                std::printf(" %02x", q[row * 16 + j]);
+                            }
+                            std::printf(" |");
+                            for (int j = 0; j < 16; j++) {
+                                unsigned ch = q[row * 16 + j];
+                                std::printf("%c", (ch >= 32 && ch < 127) ? (char)ch : '.');
+                            }
+                            std::printf("|\n");
+                        }
+                    } else {
+                        std::printf("[probe] ue-back unreadable\n");
+                    }
+                }
+            }
             {
                 const std::uint32_t eo = (std::uint32_t)r0;
                 if (cb->rt_->CheckRange(eo, 80, false)) {
@@ -4962,6 +5206,23 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
                         std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
                     }
                     std::printf("\n");
+                    // Follow two likely-string pointers at +16/+64 (URL? stage?).
+                    for (int k = 0; k < 2; k++) {
+                        std::uint32_t sp = 0;
+                        std::memcpy(&sp, p + (k == 0 ? 16 : 64), 4);
+                        if (sp >= 0x10000000u && sp < 0x20000000u &&
+                            cb->rt_->CheckRange(sp, 64, false)) {
+                            const std::uint8_t* q = cb->rt_->H<const std::uint8_t>(sp);
+                            std::printf("[probe] exc-str%d @%08x: ", k, sp);
+                            for (int j = 0; j < 64; j++) {
+                                if (q[j] == 0) {
+                                    break;
+                                }
+                                std::printf("%c", (q[j] >= 32 && q[j] < 127) ? (char)q[j] : '.');
+                            }
+                            std::printf("\n");
+                        }
+                    }
                 }
             }
         }
@@ -5164,6 +5425,17 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
+            // HARNESS_REDIR=pad: throw-to-catch emulation at the throw entry
+            // (PROBE2 slot). Emitted after the dumps (they still run first).
+            if (std::getenv("HARNESS_REDIR") && pc == probe_pc2) {
+                ir.CallHostFunction(&ProbeRedir,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
+            }
         }
     }
     if (tl > 0) {
@@ -5212,6 +5484,19 @@ void GuestCallbacks::CallSVC(std::uint32_t swi) {
 // here (same convention as TimeWarp). All paths Ret()+return (handled).
 void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                         std::uint32_t a2, std::uint32_t a3) {
+    // TEMP-DIAG (ntop failures): log args, capped (ntop has its own cap;
+    // pton spam must not eat it).
+    {
+        static int ilog = 0, olog = 0;
+        if (n == "inet_ntop" && olog < 12) {
+            olog++;
+            std::printf("[netsock] %s(%u %08x %08x %08x)%s\n", n.c_str(), a0, a1, a2, a3,
+                        olog == 12 ? " (quiet henceforth)" : "");
+        } else if (n == "inet_pton" && ilog < 4) {
+            ilog++;
+            std::printf("[netsock] %s(%u %08x %08x %08x)\n", n.c_str(), a0, a1, a2, a3);
+        }
+    }
     if (n == "inet_ntoa" || n == "inet_ntop") {
         // inet_ntoa(struct in_addr): addr comes BY VALUE in r0 (NOT a
         // pointer). inet_ntop(af, src, dst, size): dst=a2, size=a3.
@@ -5224,8 +5509,21 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
             std::memcpy(&ia, &v, 4);
             src = &ia;
         } else {
-            if (a0 != 2 /*AF_INET*/ || a3 < 16 || !CheckRange(a1, 4, false) ||
-                !CheckRange(a2, 16, true)) {
+            // AF_INET (16B min) and AF_INET6 (46B min).
+            const std::uint32_t need = (a0 == 10 /*AF_INET6*/) ? 46u : 16u;
+            if ((a0 != 2 && a0 != 10) || a3 < need || !CheckRange(a1, 4, false) ||
+                !CheckRange(a2, need, true)) {
+                // TEMP-DIAG: which check fails?
+                const std::uint8_t* sp2 =
+                    (a1 && CheckRange(a1, 16, false)) ? H<const std::uint8_t>(a1) : nullptr;
+                std::printf("[netsock] ntop-FAIL af=%u size=%u src=%08x dst=%08x%s", a0, a3, a1,
+                            a2, sp2 ? " bytes:" : " (src unreadable)");
+                if (sp2) {
+                    for (int q = 0; q < 16; q++) {
+                        std::printf(" %02x", sp2[q]);
+                    }
+                }
+                std::printf("\n");
                 Ret(regs, 0);
                 return;
             }
@@ -5234,7 +5532,7 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
             dstsize = a3;
         }
         char tmp[64];
-        if (!inet_ntop(AF_INET, src, tmp, sizeof(tmp))) {
+        if (!inet_ntop(a0 == 10 ? AF_INET6 : AF_INET, src, tmp, sizeof(tmp))) {
             Ret(regs, 0);
             return;
         }
@@ -5280,15 +5578,16 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    // inet_pton(af, src, dst): only AF_INET used by the game.
-    if (a0 != 2 /*AF_INET*/ || a2 == 0 || !CheckRange(a2, 4, true)) {
+    // inet_pton(af, src, dst): AF_INET (4B) and AF_INET6 (16B).
+    const std::uint32_t need = (a0 == 10 /*AF_INET6*/) ? 16u : 4u;
+    if ((a0 != 2 && a0 != 10) || a2 == 0 || !CheckRange(a2, need, true)) {
         Ret(regs, 0);
         return;
     }
-    unsigned char b[4] = {0, 0, 0, 0};
-    const int r = ::inet_pton(AF_INET, s, b);
+    unsigned char b[16] = {};
+    const int r = ::inet_pton(a0 == 10 ? AF_INET6 : AF_INET, s, b);
     if (r == 1) {
-        std::memcpy(H(a2), b, 4);
+        std::memcpy(H(a2), b, need);
     }
     Ret(regs, static_cast<std::uint32_t>(r));
     return;

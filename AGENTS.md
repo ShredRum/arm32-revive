@@ -879,3 +879,29 @@ dead subsystem, game degrades without it).
   callers assume success-flag, no error path — fallback is dispatcher-catch
   only). inet_* ABI bugs fixed via file-scope InetThunk (a0-vs-a1,
   ntoa-by-value, ntop order; stray-brace saga: missing } shifted nesting).
+
+## 19. Session 2026-10-10 (part 10): TLS wall mapped, redirect chains
+- TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
+  (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
+  body 0303); ServerHello 5B+110B read; client sends fatal alert 47
+  (illegal_parameter) -> reason(247) HttpRequestException. Root: 2014
+  stack capped at TLS 1.0 (any 0303 ServerHello record aborts before body
+  read). Downgrade offer 0301/0301 -> server silent (CF min-version 1.2+).
+  Hand-rolled ClientHello parse: modern ciphers offered (CHACHA/GCM) but
+  ServerHello still rejected (extensions or curve — subagent on alert site).
+  Cipher-alert proof vs CF (alert 40 no-overlap). Fake origin works
+  (hosts-hack honored! portmap 443->8443) but same alert-47. ONLINE PATH
+  DEAD both directions (crypto impossible + API dead 401/403).
+- BLOCKING SOCKETS (real bug, fixed): O_NONBLOCK caused short reads (5B of
+  115B ServerHello) -> alert. Now blocking + SO_RCVTIMEO/SNDTIMEO 10s;
+  poll-caps removed for socks (FIFO cap kept). getpeername/getsockname
+  real (sa_addr ntop chain). fcntl real (O_NONBLOCK honored).
+- REDIRECT (throw->pad emulation, works!): ProbeRedir at throw entry +
+  per-Jit resume (USER+ARM, r0 kept) + wrapper loops (cap) + REDIR=pad
+  chain + REDIRN budget. Proven: Http->0x28E7C4->length_error (begin_catch
+  accepted r0=obj!). BUT all dispatcher pads rethrow (translate pattern:
+  Http->length; length->length/swap). 117 begin_catch pads mapped; every
+  pad-function also throws (no pure handlers statically). Chains tried:
+  [28e7c4,189ef0], [28e7c4,2848c4] — both rethrow. r0/r1/sp questions
+  remain (r1=switch? sp=scratch?). NEXT: app-level catch (main-side?) or
+  real unwinder (phase1 driver + opcode interp + personality hijack).

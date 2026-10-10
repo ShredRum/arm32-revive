@@ -87,6 +87,12 @@ public:
     // directly, only via GetStringUTFChars which returns the same pointer).
     std::uint32_t JniEnv();
     std::uint32_t NewStringUTF(const char* s);
+    // Throw-to-catch emulation (unwinder stand-in, harness-only): consume a
+    // pending redirect (set by ProbeRedir) by resuming ActiveJit at the pad
+    // in ARM state. Returns true if redirected (caller must Run() again).
+    bool ApplyRedirect();
+    // Park a redirect from a probe (captures calling Jit for per-thread match).
+    void ParkRedirect(std::uint32_t pad);
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -160,6 +166,11 @@ private:
     // cannot cross their automatic inits (2026-10-10).
     void InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                    std::uint32_t a2, std::uint32_t a3);
+    // Throw-to-catch emulation (unwinder stand-in): ProbeRedir halts at the
+    // throw with pending_redir_ set; ApplyRedirect() resumes there.
+    // Per-Jit: a halted thread must never redirect a different thread.
+    std::uint32_t pending_redir_ = 0;
+    Dynarmic::A32::Jit* pending_jit_ = nullptr;
 
     GuestMemory& mem_;
     LoadedModule& mod_;
@@ -286,6 +297,7 @@ public:
     static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
     static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
+    static void ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
     static void PokeGateByte(std::uint64_t r7slot);
     // HARNESS_POKE180=1: loading render-state advance. At 0x263338
