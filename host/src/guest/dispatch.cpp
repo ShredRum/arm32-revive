@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <set>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -793,6 +794,393 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             cur++;
         }
     }
+    if (n == "sscanf" || n == "vsscanf") {
+        // Manual sscanf (host va_list can't be synthesized; semantics follow
+        // C99: ws-skip (not %c/%[/%n), literals, widths, suppression,
+        // lengths hh/h/l/ll, conversions d i u o x X f e g a s c [ p n %).
+        // Guest long = 32-bit (narrow host longs); long double = double.
+        if (!CheckRange(a0, 1, false) || !CheckRange(a1, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string inp(GuestStr(a0));
+        const std::string fmt(GuestStr(a1));
+        // TEMP-DIAG (worker jobs): log parsed inputs (URL flows).
+        {
+            static int sc = 0;
+            if (sc < 30) {
+                sc++;
+                std::printf("[sscanf]%s \"%s\" fmt \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
+                            inp.c_str(), fmt.c_str());
+            }
+        }
+        std::uint32_t gargs[4] = {a0, a1, a2, a3};
+        std::uint32_t ai = 2;  // first vararg: r2
+        std::uint32_t stack = regs[13];
+        auto next_ptr = [&]() -> std::uint32_t {
+            std::uint32_t v = 0;
+            if (ai < 4) {
+                v = gargs[ai++];
+            } else {
+                if (CheckRange(stack, 4, false)) {
+                    std::memcpy(&v, H(stack), 4);
+                }
+                stack += 4;
+            }
+            return v;
+        };
+        auto is_ws = [](char c) {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+        };
+        std::size_t ii = 0, fi = 0;
+        int assigned = 0;
+        bool fail = false, eof = false;
+        while (fi < fmt.size() && !fail) {
+            char fc = fmt[fi];
+            if (is_ws(fc)) {
+                while (fi < fmt.size() && is_ws(fmt[fi])) {
+                    fi++;
+                }
+                while (ii < inp.size() && is_ws(inp[ii])) {
+                    ii++;
+                }
+                continue;
+            }
+            if (fc != '%') {
+                if (ii >= inp.size() || inp[ii] != fc) {
+                    fail = true;
+                    break;
+                }
+                ii++;
+                fi++;
+                continue;
+            }
+            fi++;  // '%'
+            if (fi < fmt.size() && fmt[fi] == '%') {
+                if (ii >= inp.size() || inp[ii] != '%') {
+                    fail = true;
+                    break;
+                }
+                ii++;
+                fi++;
+                continue;
+            }
+            bool suppress = false;
+            if (fi < fmt.size() && fmt[fi] == '*') {
+                suppress = true;
+                fi++;
+            }
+            int width = 0;
+            while (fi < fmt.size() && fmt[fi] >= '0' && fmt[fi] <= '9') {
+                width = width * 10 + (fmt[fi] - '0');
+                fi++;
+            }
+            int len = 0;  // 0 none, 1 hh, 2 h, 3 l, 4 ll/j/z/t, 5 L
+            if (fi < fmt.size() && (fmt[fi] == 'h' || fmt[fi] == 'l' || fmt[fi] == 'L' ||
+                                    fmt[fi] == 'j' || fmt[fi] == 'z' || fmt[fi] == 't')) {
+                char lc = fmt[fi++];
+                if (lc == 'h' && fi < fmt.size() && fmt[fi] == 'h') {
+                    fi++;
+                    len = 1;
+                } else if (lc == 'h') {
+                    len = 2;
+                } else if (lc == 'l' && fi < fmt.size() && fmt[fi] == 'l') {
+                    fi++;
+                    len = 4;
+                } else if (lc == 'l') {
+                    len = 3;
+                } else if (lc == 'L') {
+                    len = 5;
+                } else {
+                    len = 4;
+                }
+            }
+            if (fi >= fmt.size()) {
+                break;
+            }
+            char conv = fmt[fi++];
+            if (conv == 'n') {
+                std::uint32_t dp = suppress ? 0 : next_ptr();
+                if (dp && CheckRange(dp, 4, true)) {
+                    std::int32_t c = (std::int32_t)ii;
+                    std::memcpy(H(dp), &c, 4);
+                }
+                continue;  // %n never counts, never fails
+            }
+            // Input exhaustion check (except %c which reads NUL? no: fail).
+            if (conv != 'c' && conv != '[') {
+                while (ii < inp.size() && is_ws(inp[ii])) {
+                    ii++;
+                }
+            }
+            if (ii >= inp.size()) {
+                if (assigned == 0) {
+                    eof = true;
+                }
+                fail = true;
+                break;
+            }
+            std::uint32_t dp = suppress ? 0 : next_ptr();
+            int maxw = width > 0 ? width : 1000000;
+            if (conv == 'c') {
+                int want = (width > 0) ? width : 1;
+                int k = 0;
+                while (k < want && k < maxw && ii < inp.size()) {
+                    if (dp && CheckRange(dp + (std::uint32_t)k, 1, true)) {
+                        H(dp)[k] = (std::uint8_t)inp[ii];
+                    }
+                    ii++;
+                    k++;
+                }
+                if (k < want) {
+                    fail = true;
+                } else if (!suppress) {
+                    assigned++;
+                }
+            } else if (conv == 's') {
+                int k = 0;
+                while (k < maxw && ii < inp.size() && !is_ws(inp[ii])) {
+                    if (dp && CheckRange(dp + (std::uint32_t)k, 1, true)) {
+                        H(dp)[k] = (std::uint8_t)inp[ii];
+                    }
+                    ii++;
+                    k++;
+                }
+                if (k == 0) {
+                    fail = true;
+                } else {
+                    if (dp && CheckRange(dp + (std::uint32_t)k, 1, true)) {
+                        H(dp)[k] = 0;
+                    }
+                    if (!suppress) {
+                        assigned++;
+                    }
+                }
+            } else if (conv == '[') {
+                bool neg = false;
+                if (fi < fmt.size() && fmt[fi] == '^') {
+                    neg = true;
+                    fi++;
+                }
+                bool set[256] = {false};
+                if (fi < fmt.size() && fmt[fi] == ']') {
+                    set[(unsigned char)']'] = true;
+                    fi++;
+                }
+                while (fi < fmt.size() && fmt[fi] != ']') {
+                    if (fi + 2 < fmt.size() && fmt[fi + 1] == '-' && fmt[fi + 2] != ']') {
+                        for (int c = (unsigned char)fmt[fi]; c <= (unsigned char)fmt[fi + 2]; c++) {
+                            set[c] = true;
+                        }
+                        fi += 3;
+                    } else {
+                        set[(unsigned char)fmt[fi]] = true;
+                        fi++;
+                    }
+                }
+                if (fi < fmt.size()) {
+                    fi++;  // ']'
+                }
+                int k = 0;
+                while (k < maxw && ii < inp.size() &&
+                       (set[(unsigned char)inp[ii]] != neg)) {
+                    if (dp && CheckRange(dp + (std::uint32_t)k, 1, true)) {
+                        H(dp)[k] = (std::uint8_t)inp[ii];
+                    }
+                    ii++;
+                    k++;
+                }
+                if (k == 0) {
+                    fail = true;
+                } else {
+                    if (dp && CheckRange(dp + (std::uint32_t)k, 1, true)) {
+                        H(dp)[k] = 0;
+                    }
+                    if (!suppress) {
+                        assigned++;
+                    }
+                }
+            } else if (conv == 'd' || conv == 'i' || conv == 'u' || conv == 'o' || conv == 'x' ||
+                       conv == 'X' || conv == 'p') {
+                int base = 10;
+                if (conv == 'o') {
+                    base = 8;
+                } else if (conv == 'x' || conv == 'X' || conv == 'p') {
+                    base = 16;
+                } else if (conv == 'i') {
+                    base = 0;
+                }
+                std::string tok;
+                std::size_t j = ii;
+                int k = 0;
+                if (k < maxw && j < inp.size() && (inp[j] == '+' || inp[j] == '-')) {
+                    tok += inp[j++];
+                    k++;
+                }
+                if (base == 16 && k + 1 < maxw && j + 1 < inp.size() && inp[j] == '0' &&
+                    (inp[j + 1] == 'x' || inp[j + 1] == 'X')) {
+                    tok += inp[j++];
+                    tok += inp[j++];
+                    k += 2;
+                } else if (base == 0) {
+                    if (k < maxw && j < inp.size() && inp[j] == '0') {
+                        tok += inp[j++];
+                        k++;
+                        if (k < maxw && j < inp.size() && (inp[j] == 'x' || inp[j] == 'X')) {
+                            tok += inp[j++];
+                            k++;
+                            base = 16;
+                        } else {
+                            base = 8;
+                        }
+                    } else {
+                        base = 10;
+                    }
+                }
+                auto digok = [&](char c) {
+                    if (base == 16) {
+                        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                               (c >= 'A' && c <= 'F');
+                    }
+                    if (base == 8) {
+                        return c >= '0' && c <= '7';
+                    }
+                    return c >= '0' && c <= '9';
+                };
+                while (k < maxw && j < inp.size() && digok(inp[j])) {
+                    tok += inp[j++];
+                    k++;
+                }
+                bool hassign = !tok.empty() && !(tok.size() == 1 && (tok[0] == '+' || tok[0] == '-'));
+                // A bare 0x prefix with no digits: only "0" converts.
+                if (tok == "0x" || tok == "0X" || tok == "+0x" || tok == "-0x" || tok == "+0X" ||
+                    tok == "-0X") {
+                    tok = tok.substr(0, tok.size() - 1);
+                    j--;
+                }
+                if (!hassign || tok.empty() || tok == "+" || tok == "-") {
+                    fail = true;
+                } else {
+                    ii = j;
+                    if (!suppress) {
+                        bool neg = tok[0] == '-';
+                        unsigned long long uv = 0;
+                        try {
+                            uv = std::stoull(
+                                (tok[0] == '+' || tok[0] == '-') ? tok.substr(1) : tok, nullptr,
+                                base == 0 ? 10 : base);
+                        } catch (...) {
+                            fail = true;
+                            break;
+                        }
+                        long long sv = neg ? -(long long)uv : (long long)uv;
+                        bool is_signed = (conv == 'd' || conv == 'i');
+                        if (len == 4 || (len == 3)) {
+                            // guest long = 32-bit: narrow.
+                            std::int32_t w32 = is_signed ? (std::int32_t)sv : (std::int32_t)uv;
+                            if (dp && CheckRange(dp, 4, true)) {
+                                std::memcpy(H(dp), &w32, 4);
+                            }
+                        } else if (len == 1) {
+                            std::int8_t w8 =
+                                is_signed ? (std::int8_t)sv : (std::int8_t)(std::uint8_t)uv;
+                            if (dp && CheckRange(dp, 1, true)) {
+                                std::memcpy(H(dp), &w8, 1);
+                            }
+                        } else if (len == 2) {
+                            std::int16_t w16 =
+                                is_signed ? (std::int16_t)sv : (std::int16_t)(std::uint16_t)uv;
+                            if (dp && CheckRange(dp, 2, true)) {
+                                std::memcpy(H(dp), &w16, 2);
+                            }
+                        } else if (len == 0 && !is_signed && conv == 'p') {
+                            std::int32_t w32 = (std::int32_t)uv;
+                            if (dp && CheckRange(dp, 4, true)) {
+                                std::memcpy(H(dp), &w32, 4);
+                            }
+                        } else if (len == 0) {
+                            if (is_signed) {
+                                std::int32_t w32 = (std::int32_t)sv;
+                                if (dp && CheckRange(dp, 4, true)) {
+                                    std::memcpy(H(dp), &w32, 4);
+                                }
+                            } else {
+                                std::uint32_t wu = (std::uint32_t)uv;
+                                if (dp && CheckRange(dp, 4, true)) {
+                                    std::memcpy(H(dp), &wu, 4);
+                                }
+                            }
+                        } else {  // 64-bit (ll/j/z/t): same size both ABIs.
+                            if (is_signed) {
+                                long long w64 = sv;
+                                if (dp && CheckRange(dp, 8, true)) {
+                                    std::memcpy(H(dp), &w64, 8);
+                                }
+                            } else {
+                                unsigned long long w64 = uv;
+                                if (dp && CheckRange(dp, 8, true)) {
+                                    std::memcpy(H(dp), &w64, 8);
+                                }
+                            }
+                        }
+                        assigned++;
+                    }
+                }
+            } else if (conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E' || conv == 'g' ||
+                       conv == 'G' || conv == 'a' || conv == 'A') {
+                // Maximal munch for float syntax, then stod for value+length.
+                std::string tok;
+                std::size_t j = ii;
+                int k = 0;
+                while (k < maxw && j < inp.size() &&
+                       ((inp[j] >= '0' && inp[j] <= '9') || inp[j] == '+' || inp[j] == '-' ||
+                        inp[j] == '.' || inp[j] == 'e' || inp[j] == 'E')) {
+                    tok += inp[j++];
+                    k++;
+                }
+                // Hex-float / inf / nan tails: extend on demand (rare here).
+                double dv = 0;
+                std::size_t pos = 0;
+                bool ok = false;
+                if (!tok.empty()) {
+                    try {
+                        dv = std::stod(tok, &pos);
+                        ok = (pos > 0);
+                    } catch (...) {
+                        ok = false;
+                    }
+                }
+                if (!ok) {
+                    fail = true;
+                } else {
+                    ii += pos;
+                    if (!suppress) {
+                        if (len == 3 || len == 4 || len == 5) {
+                            // %lf (guest long double == double, 8B).
+                            if (dp && CheckRange(dp, 8, true)) {
+                                std::memcpy(H(dp), &dv, 8);
+                            }
+                        } else {
+                            float fv = (float)dv;
+                            if (dp && CheckRange(dp, 4, true)) {
+                                std::memcpy(H(dp), &fv, 4);
+                            }
+                        }
+                        assigned++;
+                    }
+                }
+            } else {
+                // Unsupported conversion: loud halt (no silent corruption).
+                std::printf("[svc] LOUD sscanf unsupported %%%c -- halting\n", conv);
+                stop_step_ = true;
+                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                return;
+            }
+        }
+        // assigned = number of successful conversions (EOF => -1).
+        Ret(regs, eof ? static_cast<std::uint32_t>(-1)
+                      : static_cast<std::uint32_t>(assigned));
+        return;
+    }
     if (n == "strtol" || n == "strtoul" || n == "strtoll" || n == "strtoull" || n == "atoi" ||
         n == "atol" || n == "atoll") {
         // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol/atoll take
@@ -1274,10 +1662,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Anything else fails LOUD (discovery: see what the engine wants).
     // NOTE: guest struct stat uses the NDK-r27 ARM layout (88B+... see below);
     // 2014-bionic compat verified only by game behavior (st_size/st_mode reads).
-    // Whole-block lock: file/dir maps are shared with worker threads
-    // (recursive_mutex, so nested GuestMalloc etc. stay safe).
+    // Locking: NO whole-bridge guard (it used to be mutex_ across everything,
+    // and a worker parked in blocking ::read froze all threads). fd/file/dir
+    // maps use brief io_mutex_ holds at each touch; blocking syscalls always
+    // run unlocked. files_prefix_/hostbase_ are startup-immutable (no lock).
     {
-        std::lock_guard<std::recursive_mutex> file_lock(mutex_);
         auto map_path = [&](std::uint32_t gp) -> std::string {
             const std::string g(GuestStr(gp));
             if (g == "/dev/null" || g == "/dev/zero" || g == "/dev/urandom") {
@@ -1292,7 +1681,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // (cpuinfo/meminfo reads). Host values are fine for bring-up
             // (sizing/info only). Writes to these trees fail on the host
             // side naturally (read-only fs semantics), which is correct.
-            if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0) {
+            // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
+            // stack reads them (observed: worker fopen("/etc/hosts") while
+            // resolving cloud.rovio.com). Read-only passthrough; format is
+            // identical on device, content naturally differs (correct).
+            if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
+                g == "/etc/hosts" || g == "/etc/resolv.conf") {
                 return g;
             }
             if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
@@ -1323,6 +1717,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         };
         auto file_of = [&](std::uint32_t h) -> FILE* {
+            std::lock_guard<std::mutex> io(io_mutex_);
             const auto it = file_map_.find(h);
             return it == file_map_.end() ? nullptr : it->second.f;
         };
@@ -1332,22 +1727,52 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return 0;
             }
             std::memset(H(h), 0, 96);
-            file_map_[h] = HostFile{nullptr};
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                file_map_[h] = HostFile{nullptr};
+            }
             return h;
         };
         // Bind a host FILE*: allocate a guest fd, expose it at Bionic __sFile
         // offset +14 (_file, ldrsh-loaded inline by guest code for fsync etc.)
         // and in fd_map_ for fd-based thunks. Returns false on exhaustion.
         auto bind_file = [&](std::uint32_t h, FILE* f) -> bool {
-            const std::uint32_t g = next_guest_fd_++;
-            if (g >= 0x8000) {
-                return false;
+            std::uint32_t g = 0;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                g = next_guest_fd_++;
+                if (g >= 0x8000) {
+                    return false;
+                }
+                fd_map_[g] = fileno(f);
+                file_map_[h].f = f;
             }
-            fd_map_[g] = fileno(f);
-            file_map_[h].f = f;
             const std::uint16_t g16 = static_cast<std::uint16_t>(g);
             std::memcpy(H(h + 14), &g16, 2);
             return true;
+        };
+        // Brief guarded host-fd lookup (-1 if unmapped). I/O on the result
+        // runs UNLOCKED — never hold io_mutex_ across syscalls.
+        auto host_fd_of = [&](std::uint32_t g) -> int {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(g);
+            return it == fd_map_.end() ? -1 : it->second;
+        };
+        auto alloc_guest_fd = [&](int hfd) -> std::uint32_t {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const std::uint32_t g = next_guest_fd_++;
+            fd_map_[g] = hfd;
+            return g;
+        };
+        auto erase_guest_fd = [&](std::uint32_t g) -> int {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(g);
+            if (it == fd_map_.end()) {
+                return -1;
+            }
+            const int h = it->second;
+            fd_map_.erase(it);
+            return h;
         };
         auto fill_stat = [&](std::uint32_t dst, const struct stat& st) -> bool {
             if (!CheckRange(dst, 96, true)) {
@@ -1407,6 +1832,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // TEMP-DIAG (registry ParseError): track registry handles to dump
             // their exact bytes on fread/fwrite below.
             if (hp.find("registry") != std::string::npos) {
+                std::lock_guard<std::mutex> io(io_mutex_);
                 g_regfiles.insert(f);
             }
             Ret(regs, h);
@@ -1420,6 +1846,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             int r = (n == "fclose") ? std::fclose(f) : std::fflush(f);
             if (n == "fclose") {
+                std::lock_guard<std::mutex> io(io_mutex_);
                 file_map_.erase(a0);
             }
             Ret(regs, static_cast<std::uint32_t>(r));
@@ -1445,7 +1872,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::size_t got = std::fread(H(a0), a1, a2, f);
             // TEMP-DIAG (registry ParseError): dump exact bytes read.
-            if (g_regfiles.count(f) && g_regdump_n < 60) {
+            bool regdump = false;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                regdump = g_regfiles.count(f) && g_regdump_n < 60;
+            }
+            if (regdump) {
                 g_regdump_n++;
                 std::size_t nb = got * a1;
                 if (nb > 192) {
@@ -1470,7 +1902,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             // TEMP-DIAG (registry ParseError): dump exact bytes written.
-            if (g_regfiles.count(f) && g_regdump_n < 60) {
+            bool regdump = false;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                regdump = g_regfiles.count(f) && g_regdump_n < 60;
+            }
+            if (regdump) {
                 g_regdump_n++;
                 std::size_t nb = (std::size_t)a1 * a2;
                 std::size_t show = nb > 192 ? 192 : nb;
@@ -1556,12 +1993,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "fdopen") {
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end()) {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
                 Ret(regs, 0);
                 return;
             }
-            FILE* f = ::fdopen(it->second, GuestStr(a1));
+            FILE* f = ::fdopen(hfd, GuestStr(a1));
             if (!f) {
                 Ret(regs, 0);
                 return;
@@ -1614,22 +2051,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            const std::uint32_t g = next_guest_fd_++;
-            fd_map_[g] = fd;
+            const std::uint32_t g = alloc_guest_fd(fd);
             std::printf("[files] open(\"%s\",%o) -> fd %u\n", hp.c_str(), a1, g);
             Ret(regs, g);
             return;
         }
         if (n == "close" || n == "fsync") {
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end()) {
+            const int hfd = (n == "close") ? erase_guest_fd(a0) : host_fd_of(a0);
+            if (hfd < 0) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            int r = (n == "close") ? ::close(it->second) : ::fsync(it->second);
-            if (n == "close") {
-                fd_map_.erase(it);
-            }
+            // Unlocked I/O: fsync can block; close must not run under the map
+            // lock either (a concurrent in-flight read keeps its own copy).
+            int r = (n == "close") ? ::close(hfd) : ::fsync(hfd);
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -1646,10 +2081,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            const std::uint32_t g0 = next_guest_fd_++;
-            const std::uint32_t g1 = next_guest_fd_++;
-            fd_map_[g0] = hfds[0];
-            fd_map_[g1] = hfds[1];
+            const std::uint32_t g0 = alloc_guest_fd(hfds[0]);
+            const std::uint32_t g1 = alloc_guest_fd(hfds[1]);
             std::memcpy(H(a0), &g0, 4);
             std::memcpy(H(a0 + 4), &g1, 4);
             std::printf("[files] pipe() -> [%u %u]\n", g0, g1);
@@ -1672,8 +2105,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, a2);
                 return;
             }
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end()) {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -1681,7 +2114,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            ssize_t r = (n == "read") ? ::read(it->second, H(a1), a2) : ::write(it->second, H(a1), a2);
+            // Unlocked: pipes/sockets block here; the map lock must be free
+            // so other threads keep running (2026-10-10 deadlock fix).
+            ssize_t r = (n == "read") ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped).
             if ((n == "write" || n == "read") && r > 0) {
@@ -1723,18 +2158,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "lseek") {
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end()) {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            off_t r = ::lseek(it->second, (off_t)a1, (int)a2);
+            off_t r = ::lseek(hfd, (off_t)a1, (int)a2);
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
         if (n == "writev") {
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end() || !CheckRange(a1, (std::size_t)a2 * 8, false)) {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0 || !CheckRange(a1, (std::size_t)a2 * 8, false)) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -1746,7 +2181,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 if (!CheckRange(base, len, false)) {
                     break;
                 }
-                ssize_t w = ::write(it->second, H(base), len);
+                ssize_t w = ::write(hfd, H(base), len);
                 if (w < 0) {
                     total = -1;
                     break;
@@ -1757,6 +2192,309 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
             Ret(regs, static_cast<std::uint32_t>(total < 0 ? -1 : total));
+            return;
+        }
+        // --- socket bridge (host-backed; identical path runs on device) ---
+        // The game bundles its own DNS-over-UDP resolver (raw socket/
+        // connect/send/recvfrom, no getaddrinfo import) for cloud.rovio.com
+        // (session/time, sessions, apdrive variantconfig). These used to hit
+        // the generic stub ->0 (socket()=0 ALIASED STDIN; connect()=fake
+        // success; send/recv()=0 = empty replies -> 4x retry then null-call).
+        // Real host sockets: Bionic/Linux errno values + sockaddr layout
+        // match, so forward directly. Sockets stay O_NONBLOCK; every op is
+        // poll-capped (5s I/O, 10s TCP connect) so dead endpoints degrade to
+        // the offline path (EAGAIN/ETIMEDOUT) instead of hanging.
+        // HARNESS_NONET=1: socket() -> -1/ENETUNREACH (fast offline tests).
+        // NOTE: fcntl/ioctl are still stub->0 (fake success, mode unchanged);
+        // game retries cover it. sendmsg/recvmsg NOT marshalled (guest msghdr
+        // is 32-bit layout) -> LOUD if ever called.
+        auto set_guest_errno = [&](int e) {
+            const std::uint32_t s = ErrnoSlot();
+            if (CheckRange(s, 4, true)) {
+                const std::int32_t v = static_cast<std::int32_t>(e);
+                std::memcpy(H(s), &v, 4);
+            }
+        };
+        auto wait_fd = [&](int hfd, short ev, int ms) -> int {
+            struct pollfd p {};
+            p.fd = hfd;
+            p.events = ev;
+            return ::poll(&p, 1, ms);
+        };
+        if (n == "socket") {
+            if (std::getenv("HARNESS_NONET")) {
+                set_guest_errno(ENETUNREACH);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            int hfd = ::socket((int)a0, (int)a1, (int)a2);
+            if (hfd < 0) {
+                set_guest_errno(errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            int fl = ::fcntl(hfd, F_GETFL, 0);
+            if (fl >= 0) {
+                ::fcntl(hfd, F_SETFL, fl | O_NONBLOCK);
+            }
+            const std::uint32_t g = alloc_guest_fd(hfd);
+            std::printf("[netsock] socket(%u %u %u) -> gfd %u\n", a0, a1, a2, g);
+            Ret(regs, g);
+            return;
+        }
+        if (n == "connect") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (a2 == 0 || a2 > 128 || !CheckRange(a1, a2, false)) {
+                set_guest_errno(EFAULT);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
+                              (socklen_t)a2);
+            if (r != 0 && errno == EINPROGRESS) {
+                const int w = wait_fd(hfd, POLLOUT, 10000);
+                if (w > 0) {
+                    int se = 0;
+                    socklen_t sl = sizeof(se);
+                    ::getsockopt(hfd, SOL_SOCKET, SO_ERROR, &se, &sl);
+                    if (se == 0) {
+                        r = 0;
+                    } else {
+                        errno = se;
+                        r = -1;
+                    }
+                } else {
+                    if (w == 0) {
+                        errno = ETIMEDOUT;
+                    }
+                    r = -1;
+                }
+            }
+            if (r != 0) {
+                set_guest_errno(errno);
+            }
+            std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
+                        GuestTid() == 1 ? "" : "(T2+)", a0, r, r != 0 ? errno : 0);
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "shutdown" || n == "bind" || n == "listen" || n == "setsockopt" ||
+            n == "getsockopt") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            int r = -1;
+            if (n == "shutdown") {
+                r = ::shutdown(hfd, (int)a1);
+            } else if (n == "bind" || n == "listen") {
+                if (n == "bind") {
+                    if (a2 == 0 || a2 > 128 || !CheckRange(a1, a2, false)) {
+                        set_guest_errno(EFAULT);
+                        Ret(regs, static_cast<std::uint32_t>(-1));
+                        return;
+                    }
+                    r = ::bind(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
+                               (socklen_t)a2);
+                } else {
+                    r = ::listen(hfd, (int)a1);  // a1 = backlog, no pointer
+                }
+            } else {
+                // (level,name) in regs; value + len-ptr: a3=ptr, stack=lenptr.
+                std::uint32_t lenptr = 0;
+                if (CheckRange(regs[13], 4, false)) {
+                    std::memcpy(&lenptr, H(regs[13]), 4);
+                }
+                std::uint32_t len = 0;
+                if (lenptr && CheckRange(lenptr, 4, false)) {
+                    std::memcpy(&len, H(lenptr), 4);
+                }
+                if (len > 256 || !CheckRange(a3, len, n != "setsockopt")) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (n == "setsockopt") {
+                    r = ::setsockopt(hfd, (int)a1, (int)a2, H(a3), (socklen_t)len);
+                } else {
+                    socklen_t sl = (socklen_t)len;
+                    r = ::getsockopt(hfd, (int)a1, (int)a2, H(a3), &sl);
+                    if (lenptr && CheckRange(lenptr, 4, true)) {
+                        const std::uint32_t back = (std::uint32_t)sl;
+                        std::memcpy(H(lenptr), &back, 4);
+                    }
+                }
+            }
+            if (r != 0) {
+                set_guest_errno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "accept") {
+            const int lfd = host_fd_of(a0);
+            if (lfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (wait_fd(lfd, POLLIN, 5000) <= 0) {
+                set_guest_errno(EAGAIN);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            struct sockaddr_storage ss {};
+            socklen_t sl = sizeof(ss);
+            int hfd = ::accept(lfd, reinterpret_cast<struct sockaddr*>(&ss), &sl);
+            if (hfd < 0) {
+                set_guest_errno(errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            const std::uint32_t g = alloc_guest_fd(hfd);
+            Ret(regs, g);
+            return;
+        }
+        if (n == "send" || n == "sendto") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            // sendto: addr=a4, addrlen=a5 live on guest stack (ARM APCS).
+            std::uint32_t addr = 0, addrlen = 0;
+            if (n == "sendto") {
+                if (!CheckRange(regs[13] + 4, 4, false)) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                std::memcpy(&addr, H(regs[13]), 4);
+                std::memcpy(&addrlen, H(regs[13] + 4), 4);
+                if ((addr == 0) != (addrlen == 0) || addrlen > 128 ||
+                    (addr != 0 && !CheckRange(addr, addrlen, false))) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+            }
+            if (!CheckRange(a1, a2, false)) {
+                set_guest_errno(EFAULT);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (wait_fd(hfd, POLLOUT, 5000) <= 0) {
+                set_guest_errno(EAGAIN);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            ssize_t r =
+                (n == "send")
+                    ? ::send(hfd, H(a1), a2, (int)a3)
+                    : ::sendto(hfd, H(a1), a2, (int)a3,
+                               addr ? reinterpret_cast<const struct sockaddr*>(H(addr)) : nullptr,
+                               (socklen_t)addrlen);
+            if (r < 0) {
+                set_guest_errno(errno);
+                // TEMP-DIAG (network bring-up): errors are the signal.
+                std::printf("[netsock]%s %s(gfd %u %uB) -> -1 errno %d\n",
+                            GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a2, errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "recv" || n == "recvfrom") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            std::uint32_t addr = 0, addrlenptr = 0, addrlen = 0;
+            if (n == "recvfrom") {
+                if (!CheckRange(regs[13] + 4, 4, false)) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                std::memcpy(&addr, H(regs[13]), 4);
+                std::memcpy(&addrlenptr, H(regs[13] + 4), 4);
+                if (addrlenptr && CheckRange(addrlenptr, 4, false)) {
+                    std::memcpy(&addrlen, H(addrlenptr), 4);
+                }
+                if ((addr == 0) != (addrlenptr == 0) || addrlen > 128 ||
+                    (addr != 0 && !CheckRange(addr, addrlen, true))) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+            }
+            if (!CheckRange(a1, a2, true)) {
+                set_guest_errno(EFAULT);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (wait_fd(hfd, POLLIN, 5000) <= 0) {
+                set_guest_errno(EAGAIN);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            struct sockaddr_storage ss {};
+            socklen_t sl = (socklen_t)(addrlen != 0 ? addrlen : sizeof(ss));
+            ssize_t r =
+                (n == "recv")
+                    ? ::recv(hfd, H(a1), a2, (int)a3)
+                    : ::recvfrom(hfd, H(a1), a2, (int)a3,
+                                 addr ? reinterpret_cast<struct sockaddr*>(&ss) : nullptr,
+                                 addr ? &sl : nullptr);
+            if (r < 0) {
+                set_guest_errno(errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            // TEMP-DIAG (network bring-up): inbound bytes are the signal
+            // (DNS replies, HTTP bodies). Capped hex.
+            {
+                static int nlog = 0;
+                if (nlog < 40 && r > 0) {
+                    nlog++;
+                    const std::uint8_t* p = H<const std::uint8_t>(a1);
+                    std::string hex;
+                    char b[8];
+                    ssize_t show = r > 32 ? 32 : r;
+                    for (ssize_t i = 0; i < show; i++) {
+                        std::snprintf(b, sizeof(b), "%02x", p[i]);
+                        hex += b;
+                    }
+                    std::printf("[netsock]%s %s(gfd %u) %zdB: %s%s\n",
+                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
+                                r > show ? "..." : "");
+                }
+            }
+            if (addr && (std::uint32_t)sl <= addrlen) {
+                std::memcpy(H(addr), &ss, sl);
+                if (CheckRange(addrlenptr, 4, true)) {
+                    const std::uint32_t back = (std::uint32_t)sl;
+                    std::memcpy(H(addrlenptr), &back, 4);
+                }
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "sendmsg" || n == "recvmsg") {
+            std::printf("[netsock] LOUD %s unmarshal TODO -- halting\n", n.c_str());
+            stop_step_ = true;
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
         if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
@@ -1817,13 +2555,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "fstat") {
-            const auto it = fd_map_.find(a0);
-            if (it == fd_map_.end()) {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
             struct stat st {};
-            if (::fstat(it->second, &st) != 0 || !fill_stat(a1, st)) {
+            if (::fstat(hfd, &st) != 0 || !fill_stat(a1, st)) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -1846,20 +2584,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            dir_map_[h] = HostDir{d};
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                dir_map_[h] = HostDir{d};
+            }
             Ret(regs, h);
             return;
         }
         if (n == "readdir_r") {
             // args: DIR*(a0), dirent*(a1), dirent**(a2). Guest dirent (bionic):
             // u64 ino@0, i64 off@8, u16 reclen@16, u8 type@17, name[256]@18.
-            const auto it = dir_map_.find(a0);
-            if (it == dir_map_.end() || !CheckRange(a1, 280, true) || !CheckRange(a2, 4, true)) {
+            DIR* dd = nullptr;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto it = dir_map_.find(a0);
+                if (it == dir_map_.end()) {
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                dd = it->second.d;
+            }
+            if (!CheckRange(a1, 280, true) || !CheckRange(a2, 4, true)) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
             errno = 0;
-            struct dirent* de = ::readdir(it->second.d);
+            struct dirent* de = ::readdir(dd);
             if (!de) {
                 std::uint32_t z = 0;
                 std::memcpy(H(a2), &z, 4);
@@ -1881,13 +2631,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "closedir") {
-            const auto it = dir_map_.find(a0);
-            if (it == dir_map_.end()) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+            DIR* dd = nullptr;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto it = dir_map_.find(a0);
+                if (it == dir_map_.end()) {
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                dd = it->second.d;
+                dir_map_.erase(it);
             }
-            int r = ::closedir(it->second.d);
-            dir_map_.erase(it);
+            int r = ::closedir(dd);
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -4399,6 +5154,26 @@ void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
         }
     }
     std::printf("[jit] ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
+    // DIAG: mini-backtrace for null-jumps (pc=0): lr + stack code-pointers.
+    {
+        auto& regs = rt_->ActiveJit()->Regs();
+        std::printf("[jit] lr=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x%s\n", regs[14], regs[13],
+                    regs[0], regs[1], regs[2], regs[3], rt_->GuestTid() == 1 ? "" : " (T2+)");
+        std::uint32_t sp = regs[13];
+        // Module text range: [0, 0x6EE000) per loader layout (bias 0).
+        int shown = 0;
+        for (std::uint32_t a = sp & ~3u; a < sp + 512 && shown < 8; a += 4) {
+            std::uint32_t w = 0;
+            if (!rt_->CheckRange(a, 4, false)) {
+                break;
+            }
+            std::memcpy(&w, rt_->H(a), 4);
+            if (w >= 0x1000 && w < 0x6EE000 && (w & 1) == 0) {
+                std::printf("[jit] stack+%u: ret %08x\n", a - sp, w);
+                shown++;
+            }
+        }
+    }
     rt_->stop_step_ = true;
     rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
 }

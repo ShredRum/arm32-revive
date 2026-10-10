@@ -226,6 +226,12 @@ private:
     std::unordered_map<std::uint32_t, HostFile> file_map_;  // guest FILE* -> host
     std::unordered_map<std::uint32_t, int> fd_map_;         // guest fd -> host fd
     std::uint32_t next_guest_fd_ = 100;
+    // Leaf lock for the three maps above (+next_guest_fd_): brief scoped
+    // holds around lookups/inserts/erases ONLY — never across syscalls
+    // (a worker blocked in ::read under the old whole-bridge mutex_ froze
+    // every other thread; 2026-10-10). No nesting: never call GuestMalloc
+    // or other mutex_-taking code while holding it.
+    std::mutex io_mutex_;
     struct HostDir {
         DIR* d = nullptr;
     };

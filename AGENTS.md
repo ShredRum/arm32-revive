@@ -727,3 +727,44 @@ dead subsystem, game degrades without it).
   shutdown — eng_idx11.so + eng_throwprobe.so (patched .so experiment copies),
   registry_poisoned_128B.bin + regbak/ (0x01-wall forensics), milestone PNGs
   (shot7 first frame, tap3/tap4 LOADING, menu5, notap20).
+
+## 15. Session 2026-10-10 (part 6): subagent verdicts, ETC1 stall, sscanf, cloud
+- SUBAGENT render-thread (PROVEN bytes): nativeRender @0xC22F0 = `mov r0,#1`
+  (const); nativeRenderThread @0xC22F8 = single ldrb from BSS 0x672E68 (getter,
+  no writes). nativeUpdate polls 3 gates once and bails to 0xC2244 (NO loop):
+  *0x672E98!=0, vcall+148==1 (live: returns 1 from upd#3 on), byte[singleton+
+  1187]==1 (=quit flag reader 0xBE714). Gate#3 without poke = skip quit-check
+  + draw loading (correct idle behavior). No render-side ack flag exists —
+  concurrency per se is NOT the fix; the producer of +148/+1187 state never
+  runs in harness. (Note: 0x672E9C from old notes is a typo for 0x672EA0.)
+- SUBAGENT shadow-writer (PROVEN bytes): 0x0E9198 stores strtol(elem+28) into
+  ShadowingSurfaceData+188 iff map-find("unseenAds") hits and value>=1; callers
+  0x0E83D4 (orphan, no static caller) and 0x0EC6DC (inside rcs::SessionImpl
+  vtable slot-0 loop 0x0EC188 — network session callback). UNREACHABLE without
+  network/session; +188 writer silent live (0 probe hits) — transition absent.
+  +188 is an ads-counter, NOT the loading gate. Dead end for menu.
+- ETC1 STALL (PROVEN): asset queue drains through TUTORIALS_PLATES1 then stops:
+  PLATES2/3.pvr are ETC1 (format byte 6) vs RGBA elsewhere; game never uploads
+  them (TexImage2D missing for exactly those two). glCompressedTexImage2D/Sub
+  were unhandled -> now REALLY forwarded (realgl.cpp, llvmpipe accepts ETC1;
+  NVIDIA errors -> game software-decodes). ETC1 decode is a WORKER job:
+  NOWORKER run stalls at first ETC1 (upd32). etc1a/b logs.
+- SSCANF (root-caused worker instability): worker parses URLs via sscanf
+  (was a ->0 stub). Implemented manual C99 sscanf in dispatch.cpp (ws-skip,
+  widths, suppression, hh/h/l/ll, d i u o x X p f e g s c [ n %; guest long =
+  32-bit; %n no-count; unsupported conversion = LOUD halt). Result: worker
+  runs clean 3/3 (was hang/crash/clean nondeterminism). TEMP-DIAG [sscanf]
+  input log (30-line cap) kept for URL forensics.
+- CLOUD (PROVEN live): worker parses https://cloud.rovio.com/session/1/apps/
+  AngryBirdsRioFull/{time,sessions} + apdrive/.../assets?name=variantconfig.
+  json (URL dissect formats %15[^:]:%[^...] + IP-literal check). Zero socket
+  calls reached; cloud1.log DIED at 3 updates on LOUD fopen("/etc/hosts") —
+  the bundled HTTP/DNS stack reads it. FIX: /etc/hosts + /etc/resolv.conf
+  read-only passthrough (same pattern as /sys//proc). Socket family still
+  generic stub ->0 (socket()=0 is fd-0 alias hazard; connect()=0 success-lie —
+  watch when DNS completes). hosts1.log tests the fix.
+- MOCKS mined from worker flow (all device-plausible, none unlocked menu):
+  hasSystemFeature table, networkType NONE (HARNESS_NETTYPE), 800x480/PPI240,
+  UUID.randomUUID real, localtime_r/gmtime_r real, GetObjectClass #31 tracked,
+  net.dns1/2 via __system_property_get. Taps (7 positions) no-op at LOADING;
+  renders/frameClear/resume interleaves no-op; TIMEWARP +3600s no-op.

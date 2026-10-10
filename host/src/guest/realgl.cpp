@@ -525,8 +525,34 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glCompressedTexImage2D" || n == "glCompressedTexSubImage2D") {
-        std::printf("%s UNHANDLED (no host PVRTC/ETC path yet)\n", tag);
-        return false;  // fall through to fake shim (keeps game going)
+        // Real forwarding (llvmpipe accepts ETC1; NVIDIA errors -> game falls
+        // back to software decode). Args: regs(target,level,intfmt,w,h,border)
+        // + stack(imageSize,data) for Tex; (target,level,x,y,w,h,format,
+        // imageSize,data) for Sub (regs target,level,x,y + stack w,h,fmt,size,data).
+        if (n == "glCompressedTexImage2D") {
+            // regs: target,level,intfmt,width; stack: height,border,imageSize,data.
+            std::uint32_t h = Stk(r, sp, 0), size = Stk(r, sp, 2), dat = Stk(r, sp, 3);
+            const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
+                                                                             : nullptr;
+            glCompressedTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLsizei)a3, (GLsizei)h, 0,
+                                   (GLsizei)size, p);
+            GLenum e = glGetError();
+            std::printf("%s ifmt=%04x %ux%u %uB %s err=%04x\n", tag, a2, a3, h, size,
+                        p ? "data" : "NULL", e);
+        } else {
+            // regs: target,level,xoff,yoff; stack: w,h,format,imageSize,data.
+            std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2),
+                          size = Stk(r, sp, 3), dat = Stk(r, sp, 4);
+            const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
+                                                                             : nullptr;
+            glCompressedTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w,
+                                      (GLsizei)h, (GLenum)fmt, (GLsizei)size, p);
+            GLenum e = glGetError();
+            std::printf("%s %ux%u fmt=%04x %uB %s err=%04x\n", tag, w, h, fmt, size,
+                        p ? "data" : "NULL", e);
+        }
+        r->Ret(regs, 0);
+        return true;
     }
     if (n == "glCopyTexImage2D" || n == "glCopyTexSubImage2D") {
         std::printf("%s UNHANDLED -> fake\n", tag);
