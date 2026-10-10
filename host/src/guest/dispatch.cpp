@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <set>
+#include <arpa/inet.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -2279,6 +2280,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
                               (socklen_t)a2);
+            // TEMP-DIAG (DNS bring-up): who are we connecting to?
+            {
+                static int cl = 0;
+                if (cl < 12 && a2 >= 8) {
+                    cl++;
+                    const std::uint8_t* p = H<const std::uint8_t>(a1);
+                    std::uint16_t fam = (std::uint16_t)p[0] | ((std::uint16_t)p[1] << 8);
+                    std::uint16_t port = ((std::uint16_t)p[2] << 8) | p[3];
+                    std::printf("[netsock]%s connect(gfd %u) fam=%u %u.%u.%u.%u:%u%s\n",
+                                GuestTid() == 1 ? "" : "(T2+)", a0, fam, p[4], p[5], p[6], p[7],
+                                port, cl == 12 ? " (quiet henceforth)" : "");
+                }
+            }
             if (std::getenv("HARNESS_NONET")) {
                 // Airplane mode: connect never succeeds (DNS/server
                 // unreachable). Instant, no 10s waits per attempt.
@@ -2523,6 +2537,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::printf("[netsock] LOUD %s unmarshal TODO -- halting\n", n.c_str());
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
+            n == "inet_ntop") {
+            InetThunk(regs, n, a0, a1, a2, a3);
             return;
         }
         if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
@@ -3196,8 +3215,15 @@ bad_ptr:
 }
 
 std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (n == "pthread_mutex_init") {
+    // Resolve the host mutex under guard, then operate OUTSIDE it. The old
+    // code held mutex_ across pthread_mutex_lock: a thread blocking on a
+    // game mutex (held by a halted worker, or ABBA with a guest critical
+    // section spanning an SVC) froze every mutex_-touching thread
+    // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
+    pthread_mutex_t* m = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "pthread_mutex_init") {
         auto* m = new pthread_mutex_t;
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
@@ -3207,15 +3233,18 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         mutex_map_[obj] = m;
         return 0;
     }
-    if (n == "pthread_mutex_destroy") {
-        auto it = mutex_map_.find(obj);
-        if (it != mutex_map_.end()) {
-            pthread_mutex_destroy(it->second);
-            delete it->second;
-            mutex_map_.erase(it);
+        if (n == "pthread_mutex_destroy") {
+            auto it = mutex_map_.find(obj);
+            if (it != mutex_map_.end()) {
+                m = it->second;
+                mutex_map_.erase(it);
+            }
+            if (m) {
+                pthread_mutex_destroy(m);
+                delete m;
+            }
+            return 0;
         }
-        return 0;
-    }
     auto it = mutex_map_.find(obj);
     if (it == mutex_map_.end()) {
         // Statically-initialized mutex (PTHREAD_MUTEX_INITIALIZER): Bionic
@@ -3229,14 +3258,16 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         mutex_map_[obj] = m;
         it = mutex_map_.find(obj);
     }
+        m = it->second;
+    }  // guard released: blocking lock/unlock below must not hold mutex_.
     if (n == "pthread_mutex_lock") {
-        return static_cast<std::uint32_t>(pthread_mutex_lock(it->second));
+        return static_cast<std::uint32_t>(pthread_mutex_lock(m));
     }
     if (n == "pthread_mutex_unlock") {
-        return static_cast<std::uint32_t>(pthread_mutex_unlock(it->second));
+        return static_cast<std::uint32_t>(pthread_mutex_unlock(m));
     }
     if (n == "pthread_mutex_trylock") {
-        return static_cast<std::uint32_t>(pthread_mutex_trylock(it->second));
+        return static_cast<std::uint32_t>(pthread_mutex_trylock(m));
     }
     return 22;
 }
@@ -5116,6 +5147,93 @@ void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
 void GuestCallbacks::CallSVC(std::uint32_t swi) {
     auto& regs = rt_->ActiveJit()->Regs();
     rt_->OnSvc(swi, regs);
+}
+
+// inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:
+// CallImport's gotos to bad_ptr cannot cross automatic inits, so this lives
+// here (same convention as TimeWarp). All paths Ret()+return (handled).
+void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
+                        std::uint32_t a2, std::uint32_t a3) {
+    if (n == "inet_ntoa" || n == "inet_ntop") {
+        // inet_ntoa(struct in_addr): addr comes BY VALUE in r0 (NOT a
+        // pointer). inet_ntop(af, src, dst, size): dst=a2, size=a3.
+        struct in_addr ia {};
+        const void* src = nullptr;
+        std::uint32_t dst = 0;
+        std::uint32_t dstsize = 16;
+        if (n == "inet_ntoa") {
+            std::uint32_t v = a0;
+            std::memcpy(&ia, &v, 4);
+            src = &ia;
+        } else {
+            if (a0 != 2 /*AF_INET*/ || a3 < 16 || !CheckRange(a1, 4, false) ||
+                !CheckRange(a2, 16, true)) {
+                Ret(regs, 0);
+                return;
+            }
+            src = H(a1);
+            dst = a2;
+            dstsize = a3;
+        }
+        char tmp[64];
+        if (!inet_ntop(AF_INET, src, tmp, sizeof(tmp))) {
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "inet_ntoa") {
+            // Fresh 16B guest buffer per call (16B leak, bring-up):
+            // avoids thread_local (goto-crossing) and shared-slot
+            // races. ntoa is logging-path rare.
+            dst = GuestMalloc(16);
+            if (!dst || !CheckRange(dst, 16, true)) {
+                Ret(regs, 0);
+                return;
+            }
+        }
+        const std::size_t L = std::strlen(tmp) + 1;
+        if (L > dstsize) {
+            Ret(regs, 0);
+            return;
+        }
+        std::memcpy(H(dst), tmp, L);
+        Ret(regs, dst);
+        return;
+    }
+    // String -> binary. Bionic == POSIX here; forward to host.
+    // inet_pton(af, src, dst): the string is a1 (NOT a0).
+    // NOTE: plain pointer (GuestStr scratch), never std::string here:
+    // later `goto bad_ptr` sites cannot jump over non-trivial inits.
+    const std::uint32_t sptr = (n == "inet_pton") ? a1 : a0;
+    if (!CheckRange(sptr, 1, false)) {
+        Ret(regs, (n == "inet_addr") ? 0xFFFFFFFFu : 0u);
+        return;
+    }
+    const char* s = GuestStr(sptr);
+    if (n == "inet_addr") {
+        Ret(regs, static_cast<std::uint32_t>(::inet_addr(s)));
+        return;
+    }
+    if (n == "inet_aton") {
+        struct in_addr ia {};
+        const int r = ::inet_aton(s, &ia);
+        if (r != 0 && a1 != 0 && CheckRange(a1, 4, true)) {
+            std::memcpy(H(a1), &ia, 4);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return;
+    }
+    // inet_pton(af, src, dst): only AF_INET used by the game.
+    if (a0 != 2 /*AF_INET*/ || a2 == 0 || !CheckRange(a2, 4, true)) {
+        Ret(regs, 0);
+        return;
+    }
+    unsigned char b[4] = {0, 0, 0, 0};
+    const int r = ::inet_pton(AF_INET, s, b);
+    if (r == 1) {
+        std::memcpy(H(a2), b, 4);
+    }
+    Ret(regs, static_cast<std::uint32_t>(r));
+    return;
 }
 
 void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
