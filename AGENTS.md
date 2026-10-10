@@ -674,6 +674,50 @@ dead subsystem, game degrades without it).
   gettimeofday/time) +3600s at loading gate -> still LOADING. Gate is
   event/state, not time. TimeWarp helper in dispatch.cpp (file scope, avoids
   goto-initializer issue).
+
+## 14. Session 2026-10-10 (part 5): MENU HUNT systematized (no more blind pokes)
+- BOOT PATH (firm): Rovio -> Fox -> BlueSky -> Rio LOADING. Splashes advance
+  on TAP (nativeInput proved: 20upd tap=Fox vs no-tap=Rovio) and on FRAMES
+  (render-spam reached Blue Sky). Taps at 7 positions no-op at LOADING.
+  Renders interleaved don't unlock (c22f0 ~empty, c22f8 tried, frameClear
+  c1fd0 tried, resume c23dc tried — all clean, none unlock).
+- LOADING GATE (still open): idle updates byte-identical (md5 x6), zero JNI,
+  4 draws, 858 assets all OK. Subagent statics: (a) app+1187 (reader 0xBE714)
+  is QUIT flag (poke derails to quitRequested — HARMFUL, keep off); (b) draw
+  func 0x263300 r4=gr::gles2::ShadowingSurfaceData, state +180 stays 3 (switch
+  1..6), +188 vs 4, +184 flags; NO virtual method writes 180/188 (transition
+  external); draw sites 0x2637A0 (mode/count from +92/+96: first=0,count=12,
+  static) + GL_Primitive 0x2646d0; no BindTexture/UseProgram in paths.
+- POKE180 (3->4 at FuncA entry, live r0): FIRES, flips 4 instances, produces
+  TORN frame (wrong pass composited) — proves render control, wrong direction.
+  Lesson: IR probe/poke hooks fire ONLY at block starts (0x263338 mid-block
+  never emitted; 0x263300 entry works). Leaf state setters 0x12CECC/0x12DDF4
+  NEVER fire live (0 hits) — transition truly absent.
+- SHADOW DATA (static): counts +92=0/+96=12 frozen; vptr 0x669710 live.
+- EVENT SYSTEM: advance path (ex-poke) references "quitRequested" + BSS obj
+  0x672DF0; no catalogLoaded strings in heap (never posted without poke).
+- WORKER RACES (systematic): identical inputs -> hang / NULL-jump / clean.
+  Hang protocol mapped: main creates pipe in UUID/install flow, polls, gets
+  ONE 0x00 wake, starves; all 3 workers exit; sometimes a worker eats main's
+  wake (cross-thread pipe race). UUID.toString mocked real (didn't help).
+  localtime_r/gmtime_r implemented (didn't help). __system_property_get serves
+  net.dns1/2 (no sockets ever called — DNS dead end). strtok_state made
+  thread_local (real hole). pthread_cond_wait capped 5s like timedwait
+  (HARNESS_NOCAPWAIT=1 disables). Heartbeat pc/lr proven TORN (do not trust
+  for location; mem 0xF0000348=clock_gettime + lr 0x38C988=ioctl-ret was a
+  false spin theory — real hang is poll starvation).
+- MOCK AUDIT (device-plausible values): hasSystemFeature (35 features logged;
+  touch/wifi/telephony/location=1, sensors/camera/mic/BT/NFC=0),
+  networkType=NONE (HARNESS_NETTYPE ovr), Utils.getViewWidth/Height=800/480,
+  getPPI=240, density/config groups=1. JNI V/A args live behind va_list/jvalue
+  pointers (fixed hasSystemFeaturemede arg read). None unlocked menu yet.
+- HARNESS: HARNESS_LOOP still TODO (hand-rolled 100-call lists keep causing
+  index bugs — RULE: generate with python, twice bitten). HARNESS_JOVR f-float
+  + A-array + J-handle expansion; HARNESS_JLAST; HARNESS_SHOW (view window);
+  HARNESS_EGLD/EGLX device selects; gltest matrix (ES2/ES3/FBO/blit/swap);
+  eglmin minimal probe.
+- ACTIVE SUBAGENTS (background): (1) shadow-writer 0x0E9198 caller chain ×2
+  levels; (2) render-thread role (c22f0 vs c22f8, update waits for render ack?).
 - LOADING GATE intel: decrypted Lua string consts persist in heap (menu init
   registry readable: initializeGameMenus creates all pages incl. LoadingPage/
   MainMenuPage/EpisodeSelection; no code bodies, only consts). Per-update "ADD"

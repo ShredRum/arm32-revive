@@ -278,6 +278,10 @@ public:
     static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
     // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
     static void PokeGateByte(std::uint64_t r7slot);
+    // HARNESS_POKE180=1: loading render-state advance. At 0x263338
+    // (ldr r0,[r4,#180] in ShadowingSurfaceData draw), if [r4+180]==3 write 4
+    // (flips the 0x263340 bne + switch mode). r4 is live — no hardcode.
+    static void PokeShadowState(std::uint64_t r4obj);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

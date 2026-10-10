@@ -415,6 +415,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
+    // budgets hide worker calls). Remove after triage.
+    if (n == "socket" || n == "connect" || n == "send" || n == "sendto" || n == "recv" ||
+        n == "recvfrom" || n == "bind" || n == "listen" || n == "accept" || n == "getaddrinfo" ||
+        n == "freeaddrinfo" || n == "gethostbyname" || n == "setsockopt" || n == "shutdown" ||
+        n == "sendmsg" || n == "recvmsg") {
+        std::printf("[netsock]%s %s(%08x %08x %08x %08x) lr=%08x\n",
+                    GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
+    }
 
     // --- memory management ---
     if (n == "malloc") {
@@ -682,7 +691,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "strtok" || n == "strtok_r") {
         // Manual strtok on guest memory (host strtok_r can't use guest saveptr:
         // it stores host pointers). Delim = NUL-terminated guest string.
-        static std::uint32_t strtok_state = 0;  // legacy strtok (single-threaded)
+        // thread_local: legacy strtok state is per-thread (a global tore
+        // tokens across main/worker and crashed with wild pointers).
+        thread_local std::uint32_t strtok_state = 0;
         std::uint32_t state = 0;
         if (n == "strtok_r") {
             if (!CheckRange(a2, 4, false)) {
@@ -885,7 +896,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             t += (time_t)TimeWarp();
         }
         Ret(regs, static_cast<std::uint32_t>(t & 0xFFFFFFFFu),
-            static_cast<std::uint32_t>((std::uint64_t(t) >> 32) & 0xFFFFFFFFu));
+            static_cast<std::uint32_t>(((std::uint64_t)t >> 32) & 0xFFFFFFFFu));
+        return;
+    }
+    if (n == "localtime_r" || n == "gmtime_r" || n == "localtime" || n == "gmtime") {
+        // Bionic ARM struct tm (44B): 9x int + long gmtoff + char* zone.
+        // localtime(time_t*) uses a static buffer (single-thread caveat:
+        // game uses _r here); gmtime same with UTC.
+        const bool is_local = (n[0] == 'l');
+        const bool use_static = (n == "localtime" || n == "gmtime");
+        std::int32_t gt = 0;
+        if (CheckRange(a0, 4, false)) {
+            std::memcpy(&gt, H(a0), 4);
+        }
+        std::time_t tt = (std::time_t)gt;
+        if (is_local) {
+            tt += (time_t)TimeWarp();
+        }
+        thread_local struct tm scratch {};
+        struct tm* ht = is_local ? localtime_r(&tt, &scratch) : gmtime_r(&tt, &scratch);
+        std::uint32_t out = a1;
+        if (use_static) {
+            out = GuestMalloc(44);
+        }
+        if (out && CheckRange(out, 44, true) && ht) {
+            std::int32_t f[9] = {ht->tm_sec,  ht->tm_min,  ht->tm_hour, ht->tm_mday, ht->tm_mon,
+                                 ht->tm_year, ht->tm_wday, ht->tm_yday, ht->tm_isdst};
+            for (int i = 0; i < 9; i++) {
+                std::memcpy(H(out + (std::uint32_t)(i * 4)), &f[i], 4);
+            }
+            std::int32_t off = (std::int32_t)ht->tm_gmtoff;
+            std::memcpy(H(out + 36), &off, 4);
+            std::uint32_t z = 0;
+            std::memcpy(H(out + 40), &z, 4);
+            Ret(regs, out);
+        } else {
+            Ret(regs, 0);
+        }
         return;
     }
     if (n == "__android_log_print") {
@@ -1036,6 +1083,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // Diagnosis-only: removes worker/main interleaving nondeterminism
         // (shared bump-heap addresses -> hash orders -> path variance).
         // Joins will hang if reached; the font wall dies long before.
+        // NOTE: any value (even empty) counts as set; use env -u to run real
+        // worker threads.
         if (std::getenv("HARNESS_NOWORKER")) {
             std::printf("[thread] NOWORKER: skip create start=%08x\n", a2);
             if (a0 && CheckRange(a0, 4, true)) {
@@ -1044,6 +1093,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             Ret(regs, 0);
             return;
+        }
+        // TEMP-DIAG (worker hang): log the job name (inline C string at
+        // [arg+0x20], seen as "Configuration") so runs inventory jobs.
+        {
+            std::string jn = "?";
+            if (CheckRange(a3 + 0x20, 32, false)) {
+                char tmp[33] = {0};
+                for (int i = 0; i < 32; i++) {
+                    char c = 0;
+                    std::memcpy(&c, H(a3 + 0x20 + (std::uint32_t)i), 1);
+                    if (!c) {
+                        break;
+                    }
+                    tmp[i] = (c >= 32 && c < 127) ? c : '?';
+                }
+                if (tmp[0]) {
+                    jn = tmp;
+                }
+            }
+            std::printf("[thread] create start=%08x arg=%08x job=\"%s\"\n", a2, a3, jn.c_str());
         }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
@@ -1615,18 +1684,39 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             ssize_t r = (n == "read") ? ::read(it->second, H(a1), a2) : ::write(it->second, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped).
-            if (n == "write" && r > 0 && r <= 64) {
+            if ((n == "write" || n == "read") && r > 0) {
                 static int wlog = 0;
-                if (wlog < 60) {
+                if (wlog < 200) {
                     wlog++;
                     const std::uint8_t* p = H<const std::uint8_t>(a1);
                     std::string hex;
                     char b[8];
-                    for (ssize_t i = 0; i < r; i++) {
+                    ssize_t show = r > 32 ? 32 : r;
+                    for (ssize_t i = 0; i < show; i++) {
                         std::snprintf(b, sizeof(b), "%02x", p[i]);
                         hex += b;
                     }
-                    std::printf("[pipelog] write gfd=%u %zdB: %s\n", a0, r, hex.c_str());
+                    // Thread marker: main=0, workers get small ids.
+                    static std::mutex idm;
+                    static std::unordered_map<std::thread::id, int> ids;
+                    static int nextid = 1;
+                    int who = 0;
+                    {
+                        std::lock_guard<std::mutex> L(idm);
+                        auto tid = std::this_thread::get_id();
+                        auto it = ids.find(tid);
+                        if (it == ids.end()) {
+                            // Main thread registered itself? Heuristic: the
+                            // first thread to log here during init is main.
+                            who = (GuestTid() == 1 && nextid == 1) ? 0 : nextid++;
+                            ids[tid] = who;
+                        } else {
+                            who = it->second;
+                        }
+                    }
+                    std::printf("[pipelog][t%d]%s %s gfd=%u %zdB: %s%s\n", who,
+                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
+                                r > show ? "..." : "");
                 }
             }
             Ret(regs, static_cast<std::uint32_t>(r < 0 ? -1 : r));
@@ -2253,6 +2343,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
+    if (n == "__system_property_get") {
+        // Bionic: int(name, value_out) -> length. The generic stub returned 0
+        // with an empty buffer, which silently killed the resolver worker
+        // (empty net.dns1 -> resolve fails -> worker exits -> main's pipe
+        // wait starves). Serve a small table (HARNESS_DNS1/2 overrides).
+        const std::string key = GuestStr(a0);
+        std::string val;
+        if (key == "net.dns1" || key == "net.dns2") {
+            val = (key == "net.dns1") ? "8.8.8.8" : "8.8.4.4";
+            if (const char* e = std::getenv(key == "net.dns1" ? "HARNESS_DNS1" : "HARNESS_DNS2")) {
+                val = e;
+            }
+        } else if (key == "ro.build.version.sdk") {
+            val = "21";
+        } else if (key == "ro.product.model") {
+            val = "izan";
+        } else if (key == "ro.product.manufacturer") {
+            val = "unknown";
+        }
+        if (!val.empty() && CheckRange(a1, val.size() + 1, true)) {
+            std::memcpy(H(a1), val.c_str(), val.size() + 1);
+            std::printf("[prop]%s \"%s\" -> \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
+                        key.c_str(), val.c_str());
+            Ret(regs, static_cast<std::uint32_t>(val.size()));
+            return;
+        }
+        // Unknown key: legacy empty behavior (length 0).
+    }
     {
         // Locked: worker threads share stub_hits_ with main.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2368,6 +2486,20 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         return 22;
     }
     if (n == "pthread_cond_wait") {
+        // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
+        // Otherwise bound unbounded waits like timedwait: a worker/main
+        // deadlock on a never-signaled cond (seen at loading: worker waits
+        // for main's processing, main polls for worker's message) hangs
+        // forever; spurious wakeups let predicates re-check instead.
+        if (!std::getenv("HARNESS_NOCAPWAIT")) {
+            struct timespec ts {};
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 5;
+            mutex_.unlock();
+            const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
+            mutex_.lock();
+            return static_cast<std::uint32_t>(r);
+        }
         mutex_.unlock();
         const int r = pthread_cond_wait(it->second, mit->second);
         mutex_.lock();
@@ -3203,6 +3335,16 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     content = d;
                 }
             }
+            // networkType must be a valid token ("" stalls network-state
+            // waits). NONE = offline degrade (no socket attempts against our
+            // stubs, which fake success and could hang); HARNESS_NETTYPE
+            // overrides (e.g. WIFI if real socket forwarding lands).
+            if (mdesc.find("networkType") != std::string::npos) {
+                content = "NONE";
+                if (const char* d = std::getenv("HARNESS_NETTYPE")) {
+                    content = d;
+                }
+            }
             // UUID.toString() must be a valid UUID (empty string stalled the
             // installation-ID flow into a forever poll-wait; device always
             // returns a real UUID here).
@@ -3313,8 +3455,40 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         const char* vtag = (fn == 117) ? "" : ((fn == 118) ? "V" : "A");
-        std::printf("[jni] CallStaticBooleanMethod%s %s -> 0\n", vtag, mdesc.c_str());
-        Ret(regs, 0);
+        // TEMP-DIAG (mock audit): log the feature string arg (jstring).
+        // V/A pass args behind a pointer (va_list / jvalue*); plain reads
+        // the jstring handle from the stack.
+        std::string farg;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            std::uint32_t h = 0;
+            if (fn == 118 || fn == 119) {
+                if (CheckRange(a3, 4, false)) {
+                    std::memcpy(&h, H(a3), 4);
+                }
+            } else if (CheckRange(regs[13], 4, false)) {
+                std::memcpy(&h, H(regs[13]), 4);
+            }
+            const auto it = h ? jni_strings_.find(h) : jni_strings_.end();
+            if (it != jni_strings_.end()) {
+                farg = it->second;
+            }
+        }
+        // hasSystemFeature policy (device-plausible): true for core mobile
+        // features, false for exotic ones. Tunable per feature string.
+        std::uint32_t v = 0;
+        if (mdesc.find("hasSystemFeature") != std::string::npos) {
+            if (farg.find("touchscreen") != std::string::npos ||
+                farg.find("opengles") != std::string::npos ||
+                farg.find("wifi") != std::string::npos ||
+                farg.find("telephony") != std::string::npos ||
+                farg.find("location") != std::string::npos) {
+                v = 1;
+            }
+        }
+        std::printf("[jni] CallStaticBooleanMethod%s %s(\"%s\") -> %u\n", vtag, mdesc.c_str(),
+                    farg.c_str(), v);
+        Ret(regs, v);
         return;
     }
     case 129:  // CallStaticIntMethod(V/A)(env, class, method, ...) -> jint
@@ -3346,6 +3520,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             v = 800;
         } else if (mdesc.find("getDisplayHeight") != std::string::npos) {
             v = 480;
+        } else if (mdesc.find("getViewWidth") != std::string::npos) {
+            // Utils.getViewWidth (0 broke downstream layout while
+            // DeviceInfoWrapper reports 800; keep consistent).
+            v = 800;
+        } else if (mdesc.find("getViewHeight") != std::string::npos) {
+            v = 480;
+        } else if (mdesc.find("getPPI") != std::string::npos) {
+            // 800x480 era phone (~4in, 233ppi); 240 keeps density math sane.
+            v = 240;
+        } else if (mdesc.find("getDisplayDensityGroup") != std::string::npos) {
+            // Unknown bucket encoding; 1 = baseline bucket guess (tunable;
+            // 0 selected no/fallback assets downstream).
+            v = 1;
+        } else if (mdesc.find("getDisplayConfigurationGroup") != std::string::npos) {
+            v = 1;
         }
         const char* vtag = (fn == 129) ? "" : ((fn == 130) ? "V" : "A");
         std::printf("[jni] CallStaticIntMethod%s %s -> %u\n", vtag, mdesc.c_str(), v);
@@ -3689,9 +3878,44 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
         }
     }
 }
+void GuestCallbacks::PokeShadowState(std::uint64_t r4obj) {
+    // HARNESS_POKE180=1: [r4+180] 3->4 (loading render-state advance).
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    const std::uint32_t o = (std::uint32_t)r4obj;
+    if (!cb->rt_->CheckRange(o + 180, 4, false)) {
+        return;
+    }
+    std::uint32_t v = 0;
+    std::memcpy(&v, cb->rt_->H(o + 180), 4);
+    if (v == 3) {
+        // TEMP-DIAG: dump the shadow-state words (+84..+188) once.
+        static int psd = 0;
+        if (psd < 2 && cb->rt_->CheckRange(o + 84, 108, false)) {
+            psd++;
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(o);
+            std::printf("[poke180] obj=%08x vptr=%08x", o, *(const std::uint32_t*)p);
+            for (int k = 84; k <= 188; k += 4) {
+                std::uint32_t w = 0;
+                std::memcpy(&w, p + k, 4);
+                std::printf(" +%d=%08x", k, w);
+            }
+            std::printf("\n");
+        }
+        std::uint32_t nv = 4;
+        if (cb->rt_->CheckRange(o + 180, 4, true)) {
+            std::memcpy(cb->rt_->H(o + 180), &nv, 4);
+            static int ps = 0;
+            if (ps < 4) {
+                ps++;
+                std::printf("[poke180] obj=%08x 3->4\n", o);
+            }
+        }
+    }
+}
 void GuestCallbacks::PokeGateByte(std::uint64_t r7slot) {
-    // HARNESS_POKE1187 mid-update poke: [*(r7slot)+1187] = 1, where r7slot
-    // is the live gate slot (r7 at 0xC2144) — no hardcoded BSS.
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -4025,6 +4249,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             ir.CallHostFunction(
                 &PokeGateByte,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))));
+        }
+        // HARNESS_POKE180=1: render-state advance at 0x263300 (FuncA entry,
+        // a block start; r0=this). The 0x263338 site is mid-block (hook never
+        // fires there). Sets [this+180] 3->4 when loading-state.
+        if (std::getenv("HARNESS_POKE180") && pc == 0x263300u) {
+            ir.CallHostFunction(
+                &PokeShadowState,
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
         }
         if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3)) {
             g_probe_pc = pc;
