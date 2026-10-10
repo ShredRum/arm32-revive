@@ -2539,6 +2539,47 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
+        // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
+        // stub kept fds blocking -> handshake breakage -> HttpRequestException).
+        if (n == "fcntl") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            const int cmd = (int)a1;
+            if (cmd == F_GETFL || cmd == F_GETFD) {
+                int r = ::fcntl(hfd, cmd);
+                if (r < 0) {
+                    set_guest_errno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
+                return;
+            }
+            if (cmd == F_SETFL || cmd == F_SETFD) {
+                int r = ::fcntl(hfd, cmd, (int)a2);
+                if (r < 0) {
+                    set_guest_errno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
+                return;
+            }
+            if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+                int r = ::fcntl(hfd, cmd, (int)a2);
+                if (r < 0) {
+                    set_guest_errno(errno);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                Ret(regs, alloc_guest_fd(r));
+                return;
+            }
+            // File locks etc.: success-lie (single-process bring-up; revisit
+            // if a game path depends on lock contention).
+            Ret(regs, 0);
+            return;
+        }
         if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
             n == "inet_ntop") {
             InetThunk(regs, n, a0, a1, a2, a3);
@@ -4905,6 +4946,23 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             buf[k] = 0;
             if (k > 0 && k < 128) {
                 std::printf("[probe] throw type: %s\n", buf);
+            }
+            // TEMP-DIAG (HttpRequestException reason): dump the exception
+            // object head [r0,80] with ASCII — usually vtable + code/message.
+            {
+                const std::uint32_t eo = (std::uint32_t)r0;
+                if (cb->rt_->CheckRange(eo, 80, false)) {
+                    const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(eo);
+                    std::printf("[probe] exc-obj @%08x:", eo);
+                    for (int j = 0; j < 80; j++) {
+                        std::printf(" %02x", p[j]);
+                    }
+                    std::printf("\n[probe] exc-ascii: ");
+                    for (int j = 0; j < 80; j++) {
+                        std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+                    }
+                    std::printf("\n");
+                }
             }
         }
     }
