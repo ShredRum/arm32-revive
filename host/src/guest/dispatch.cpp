@@ -5384,305 +5384,8 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
     //     catch, else innermost untried catch-all (r1=filter, 0 for catchall;
     //     r0=exception object kept, sp kept — proven accepted by begin_catch).
     // Rethrows iterate to the next candidate via the tried-pad set.
-    if (const char* uf = std::getenv("HARNESS_TTUNW")) {
-        struct PadEnt {
-            std::uint32_t fn, pad;
-            int flt;
-            std::uint32_t slot;
-        };
-        static bool uloaded = false;
-        static std::unordered_map<std::uint32_t, std::vector<PadEnt>> umap;
-        static std::set<std::uint32_t> tried;
-        if (!uloaded) {
-            uloaded = true;
-            if (FILE* f = std::fopen(uf, "r")) {
-                char line[128];
-                while (std::fgets(line, sizeof(line), f)) {
-                    unsigned fn = 0, padoff = 0, se = 0;
-                    int fl = 0;
-                    if (std::sscanf(line, "%x %x %d %x", &fn, &padoff, &fl, &se) == 4) {
-                        // File stores fn-relative pad offsets; redirect needs
-                        // absolute VAs (0x208-style offsets alone executed
-                        // garbage low memory in ttunw1 — fixed).
-                        umap[fn].push_back({fn, fn + padoff, fl, se});
-                    }
-                }
-                std::fclose(f);
-            }
-            std::printf("[ttunw] %zu fns loaded\n", umap.size());
-        }
-        auto urd = [&](std::uint32_t a, std::uint32_t& v) -> bool {
-            if (!cb->rt_->CheckRange(a, 4, false)) {
-                return false;
-            }
-            std::memcpy(&v, cb->rt_->H(a), 4);
-            return true;
-        };
-        auto uprel31 = [&](std::uint32_t place, std::uint32_t& out) -> bool {
-            std::uint32_t w = 0;
-            if (!urd(place, w)) {
-                return false;
-            }
-            std::int32_t off = (std::int32_t)(w << 1) >> 1;
-            out = place + (std::uint32_t)off;
-            return true;
-        };
-        // Frame -> fn via exidx (base 0x59D250, 18184 entries, verified).
-        auto ufnof = [&](std::uint32_t pc) -> std::uint32_t {
-            const std::uint32_t base = 0x59D250u;
-            const int n = 18184;
-            int lo = 0, hi = n;
-            while (lo < hi) {
-                int mid = (lo + hi) / 2;
-                std::uint32_t f = 0;
-                if (!uprel31(base + mid * 8, f)) {
-                    return 0;
-                }
-                if (f <= pc) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            if (lo < 1) {
-                return 0;
-            }
-            std::uint32_t f = 0;
-            if (!uprel31(base + (lo - 1) * 8, f)) {
-                return 0;
-            }
-            return f;
-        };
-        const std::uint32_t thrown = (std::uint32_t)r1;
-        std::uint32_t chain[5] = {thrown, 0, 0, 0, 0};
-        int nc = 1;
-        {
-            std::uint32_t cur = thrown;
-            for (int k = 0; k < 3; k++) {
-                std::uint32_t b = 0;
-                if (!urd(cur + 8, b)) {
-                    break;
-                }
-                if (b < 0x600000u || b >= 0x6F0000u) {
-                    break;
-                }
-                chain[nc++] = b;
-                cur = b;
-            }
-        }
-        auto umatch = [&](std::uint32_t E) -> int {
-            // Returns chain index or -1. One-hop absolute or pcrel two-hop.
-            std::uint32_t raw = 0;
-            if (!urd(E, raw)) {
-                return -1;
-            }
-            std::uint32_t cands[2] = {raw, 0};
-            std::uint32_t slot2 = E + raw;
-            urd(slot2, cands[1]);
-            for (int c = 0; c < 2; c++) {
-                if (cands[c] < 0x600000u || cands[c] >= 0x6F0000u) {
-                    continue;
-                }
-                for (int k = 0; k < nc; k++) {
-                    if (cands[c] == chain[k]) {
-                        return k;
-                    }
-                }
-            }
-            return -1;
-        };
-        // Live frames: ARM frame-pointer walk (r11 chain: exact frames incl.
-        // tail-call-compacted ones the BL heuristic misses) UNION the BL
-        // return-addr scan (frames without FP).
-        struct Frame {
-            std::uint32_t pc, slot;
-        };
-        std::vector<Frame> frames;
-        {
-            std::uint32_t fp = regs[11];
-            for (int d = 0; d < 24; d++) {
-                std::uint32_t sfp = 0, slr = 0;
-                if (!urd(fp, sfp) || !urd(fp + 4, slr)) {
-                    break;
-                }
-                if (slr < 0x1000 || slr >= 0x653D1C) {
-                    break;
-                }
-                if (sfp != 0 && (sfp <= fp || sfp > fp + 65536)) {
-                    // Not a sane chain link; still record this frame once.
-                    frames.push_back({slr & ~1u, fp});
-                    break;
-                }
-                frames.push_back({slr & ~1u, fp});
-                if (sfp == 0) {
-                    break;
-                }
-                fp = sfp;
-            }
-            const std::uint32_t sp0 = regs[13];
-            for (std::uint32_t a = sp0; a < sp0 + 8192 && frames.size() < 40; a += 4) {
-                std::uint32_t w = 0;
-                if (!urd(a, w)) {
-                    break;
-                }
-                if (w < 0x1000 || w >= 0x653D1C) {
-                    continue;
-                }
-                std::uint32_t prev = 0;
-                if (!urd(w - 4, prev)) {
-                    continue;
-                }
-                if ((prev >> 25) == 0x75) {
-                    std::uint32_t pc = w & ~1u;
-                    bool dup = false;
-                    for (const Frame& f : frames) {
-                        if (f.pc == pc) {
-                            dup = true;
-                            break;
-                        }
-                    }
-                    if (!dup) {
-                        frames.push_back({pc, a});
-                    }
-                }
-            }
-        }
-        std::printf("[ttunw] throw ti=%08x frames=%zu\n", thrown, frames.size());
-        // HARNESS_TTUNW_V=1: verbose per-frame fn + typed-slot resolution
-        // (finds false-negative matches the redirect pass skips).
-        const bool verbose = (std::getenv("HARNESS_TTUNW_V") != nullptr);
-        if (verbose) {
-            for (const Frame& fr : frames) {
-                std::uint32_t fn = ufnof(fr.pc);
-                std::printf("[ttunw-v] pc=%08x fn=%08x", fr.pc, fn);
-                auto it = umap.find(fn);
-                if (it == umap.end()) {
-                    std::printf(" (no pads)\n");
-                    continue;
-                }
-                std::printf(" pads=%zu:", it->second.size());
-                for (const PadEnt& e : it->second) {
-                    if (e.flt > 0) {
-                        std::printf(" [%08x,f%d->%d]", e.pad, e.flt, umatch(e.slot));
-                    } else {
-                        std::printf(" [%08x,all]", e.pad);
-                    }
-                }
-                std::printf("\n");
-            }
-        }
-        // HARNESS_TTREG=1: restore callee-saved regs from the pad frame's
-        // saved slots + r11=fp (default: keep throw-time regs). Real unwind
-        // restores r4-r11 from the frame; keeping the innermost frame's regs
-        // feeds handlers garbage (BADCTX-proven: r4/r7/r10 held inner values
-        // -> 0x167d string). Assumes prologue push{r4-r11,lr} + fp=sp+28
-        // (VERIFIED for 0x19FE80: e92d4ff0/e28db01c): saved r4=[fp-28] ..
-        // r10=[fp-4]. Frame sp: TTSP if set, else fp-28 (entry sp).
-        const bool restoreregs = (std::getenv("HARNESS_TTREG") != nullptr);
-        // HARNESS_TTUNW_PAD=pad: force redirect to one pad (found via its
-        // frame in the live walk; its fp anchors sp/regs). Overrides order.
-        std::uint32_t forcepad = 0;
-        if (const char* e = std::getenv("HARNESS_TTUNW_PAD")) {
-            forcepad = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
-        }
-        // HARNESS_TTSP=off: resume sp = frame_fp + off (signed bytes,
-        // default +8). Landing pads address frame temporaries via sp; the
-        // throw sp (possibly KB away) feeds them garbage. The true value is
-        // try-site dependent; sweep when a handler derails on wild pointers.
-        int ttsp_off = 8;
-        const bool forcesp = (std::getenv("HARNESS_TTSP") != nullptr);
-        if (const char* so = std::getenv("HARNESS_TTSP")) {
-            ttsp_off = std::atoi(so);
-        }
-        if (forcepad) {
-            for (const Frame& fr : frames) {
-                std::uint32_t fn = ufnof(fr.pc);
-                if (!fn) {
-                    continue;
-                }
-                auto it = umap.find(fn);
-                if (it == umap.end()) {
-                    continue;
-                }
-                for (const PadEnt& e : it->second) {
-                    if (e.pad != forcepad) {
-                        continue;
-                    }
-                    bool iscatch = (e.flt == 0);
-                    std::printf("[ttunw] forced pad=%08x fn=%08x filter=%d fp=%08x%s%s\n",
-                                e.pad, fn, e.flt, fr.slot, forcesp ? " (sp=fp+off)" : "",
-                                restoreregs ? " (regs<=frame)" : "");
-                    tried.insert(e.pad);
-                    if (restoreregs) {
-                        // Saved r4-r10 live at [fp-28..fp-4] (prologue push
-                        // r4-r11,lr + fp=sp+28); r11=fp; sp=fp-28 unless TTSP.
-                        bool ok = true;
-                        for (int k = 0; k < 7; k++) {
-                            std::uint32_t v = 0;
-                            if (!urd(fr.slot - 28 + k * 4, v)) {
-                                ok = false;
-                                break;
-                            }
-                            regs[4 + k] = v;
-                        }
-                        regs[11] = fr.slot;
-                        std::printf("[ttunw] regs %s r4=%08x r5=%08x r6=%08x\n", ok ? "ok" : "SHORT",
-                                    regs[4], regs[5], regs[6]);
-                        if (!forcesp) {
-                            regs[13] = fr.slot - 28;
-                        }
-                    }
-                    if (forcesp) {
-                        regs[13] = fr.slot + (std::uint32_t)ttsp_off;
-                    }
-                    cb->rt_->ParkRedirectEx(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt));
-                    cb->rt_->stop_step_ = true;
-                    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
-                    return;
-                }
-            }
-            std::printf("[ttunw] forced pad %08x not on live path\n", forcepad);
-        }
-        for (int pass = 0; pass < 2; pass++) {
-            for (const Frame& fr : frames) {
-                std::uint32_t fn = ufnof(fr.pc);
-                if (!fn) {
-                    continue;
-                }
-                auto it = umap.find(fn);
-                if (it == umap.end()) {
-                    continue;
-                }
-                for (const PadEnt& e : it->second) {
-                    bool iscatch = (e.flt == 0);
-                    if ((pass == 0) == iscatch) {
-                        continue;
-                    }
-                    if (tried.count(e.pad)) {
-                        continue;
-                    }
-                    if (!iscatch) {
-                        if (umatch(e.slot) < 0) {
-                            continue;
-                        }
-                    }
-                    std::printf("[ttunw] %s pad=%08x fn=%08x filter=%d (frame pc=%08x)\n",
-                                iscatch ? "catchall" : "typed", e.pad, fn, e.flt, fr.pc);
-                    tried.insert(e.pad);
-                    if (tried.size() > 24) {
-                        std::printf("[ttunw] tried budget exhausted\n");
-                        break;
-                    }
-                    cb->rt_->ParkRedirectEx(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt));
-                    cb->rt_->stop_step_ = true;
-                    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
-                    return;
-                }
-            }
-        }
-        std::printf("[ttunw] no candidate for ti=%08x\n", thrown);
-        cb->rt_->stop_step_ = true;
-        cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    if (std::getenv("HARNESS_TTUNW")) {
+        UnwNext((std::uint32_t)r1);
         return;
     }
     // (0x28A3DC, throw lr 0x28AE70) instead of throwing: the callers check
@@ -5768,7 +5471,359 @@ void Runtime::ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val) {
     pending_redir_ = pad;
     pending_jit_ = ActiveJit();
     pending_r1_ = r1val;
+    pending_fp_ = 0;
+    pending_flags_ = 0;
 }
+// Park a redirect with unwind state (applied at resume, see header).
+void Runtime::ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t fp,
+                         std::uint32_t flags, std::int32_t spoff) {
+    pending_redir_ = pad;
+    pending_jit_ = ActiveJit();
+    pending_r1_ = r1val;
+    pending_fp_ = fp;
+    pending_flags_ = flags;
+    pending_spoff_ = spoff;
+}
+static std::uint32_t g_unw_lastti = 0;
+
+void GuestCallbacks::ResumeTrap(std::uint64_t r0) {
+    // A cleanup pad called _Unwind_Resume (would spiral: our unwinder can't
+    // continue it). Recompute the live walk and park the next untried pad.
+    // The stack never really unwound, so frames/ti are still valid.
+    (void)r0;
+    std::printf("[resume] trap exc=%08x, continuing walk for ti=%08x\n", (std::uint32_t)r0,
+                g_unw_lastti);
+    UnwNext(g_unw_lastti);
+}
+
+void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
+    // Per-frame unwinder emulation (see ProbeRedir HARNESS_TTUNW comment).
+    // Shared by the throw probe and the _Unwind_Resume trap: recomputes the
+    // live walk (the stack never really unwinds) and parks the next untried
+    // pad. Halts in all cases (parked or observe).
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    auto& regs = cb->rt_->ActiveJit()->Regs();
+    const char* uf = std::getenv("HARNESS_TTUNW");
+    if (!uf) {
+        return;
+    }
+    g_unw_lastti = thrown_ti;
+    std::uint32_t thrown = thrown_ti;
+    struct PadEnt {
+        std::uint32_t fn, pad;
+        int flt;
+        std::uint32_t slot;
+    };
+    static bool uloaded = false;
+    static std::unordered_map<std::uint32_t, std::vector<PadEnt>> umap;
+    static std::set<std::uint32_t> tried;
+    // HARNESS_TTSKIP=pad[,..]: blacklist pads that crash the walk (halts).
+    static std::set<std::uint32_t> skip;
+    static bool skipinit = false;
+    if (!skipinit) {
+        skipinit = true;
+        if (const char* e = std::getenv("HARNESS_TTSKIP")) {
+            char tmp[256];
+            std::snprintf(tmp, sizeof(tmp), "%s", e);
+            for (char* tok = std::strtok(tmp, ","); tok; tok = std::strtok(nullptr, ",")) {
+                skip.insert(static_cast<std::uint32_t>(std::strtoul(tok, nullptr, 16)));
+            }
+        }
+    }
+    if (!uloaded) {
+        uloaded = true;
+        if (FILE* f = std::fopen(uf, "r")) {
+            char line[128];
+            while (std::fgets(line, sizeof(line), f)) {
+                unsigned fn = 0, padoff = 0, se = 0;
+                int fl = 0;
+                if (std::sscanf(line, "%x %x %d %x", &fn, &padoff, &fl, &se) == 4) {
+                    // File stores fn-relative pad offsets; redirect needs
+                    // absolute VAs (0x208-style offsets alone executed
+                    // garbage low memory in ttunw1 — fixed).
+                    umap[fn].push_back({fn, fn + padoff, fl, se});
+                }
+            }
+            std::fclose(f);
+        }
+        std::printf("[ttunw] %zu fns loaded\n", umap.size());
+    }
+    auto urd = [&](std::uint32_t a, std::uint32_t& v) -> bool {
+        if (!cb->rt_->CheckRange(a, 4, false)) {
+            return false;
+        }
+        std::memcpy(&v, cb->rt_->H(a), 4);
+        return true;
+    };
+    auto uprel31 = [&](std::uint32_t place, std::uint32_t& out) -> bool {
+        std::uint32_t w = 0;
+        if (!urd(place, w)) {
+            return false;
+        }
+        std::int32_t off = (std::int32_t)(w << 1) >> 1;
+        out = place + (std::uint32_t)off;
+        return true;
+    };
+    // Frame -> fn via exidx (base 0x59D250, 18184 entries, verified).
+    auto ufnof = [&](std::uint32_t pc) -> std::uint32_t {
+        const std::uint32_t base = 0x59D250u;
+        const int n = 18184;
+        int lo = 0, hi = n;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            std::uint32_t f = 0;
+            if (!uprel31(base + mid * 8, f)) {
+                return 0;
+            }
+            if (f <= pc) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo < 1) {
+            return 0;
+        }
+        std::uint32_t f = 0;
+        if (!uprel31(base + (lo - 1) * 8, f)) {
+            return 0;
+        }
+        return f;
+    };
+    std::uint32_t chain[5] = {thrown, 0, 0, 0, 0};
+    int nc = 1;
+    {
+        std::uint32_t cur = thrown;
+        for (int k = 0; k < 3; k++) {
+            std::uint32_t b = 0;
+            if (!urd(cur + 8, b)) {
+                break;
+            }
+            if (b < 0x600000u || b >= 0x6F0000u) {
+                break;
+            }
+            chain[nc++] = b;
+            cur = b;
+        }
+    }
+    auto umatch = [&](std::uint32_t E) -> int {
+        // Returns chain index or -1. One-hop absolute or pcrel two-hop.
+        std::uint32_t raw = 0;
+        if (!urd(E, raw)) {
+            return -1;
+        }
+        std::uint32_t cands[2] = {raw, 0};
+        std::uint32_t slot2 = E + raw;
+        urd(slot2, cands[1]);
+        for (int c = 0; c < 2; c++) {
+            if (cands[c] < 0x600000u || cands[c] >= 0x6F0000u) {
+                continue;
+            }
+            for (int k = 0; k < nc; k++) {
+                if (cands[c] == chain[k]) {
+                    return k;
+                }
+            }
+        }
+        return -1;
+    };
+    // Live frames: ARM frame-pointer walk (r11 chain: exact frames incl.
+    // tail-call-compacted ones the BL heuristic misses) UNION the BL
+    // return-addr scan (frames without FP).
+    struct Frame {
+        std::uint32_t pc, slot;
+        bool isfp = false;
+    };
+    std::vector<Frame> frames;
+    {
+        std::uint32_t fp = regs[11];
+        for (int d = 0; d < 24; d++) {
+            std::uint32_t sfp = 0, slr = 0;
+            if (!urd(fp, sfp) || !urd(fp + 4, slr)) {
+                break;
+            }
+            if (slr < 0x1000 || slr >= 0x653D1C) {
+                break;
+            }
+            if (sfp != 0 && (sfp <= fp || sfp > fp + 65536)) {
+                // Not a sane chain link; still record this frame once.
+                frames.push_back({slr & ~1u, fp});
+                break;
+            }
+            frames.push_back({slr & ~1u, fp});
+            if (sfp == 0) {
+                break;
+            }
+            fp = sfp;
+        }
+        const std::uint32_t sp0 = regs[13];
+        for (std::uint32_t a = sp0; a < sp0 + 8192 && frames.size() < 40; a += 4) {
+            std::uint32_t w = 0;
+            if (!urd(a, w)) {
+                break;
+            }
+            if (w < 0x1000 || w >= 0x653D1C) {
+                continue;
+            }
+            std::uint32_t prev = 0;
+            if (!urd(w - 4, prev)) {
+                continue;
+            }
+            if ((prev >> 25) == 0x75) {
+                std::uint32_t pc = w & ~1u;
+                bool dup = false;
+                for (const Frame& f : frames) {
+                    if (f.pc == pc) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    frames.push_back({pc, a});
+                }
+            }
+        }
+    }
+    std::printf("[ttunw] throw ti=%08x frames=%zu\n", thrown, frames.size());
+    // HARNESS_TTUNW_V=1: verbose per-frame fn + typed-slot resolution
+    // (finds false-negative matches the redirect pass skips).
+    const bool verbose = (std::getenv("HARNESS_TTUNW_V") != nullptr);
+    if (verbose) {
+        for (const Frame& fr : frames) {
+            std::uint32_t fn = ufnof(fr.pc);
+            std::printf("[ttunw-v] pc=%08x fn=%08x", fr.pc, fn);
+            auto it = umap.find(fn);
+            if (it == umap.end()) {
+                std::printf(" (no pads)\n");
+                continue;
+            }
+            std::printf(" pads=%zu:", it->second.size());
+            for (const PadEnt& e : it->second) {
+                if (e.flt > 0) {
+                    std::printf(" [%08x,f%d->%d]", e.pad, e.flt, umatch(e.slot));
+                } else {
+                    std::printf(" [%08x,all]", e.pad);
+                }
+            }
+            std::printf("\n");
+        }
+    }
+    // HARNESS_TTREG=1: restore callee-saved regs from the pad frame's
+    // saved slots + r11=fp (default: keep throw-time regs). Real unwind
+    // restores r4-r11 from the frame; keeping the innermost frame's regs
+    // feeds handlers garbage (BADCTX-proven: r4/r7/r10 held inner values
+    // -> 0x167d string). Assumes prologue push{r4-r11,lr} + fp=sp+28
+    // (VERIFIED for 0x19FE80: e92d4ff0/e28db01c): saved r4=[fp-28] ..
+    // r10=[fp-4]. Frame sp: TTSP if set, else fp-28 (entry sp).
+    const bool restoreregs = (std::getenv("HARNESS_TTREG") != nullptr);
+    // HARNESS_TTUNW_PAD=pad: force redirect to one pad (found via its
+    // frame in the live walk; its fp anchors sp/regs). Overrides order.
+    std::uint32_t forcepad = 0;
+    if (const char* e = std::getenv("HARNESS_TTUNW_PAD")) {
+        forcepad = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+    }
+    // HARNESS_TTSP=off: resume sp = frame_fp + off (signed bytes,
+    // default +8). Landing pads address frame temporaries via sp; the
+    // throw sp (possibly KB away) feeds them garbage. The true value is
+    // try-site dependent; sweep when a handler derails on wild pointers.
+    int ttsp_off = 8;
+    const bool forcesp = (std::getenv("HARNESS_TTSP") != nullptr);
+    if (const char* so = std::getenv("HARNESS_TTSP")) {
+        ttsp_off = std::atoi(so);
+    }
+    if (forcepad) {
+        for (const Frame& fr : frames) {
+            std::uint32_t fn = ufnof(fr.pc);
+            if (!fn) {
+                continue;
+            }
+            auto it = umap.find(fn);
+            if (it == umap.end()) {
+                continue;
+            }
+            for (const PadEnt& e : it->second) {
+                if (e.pad != forcepad || tried.count(e.pad) || skip.count(e.pad)) {
+                    continue;
+                }
+                bool iscatch = (e.flt == 0);
+                std::printf("[ttunw] forced pad=%08x fn=%08x filter=%d fp=%08x%s%s\n",
+                            e.pad, fn, e.flt, fr.slot, forcesp ? " (sp=fp+off)" : "",
+                            restoreregs ? " (regs<=frame)" : "");
+                tried.insert(e.pad);
+                // State applied at resume (ParkUnwind); never touch regs
+                // here (park-time writes were observed clobbered). Reg
+                // restore only for real-fp frames (BL slots are addrs).
+                std::uint32_t flags = ((restoreregs && fr.isfp) ? 1u : 0u) | (forcesp ? 2u : 0u);
+                cb->rt_->ParkUnwind(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt), fr.slot,
+                                    flags, ttsp_off);
+                cb->rt_->stop_step_ = true;
+                cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+                return;
+            }
+        }
+        std::printf("[ttunw] forced pad %08x not on live path\n", forcepad);
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (const Frame& fr : frames) {
+            std::uint32_t fn = ufnof(fr.pc);
+            if (!fn) {
+                continue;
+            }
+            auto it = umap.find(fn);
+            if (it == umap.end()) {
+                continue;
+            }
+            for (const PadEnt& e : it->second) {
+                bool iscatch = (e.flt == 0);
+                if ((pass == 0) == iscatch) {
+                    continue;
+                }
+                if (tried.count(e.pad) || skip.count(e.pad)) {
+                    continue;
+                }
+                if (!iscatch) {
+                    if (umatch(e.slot) < 0) {
+                        continue;
+                    }
+                }
+                std::printf("[ttunw] %s pad=%08x fn=%08x filter=%d (frame pc=%08x)\n",
+                            iscatch ? "catchall" : "typed", e.pad, fn, e.flt, fr.pc);
+                tried.insert(e.pad);
+                if (tried.size() > 24) {
+                    std::printf("[ttunw] tried budget exhausted\n");
+                    break;
+                }
+                // Full unwind state at resume (ParkUnwind): park-time reg
+                // writes are clobbered by the halt sync (proven: r4/r6
+                // rewritten post-park). Flags from env (TTREG/TTSP).
+                {
+                    std::uint32_t flags = 0;
+                    std::int32_t spoff = 8;
+                    if (std::getenv("HARNESS_TTREG") && fr.isfp) {
+                        flags |= 1u;
+                    }
+                    if (const char* so = std::getenv("HARNESS_TTSP")) {
+                        flags |= 2u;
+                        spoff = std::atoi(so);
+                    }
+                    cb->rt_->ParkUnwind(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt), fr.slot,
+                                        flags, spoff);
+                }
+                cb->rt_->stop_step_ = true;
+                cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+                return;
+            }
+        }
+    }
+    std::printf("[ttunw] no candidate for ti=%08x\n", thrown);
+    cb->rt_->stop_step_ = true;
+    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    return;
+}
+
 bool Runtime::ApplyRedirect() {
     if (pending_redir_ == 0 || ActiveJit() != pending_jit_) {
         return false;
@@ -5782,12 +5837,43 @@ bool Runtime::ApplyRedirect() {
     if (pending_r1_ != ~0u) {
         regs[1] = pending_r1_;
     }
+    // Unwind state applied AT RESUME (see header): restore callee-saved
+    // regs from the frame's saved slots ([fp-28..fp-4] for the standard
+    // push{r4-r11,lr}+fp=sp+28 prologue), r11=fp, sp per flags/offset.
+    if (pending_flags_ & 1u) {
+        bool ok = true;
+        for (int k = 0; k < 7; k++) {
+            std::uint32_t v = 0;
+            if (!CheckRange(pending_fp_ - 28 + k * 4, 4, false)) {
+                ok = false;
+                break;
+            }
+            std::memcpy(&v, H(pending_fp_ - 28 + k * 4), 4);
+            regs[4 + k] = v;
+        }
+        regs[11] = pending_fp_;
+        if (!ok) {
+            std::printf("[redir] frame-reg restore SHORT\n");
+        }
+    }
+    if (pending_flags_ & 2u) {
+        regs[13] = pending_fp_ + (std::uint32_t)pending_spoff_;
+    } else if (pending_flags_ & 1u) {
+        regs[13] = pending_fp_ - 28;
+    }
     stop_step_ = false;
+    if (std::getenv("HARNESS_TTUNW")) {
+        std::printf("[redir] pre-run r4-r7=%08x %08x %08x %08x r8-r11=%08x %08x %08x %08x sp=%08x\n",
+                    regs[4], regs[5], regs[6], regs[7], regs[8], regs[9], regs[10], regs[11],
+                    regs[13]);
+    }
     std::printf("[redir] resume at %08x (r0=%08x r1=%08x sp=%08x)%s\n", pending_redir_, regs[0],
                 regs[1], regs[13], GuestTid() == 1 ? "" : " (T2+)");
     pending_redir_ = 0;
     pending_jit_ = nullptr;
     pending_r1_ = ~0u;
+    pending_fp_ = 0;
+    pending_flags_ = 0;
     return true;
 }
 void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
@@ -6121,7 +6207,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
     // the emitted CallHostFunction runs on every execution with live regs.
     {
         static std::int64_t probe = -2;
-        static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0, probe_pc3 = 0;
+        static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0, probe_pc3 = 0,
+                                 probe_pc4 = 0;
         if (probe == -2) {
             probe = 0;
             if (const char* pe = std::getenv("HARNESS_PROBE")) {
@@ -6138,6 +6225,11 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             }
             if (const char* pe3 = std::getenv("HARNESS_PROBE3")) {
                 probe_pc3 = static_cast<std::uint32_t>(std::strtoul(pe3, nullptr, 16));
+                probe = 1;
+            }
+            // HARNESS_PROBE4=addr: _Unwind_Resume trap slot (resume-walk).
+            if (const char* pe4 = std::getenv("HARNESS_PROBE4")) {
+                probe_pc4 = static_cast<std::uint32_t>(std::strtoul(pe4, nullptr, 16));
                 probe = 1;
             }
         }
@@ -6162,10 +6254,29 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 &PokeShadowState,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
         }
-        // HARNESS_TRCALL=start,len: trace r0-r6 at every basic-block entry
-        // in [start,start+len) (straight-line handler forensics: which call
-        // first receives garbage). Uses the ProbeDump triple; raise
-        // HARNESS_PROBE_N accordingly (it shares the dump cap).
+        // HARNESS_PCTRACE=start,len[,cap]: pc-only trace of basic-block
+        // entries in range (path forensics without register dumps; much
+        // cheaper than TRCALL's ProbeDump triple — safe for warm code).
+        {
+            static bool pcinit = false;
+            static std::uint32_t pcstart = 0, pcend = 0;
+            static std::int64_t pccap = 5000, pcn = 0;
+            if (!pcinit) {
+                pcinit = true;
+                if (const char* e = std::getenv("HARNESS_PCTRACE")) {
+                    unsigned s = 0, l = 0, c = 5000;
+                    if (std::sscanf(e, "%x,%x,%x", &s, &l, &c) >= 2) {
+                        pcstart = s;
+                        pcend = s + l;
+                        pccap = (std::int64_t)c;
+                    }
+                }
+            }
+            if (pcend > pcstart && pc >= pcstart && pc < pcend && pcn < pccap) {
+                pcn++;
+                std::printf("[pctrace] %08x\n", pc);
+            }
+        }
         {
             static bool trinit = false;
             static std::uint32_t trstart = 0, trend = 0;
@@ -6203,7 +6314,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
             }
         }
-        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3)) {
+        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3 || pc == probe_pc4)) {
             g_probe_pc = pc;
             std::printf("[probe-emit] %c %08x\n", is_thumb ? 'T' : 'A', pc);
             // HARNESS_FIXPVR=1: at 0x2B0C50 (post image-format lookup) force
@@ -6228,6 +6339,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
+            // HARNESS_PROBE4=_Unwind_Resume entry: resume-trap. A cleanup pad
+            // ending in resume would spiral in our broken unwinder; instead
+            // continue the walk (next untried pad) via shared UnwNext.
+            if (std::getenv("HARNESS_TTUNW") && pc == probe_pc4 && probe_pc4) {
+                ir.CallHostFunction(&ResumeTrap, ir.ZeroExtendWordToLong(
+                                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                         0))));
+            }
             // HARNESS_RDUMP=1: deep raiser-entry ABI dump (PROBE3 slot).
             if (std::getenv("HARNESS_RDUMP") && pc == probe_pc3) {
                 ir.CallHostFunction(&RaiserDump,

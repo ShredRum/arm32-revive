@@ -96,6 +96,12 @@ public:
     // TTFILE matcher parks pad + filter here (r1 override for the pad's
     // catch-clause switch); ApplyRedirect applies them.
     void ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val);
+    // Park a redirect with unwind state (frame fp + restore flags + sp
+    // offset), applied AT RESUME (register writes at park time were
+    // observed clobbered before resume).
+    void ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t fp, std::uint32_t flags,
+                    std::int32_t spoff);
+
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -172,10 +178,17 @@ private:
     // Throw-to-catch emulation (unwinder stand-in): ProbeRedir halts at the
     // throw with pending_redir_ set; ApplyRedirect() resumes there.
     // Per-Jit: a halted thread must never redirect a different thread.
+    // Unwind state (frame fp + flags) is applied AT RESUME (not at park):
+    // anything guest-side between park and resume would clobber parked
+    // register values (observed: r4/r6 rewritten post-park).
     std::uint32_t pending_redir_ = 0;
     Dynarmic::A32::Jit* pending_jit_ = nullptr;
     // r1 override for the pad (catch-clause switch value); ~0u = keep regs.
     std::uint32_t pending_r1_ = ~0u;
+    // Frame fp for reg/sp restore; restore-mode flags (bit0: regs, bit1: sp).
+    std::uint32_t pending_fp_ = 0;
+    std::uint32_t pending_flags_ = 0;
+    std::int32_t pending_spoff_ = 8;
 
     GuestMemory& mem_;
     LoadedModule& mod_;
@@ -303,6 +316,10 @@ public:
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
     static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
     static void ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
+    // Per-frame unwinder step (throw probe + resume trap share it).
+    static void UnwNext(std::uint32_t thrown_ti);
+    // _Unwind_Resume trap: continue the pad walk instead of spiraling.
+    static void ResumeTrap(std::uint64_t r0);
     // HARNESS_RDUMP=1: deep dump of the HTTP raiser entry ABI (PROBE3).
     static void RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2);
     static void RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp);
