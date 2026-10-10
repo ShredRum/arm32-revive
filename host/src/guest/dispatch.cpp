@@ -4991,15 +4991,83 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
             }
         }
     }
-    if (used >= npads) {
+    if (used >= npads && !std::getenv("HARNESS_RETFAIL")) {
         return;
     }
-    std::uint32_t pad = pads[used++];
+    std::uint32_t pad = (used < npads) ? pads[used++] : 0;
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
     }
     auto& regs = cb->rt_->ActiveJit()->Regs();
+    // HARNESS_RETFAIL=1: synthesize a failing return from the HTTP raiser
+    // (0x28A3DC, throw lr 0x28AE70) instead of throwing: the callers check
+    // a stack flag ([sp+8] == 0 -> failure branch) and ignore r0. Uses the
+    // LIVE frame: r11 (frame ptr, entry_sp = r11+16) gives flag addr
+    // [entry_sp+8] and saved return [entry_sp-4] (validated against the 7
+    // known caller rets). Takes precedence over pad redirect.
+    if (std::getenv("HARNESS_RETFAIL") && (std::uint32_t)lr == 0x28AE70u) {
+        const std::uint32_t r11 = regs[11];
+        std::uint32_t entry_sp = r11 + 16;
+        std::uint32_t saved_lr = 0;
+        bool ok = cb->rt_->CheckRange(entry_sp - 4, 4, false);
+        if (ok) {
+            std::memcpy(&saved_lr, cb->rt_->H(entry_sp - 4), 4);
+        }
+        static const std::uint32_t rets[] = {0x28A380u, 0x28B0E4u, 0x28B160u, 0x28B1B8u,
+                                             0x28B390u, 0x28B3E8u, 0x28B484u};
+        bool known = false;
+        for (std::uint32_t r : rets) {
+            if (saved_lr == r) {
+                known = true;
+                break;
+            }
+        }
+        std::printf("[retfail] r11=%08x entry_sp=%08x saved_lr=%08x %s\n", r11, entry_sp, saved_lr,
+                    known ? "KNOWN" : "UNKNOWN");
+        if (!known) {
+            // r11 is stale here: scan the live stack for a return address
+            // into one of the 7 caller functions instead. The saved-lr
+            // slot +4 gives entry_sp the same way.
+            const std::uint32_t sp0 = regs[13];
+            for (std::uint32_t a = sp0; a < sp0 + 4096; a += 4) {
+                if (!cb->rt_->CheckRange(a, 4, false)) {
+                    break;
+                }
+                std::uint32_t w = 0;
+                std::memcpy(&w, cb->rt_->H(a), 4);
+                for (std::uint32_t r : rets) {
+                    if (w == r) {
+                        entry_sp = a + 4;
+                        saved_lr = w;
+                        known = true;
+                        ok = true;
+                        break;
+                    }
+                }
+                if (known) {
+                    break;
+                }
+            }
+            std::printf("[retfail] stack-scan entry_sp=%08x saved_lr=%08x %s\n", entry_sp,
+                        saved_lr, known ? "KNOWN" : "UNKNOWN");
+        }
+        if (ok && known && cb->rt_->CheckRange(entry_sp + 8, 4, true)) {
+            const std::uint32_t z = 0;
+            std::memcpy(cb->rt_->H(entry_sp + 8), &z, 4);
+            regs[0] = 0;
+            regs[13] = entry_sp;
+            cb->rt_->ParkRedirect(saved_lr);
+            std::printf("[retfail] flag=0, resume at %08x\n", saved_lr);
+            cb->rt_->stop_step_ = true;
+            cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+            return;
+        }
+        std::printf("[retfail] validation failed, falling through\n");
+    }
+    if (!pad) {
+        return;  // RETFAIL-only mode (no pad chain): nothing more to do.
+    }
     std::printf("[redir] throw r0=%08x r1=%08x lr=%08x sp=%08x -> pad %08x%s\n", (std::uint32_t)r0,
                 (std::uint32_t)r1, (std::uint32_t)lr, regs[13], pad,
                 cb->rt_->GuestTid() == 1 ? "" : " (T2+)");
@@ -5425,9 +5493,11 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
-            // HARNESS_REDIR=pad: throw-to-catch emulation at the throw entry
-            // (PROBE2 slot). Emitted after the dumps (they still run first).
-            if (std::getenv("HARNESS_REDIR") && pc == probe_pc2) {
+            // HARNESS_REDIR=pad[,..]: throw-to-catch emulation at the throw
+            // entry (PROBE2 slot); HARNESS_RETFAIL=1: failing-return
+            // emulation (same site). Emitted after the dumps.
+            if ((std::getenv("HARNESS_REDIR") || std::getenv("HARNESS_RETFAIL")) &&
+                pc == probe_pc2) {
                 ir.CallHostFunction(&ProbeRedir,
                                     ir.ZeroExtendWordToLong(
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
@@ -5463,6 +5533,19 @@ void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) {
     const std::int64_t wp = WriteWP();
     if (wp >= 0 && v == static_cast<std::uint32_t>(wp)) {
         std::printf("[wp] %08x written to %08x guest-pc=%08x\n", v, a, rt_->ActiveJit()->Regs()[15]);
+    }
+    // Address watchpoint, write side (HARNESS_WPA=hexaddr also arms this).
+    // NOTE: bulk stores (guest memset/memcpy thunks) bypass callbacks.
+    const std::int64_t wa = WatchAddr();
+    if (wa >= 0 && a == static_cast<std::uint32_t>(wa)) {
+        auto& regs = rt_->ActiveJit()->Regs();
+        std::printf("[wpa] WRITE to %08x = %08x guest-pc=%08x%s\n", a, v, regs[15],
+                    rt_->GuestTid() == 1 ? "" : " (T2+)");
+        std::printf("[wpa] regs:");
+        for (int r = 0; r < 12; r++) {
+            std::printf(" r%d=%08x", r, regs[r]);
+        }
+        std::printf("\n");
     }
 }
 
