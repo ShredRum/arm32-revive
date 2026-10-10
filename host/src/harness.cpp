@@ -142,6 +142,32 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
     regs[1] = 0;
     regs[2] = r2;
     regs[3] = r3;
+    // HARNESS_POKE1187=1 (loading->menu gate): the gate is byte
+    // [*(0x672e9c)+1187]==1 (reader 0xBE714 from update 0xC2148; sole writer
+    // 0xBE704 never fires). Poke it before every call (BSS valid post-init).
+    if (std::getenv("HARNESS_POKE1187")) {
+        const std::uint32_t slot = 0x672e9cu;
+        if (rt.CheckRange(slot, 4, false)) {
+            std::uint32_t obj = 0;
+            std::memcpy(&obj, mem.host(slot), 4);
+            if (obj && rt.CheckRange(obj + 1187, 1, true)) {
+                std::uint8_t old = 0, one = 1;
+                std::memcpy(&old, mem.host(obj + 1187), 1);
+                std::memcpy(mem.host(obj + 1187), &one, 1);
+                static int pk = 0;
+                if (pk < 12) {
+                    pk++;
+                    std::printf("[poke1187] fn=%08x obj=%08x was=%u\n", fn, obj, old);
+                }
+            } else {
+                static int pk0 = 0;
+                if (pk0 < 3) {
+                    pk0++;
+                    std::printf("[poke1187] fn=%08x obj=%08x INVALID\n", fn, obj);
+                }
+            }
+        }
+    }
     // HARNESS_JSTK: caller passes resolved words (numbers, or byte-array
     // handles created via HARNESS_JBARRAY); pushed so stack[0] = first.
     if (!stack_args.empty()) {
@@ -195,9 +221,35 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
                     regs[8], regs[9], regs[10], regs[11], regs[12], regs[13], regs[14]);
     }
     rt.SvcHistDump();
-    // HARNESS_HEXDUMP=<hexaddr>[,<len>]: post-mortem guest memory dump.
-    // Heap is bump (no reuse), so buffers survive to the halt. Trusted addrs
-    // come from [call] logs of the same (deterministic) run.
+    // HARNESS_HEXDUMPFILE=<hexaddr>,<hexlen>,<path>: raw binary guest dump
+    // to a host file (for extracting decrypted Lua sources etc.; no 1KB cap,
+    // single post-mortem dump after the last JNI call... actually per call
+    // like HEXDUMP; use the last one).
+    if (const char* hf = std::getenv("HARNESS_HEXDUMPFILE")) {
+        std::string s(hf);
+        auto c1 = s.find(',');
+        auto c2 = (c1 == std::string::npos) ? std::string::npos : s.find(',', c1 + 1);
+        if (c1 != std::string::npos && c2 != std::string::npos) {
+            std::uint32_t da =
+                static_cast<std::uint32_t>(std::strtoul(s.substr(0, c1).c_str(), nullptr, 16));
+            std::uint32_t dl = static_cast<std::uint32_t>(
+                std::strtoul(s.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 16));
+            std::string path = s.substr(c2 + 1);
+            if (dl > 0x100000) {
+                dl = 0x100000;
+            }
+            if (rt.CheckRange(da, dl, false)) {
+                FILE* f = std::fopen(path.c_str(), "wb");
+                if (f) {
+                    std::fwrite(rt.H<std::uint8_t>(da), 1, dl, f);
+                    std::fclose(f);
+                    std::printf("[hexdumpfile] %08x+%u -> %s\n", da, dl, path.c_str());
+                }
+            } else {
+                std::printf("[hexdumpfile] BAD range %08x+%u\n", da, dl);
+            }
+        }
+    }
     if (const char* hd = std::getenv("HARNESS_HEXDUMP")) {
         std::uint32_t da = static_cast<std::uint32_t>(std::strtoul(hd, nullptr, 16));
         std::uint32_t dl = 64;

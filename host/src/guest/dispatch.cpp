@@ -25,6 +25,19 @@
 
 namespace abr {
 
+// HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
+// goto bad_ptr initializations inside CallImport).
+static std::int64_t TimeWarp() {
+    static std::int64_t w = -2;
+    if (w == -2) {
+        w = 0;
+        if (const char* e = std::getenv("HARNESS_TIMEWARP")) {
+            w = (std::int64_t)std::strtoll(e, nullptr, 0);
+        }
+    }
+    return w;
+}
+
 // Real GLES backend instance (created on first gl* import).
 RealGL* Runtime::RealGLBackend() {
     if (!realgl_) {
@@ -833,10 +846,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
+    // HARNESS_TIMEWARP=<sec>: shift all guest clocks forward (timer-gate
+    // tests: loading/menu timeouts expire without wall waiting).
     if (n == "clock_gettime") {
         struct timespec ts {};
         const int r = clock_gettime(a0, &ts);
         if (r == 0) {
+            ts.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(ts.tv_sec);
             const std::uint32_t nsec = static_cast<std::uint32_t>(ts.tv_nsec);
             if (CheckRange(a1, 8, true)) {
@@ -851,6 +867,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         struct timeval tv {};
         const int r = gettimeofday(&tv, nullptr);
         if (r == 0 && a0 != 0) {
+            tv.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(tv.tv_sec);
             const std::uint32_t usec = static_cast<std::uint32_t>(tv.tv_usec);
             if (CheckRange(a0, 8, true)) {
@@ -864,6 +881,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "time" || n == "clock") {
         std::time_t t = (n == "time") ? std::time(nullptr) : std::clock();
+        if (n == "time") {
+            t += (time_t)TimeWarp();
+        }
         Ret(regs, static_cast<std::uint32_t>(t & 0xFFFFFFFFu),
             static_cast<std::uint32_t>((std::uint64_t(t) >> 32) & 0xFFFFFFFFu));
         return;
@@ -1090,6 +1110,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         int r = ::poll(pfds.data(), (nfds_t)pfds.size(), to);
+        // TEMP-DIAG (worker hang): log which fd fires on nonzero returns.
+        if (r > 0) {
+            std::string ds;
+            for (std::size_t i = 0; i < pfds.size() && i < 8; i++) {
+                std::int32_t gfd = -99;
+                std::memcpy(&gfd, H(a0 + i * 8), 4);
+                char b[64];
+                std::snprintf(b, sizeof(b), "g%d->h%d:ev%04x ", gfd, pfds[i].fd, pfds[i].revents);
+                ds += b;
+            }
+            std::printf("[poll-event] r=%d %s\n", r, ds.c_str());
+        }
         {
             char b[64];
             int n = std::snprintf(b, sizeof(b), "[poll-ret] %d\n", r);
@@ -1581,6 +1613,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             ssize_t r = (n == "read") ? ::read(it->second, H(a1), a2) : ::write(it->second, H(a1), a2);
+            // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
+            // pipes show up here via fd_map_; files too, capped).
+            if (n == "write" && r > 0 && r <= 64) {
+                static int wlog = 0;
+                if (wlog < 60) {
+                    wlog++;
+                    const std::uint8_t* p = H<const std::uint8_t>(a1);
+                    std::string hex;
+                    char b[8];
+                    for (ssize_t i = 0; i < r; i++) {
+                        std::snprintf(b, sizeof(b), "%02x", p[i]);
+                        hex += b;
+                    }
+                    std::printf("[pipelog] write gfd=%u %zdB: %s\n", a0, r, hex.c_str());
+                }
+            }
             Ret(regs, static_cast<std::uint32_t>(r < 0 ? -1 : r));
             return;
         }
@@ -2987,6 +3035,34 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, (a1 == a2) ? 1u : 0u);  // covers NULL==NULL; handles are VAs
         return;
     }
+    case 31: {  // GetObjectClass(env, obj) -> jclass (verified vs NDK jni.h)
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::uint32_t ch = 0;
+        const auto it = jni_objclass_.find(a1);
+        if (it != jni_objclass_.end()) {
+            ch = it->second;
+        } else {
+            // Unknown object (e.g. jstring/array): fabricate java/lang/Object.
+            for (const auto& kv : jni_classes_) {
+                if (kv.second == "java/lang/Object") {
+                    ch = kv.first;
+                    break;
+                }
+            }
+            if (!ch) {
+                jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
+                ch = jni_obj_next_;
+                jni_obj_next_ += 4;
+                jni_classes_[ch] = "java/lang/Object";
+            }
+            if (a1) {
+                jni_objclass_[a1] = ch;
+            }
+        }
+        std::printf("[jni] GetObjectClass %08x -> %08x\n", a1, ch);
+        Ret(regs, ch);
+        return;
+    }
     case 23:   // DeleteLocalRef(env, obj) -> void: mock handles need no GC
     case 22:   // DeleteGlobalRef(env, obj) -> void (same)
     case 228:  // DeleteWeakGlobalRef(env, ref) -> void (same)
@@ -3028,6 +3104,27 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         std::memcpy(H(o), &o, 4);
         jni_objects_[o] = "newobj<" + mdesc + ">";
+        // Track obj -> class handle for GetObjectClass (fn#31): parse the
+        // class from the ctor desc ("pkg/Class.<init>..."), find-or-create.
+        {
+            auto dot = mdesc.find(".<init>");
+            std::string cname = (dot == std::string::npos) ? "java/lang/Object"
+                                                           : mdesc.substr(0, dot);
+            std::uint32_t ch = 0;
+            for (const auto& kv : jni_classes_) {
+                if (kv.second == cname) {
+                    ch = kv.first;
+                    break;
+                }
+            }
+            if (!ch) {
+                jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
+                ch = jni_obj_next_;
+                jni_obj_next_ += 4;
+                jni_classes_[ch] = cname;
+            }
+            jni_objclass_[o] = ch;
+        }
         const char* vtag = (fn == 28) ? "" : ((fn == 29) ? "V" : "A");
         std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
         // TEMP-DIAG (audio): capture the native audio handle. NewObjectV
@@ -3104,6 +3201,16 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 content = "en_US";
                 if (const char* d = std::getenv("HARNESS_LOCALE")) {
                     content = d;
+                }
+            }
+            // UUID.toString() must be a valid UUID (empty string stalled the
+            // installation-ID flow into a forever poll-wait; device always
+            // returns a real UUID here).
+            if (content.empty() && mdesc.find("toString") != std::string::npos && !is_static) {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                const auto ito = jni_objects_.find(a1);
+                if (ito != jni_objects_.end() && ito->second.find("UUID") != std::string::npos) {
+                    content = "01234567-89ab-cdef-0123-456789abcdef";
                 }
             }
             const std::uint32_t js = JniNewString(content);
@@ -3582,6 +3689,35 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
         }
     }
 }
+void GuestCallbacks::PokeGateByte(std::uint64_t r7slot) {
+    // HARNESS_POKE1187 mid-update poke: [*(r7slot)+1187] = 1, where r7slot
+    // is the live gate slot (r7 at 0xC2144) — no hardcoded BSS.
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    const std::uint32_t slot = (std::uint32_t)r7slot;
+    if (!cb->rt_->CheckRange(slot, 4, false)) {
+        return;
+    }
+    std::uint32_t obj = 0;
+    std::memcpy(&obj, cb->rt_->H(slot), 4);
+    if (obj && cb->rt_->CheckRange(obj + 1187, 1, true)) {
+        std::uint8_t one = 1;
+        std::memcpy(cb->rt_->H(obj + 1187), &one, 1);
+        // TEMP-EXP (menu gate): also set the companion event word. If the
+        // advance path derefs it, we get an informative BAD (proves ptr).
+        if (std::getenv("HARNESS_POKE1188") && cb->rt_->CheckRange(obj + 1188, 4, true)) {
+            std::uint32_t w = 1;
+            std::memcpy(cb->rt_->H(obj + 1188), &w, 4);
+        }
+        static int pg = 0;
+        if (pg < 4) {
+            pg++;
+            std::printf("[poke1187] mid-update slot=%08x obj=%08x\n", slot, obj);
+        }
+    }
+}
 void GuestCallbacks::ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6) {
     std::printf("[probe] r4=%08x r5=%08x r6=%08x\n", (std::uint32_t)r4, (std::uint32_t)r5,
                 (std::uint32_t)r6);
@@ -3881,6 +4017,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         if (std::getenv("HARNESS_FIXPVR") && pc == 0x2B0C50u) {
             using Reg = Dynarmic::A32::Reg;
             ir.SetRegister(static_cast<Reg>(0), ir.Imm32(11));
+        }
+        // HARNESS_POKE1187: the loading gate byte [*(r7)+1187] is
+        // re-zeroed by an in-update memset AFTER our pre-call poke, so set it
+        // right here at 0xC2144 (ldr r0,[r7] just before the gate BL 0xC2148).
+        if (std::getenv("HARNESS_POKE1187") && pc == 0xC2144u) {
+            ir.CallHostFunction(
+                &PokeGateByte,
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))));
         }
         if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3)) {
             g_probe_pc = pc;

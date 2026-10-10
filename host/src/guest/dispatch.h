@@ -214,6 +214,7 @@ private:
     std::unordered_map<std::uint32_t, std::string> jni_classes_;  // handle -> name
     std::unordered_map<std::uint32_t, std::string> jni_methods_;  // cookie -> desc
     std::unordered_map<std::uint32_t, std::string> jni_objects_;  // handle -> desc
+    std::unordered_map<std::uint32_t, std::uint32_t> jni_objclass_;  // obj -> class
     std::unordered_map<std::uint32_t, std::string> jni_strings_;  // jstring -> UTF-8
 
     // File-bridge state.
@@ -275,6 +276,8 @@ public:
     static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
     static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
+    // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
+    static void PokeGateByte(std::uint64_t r7slot);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

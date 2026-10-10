@@ -670,6 +670,15 @@ dead subsystem, game degrades without it).
   (retracted). Mixing so far doesn't unblock loading.
 - SHOT/GL DIAG: RGBA reads (RGB=INVALID_OPERATION on alpha configs),
   swap-after-read, draw-state/MVP/texsize dumps, upload checksums, glScissor.
+- TIMER THEORY DEAD (2026-10-10): HARNESS_TIMEWARP=N (shifts clock_gettime/
+  gettimeofday/time) +3600s at loading gate -> still LOADING. Gate is
+  event/state, not time. TimeWarp helper in dispatch.cpp (file scope, avoids
+  goto-initializer issue).
+- LOADING GATE intel: decrypted Lua string consts persist in heap (menu init
+  registry readable: initializeGameMenus creates all pages incl. LoadingPage/
+  MainMenuPage/EpisodeSelection; no code bodies, only consts). Per-update "ADD"
+  memcmp = volume-key input polling (VOLUME_UP/ADD rodata @0x5C0D59), harmless.
+  Idle updates byte-identical (md5-proven, 6 in a row) = pure flag wait.
 - TMP-ARCHIVE (work/tmp-archive/, git-ignored): rescued from /tmp before a
   shutdown — eng_idx11.so + eng_throwprobe.so (patched .so experiment copies),
   registry_poisoned_128B.bin + regbak/ (0x01-wall forensics), milestone PNGs
