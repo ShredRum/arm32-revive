@@ -968,6 +968,45 @@ dead subsystem, game degrades without it).
   OPEN: why lookup NULLs offered ciphers (table subset? [sp+32] misland?).
 - NEXT: cipher sweep (0x35 running) -> ECDHE_RSA (0xC013, offered) with
   ServerKeyExchange+ECDH+RSA-sign via cryptography lib if RSA-kx all NULL.
+
+## 22. Session 2026-10-11 (part 13): phone dump, graceful catch proven
+- SAME BUILD (proven): aapt says our APK versionName=2.6.13 versionCode=2676;
+  phone reports 2.6.13; md5 of both libAngryBirdsRio.so identical. Phone
+  evidence fully applies. ("2676" in filename = versionCode.)
+- PHONE LOGCAT (online): RovioAccount login FAILS 403 (CloudFront HTML) yet
+  menu reached. AIRPLANE logcat: SAME "Could not contact DNS server" shape
+  as our harness, surfacing as error code 6, menu reached. PROVES a graceful
+  catch exists in the binary: identical failure throws here, degrades there.
+  Consequence: host unwinder (TTUNW) is THE menu path, not TLS success.
+- HEALTHY STATE: phone fusion.registry (320B vs our 144B) READ+rewritten by
+  the game (not rejected -> registry crypto not device-bound). Seeded
+  work/files5 with phone files. Still throws in NONET (state alone no unlock).
+- NONET FIDELITY (fixed, was unfaithful): socket() already succeeded; now UDP
+  connect() succeeds (Linux sends no packets; getsockopt SO_TYPE gate), while
+  send/sendto/write-to-socket fail ENETUNREACH (host uplink no longer leaks
+  under NONET). Resolver now goes connect-OK -> send-fail like on device.
+  Result: still "Could not contact DNS server" + throw (shape now faithful).
+- LOGO FORENSICS (filmstrip HARNESS_SHOT_EVERY=N): 100 input-less updates =
+  Rovio logo, zero change (proven stuck, not slow). Renders don't advance
+  (update+render film still Rovio). nativeResume (0xC23DC, dynsym) changes
+  nothing. Inputs (tap-to-skip) are the only in-harness advance. Phone: 3s
+  logo timeout (user-observed) = plain timer starved of game-time here (idle
+  updates take ms; TLOG: early updates dt 100-250ms). No missing engine:
+  frames render every update; pacing ~5-10fps is ours to drive. SHOW window
+  is black (offscreen render; presentation unwired — screenshots are truth).
+- JNI GAP closed: nativeResume needs CallBooleanMethodV (fn#38) =
+  AudioOutput.startOutput()Z -> implemented (1=true, default 0).
+- TTUNW2 (per-frame unwinder emulation): exidx binary search in C++ (prel31),
+  live frames w/ slots, static map ttslots3 (17.5k: 3858 typed + 13729
+  catchall/cleanup, incl filter 0). ttunw1: 4348 fns, 20 frames, catchalls in
+  0x18953C found BUT pads were fn-RELATIVE (resumed 0x208 garbage — fixed to
+  absolute). Pass order: typed matches inner->outer, then catchalls;
+  tried-set (24) iterates rethrows; r0 kept, r1=filter (0 catchall), sp kept.
+- TLS (closed as menu path, kept as diagnostics): cipher sweep 0x0A/0x2F/
+  0x35 all NULL-lookup (reason 247); ECDHE loopback-green but game RSTs
+  (no parse crash markers; worker dies by unwind as usual). Real cloud alive
+  (TLS1.3, valid cert) but API 403 even with byte-exact real request bodies
+  (replayed via python) — anonymous session endpoints dead in 2026.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

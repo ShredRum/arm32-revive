@@ -985,6 +985,30 @@ int main(int argc, char** argv) {
             }
             Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, stk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
+            // HARNESS_TLOG=1: host monotonic ms at each JNI call boundary
+            // (frame pacing diagnostics: what dt does the game observe?).
+            if (std::getenv("HARNESS_TLOG")) {
+                struct timespec ts {};
+                ::clock_gettime(CLOCK_MONOTONIC, &ts);
+                std::printf("[tlog] fn=%08x t=%lld.%03lld\n", fns[i],
+                            (long long)ts.tv_sec, (long long)(ts.tv_nsec / 1000000));
+            }
+            // HARNESS_SHOT_EVERY=N: filmstrip screenshot every Nth call.
+            {
+                static int every = -1;
+                if (every < 0) {
+                    every = 0;
+                    if (const char* se = std::getenv("HARNESS_SHOT_EVERY")) {
+                        every = std::atoi(se);
+                    }
+                }
+                if (every > 0 && (i + 1) % (std::size_t)every == 0) {
+                    char path[64];
+                    std::snprintf(path, sizeof(path), "work/shot%03zu.ppm", i + 1);
+                    rt.RealGLBackend()->Screenshot(path, 800, 480);
+                    std::printf("[realgl] filmstrip -> %s\n", path);
+                }
+            }
         }
         // HARNESS_SCREENSHOT=1: capture the real-GL drawable (needs
         // HARNESS_REALGL=1) to work/shot.ppm after the JNI sequence.

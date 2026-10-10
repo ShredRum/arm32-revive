@@ -1556,11 +1556,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         {
             static std::uint64_t poll_hits = 0;
-            if (++poll_hits <= 5) {
+            if (++poll_hits <= 400) {
                 std::string ds;
                 for (std::size_t i = 0; i < pfds.size() && i < 4; i++) {
                     char b[32];
-                    std::snprintf(b, sizeof(b), "%d ", pfds[i].fd);
+                    std::int32_t gfd = -99;
+                    std::memcpy(&gfd, H(a0 + i * 8), 4);
+                    std::int16_t ev = 0;
+                    std::memcpy(&ev, H(a0 + i * 8 + 4), 2);
+                    std::snprintf(b, sizeof(b), "g%d:%04x ", gfd, (unsigned)ev & 0xFFFF);
                     ds += b;
                 }
                 std::printf("[poll] nfds=%u to=%d fds=[%s]%s\n", a1, (int)a2, ds.c_str(),
@@ -2155,6 +2159,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
+            // HARNESS_NONET=1: airplane-faithful — writes to sockets fail
+            // (ENETUNREACH); pipes/files are unaffected (local IPC works
+            // offline). The TLS stack writes via write(), not send().
+            if (n == "write" && std::getenv("HARNESS_NONET")) {
+                struct stat fw {};
+                if (::fstat(hfd, &fw) == 0 && S_ISSOCK(fw.st_mode)) {
+                    set_guest_errno(ENETUNREACH);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+            }
             // Unlocked: pipes/sockets block here; the map lock must be free
             // so other threads keep running (2026-10-10 deadlock fix).
             // Cap: FIFO reads wait max 5s (poll) then fail EAGAIN —
@@ -2358,10 +2373,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
             if (std::getenv("HARNESS_NONET")) {
-                // Airplane mode: connect never succeeds (DNS/server
-                // unreachable). Instant, no 10s waits per attempt.
-                errno = ENETUNREACH;
-                r = -1;
+                // Airplane-faithful: UDP connect() SUCCEEDS on Linux (no
+                // packets sent; only sets the default remote). Only TCP
+                // connect fails (ENETUNREACH). Failing UDP connect sent the
+                // bundled resolver down a never-on-device path (it aborts
+                // before send with "Could not contact DNS server", while on
+                // device it proceeds to sendto-fail/timeout = "no answer").
+                int st = 0;
+                socklen_t sl = sizeof(st);
+                if (::getsockopt(hfd, SOL_SOCKET, SO_TYPE, &st, &sl) == 0 &&
+                    st == SOCK_DGRAM) {
+                    // Leave r as-is (real UDP connect outcome: success).
+                } else {
+                    // Airplane mode: TCP connect never succeeds
+                    // (server unreachable). Instant, no 10s waits.
+                    errno = ENETUNREACH;
+                    r = -1;
+                }
             } else if (r != 0 && errno == EINPROGRESS) {
                 const int w = wait_fd(hfd, POLLOUT, 10000);
                 if (w > 0) {
@@ -2504,6 +2532,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
+            // HARNESS_NONET=1: airplane-faithful traffic failure. Sockets
+            // create fine and UDP connects (above), but no packet can leave:
+            // send/sendto fail ENETUNREACH (no route), recv waits out the
+            // kernel timeout below (EAGAIN). Previously sends went out over
+            // the HOST uplink even under NONET (unfaithful).
+            if (std::getenv("HARNESS_NONET")) {
+                set_guest_errno(ENETUNREACH);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
             // TLS version DOWNGRADE (harness bridge): the in-module stack
             // is capped at TLS 1.0 (any 0303 ServerHello record -> fatal
             // alert 47 illegal_parameter, even though the hello body says
@@ -2589,8 +2627,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                  addr ? &sl : nullptr);
             if (r < 0) {
                 set_guest_errno(errno);
+                if (std::getenv("HARNESS_POLLDBG")) {
+                    std::printf("[recv-dbg] %s(gfd %u) r=-1 errno=%d\n", n.c_str(), a0, errno);
+                }
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
+            }
+            if (r == 0 && std::getenv("HARNESS_POLLDBG")) {
+                std::printf("[recv-dbg] %s(gfd %u) r=0 (EOF)\n", n.c_str(), a0);
             }
             // TEMP-DIAG (network bring-up): inbound bytes are the signal
             // (DNS replies, HTTP bodies). Capped hex.
@@ -4278,6 +4322,27 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, o);
         return;
     }
+    case 37:  // CallBooleanMethod(V/A)(env, obj, method, ...) -> jboolean
+    case 38:
+    case 39: {
+        const char* vtag = (fn == 37) ? "" : ((fn == 38) ? "V" : "A");
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        // AudioOutput.startOutput()Z: our mixer is live (mixdata proven) —
+        // report started, as on device. Everything else defaults to false
+        // (logged-out services etc.).
+        const std::uint32_t rv =
+            (mdesc.find("startOutput") != std::string::npos) ? 1 : 0;
+        std::printf("[jni] CallBooleanMethod%s %s -> %u\n", vtag, mdesc.c_str(), rv);
+        Ret(regs, rv);
+        return;
+    }
     case 61:  // CallVoidMethod(V/A)(env, obj, method, ...) -> void
     case 62:   // (verified vs NDK jni.h)
     case 63: {
@@ -5098,7 +5163,7 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
         }
     }
     if (used >= npads && !std::getenv("HARNESS_RETFAIL") && !std::getenv("HARNESS_STACKBT") &&
-        !std::getenv("HARNESS_TTFILE")) {
+        !std::getenv("HARNESS_TTFILE") && !std::getenv("HARNESS_TTUNW")) {
         return;
     }
     std::uint32_t pad = (used < npads) ? pads[used++] : 0;
@@ -5246,7 +5311,192 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
         cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
         return;
     }
-    // HARNESS_RETFAIL=1: synthesize a failing return from the HTTP raiser
+    // HARNESS_TTUNW=path: per-frame unwinder emulation (phone-proven: the
+    // same binary catches the DNS-fail exception on device and degrades to
+    // error code 6; our Dynarmic unwinder can't reach it). At a throw:
+    //  1. base chain of the thrown type (live si_class walk, as TTFILE);
+    //  2. live stack return-addr scan -> (ret_pc, stack_slot) frames;
+    //  3. exidx binary search (in-C++, prel31) ret_pc -> fn start;
+    //  4. map lookup fn -> pads (typed + catch-all/cleanup, incl filter 0);
+    //  5. redirect to the innermost untried frame with a live-matching typed
+    //     catch, else innermost untried catch-all (r1=filter, 0 for catchall;
+    //     r0=exception object kept, sp kept — proven accepted by begin_catch).
+    // Rethrows iterate to the next candidate via the tried-pad set.
+    if (const char* uf = std::getenv("HARNESS_TTUNW")) {
+        struct PadEnt {
+            std::uint32_t fn, pad;
+            int flt;
+            std::uint32_t slot;
+        };
+        static bool uloaded = false;
+        static std::unordered_map<std::uint32_t, std::vector<PadEnt>> umap;
+        static std::set<std::uint32_t> tried;
+        if (!uloaded) {
+            uloaded = true;
+            if (FILE* f = std::fopen(uf, "r")) {
+                char line[128];
+                while (std::fgets(line, sizeof(line), f)) {
+                    unsigned fn = 0, padoff = 0, se = 0;
+                    int fl = 0;
+                    if (std::sscanf(line, "%x %x %d %x", &fn, &padoff, &fl, &se) == 4) {
+                        // File stores fn-relative pad offsets; redirect needs
+                        // absolute VAs (0x208-style offsets alone executed
+                        // garbage low memory in ttunw1 — fixed).
+                        umap[fn].push_back({fn, fn + padoff, fl, se});
+                    }
+                }
+                std::fclose(f);
+            }
+            std::printf("[ttunw] %zu fns loaded\n", umap.size());
+        }
+        auto urd = [&](std::uint32_t a, std::uint32_t& v) -> bool {
+            if (!cb->rt_->CheckRange(a, 4, false)) {
+                return false;
+            }
+            std::memcpy(&v, cb->rt_->H(a), 4);
+            return true;
+        };
+        auto uprel31 = [&](std::uint32_t place, std::uint32_t& out) -> bool {
+            std::uint32_t w = 0;
+            if (!urd(place, w)) {
+                return false;
+            }
+            std::int32_t off = (std::int32_t)(w << 1) >> 1;
+            out = place + (std::uint32_t)off;
+            return true;
+        };
+        // Frame -> fn via exidx (base 0x59D250, 18184 entries, verified).
+        auto ufnof = [&](std::uint32_t pc) -> std::uint32_t {
+            const std::uint32_t base = 0x59D250u;
+            const int n = 18184;
+            int lo = 0, hi = n;
+            while (lo < hi) {
+                int mid = (lo + hi) / 2;
+                std::uint32_t f = 0;
+                if (!uprel31(base + mid * 8, f)) {
+                    return 0;
+                }
+                if (f <= pc) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if (lo < 1) {
+                return 0;
+            }
+            std::uint32_t f = 0;
+            if (!uprel31(base + (lo - 1) * 8, f)) {
+                return 0;
+            }
+            return f;
+        };
+        const std::uint32_t thrown = (std::uint32_t)r1;
+        std::uint32_t chain[5] = {thrown, 0, 0, 0, 0};
+        int nc = 1;
+        {
+            std::uint32_t cur = thrown;
+            for (int k = 0; k < 3; k++) {
+                std::uint32_t b = 0;
+                if (!urd(cur + 8, b)) {
+                    break;
+                }
+                if (b < 0x600000u || b >= 0x6F0000u) {
+                    break;
+                }
+                chain[nc++] = b;
+                cur = b;
+            }
+        }
+        auto umatch = [&](std::uint32_t E) -> int {
+            // Returns chain index or -1. One-hop absolute or pcrel two-hop.
+            std::uint32_t raw = 0;
+            if (!urd(E, raw)) {
+                return -1;
+            }
+            std::uint32_t cands[2] = {raw, 0};
+            std::uint32_t slot2 = E + raw;
+            urd(slot2, cands[1]);
+            for (int c = 0; c < 2; c++) {
+                if (cands[c] < 0x600000u || cands[c] >= 0x6F0000u) {
+                    continue;
+                }
+                for (int k = 0; k < nc; k++) {
+                    if (cands[c] == chain[k]) {
+                        return k;
+                    }
+                }
+            }
+            return -1;
+        };
+        // Live frames (same scan as STACKBT, keep slot addrs).
+        struct Frame {
+            std::uint32_t pc, slot;
+        };
+        std::vector<Frame> frames;
+        {
+            const std::uint32_t sp0 = regs[13];
+            for (std::uint32_t a = sp0; a < sp0 + 8192 && frames.size() < 20; a += 4) {
+                std::uint32_t w = 0;
+                if (!urd(a, w)) {
+                    break;
+                }
+                if (w < 0x1000 || w >= 0x653D1C) {
+                    continue;
+                }
+                std::uint32_t prev = 0;
+                if (!urd(w - 4, prev)) {
+                    continue;
+                }
+                if ((prev >> 25) == 0x75) {
+                    frames.push_back({w & ~1u, a});
+                }
+            }
+        }
+        std::printf("[ttunw] throw ti=%08x frames=%zu\n", thrown, frames.size());
+        // Pass 1: innermost typed match. Pass 2: innermost catch-all.
+        for (int pass = 0; pass < 2; pass++) {
+            for (const Frame& fr : frames) {
+                std::uint32_t fn = ufnof(fr.pc);
+                if (!fn) {
+                    continue;
+                }
+                auto it = umap.find(fn);
+                if (it == umap.end()) {
+                    continue;
+                }
+                for (const PadEnt& e : it->second) {
+                    bool iscatch = (e.flt == 0);
+                    if ((pass == 0) == iscatch) {
+                        continue;
+                    }
+                    if (tried.count(e.pad)) {
+                        continue;
+                    }
+                    if (!iscatch) {
+                        if (umatch(e.slot) < 0) {
+                            continue;
+                        }
+                    }
+                    std::printf("[ttunw] %s pad=%08x fn=%08x filter=%d (frame pc=%08x)\n",
+                                iscatch ? "catchall" : "typed", e.pad, fn, e.flt, fr.pc);
+                    tried.insert(e.pad);
+                    if (tried.size() > 24) {
+                        std::printf("[ttunw] tried budget exhausted\n");
+                        break;
+                    }
+                    cb->rt_->ParkRedirectEx(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt));
+                    cb->rt_->stop_step_ = true;
+                    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+                    return;
+                }
+            }
+        }
+        std::printf("[ttunw] no candidate for ti=%08x\n", thrown);
+        cb->rt_->stop_step_ = true;
+        cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+        return;
+    }
     // (0x28A3DC, throw lr 0x28AE70) instead of throwing: the callers check
     // a stack flag ([sp+8] == 0 -> failure branch) and ignore r0. Uses the
     // LIVE frame: r11 (frame ptr, entry_sp = r11+16) gives flag addr
@@ -5769,9 +6019,11 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             // HARNESS_REDIR=pad[,..]: throw-to-catch emulation at the throw
             // entry (PROBE2 slot); HARNESS_RETFAIL=1: failing-return
             // emulation (same site); HARNESS_STACKBT/HARNESS_TTFILE observe.
+            // HARNESS_TTUNW=path: per-frame unwinder emulation (same site).
             // Emitted after the dumps.
             if ((std::getenv("HARNESS_REDIR") || std::getenv("HARNESS_RETFAIL") ||
-                 std::getenv("HARNESS_STACKBT") || std::getenv("HARNESS_TTFILE")) &&
+                 std::getenv("HARNESS_STACKBT") || std::getenv("HARNESS_TTFILE") ||
+                 std::getenv("HARNESS_TTUNW")) &&
                 pc == probe_pc2) {
                 ir.CallHostFunction(&ProbeRedir,
                                     ir.ZeroExtendWordToLong(
