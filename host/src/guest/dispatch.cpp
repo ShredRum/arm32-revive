@@ -4991,15 +4991,155 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
             }
         }
     }
-    if (used >= npads && !std::getenv("HARNESS_RETFAIL")) {
+    if (used >= npads && !std::getenv("HARNESS_RETFAIL") && !std::getenv("HARNESS_STACKBT") &&
+        !std::getenv("HARNESS_TTFILE")) {
         return;
     }
     std::uint32_t pad = (used < npads) ? pads[used++] : 0;
+    // HARNESS_STACKBT=1: backtrace at throw via live stack (find words that
+    // are return addresses = right after a BL). Maps the propagation chain
+    // -> candidate catching frames/pads. Runs BEFORE any chain/retfail
+    // gating below (pure observation, never halts).
+    if (std::getenv("HARNESS_STACKBT")) {
+        GuestCallbacks* cbb = g_probe_cb;
+        if (cbb) {
+            auto& rgs = cbb->rt_->ActiveJit()->Regs();
+            const std::uint32_t sp0 = rgs[13];
+            std::printf("[stackbt] throw sp=%08x frames:", sp0);
+            int n = 0;
+            for (std::uint32_t a = sp0; a < sp0 + 8192 && n < 14; a += 4) {
+                if (!cbb->rt_->CheckRange(a, 4, false)) {
+                    break;
+                }
+                std::uint32_t w = 0;
+                std::memcpy(&w, cbb->rt_->H(a), 4);
+                if (w < 0x1000 || w >= 0x653D1C) {
+                    continue;
+                }
+                if (!cbb->rt_->CheckRange(w - 4, 4, false)) {
+                    continue;
+                }
+                std::uint32_t prev = 0;
+                std::memcpy(&prev, cbb->rt_->H(w - 4), 4);
+                if ((prev >> 25) == 0x75) {
+                    std::printf(" %08x", w);
+                    n++;
+                }
+            }
+            std::printf("\n");
+        }
+    }
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
     }
     auto& regs = cb->rt_->ActiveJit()->Regs();
+    // HARNESS_TTFILE=path: typeinfo-slot matcher (unwinder discovery). At a
+    // throw, resolves every ttype slot (one-hop absolute or pcrel-indirect
+    // two-hop) and matches against the thrown type + its live base chain.
+    // Prints matches (fn/pad/filter/ti). Halts cleanly after (observe mode).
+    if (const char* tf = std::getenv("HARNESS_TTFILE")) {
+        static bool loaded = false;
+        static std::vector<std::uint32_t> slots;
+        static std::vector<std::uint32_t> slotpad;
+        static std::vector<int> slotflt;
+        if (!loaded) {
+            loaded = true;
+            if (FILE* f = std::fopen(tf, "r")) {
+                char line[128];
+                while (std::fgets(line, sizeof(line), f)) {
+                    unsigned fn = 0, padoff = 0, se = 0;
+                    int fl = 0;
+                    if (std::sscanf(line, "%x %x %d %x", &fn, &padoff, &fl, &se) == 4) {
+                        slotpad.push_back(fn + padoff);
+                        slotflt.push_back(fl);
+                        slots.push_back(se);
+                    }
+                }
+                std::fclose(f);
+            }
+            std::printf("[ttmatch] %zu slots loaded\n", slots.size());
+        }
+        const std::uint32_t thrown = (std::uint32_t)r1;
+        // Live base chain (si_class: base at ti+8), cap 4.
+        std::uint32_t chain[5] = {thrown, 0, 0, 0, 0};
+        int nc = 1;
+        {
+            std::uint32_t cur = thrown;
+            for (int k = 0; k < 3; k++) {
+                std::uint32_t b = 0;
+                if (!cb->rt_->CheckRange(cur + 8, 4, false)) {
+                    break;
+                }
+                std::memcpy(&b, cb->rt_->H(cur + 8), 4);
+                if (b < 0x600000u || b >= 0x6F0000u) {
+                    break;
+                }
+                chain[nc++] = b;
+                cur = b;
+            }
+        }
+        auto isdata = [](std::uint32_t v) { return v >= 0x600000u && v < 0x6F0000u; };
+        int hits = 0;
+        // HARNESS_TTPAD=pad,filter: redirect to an explicitly chosen match
+        // (pad absolute VA, filter = catch-clause switch for r1).
+        static std::uint32_t wantpad = 0;
+        static std::uint32_t wantflt = 0;
+        static bool ttinit = false;
+        if (!ttinit) {
+            ttinit = true;
+            if (const char* e = std::getenv("HARNESS_TTPAD")) {
+                unsigned p = 0, fl = 0;
+                if (std::sscanf(e, "%x,%u", &p, &fl) == 2) {
+                    wantpad = p;
+                    wantflt = fl;
+                }
+            }
+        }
+        for (std::size_t i = 0; i < slots.size(); i++) {
+            std::uint32_t E = slots[i];
+            if (!cb->rt_->CheckRange(E, 4, false)) {
+                continue;
+            }
+            std::uint32_t raw = 0;
+            std::memcpy(&raw, cb->rt_->H(E), 4);
+            std::uint32_t cands[2] = {raw, 0};
+            std::int32_t sraw = (std::int32_t)raw;
+            std::uint32_t slot2 = E + (std::uint32_t)sraw;
+            if (cb->rt_->CheckRange(slot2, 4, false)) {
+                std::memcpy(&cands[1], cb->rt_->H(slot2), 4);
+            }
+            for (int c = 0; c < 2; c++) {
+                if (!isdata(cands[c])) {
+                    continue;
+                }
+                for (int k = 0; k < nc; k++) {
+                    if (cands[c] == chain[k]) {
+                        std::printf("[ttmatch] pad=%08x filter=%d ti=%08x (chain+%d, %s)\n",
+                                    slotpad[i], slotflt[i], cands[c], k, c ? "twohop" : "onehop");
+                        hits++;
+                        // HARNESS_TTREDIR=1: redirect to the FIRST match
+                        // (pad + catch-clause switch value).
+                        if (hits == 1 && std::getenv("HARNESS_TTREDIR")) {
+                            cb->rt_->ParkRedirectEx(slotpad[i], (std::uint32_t)slotflt[i]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // Explicit pad choice wins over first-match.
+        if (wantpad) {
+            std::printf("[ttmatch] explicit pad=%08x filter=%u\n", wantpad, wantflt);
+            cb->rt_->ParkRedirectEx(wantpad, wantflt);
+        }
+        if (!hits) {
+            std::printf("[ttmatch] no match for ti=%08x\n", thrown);
+        }
+        cb->rt_->stop_step_ = true;
+        cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+        return;
+    }
     // HARNESS_RETFAIL=1: synthesize a failing return from the HTTP raiser
     // (0x28A3DC, throw lr 0x28AE70) instead of throwing: the callers check
     // a stack flag ([sp+8] == 0 -> failure branch) and ignore r0. Uses the
@@ -5078,6 +5218,12 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
 void Runtime::ParkRedirect(std::uint32_t pad) {
     pending_redir_ = pad;
     pending_jit_ = ActiveJit();
+    pending_r1_ = ~0u;
+}
+void Runtime::ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val) {
+    pending_redir_ = pad;
+    pending_jit_ = ActiveJit();
+    pending_r1_ = r1val;
 }
 bool Runtime::ApplyRedirect() {
     if (pending_redir_ == 0 || ActiveJit() != pending_jit_) {
@@ -5089,11 +5235,15 @@ bool Runtime::ApplyRedirect() {
     cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10);  // USER+ARM
     jit->SetCpsr(cpsr);
     regs[15] = pending_redir_;
+    if (pending_r1_ != ~0u) {
+        regs[1] = pending_r1_;
+    }
     stop_step_ = false;
-    std::printf("[redir] resume at %08x (r0=%08x sp=%08x)%s\n", pending_redir_, regs[0], regs[13],
-                GuestTid() == 1 ? "" : " (T2+)");
+    std::printf("[redir] resume at %08x (r0=%08x r1=%08x sp=%08x)%s\n", pending_redir_, regs[0],
+                regs[1], regs[13], GuestTid() == 1 ? "" : " (T2+)");
     pending_redir_ = 0;
     pending_jit_ = nullptr;
+    pending_r1_ = ~0u;
     return true;
 }
 void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
@@ -5495,8 +5645,10 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
             // HARNESS_REDIR=pad[,..]: throw-to-catch emulation at the throw
             // entry (PROBE2 slot); HARNESS_RETFAIL=1: failing-return
-            // emulation (same site). Emitted after the dumps.
-            if ((std::getenv("HARNESS_REDIR") || std::getenv("HARNESS_RETFAIL")) &&
+            // emulation (same site); HARNESS_STACKBT/HARNESS_TTFILE observe.
+            // Emitted after the dumps.
+            if ((std::getenv("HARNESS_REDIR") || std::getenv("HARNESS_RETFAIL") ||
+                 std::getenv("HARNESS_STACKBT") || std::getenv("HARNESS_TTFILE")) &&
                 pc == probe_pc2) {
                 ir.CallHostFunction(&ProbeRedir,
                                     ir.ZeroExtendWordToLong(

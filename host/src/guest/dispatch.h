@@ -93,6 +93,9 @@ public:
     bool ApplyRedirect();
     // Park a redirect from a probe (captures calling Jit for per-thread match).
     void ParkRedirect(std::uint32_t pad);
+    // TTFILE matcher parks pad + filter here (r1 override for the pad's
+    // catch-clause switch); ApplyRedirect applies them.
+    void ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val);
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -171,6 +174,8 @@ private:
     // Per-Jit: a halted thread must never redirect a different thread.
     std::uint32_t pending_redir_ = 0;
     Dynarmic::A32::Jit* pending_jit_ = nullptr;
+    // r1 override for the pad (catch-clause switch value); ~0u = keep regs.
+    std::uint32_t pending_r1_ = ~0u;
 
     GuestMemory& mem_;
     LoadedModule& mod_;
