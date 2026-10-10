@@ -260,6 +260,7 @@ public:
     static std::uint32_t g_probe_pc;  // pc being probed (fill gates on it)
     static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
+    static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

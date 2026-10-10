@@ -278,6 +278,13 @@ dead subsystem, game degrades without it).
   InitDataImports now allocates pointer cells (*V=table base / canary) and
   patches slots with &V. Killed the 0x20202021/0x464C45AD wild-pointer faults
   (table bytes were being read as pointers). Subagent #8 diagnosed.
+- CTYPE FIX (2026-10-10, subagent-proven mechanism, self-verified): our
+  _tolower/_toupper tables were u32[256], but the game reads u16 tab[c+1]
+  (2014 Bionic short tables with EOF-shift). Rebuilt as u16[257] ([0]=0xFFFF,
+  [c+1]=case(c)). Old layout read back zeros through the u16 lens. NOTE: this
+  did NOT yet move the font wall (same IOException/svc) — the "PVR" key was
+  already resolving; lookup miss is elsewhere (0x2B0A3C scan behavior under
+  probe with raisable cap HARNESS_PROBE_N, default 8).
 - WALL #3 (update, 2026-10-10): io::IOException "Unsupported image file
   format while reading data/fonts/864x480/FONT_BASIC.pvr" (message captured
   with {0} substituted via probe at 0x292118). Mechanism: 0x2B0BD4 returns
@@ -306,6 +313,11 @@ dead subsystem, game degrades without it).
   GLRENDERER tunable; PC-only scaffolding, real driver answers on device);
   GetIntegerv era limits (4096/8/16/...); display 800x480 (was 0).
 - FILES: /sys + /proc read-only passthrough (cpu topology sizing).
+- FLAKE (harness-only, 2/40 runs): main stuck in mutex_unlock trampoline
+  (same-pc beats) while worker blocks in file I/O holding the global
+  file_lock(mutex_) (probable pipe-read with no writer yet). Device-safe
+  (real bionic locks, no global). Watchdog aborts rc=42; rerun proceeds.
+  TODO: drop file_lock across blocking ::read/::write if flakes increase.
 - PORT LEDGER (do NOT ship): probe infra, fill-{} hack, GL shim+strings,
   /sys/proc passthrough, mock JNI values, seeds. SHIP: loader, real thunks,
   threads, asset bridge, build.
@@ -487,3 +499,90 @@ dead subsystem, game degrades without it).
   read region first, keep oldString minimal, verify after (3 destructive
   edits caught this session). Subagents: all 9 closed; relaunch by sessionID
   after rate-limit death; no live introspection possible.
+
+## 10. Session 2026-10-10: ParseError bypass -> font wall -> update+render GREEN
+- PARSE BYPASS (HARNESS_PROBE=1a410c,fill): the {} fill at 0x1A410C (empty
+  cloud-config string) lets the JSON parser proceed with defaults. Wall
+  BYPASSED, update advanced 16.7K -> 143K -> 586K svc. Fill is harness-only
+  scaffolding (does NOT ship). begin_catch NEVER fires on these paths (0 hits)
+  — no C++ catch-and-fallback; every throw is fatal spiral (NESTMAX=200000
+  proves: blows 8MB stack, genuinely uncaught).
+- FONT WALL (io::IOException "Unsupported image file format ... FONT_BASIC.pvr",
+  svc~585909 deterministic NOWORKER): 0x2B0A3C image-format lookup returned
+  NULL for key ".PVR" though static 20-entry table HAS PVR at index 11.
+  - BYPASS FIRST: HARNESS_FIXPVR=1 (IR SetRegister r0=11 at 0x2B0C50) moved past
+    the font wall to a new frontier (audio wrapper BAD read) — proved forcing
+    the right index suffices (jev_noul 0.93). Real fix superseded it.
+  - ROOT CAUSE (PROVEN live): key buffer held "__1" not "PVR". Writer is
+    toupper-copy @0x387DE8 (string copy + `tab[c*2+2]` u16 loop). It does TWO
+    loads: `ldr r2,[pc+r2]` (=*slot=TABLE) then `ldr r4,[r2]` (reads
+    [TABLE]=0xFFFF, our EOF word!) then indexes rodata garbage [0xFFFF+c*2+2].
+    I.e. the game DOUBLE-DEREFS toupper/tolower slots (Bionic exports POINTERS;
+    slot->var->table), but we patched slots with the table DIRECTLY (single
+    level). Live proof: probe at 0x387E6C showed r2=0x10000308 (table, not
+    &var), r4=0x0000FFFF, chars P/V/R correct, [r4]=rodata typeinfo bytes.
+  - FIX: var_lower/var_upper 4B cells holding lower_va/upper_va; slots patched
+    with &var (same pattern as _ctype_/guard). Isolated lookup HARNESS_RAW=
+    2b0a3c now returns 11; full run blasts past fonts into SPLASHES/TEXTS
+    assets. NOTE: the earlier u16-table rebuild was NECESSARY but not
+    sufficient (tables were correct; routing was wrong).
+  - MEMCMP RED HERRING: host glibc memcmp returns sign-only (±1), NOT byte
+    difference ([memselftest] prints `1 0 1`). Wild memcmp3 magnitudes
+    (58523644 etc.) are glibc internals — game uses sign/zero only, our
+    forward is correct. Do NOT chase memcmp magnitudes again.
+  - SSO ASYMMETRY (PROVEN via HARNESS_RAW=69cdc): in-game compare treats r3 as
+    `const char*`; passing an SSO buffer misaligns (PVR vs 06 50 56 -> 74).
+    Live path passes raw static entries — fine. No action.
+  - Loop anatomy 0x2B0A3C (for the next reader): returns INDEX (0=not found,
+    r7 distinguishes found/exhausted); per-entry multi-alias inner walk;
+    length prefilter; full compare via 0x69CDC; caller 0x2B0BD4 switches on
+    index through jump table (0x2B0BC0). rfind('.')@0x17EE94, substr@0x6A1F4.
+- REGISTRY SAGA (after font wall, update svc 650K ParseError):
+  - Decrypted registry plaintext: {"ads":{"installTracker":null},
+    "pf::LocalNotifications::sm_pendingNotifications":{"EID_INACTIVITY_
+    NOTIFICATION_3":0x01}} — byte 0x01 is not JSON.
+  - Bridge EXONERATED: [regio] fwrite/fread dumps + file bytes all 128/128
+    identical (roundtrip byte-exact). Game serializes 0x01 itself.
+  - Map node dump: pending value = int32 1. Writer emits int 7 as "7" (valid!)
+    but int... 0-case emits raw 0x01. Mechanism: notifyAfter mock returned 0
+    -> game stores bool-true fallback -> writer emits bool as raw byte.
+    PROOF: notifyAfter->7 gives ":7}}" (parses); ->1 gives ":1}}".
+  - FIX: notifyAfter mock returns 1 (first notification id, device-plausible;
+    real Java returns nonzero id -> decimal text -> parses). Device works
+    because real Java never returns 0. JNI int-mock policy grows: API21,
+    800x480, notifyAfter=1, else 0.
+  - FRESH-INSTALL RULE: no registry file -> io::FileException (r1=0x65ED5C)
+    at svc~15K (game cannot bootstrap missing registry). SEED empty
+    work/files/fusion.registry (touch 0B) -> long path. Poisoned file (with
+    0x01 entry) kills at 15K — delete/reseed when iterating. work/files seeds
+    are harness-only scaffolding.
+- MILESTONE 2026-10-10: nativeUpdate RETURNS CLEAN (r0=1, svc~643730, no
+  throw/spiral) + nativeRender RETURNS CLEAN. Real GL traffic: 20x
+  TexImage2D + 20x TexSubImage2D (texture uploads!), 12x ShaderSource,
+  GetString/GetIntegerv/attrib+uniform locations. Shaders compile, textures
+  upload (fake-success shim still — real GLES backend is NEXT).
+- WALL #4 PARKED (2nd serial update): re-entering update (with or without
+  render between) dies svc~653206: BAD reads from 0x30303038+ (ASCII "000...")
+  in block-copy @0x264AF8 (ldm/stm list/object copy; reported pc 0x264B10
+  lags — real fault is later ldm from bogus source ptr). Needs threaded
+  model (update/render/audio interleaved) or audio/input state; revisit after
+  audio+input milestones. Single update+render is the validated unit.
+- DETERMINISM: heap addresses stable across NOWORKER runs (same #8 buffer
+  addrs twice) — watchpoints reusable. Registry FILE STATE selects path
+  (missing->15K FileException; poisoned->15K ParseError; empty/fresh->650K).
+  Always note file state when comparing svc counts.
+- DIAG TOOLS ADDED (harness-only, do NOT ship): HARNESS_NOWORKER (skip
+  pthread_create, deterministic); HARNESS_NESTMAX (default 512); HARNESS_RAW
+  (+RAWDOT/RAW2: isolated guest micro-calls, inits run first); ProbeDump3
+  (r4/r5/r6 + [r4] table peek); [probe-emit] A/T log; memcmp3 len-3 compare
+  log (HOT — fires constantly, silence before perf work); [regio] registry
+  fread/fwrite dumps (cap 60); [memselftest] (glibc sign proof);
+  HARNESS_WP/WPA (exact-addr only; bulk writes bypass -> use ScanWP);
+  HEXDUMP len is HEX; HEXFIND heap needle (5 contexts, page-skip fixed).
+- JEV: noul batch (force-11 0.93 likely; audio-same-cause 0.28; GLES-needed
+  0.29) — audio wall and GLES gating stayed uncertain, correctly (both were
+  downstream of the real toupper bug).
+- NEXT (revised): 1) real GLES backend (surfaceless EGL, real uploads; shim
+  fns enumerated in dispatch ~glGen*/glTex*/glShaderSource...), 2) audio
+  null-sink (nativeMixData needs boot context), 3) input, 4) wall-#4 revisit
+  (threads), 5) RegisterNatives cleanup, 6) Android shell + packaging.

@@ -344,6 +344,13 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // logs must survive _exit()
+    // TEMP-DIAG: host memcmp sanity (wild memcmp3 values investigation).
+    {
+        int t1 = std::memcmp("min", "for", 3);
+        int t2 = std::memcmp("PVR", "PVR", 3);
+        int t3 = std::memcmp("PVR", "BMP", 3);
+        std::printf("[memselftest] %d %d %d (want 7 0 14)\n", t1, t2, t3);
+    }
     if (argc < 2) {
         std::printf("usage: harness <libAngryBirdsRio.so>\n");
         return 2;
@@ -661,6 +668,51 @@ int main(int argc, char** argv) {
     // (single call without JSTR keeps legacy JA2/JA3 behavior).
     // HARNESS_ONLOAD=<hexaddr> (default real JNI_OnLoad) runs first with
     // r0=mock JavaVM* (sole writer of JavaVM slot 0x6747D0); NOONLOAD=1 skips.
+    // HARNESS_RAW=<hexaddr>: micro-call for isolated forensics (wall #3):
+    // builds two SSO-short "PVR" buffers in guest-data scratch, calls addr
+    // with (r0=buf1, r1=0, r2=-1, r3=buf2, stack=[3]) and prints r0. Used to
+    // test 0x69CDC (string compare) outside the lookup loop.
+    if (const char* rawe = std::getenv("HARNESS_RAW")) {
+        std::uint32_t fn = static_cast<std::uint32_t>(std::strtoul(rawe, nullptr, 16));
+        const std::uint32_t b1 = abr::kGuestDataBase + 0x100;
+        const std::uint32_t b2 = abr::kGuestDataBase + 0x120;
+        const std::uint8_t s1[12] = {0x06, 'P', 'V', 'R', 0, 0, 0, 0, 0, 0, 0, 0};
+        const std::uint8_t s2[12] = {0x06, 'P', 'V', 'R', 0, 0, 0, 0, 0, 0, 0, 0};
+        std::memcpy(mem.host(b1), s1, 12);
+        std::memcpy(mem.host(b2), s2, 12);
+        // HARNESS_RAWDOT=1: first buffer becomes ".PVR" (dotted key).
+        if (std::getenv("HARNESS_RAWDOT")) {
+            const std::uint8_t sd[12] = {0x08, '.', 'P', 'V', 'R', 0, 0, 0, 0, 0, 0, 0};
+            std::memcpy(mem.host(b1), sd, 12);
+        }
+        auto& regs = jit.Regs();
+        regs.fill(0);
+        regs[13] = abr::kStackTop - 0x100;
+        regs[14] = mod.halt_va;
+        regs[0] = b1;
+        regs[1] = 0;
+        regs[2] = 0xFFFFFFFFu;
+        // HARNESS_RAW2=<hexaddr>: r3 override for the raw call (default:
+        // second SSO buffer). Lets the compare run against static entries.
+        regs[3] = b2;
+        if (const char* r2e = std::getenv("HARNESS_RAW2")) {
+            regs[3] = static_cast<std::uint32_t>(std::strtoul(r2e, nullptr, 16));
+        }
+        regs[13] -= 8;
+        std::uint32_t three = 3;
+        std::memcpy(mem.host(regs[13]), &three, 4);
+        std::uint32_t z2 = 0;
+        std::memcpy(mem.host(regs[13] + 4), &z2, 4);
+        CallGuest(jit, fn);
+        std::printf("[raw] calling @%08x ... ", fn);
+        std::fflush(stdout);
+        alarm(60);
+        Dynarmic::HaltReason hr = jit.Run();
+        alarm(0);
+        std::printf("hr=%d r0=%08x (%u) r1=%08x svc=%llu\n", static_cast<int>(hr), regs[0], regs[0],
+                    regs[1], (unsigned long long)rt.svc_count);
+        _exit(hr == Dynarmic::HaltReason::UserDefined1 ? 0 : 1);
+    }
     if (const char* e = std::getenv("HARNESS_JNI")) {
         // Call list: comma-separated addrs + HARNESS_JNI2 appended.
         std::vector<std::uint32_t> fns;

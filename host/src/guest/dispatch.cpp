@@ -12,6 +12,7 @@
 #include <optional>
 #include <poll.h>
 #include <pthread.h>
+#include <set>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -21,6 +22,10 @@
 #include <cstring>
 
 namespace abr {
+
+// TEMP-DIAG (registry ParseError): registry FILE* set + dump counter.
+static std::set<FILE*> g_regfiles;
+static int g_regdump_n = 0;
 
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // HARNESS_HEAPBASE=hex: relocate heap start (address-sensitivity probe).
@@ -436,6 +441,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "memcmp" || n == "bcmp") {
         if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
+        }
+        // TEMP-DIAG (font wall): log len-3 compares to catch the PVR one.
+        if (a2 == 3) {
+            const std::uint8_t* p0 = H<const std::uint8_t>(a0);
+            const std::uint8_t* p1 = H<const std::uint8_t>(a1);
+            std::printf("[memcmp3] %08x: %02x %02x %02x vs %08x: %02x %02x %02x -> %d\n",
+                        a0, p0[0], p0[1], p0[2], a1, p1[0], p1[1], p1[2],
+                        std::memcmp(p0, p1, 3));
         }
         Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
         return;
@@ -943,6 +956,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "pthread_create") {
+        // HARNESS_NOWORKER=1: skip thread creation (return 0, no thread).
+        // Diagnosis-only: removes worker/main interleaving nondeterminism
+        // (shared bump-heap addresses -> hash orders -> path variance).
+        // Joins will hang if reached; the font wall dies long before.
+        if (std::getenv("HARNESS_NOWORKER")) {
+            std::printf("[thread] NOWORKER: skip create start=%08x\n", a2);
+            if (a0 && CheckRange(a0, 4, true)) {
+                std::uint32_t zero = 0;
+                std::memcpy(H(a0), &zero, 4);
+            }
+            Ret(regs, 0);
+            return;
+        }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
     }
@@ -1063,7 +1089,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (a0 == tr.pc && a1 != 0) {
             tr.sp = a1;
         }
-        if (tr.depth > 512) {
+        // HARNESS_NESTMAX overrides the abort depth (default 512) to test
+        // whether a deeper handler catches (fallback paths) vs true spiral.
+        static std::int64_t nestmax = -2;
+        if (nestmax == -2) {
+            nestmax = 512;
+            if (const char* ne = std::getenv("HARNESS_NESTMAX")) {
+                nestmax = (std::int64_t)std::strtoul(ne, nullptr, 0);
+            }
+        }
+        if ((std::int64_t)tr.depth > nestmax) {
             // Returning 0 does NOT stop this driver (it takes the NULL path
             // and re-presents). Halt loud: the stack holds the whole spiral
             // and the original throw is ~512 levels up, intact for forensics.
@@ -1212,6 +1247,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             std::printf("[files] fopen(\"%s\",\"%s\") -> %08x\n", hp.c_str(), mode.c_str(), h);
+            // TEMP-DIAG (registry ParseError): track registry handles to dump
+            // their exact bytes on fread/fwrite below.
+            if (hp.find("registry") != std::string::npos) {
+                g_regfiles.insert(f);
+            }
             Ret(regs, h);
             return;
         }
@@ -1246,7 +1286,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            Ret(regs, static_cast<std::uint32_t>(std::fread(H(a0), a1, a2, f)));
+            std::size_t got = std::fread(H(a0), a1, a2, f);
+            // TEMP-DIAG (registry ParseError): dump exact bytes read.
+            if (g_regfiles.count(f) && g_regdump_n < 60) {
+                g_regdump_n++;
+                std::size_t nb = got * a1;
+                if (nb > 192) {
+                    nb = 192;
+                }
+                const std::uint8_t* p = H<const std::uint8_t>(a0);
+                std::printf("[regio] fread #%d %u items(%uB):", g_regdump_n, got, (unsigned)(got * a1));
+                for (std::size_t i = 0; i < nb; i++) {
+                    std::printf(" %02x", p[i]);
+                }
+                std::printf("\n");
+            }
+            Ret(regs, static_cast<std::uint32_t>(got));
             return;
         }
         if (n == "fwrite") {
@@ -1256,6 +1311,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!f || a1 == 0 || a2 == 0 || !CheckRange(a0, (std::size_t)a1 * a2, false)) {
                 Ret(regs, 0);
                 return;
+            }
+            // TEMP-DIAG (registry ParseError): dump exact bytes written.
+            if (g_regfiles.count(f) && g_regdump_n < 60) {
+                g_regdump_n++;
+                std::size_t nb = (std::size_t)a1 * a2;
+                std::size_t show = nb > 192 ? 192 : nb;
+                const std::uint8_t* p = H<const std::uint8_t>(a0);
+                std::printf("[regio] fwrite #%d %uB:", g_regdump_n, (unsigned)nb);
+                for (std::size_t i = 0; i < show; i++) {
+                    std::printf(" %02x", p[i]);
+                }
+                std::printf("%s\n", nb > show ? " ..." : "");
             }
             Ret(regs, static_cast<std::uint32_t>(std::fwrite(H(a0), a1, a2, f)));
             return;
@@ -1930,10 +1997,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (n == "glGetIntegerv") {
             // Era-correct Mali-400-ish limits (verified enum vs
-            // /usr/include/GLES2/gl2.h). A zero MAX_TEXTURE_SIZE made every
-            // texture "unsupported" (io::IOException on FONT_BASIC.pvr).
+            // /usr/include/GLES2/gl2.h). Signature: (pname=a0, params=a1).
             std::uint32_t v0 = 0, v1 = 0, cnt = 1;
-            switch (a1) {
+            switch (a0) {
                 case 0x0D33: v0 = 4096; break;                 // MAX_TEXTURE_SIZE
                 case 0x84E8: v0 = 4096; break;                 // MAX_RENDERBUFFER_SIZE
                 case 0x8872: v0 = 8; break;                   // MAX_TEXTURE_IMAGE_UNITS
@@ -1950,13 +2016,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 case 0x0D57: v0 = 8; break;                    // STENCIL_BITS
                 default: break;                                // unknown -> 0, logged
             }
-            if (CheckRange(a2, 4 * cnt, true)) {
-                std::memcpy(H(a2), &v0, 4);
+            if (CheckRange(a1, 4 * cnt, true)) {
+                std::memcpy(H(a1), &v0, 4);
                 if (cnt > 1) {
-                    std::memcpy(H(a2 + 4), &v1, 4);
+                    std::memcpy(H(a1 + 4), &v1, 4);
                 }
             }
-            std::printf("[gl] GetIntegerv(%04x) -> %u%s\n", a1, v0,
+            std::printf("[gl] GetIntegerv(%04x) -> %u%s\n", a0, v0,
                         cnt > 1 ? ",..." : "");
             Ret(regs, 0);
             return;
@@ -1979,6 +2045,49 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::printf("[gl] %s(%u) -> empty\n", n.c_str(), a0);
             Ret(regs, 0);
+            return;
+        }
+        if (n == "glGenTextures" || n == "glGenBuffers" || n == "glGenFramebuffers" ||
+            n == "glGenRenderbuffers") {
+            // (n=a0, handles=a1): write incrementing nonzero handles.
+            static std::uint32_t gl_handle = 100;
+            if (a0 > 0 && a0 < 1024 && CheckRange(a1, 4 * a0, true)) {
+                for (std::uint32_t i = 0; i < a0; i++) {
+                    std::uint32_t h = ++gl_handle;
+                    std::memcpy(H(a1 + i * 4), &h, 4);
+                }
+            }
+            std::printf("[gl] %s(%u) -> handles from %u\n", n.c_str(), a0, gl_handle);
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "glGetUniformLocation" || n == "glGetAttribLocation") {
+            // Fake but stable locations (hash of name, nonzero).
+            std::uint32_t h = 0;
+            if (a1 && CheckRange(a1, 1, false)) {
+                const char* s = reinterpret_cast<const char*>(H(a1));
+                std::size_t k = 0;
+                while (k < 128 && CheckRange(a1 + (std::uint32_t)k, 1, false) && s[k]) {
+                    h = h * 33 + (unsigned char)s[k];
+                    k++;
+                }
+                h = (h % 64) + 1;
+            }
+            std::printf("[gl] %s(%u) -> %u\n", n.c_str(), a0, h);
+            Ret(regs, h);
+            return;
+        }
+        if (n == "glTexImage2D" || n == "glTexSubImage2D" || n == "glCompressedTexImage2D" ||
+            n == "glCopyTexImage2D" || n == "glReadPixels" || n == "glBufferData" ||
+            n == "glVertexAttribPointer" || n == "glShaderSource") {
+            // Accepted and ignored (no real GL yet): fake upload succeeds.
+            // Bulk-pointer args are range-checked but not consumed.
+            std::printf("[gl] %s accepted (fake)\n", n.c_str());
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "glGetError") {
+            Ret(regs, 0);  // GL_NO_ERROR
             return;
         }
     }
@@ -2280,8 +2389,14 @@ void Runtime::InitDataImports() {
         }
         cls[c] = b;
     }
-    // Block: [257B ctype (EOF slot + 256)] + pad + [256 x u32 lower] + [256 x u32 upper].
-    const std::uint32_t total = 260 + 1024 + 1024;
+    // Block: [257B ctype (EOF slot + 256)] + pad + [257 x u16 lower] + [257 x u16 upper].
+    // 2014-era Bionic layout (the game was built against it): short tables
+    // with index shift — game reads tab[c+1] as u16 (EOF at [0]). Our old
+    // u32 fill read back zeros through the game's u16 lens, breaking
+    // toupper-dependent paths (ext lookup "pvr"->"PVR" failed -> NULL ->
+    // "Unsupported image file format" IOException). Verified vs NDK ctype.h
+    // (modern Bionic inlines everything; only _ctype_ remains exported).
+    const std::uint32_t total = 260 + 516 + 516;
     const std::uint32_t blk = GuestMalloc(total);
     if (!blk) {
         std::printf("[data] LOUD ctype block alloc failed -- halting\n");
@@ -2303,12 +2418,20 @@ void Runtime::InitDataImports() {
     }
     // NOTE: slots below need blk (table base, EOF at [0]); the guest adds +1.
     const std::uint32_t lower_va = (blk + 260 + 3) & ~std::uint32_t(3);
-    const std::uint32_t upper_va = lower_va + 1024;
+    const std::uint32_t upper_va = lower_va + 516;
+    // Bionic C-locale short tables: [0] = EOF mapping (-1), [c+1] = case(c).
+    {
+        std::uint16_t eof = 0xFFFFu;
+        std::memcpy(H(lower_va), &eof, 2);
+        std::memcpy(H(upper_va), &eof, 2);
+    }
     for (int c = 0; c < 256; c++) {
-        std::uint32_t lo32 = (c >= 'A' && c <= 'Z') ? (std::uint32_t)(c + 32) : (std::uint32_t)c;
-        std::uint32_t up32 = (c >= 'a' && c <= 'z') ? (std::uint32_t)(c - 32) : (std::uint32_t)c;
-        std::memcpy(H(lower_va + c * 4), &lo32, 4);
-        std::memcpy(H(upper_va + c * 4), &up32, 4);
+        std::uint16_t lo16 =
+            (std::uint16_t)((c >= 'A' && c <= 'Z') ? (c + 32) : c);
+        std::uint16_t up16 =
+            (std::uint16_t)((c >= 'a' && c <= 'z') ? (c - 32) : c);
+        std::memcpy(H(lower_va + 2 + c * 2), &lo16, 2);
+        std::memcpy(H(upper_va + 2 + c * 2), &up16, 2);
     }
     struct Slot {
         const char* name;
@@ -2319,9 +2442,12 @@ void Runtime::InitDataImports() {
     // so each data import gets a 4B guest variable cell holding the real value.
     // _ctype_ var = table base (guest adds +1 for the EOF [-1] slot itself).
     // guard var = the harness canary (guestdata+0, written before this call).
+    std::printf("[data] ctype blk=%08x lower=%08x upper=%08x\n", blk, lower_va, upper_va);
     const std::uint32_t var_ctype = GuestMalloc(4);
     const std::uint32_t var_guard = GuestMalloc(4);
-    if (!var_ctype || !var_guard) {
+    const std::uint32_t var_lower = GuestMalloc(4);
+    const std::uint32_t var_upper = GuestMalloc(4);
+    if (!var_ctype || !var_guard || !var_lower || !var_upper) {
         std::printf("[data] LOUD var alloc failed -- halting\n");
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
@@ -2333,11 +2459,16 @@ void Runtime::InitDataImports() {
     }
     std::memcpy(H(var_ctype), &blk, 4);
     std::memcpy(H(var_guard), &canary, 4);
+    // tolower/toupper vars hold the TABLE address; slots hold &var (the game
+    // double-derefs: ldr r2,[slot]; ldr r4,[r2] at 0x387E64/6C — PROVEN live:
+    // single-level patch fed [table]=0xFFFF as base -> "__1" key garbage).
+    std::memcpy(H(var_lower), &lower_va, 4);
+    std::memcpy(H(var_upper), &upper_va, 4);
     const Slot slots[] = {
         {"_ctype_", var_ctype},
         {"__stack_chk_guard", var_guard},
-        {"_tolower_tab_", lower_va},
-        {"_toupper_tab_", upper_va},
+        {"_tolower_tab_", var_lower},
+        {"_toupper_tab_", var_upper},
     };
     for (const Slot& s : slots) {
         const std::uint32_t idx = find_import(s.name);
@@ -2968,6 +3099,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::uint32_t v = 0;
         if (mdesc.find("getAPILevel") != std::string::npos) {
             v = 21;
+        } else if (mdesc.find("notifyAfter") != std::string::npos) {
+            // PROVEN (notify7): pending-notifications value tracks this
+            // return; 0 makes the game store bool-true, which its JSON
+            // writer emits as raw 0x01 (ParseError). Real Java returns a
+            // nonzero notification id -> decimal text -> parses. Use 1
+            // (first id, device-plausible).
+            v = 1;
         } else if (mdesc.find("getDisplayWidth") != std::string::npos) {
             v = 800;
         } else if (mdesc.find("getDisplayHeight") != std::string::npos) {
@@ -3231,6 +3369,47 @@ std::uint32_t GuestCallbacks::g_probe_pc = 0;
 void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp) {
     std::printf("[probe] r2=%08x r3=%08x sp=%08x\n", (std::uint32_t)r2, (std::uint32_t)r3,
                 (std::uint32_t)sp);
+    // Stack-string peek: 16B at [sp+16] (resolver OUT / locals forensics).
+    // Plus 16B at [sp+4] (often the compared key: 0x2B0A3C uses sp+4).
+    {
+        GuestCallbacks* cb = g_probe_cb;
+        for (int k = 0; k < 2; k++) {
+            std::uint32_t so = (std::uint32_t)sp + (k == 0 ? 16u : 4u);
+            if (!cb || !cb->rt_->CheckRange(so, 16, false)) {
+                continue;
+            }
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(so);
+            std::printf("[probe] [sp+%s]:", k == 0 ? "16" : "4");
+            for (int j = 0; j < 16; j++) {
+                std::printf(" %02x", p[j]);
+            }
+            std::printf("  |");
+            for (int j = 0; j < 16; j++) {
+                std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+            }
+            std::printf("|\n");
+        }
+        {
+            std::uint32_t so = (std::uint32_t)sp + 16;
+            (void)so;
+        }
+        // r3 peek: 16B (often the compared-against string).
+        {
+            std::uint32_t ra = (std::uint32_t)r3;
+            if (cb && cb->rt_->CheckRange(ra, 16, false)) {
+                const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(ra);
+                std::printf("[probe] [r3]:");
+                for (int j = 0; j < 16; j++) {
+                    std::printf(" %02x", p[j]);
+                }
+                std::printf("  |");
+                for (int j = 0; j < 16; j++) {
+                    std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+                }
+                std::printf("|\n");
+            }
+        }
+    }
     // HARNESS_PROBE=<pc>,fill: if the 12B SSO string at [sp+28] is empty
     // (all-zero, i.e. a missed typed-map lookup left OUT untouched), write
     // "{}" (04 7B 7D): lets the JSON parser proceed with defaults instead
@@ -3274,10 +3453,38 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
         }
     }
 }
+void GuestCallbacks::ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6) {
+    std::printf("[probe] r4=%08x r5=%08x r6=%08x\n", (std::uint32_t)r4, (std::uint32_t)r5,
+                (std::uint32_t)r6);
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    // [r4] 16B: byte table the game actually reads (toupper base).
+    if (cb->rt_->CheckRange((std::uint32_t)r4, 16, false)) {
+        const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r4);
+        std::printf("[probe] [r4]:");
+        for (int j = 0; j < 16; j++) {
+            std::printf(" %02x", p[j]);
+        }
+        std::printf("  |");
+        for (int j = 0; j < 16; j++) {
+            std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+        }
+        std::printf("|\n");
+    }
+}
 void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     static std::uint64_t n = 0;
-    if (++n > 8) {
-        if (n == 9) {
+    static std::int64_t cap = -2;
+    if (cap == -2) {
+        cap = 8;
+        if (const char* ce = std::getenv("HARNESS_PROBE_N")) {
+            cap = (std::int64_t)std::strtoul(ce, nullptr, 0);
+        }
+    }
+    if (++n > (std::uint64_t)cap) {
+        if (n == (std::uint64_t)cap + 1) {
             std::printf("[probe] ... (quiet henceforth)\n");
         }
         return;
@@ -3288,6 +3495,49 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
+    }
+    // Unconditional 16B at [r0] (compare key / object head). Runs before any
+    // early-returning branch below.
+    if (cb->rt_->CheckRange((std::uint32_t)r0, 16, false)) {
+        const std::uint8_t* p0 = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
+        std::printf("[probe] [r0]:");
+        for (int j = 0; j < 16; j++) {
+            std::printf(" %02x", p0[j]);
+        }
+        std::printf("  |");
+        for (int j = 0; j < 16; j++) {
+            std::printf("%c", (p0[j] >= 32 && p0[j] < 127) ? (char)p0[j] : '.');
+        }
+        std::printf("|\n");
+    }
+    // [r1] raw 32B (forwarder inputs are objects; the range/longstr
+    // interpretation above misfires on them).
+    if (cb->rt_->CheckRange((std::uint32_t)r1, 32, false)) {
+        const std::uint8_t* p1 = cb->rt_->H<const std::uint8_t>((std::uint32_t)r1);
+        std::printf("[probe] [r1]-raw:");
+        for (int j = 0; j < 32; j++) {
+            std::printf(" %02x", p1[j]);
+        }
+        std::printf("\n");
+    }
+    if (cb->rt_->CheckRange((std::uint32_t)r1, 1, false)) {
+        std::uint8_t b0 = 0;
+        std::memcpy(&b0, cb->rt_->H<const std::uint8_t>((std::uint32_t)r1), 1);
+        if ((b0 & 1) == 0) {
+            std::uint32_t L = (std::uint32_t)b0 >> 1;
+            if (L <= 64 && cb->rt_->CheckRange((std::uint32_t)r1 + 1, L ? L : 1, false)) {
+                const std::uint8_t* p1 = cb->rt_->H<const std::uint8_t>((std::uint32_t)r1);
+                std::printf("[probe] [r1]-sso(len=%u):", L);
+                for (std::uint32_t j = 1; j <= L && j < 65; j++) {
+                    std::printf(" %02x", p1[j]);
+                }
+                std::printf("  |");
+                for (std::uint32_t j = 1; j <= L && j < 65; j++) {
+                    std::printf("%c", (p1[j] >= 32 && p1[j] < 127) ? (char)p1[j] : '.');
+                }
+                std::printf("|\n");
+            }
+        }
     }
     // C++ object form: [rX+0] = vtable -> [-1] = typeinfo -> [+4] = name.
     // Applies to both r0 and r1 (caller decides which holds the object).
@@ -3367,7 +3617,7 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             std::printf("[probe] [r1]={%08x..%08x}\n", b, e);
         }
         if (e >= b && e - b <= 0x10000 && cb->rt_->CheckRange(b, e > b ? e - b : 1, false)) {
-            std::uint32_t dl = (e - b > 256) ? 256 : e - b;
+            std::uint32_t dl = (e - b > 2048) ? 2048 : e - b;
             const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(b);
             for (std::uint32_t i = 0; i < dl; i += 16) {
                 std::printf("[probe] %08x:", b + i);
@@ -3425,7 +3675,7 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
                 }
             }
             const std::uint8_t* bp = cb->rt_->H<const std::uint8_t>(w8);
-            for (std::uint32_t i = 0; i < 96; i += 16) {
+            for (std::uint32_t i = 0; i < 192; i += 16) {
                 if (!cb->rt_->CheckRange(w8 + i, 16, false)) {
                     break;
                 }
@@ -3478,7 +3728,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
     // the emitted CallHostFunction runs on every execution with live regs.
     {
         static std::int64_t probe = -2;
-        static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0;
+        static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0, probe_pc3 = 0;
         if (probe == -2) {
             probe = 0;
             if (const char* pe = std::getenv("HARNESS_PROBE")) {
@@ -3493,9 +3743,20 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 probe_pc2 = static_cast<std::uint32_t>(std::strtoul(pe2, nullptr, 16));
                 probe = 1;
             }
+            if (const char* pe3 = std::getenv("HARNESS_PROBE3")) {
+                probe_pc3 = static_cast<std::uint32_t>(std::strtoul(pe3, nullptr, 16));
+                probe = 1;
+            }
         }
-        if (probe > 0 && (pc == probe_pc || pc == probe_pc2)) {
+        // Standalone IR fixes (independent of probe slots).
+        if (std::getenv("HARNESS_FIXPVR") && pc == 0x2B0C50u) {
+            using Reg = Dynarmic::A32::Reg;
+            ir.SetRegister(static_cast<Reg>(0), ir.Imm32(11));
+        }
+        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3)) {
             g_probe_pc = pc;
+            std::printf("[probe-emit] %c %08x\n", is_thumb ? 'T' : 'A', pc);
+            // HARNESS_FIXPVR=1: at 0x2B0C50 (post image-format lookup) force
             ir.CallHostFunction(&ProbeDump,
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
@@ -3510,6 +3771,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(3))),
                                 ir.ZeroExtendWordToLong(
                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))));
+            ir.CallHostFunction(&ProbeDump3,
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(4))),
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
+                                ir.ZeroExtendWordToLong(
+                                    ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
         }
     }
     if (tl > 0) {
