@@ -838,3 +838,44 @@ dead subsystem, game degrades without it).
   log-silence -> auto gdb bt) to CONFIRM main-in-mutex vs guest-spin;
   (2) throw-type forensics (patched-/tmp-copy __cxa_throw probe, ParseError
   playbook) on the worker job; (3) bypass/fallback to menu.
+
+## 18. Session 2026-10-10 (part 9): MCSM reference autopsy (read-only)
+- SOURCE: /home/shredrum/Рабочий стол/Lifeline_port (their project dir) +
+  shipped `lib/arm64-v8a/libmain.so` (3.5MB, arm64, NDK r27c, RTTI intact)
+  extracted from Minecraft.Story.Mode .apks base.apk to /tmp (source files
+  never touched). Guest libs pristine in assets/guestlib (GameEngine 17MB +
+  SDL2 + fmod + 9KB main shim).
+- THEIR HOST (proven via strings/nm/readelf): single export JNI_OnLoad;
+  NEEDED GLESv2/GLESv1_CM/EGL/OpenSLES/log/android/m/z/dl/libc; AAssetManager
+  guest loading; ANativeWindow real surface; RegisterNatives (Java_* names
+  SDLActivity_/TelltaleActivity_/fmod present as STRINGS, not exports);
+  DynarmicHost::LoadModulesFromMemory (multi-module vector<GuestModuleImage>);
+  ThunkManager::RegisterLibcThunks (~286 lambdas) + RegisterGLThunks (~104)
+  — SAME granularity as our ~340 imports (convergent, not thinner);
+  GuestThreadState/Mutex/Cond/Semaphore; Hooks::Execute + ResourcePatchSet::
+  Apply (coarse gameplay hooks + DATA-only patches).
+- KEY ADOPTIONS: (1) FASTMEM ("POSIX SigHandler", "Segfault happened within
+  JITted code") — perf only, deferred for us (2D game fine on callbacks);
+  (2) LIBUNWIND EH (_Unwind_RaiseException/_Unwind_VRS_Set/_Unwind_Resume/
+  __cxa_type_match/scan_eh_tab/__gnu_Unwind_Find_exidx/_Unwind_DeleteException)
+  — they unwind GUEST exceptions; this is our #1 blocker class
+  (HttpRequestException spiral). Our pieces ALL present: exidx parsed
+  (FindExidx), __gxx_personality_v0 in-module @0x458859 (Thumb),
+  __cxa_throw @0x457F91 (Thumb) / allocate/begin_catch in-module, Dynarmic
+  Regs for VRS. _Unwind_RaiseException itself is neither imported nor
+  defined (host must provide it — same as us). PLAN: custom _Unwind_Context
+  with VRS over Dynarmic regs + in-module personality via hijack +
+  phase-2 pad resume (set regs + jump). Replaces ALL per-throw bypasses
+  (fills, catch emulation) — STOP building bypasses, build unwinding.
+- NOT REDUNDANT (their engine is SDL-thin, ours pays rcs-fusion tax):
+  sockets/DNS/inet (theirs: zero socket strings — no cloud), registry/seeds/
+  Lua/consents mocks, JNI mock zoo (theirs calls REAL SDLActivity Java;
+  ours needs harness scaffolding until device). 63 Java_* -> RegisterNatives
+  at packaging (already planned). No dlopen emulation needed (theirs: none).
+- Ahnentafel: patched-copy forensics CONTAMINATED (2B patch in __cxa_throw
+  -> 0/9 anomalies vs 3/3 unpatched — engine self-reads; use IR probes,
+  never byte patches). Throw probe PROBE2=457f90 prints type cleanly
+  (net::HttpRequestException x2/run, lr=0x28AE70 raiser tail in 0x28A3DC;
+  callers assume success-flag, no error path — fallback is dispatcher-catch
+  only). inet_* ABI bugs fixed via file-scope InetThunk (a0-vs-a1,
+  ntoa-by-value, ntop order; stray-brace saga: missing } shifted nesting).
