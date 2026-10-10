@@ -881,6 +881,55 @@ dead subsystem, game degrades without it).
   ntoa-by-value, ntop order; stray-brace saga: missing } shifted nesting).
 
 ## 19. Session 2026-10-10 (part 10): TLS wall mapped, redirect chains
+
+## 20. Session 2026-10-10 (part 11): fake origin, surface gate, unwinder plan
+- FAKE ORIGIN (works, insufficient): hosts-hack honored (TCP straight to
+  127.0.0.2), portmap 443->8443, python TLS server (self-signed
+  CN=cloud.rovio.com). Client talks (ClientHello!) but aborts every
+  ServerHello with alert 47 (python AND CloudFront alike). Client offers
+  modern ciphers (CHACHA/GCM) yet rejects hellos: version OR curve OR
+  extensions (subagent on the record-layer check). TLS 1.0 downgrade offer
+  -> server silent (min 1.2+). Cipher-overlap proof vs CF (alert 40).
+  ONLINE PATH DEAD (crypto + dead API 401/403).
+- BLOCKING SOCKETS (real bug fixed): O_NONBLOCK caused short reads (5B of
+  115B ServerHello) -> alert. Now blocking + SO_RCVTIMEO/SNDTIMEO; poll
+  caps off for socks. getpeername/getsockname real. fcntl real.
+- LOCAL variantconfig.json (1904B) IS read + parsed (valid JSON #1) during
+  boot — data present. Missing piece = cloud-JOB COMPLETION (session token
+  -> apdrive), not content. Emulated failures (RETFAIL) run clean but don't
+  unlock (failure branches yield no data).
+- SURFACE GATE (mechanism proven): ONE ShadowingSurfaceData ever constructed
+  (state 3, loading); array has 1 descriptor; caller fork ([r10+164]==0 -> 1
+  else 3) is const-2 by init (hardcoded). No menu surface requested: gate is
+  UPSTREAM (config/event), not a transition (WPA: +180 write-once ever).
+- REDIRECT (works mechanically): Http->0x28E7C4->length_error rethrow;
+  chains [28e7c4,189ef0]/[28e7c4,2848c4] all rethrow (translate pads, no
+  handlers). 117 pads mapped; all live in functions that also throw.
+  RETFAIL (synthetic failing return via live frame: r11 stale, stack-scan
+  finds saved-lr, flag=0, resume) works end-to-end, no spirals, but failure
+  branches don't unlock menu.
+- TTMatch (typed-catch finder): GCC LSDA decoder validated on NDK test .o
+  (filter->ttype->reloc); 988 generic entries + 1559 (fn,pad,filter,slot);
+  live resolve (onehop + pcrel-indirect twohop) + live base-chain walk.
+  Result: catches filter a BASE (0x65E958), never the derived type; NO
+  dispatcher-module typed catch for it; on-path frames have no typed
+  catches (compact catch-alls only). StackBT (live return-addr scan) gives
+  the propagation chain (raiser<-0x28B140<-0x19F9C4<-0x2AE8BC<-pool...).
+- DECISION: offline-first (NONET) + unwinder (host phase-1: stackbt frames
+  + LSDA filters + live ti match + opcode-sp + pad resume via redirect
+  machinery). r0=obj proven accepted; r1=filter (not ti!).
+- SUBAGENT TLS verdict (independent): handshake/record validator
+  @0x49D33C (Thumb): minor-version pair accepts 1|2, rejects 3 -> fatal 47;
+  sender @0x49D3F6 (r1=2); error blocks reference s3_srvr.c. Confirms 1.0-cap.
+- NEGATIVES (closed): NETTYPE=WIFI (only 2nd DNS queried, no gate change);
+  NETTYPE="" (requests still attempted, LOADING); chain pad 0x38A270 in
+  0x38A0E8 (on-path, rethrows like the rest); thread entries 0x38C048/
+  0x189338 have NO pads (uncaught = thread death, by design).
+- STACKBT chain at Http throw (live): raiser <-0x28B140<-0x19F9C4<-
+  0x2AE8BC<-0x38A0E8(pool)<-0x2ABF40 (+ runtime frames). Only 0x2AE8BC has a
+  typed entry (no match); single on-path begin_catch pad (0x38A270) rethrows.
+- TTMATCH base = 0x65E958 (live), catches filter base-never-derived; no
+  dispatcher typed catch; compact entries hold the rest (catch-all shape).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
