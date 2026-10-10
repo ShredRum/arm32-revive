@@ -3422,6 +3422,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
 bad_ptr:
     std::printf("[svc] BAD guest pointer in %s(%08x %08x %08x %08x) lr=%08x -- halting\n", n.c_str(),
                 a0, a1, a2, a3, regs[14]);
+    // HARNESS_BADCTX=1: caller context forensics (regs + stack top) at the
+    // faulting import. Catches state bugs the JIT probes miss (e.g. calls
+    // converging inside a probed function without hitting its entry hook).
+    if (std::getenv("HARNESS_BADCTX")) {
+        auto& rr = ActiveJit()->Regs();
+        std::printf("[badctx] r0-r3=%08x %08x %08x %08x r4-r7=%08x %08x %08x %08x\n", rr[0], rr[1],
+                    rr[2], rr[3], rr[4], rr[5], rr[6], rr[7]);
+        std::printf("[badctx] r8-r11=%08x %08x %08x %08x sp=%08x lr=%08x\n", rr[8], rr[9], rr[10],
+                    rr[11], rr[13], rr[14]);
+        for (int o = 0; o < 96; o += 16) {
+            if (!CheckRange(rr[13] + o, 16, false)) {
+                std::printf("[badctx] sp+%02x: <unmapped>\n", o);
+                break;
+            }
+            const std::uint8_t* p = H<const std::uint8_t>(rr[13] + o);
+            std::printf("[badctx] sp+%02x:", o);
+            for (int j = 0; j < 16; j++) {
+                std::printf(" %02x", p[j]);
+            }
+            std::printf("  |");
+            for (int j = 0; j < 16; j++) {
+                std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+            }
+            std::printf("|\n");
+        }
+    }
     std::printf("[svc] mappings:\n");
     for (const auto& m : mappings_) {
         std::printf("    [%08x-%08x] prot=%d\n", m.start, m.end, m.prot);
@@ -5163,7 +5189,8 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
         }
     }
     if (used >= npads && !std::getenv("HARNESS_RETFAIL") && !std::getenv("HARNESS_STACKBT") &&
-        !std::getenv("HARNESS_TTFILE") && !std::getenv("HARNESS_TTUNW")) {
+        !std::getenv("HARNESS_TTFILE") && !std::getenv("HARNESS_TTUNW") &&
+        !std::getenv("HARNESS_EXDUMP")) {
         return;
     }
     std::uint32_t pad = (used < npads) ? pads[used++] : 0;
@@ -5205,6 +5232,25 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
         return;
     }
     auto& regs = cb->rt_->ActiveJit()->Regs();
+    // HARNESS_EXDUMP=1: hexdump the exception object (r0, 64B) + ti (r1) at
+    // the throw. Layout forensics for catch-handler field reads.
+    if (std::getenv("HARNESS_EXDUMP")) {
+        std::printf("[exdump] obj=%08x ti=%08x\n", (std::uint32_t)r0, (std::uint32_t)r1);
+        if (cb->rt_->CheckRange((std::uint32_t)r0, 64, false)) {
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
+            for (int o = 0; o < 64; o += 16) {
+                std::printf("[exdump] +%02x:", o);
+                for (int j = 0; j < 16; j++) {
+                    std::printf(" %02x", p[o + j]);
+                }
+                std::printf("  |");
+                for (int j = 0; j < 16; j++) {
+                    std::printf("%c", (p[o + j] >= 32 && p[o + j] < 127) ? (char)p[o + j] : '.');
+                }
+                std::printf("|\n");
+            }
+        }
+    }
     // HARNESS_TTFILE=path: typeinfo-slot matcher (unwinder discovery). At a
     // throw, resolves every ttype slot (one-hop absolute or pcrel-indirect
     // two-hop) and matches against the thrown type + its live base chain.
@@ -5429,14 +5475,36 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
             }
             return -1;
         };
-        // Live frames (same scan as STACKBT, keep slot addrs).
+        // Live frames: ARM frame-pointer walk (r11 chain: exact frames incl.
+        // tail-call-compacted ones the BL heuristic misses) UNION the BL
+        // return-addr scan (frames without FP).
         struct Frame {
             std::uint32_t pc, slot;
         };
         std::vector<Frame> frames;
         {
+            std::uint32_t fp = regs[11];
+            for (int d = 0; d < 24; d++) {
+                std::uint32_t sfp = 0, slr = 0;
+                if (!urd(fp, sfp) || !urd(fp + 4, slr)) {
+                    break;
+                }
+                if (slr < 0x1000 || slr >= 0x653D1C) {
+                    break;
+                }
+                if (sfp != 0 && (sfp <= fp || sfp > fp + 65536)) {
+                    // Not a sane chain link; still record this frame once.
+                    frames.push_back({slr & ~1u, fp});
+                    break;
+                }
+                frames.push_back({slr & ~1u, fp});
+                if (sfp == 0) {
+                    break;
+                }
+                fp = sfp;
+            }
             const std::uint32_t sp0 = regs[13];
-            for (std::uint32_t a = sp0; a < sp0 + 8192 && frames.size() < 20; a += 4) {
+            for (std::uint32_t a = sp0; a < sp0 + 8192 && frames.size() < 40; a += 4) {
                 std::uint32_t w = 0;
                 if (!urd(a, w)) {
                     break;
@@ -5449,12 +5517,88 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
                     continue;
                 }
                 if ((prev >> 25) == 0x75) {
-                    frames.push_back({w & ~1u, a});
+                    std::uint32_t pc = w & ~1u;
+                    bool dup = false;
+                    for (const Frame& f : frames) {
+                        if (f.pc == pc) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        frames.push_back({pc, a});
+                    }
                 }
             }
         }
         std::printf("[ttunw] throw ti=%08x frames=%zu\n", thrown, frames.size());
-        // Pass 1: innermost typed match. Pass 2: innermost catch-all.
+        // HARNESS_TTUNW_V=1: verbose per-frame fn + typed-slot resolution
+        // (finds false-negative matches the redirect pass skips).
+        const bool verbose = (std::getenv("HARNESS_TTUNW_V") != nullptr);
+        if (verbose) {
+            for (const Frame& fr : frames) {
+                std::uint32_t fn = ufnof(fr.pc);
+                std::printf("[ttunw-v] pc=%08x fn=%08x", fr.pc, fn);
+                auto it = umap.find(fn);
+                if (it == umap.end()) {
+                    std::printf(" (no pads)\n");
+                    continue;
+                }
+                std::printf(" pads=%zu:", it->second.size());
+                for (const PadEnt& e : it->second) {
+                    if (e.flt > 0) {
+                        std::printf(" [%08x,f%d->%d]", e.pad, e.flt, umatch(e.slot));
+                    } else {
+                        std::printf(" [%08x,all]", e.pad);
+                    }
+                }
+                std::printf("\n");
+            }
+        }
+        // HARNESS_TTUNW_PAD=pad: force redirect to one pad (found via its
+        // frame in the live walk; its fp anchors sp). Overrides pass order.
+        std::uint32_t forcepad = 0;
+        if (const char* e = std::getenv("HARNESS_TTUNW_PAD")) {
+            forcepad = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+        }
+        // HARNESS_TTSP=off: resume sp = frame_fp + off (signed bytes,
+        // default +8). Landing pads address frame temporaries via sp; the
+        // throw sp (possibly KB away) feeds them garbage. The true value is
+        // try-site dependent; sweep when a handler derails on wild pointers.
+        int ttsp_off = 8;
+        const bool forcesp = (std::getenv("HARNESS_TTSP") != nullptr);
+        if (const char* so = std::getenv("HARNESS_TTSP")) {
+            ttsp_off = std::atoi(so);
+        }
+        if (forcepad) {
+            for (const Frame& fr : frames) {
+                std::uint32_t fn = ufnof(fr.pc);
+                if (!fn) {
+                    continue;
+                }
+                auto it = umap.find(fn);
+                if (it == umap.end()) {
+                    continue;
+                }
+                for (const PadEnt& e : it->second) {
+                    if (e.pad != forcepad) {
+                        continue;
+                    }
+                    bool iscatch = (e.flt == 0);
+                    std::printf("[ttunw] forced pad=%08x fn=%08x filter=%d fp=%08x%s\n",
+                                e.pad, fn, e.flt, fr.slot, forcesp ? " (sp=fp+off)" : "");
+                    tried.insert(e.pad);
+                    if (forcesp) {
+                        regs[13] = fr.slot + (std::uint32_t)ttsp_off;
+                    }
+                    cb->rt_->ParkRedirectEx(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt));
+                    cb->rt_->stop_step_ = true;
+                    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+                    return;
+                }
+            }
+            std::printf("[ttunw] forced pad %08x not on live path\n", forcepad);
+        }
         for (int pass = 0; pass < 2; pass++) {
             for (const Frame& fr : frames) {
                 std::uint32_t fn = ufnof(fr.pc);
@@ -6023,7 +6167,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             // Emitted after the dumps.
             if ((std::getenv("HARNESS_REDIR") || std::getenv("HARNESS_RETFAIL") ||
                  std::getenv("HARNESS_STACKBT") || std::getenv("HARNESS_TTFILE") ||
-                 std::getenv("HARNESS_TTUNW")) &&
+                 std::getenv("HARNESS_TTUNW") || std::getenv("HARNESS_EXDUMP")) &&
                 pc == probe_pc2) {
                 ir.CallHostFunction(&ProbeRedir,
                                     ir.ZeroExtendWordToLong(

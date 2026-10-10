@@ -1007,6 +1007,31 @@ dead subsystem, game degrades without it).
   (no parse crash markers; worker dies by unwind as usual). Real cloud alive
   (TLS1.3, valid cert) but API 403 even with byte-exact real request bodies
   (replayed via python) — anonymous session endpoints dead in 2026.
+
+## 23. Session 2026-10-11 (part 14): TTUNW live, translate mapped, sp hunt
+- TTUNW2 live results: 4348 fns, 20-29 frames/throw (FP-walk + BL-scan union;
+  exidx search in C++). Innermost typed matches in job runner 0x19FE80
+  (filter 2 = Http ti, ~43 pads). Outer frames: typed f1->3 in 0x18766C,
+  catchalls in pool/dispatch frames (0x38A0E8, 0x2ABF40, 0x3889EC, ...).
+- SUBAGENT on 0x19FE80 (PROVEN): NO graceful pad — all 43 Http pads share one
+  handler (translate Http -> rcs::Exception ti 0x65FDB4 + rethrow); zero
+  job-state stores, zero notifies. Killed the 43-pad grind.
+- Two-level choreography: Http -> hub 0x1A0A3C (path A) -> rcs::Exception
+  -> outer catch. BUT path A derails: BAD memchr(0x167d,'}',...) from string
+  fn 0xEE4B0, sp-INDEPENDENT (6 offsets fp-28..fp-828 identical) -> not sp.
+- EXDUMP (object layout, live): Http obj = [+0]=0x66A5C0(vt?) [+8]=0x31
+  [+12]=0x28 [+16]=heapptr [+20]=2 [+24]=double 6.0 (error code!)
+  [+44]=1 [+56]=0x51 [+60]=0x42. No 0x167d inside -> handler misreads offset.
+- 0x38A2B0 catchall TOXIC (BAD @0x459EF0, both sps). 0x187830 handler throws
+  secondary EE4swap (type TBD) at 0x18788C regardless of sp.
+- TTPAD batch (6 parallel): outer catchalls (2abfd4/388b54/19fa84) + typed
+  (1a0e88) all convert throw -> thread return (-1/0x167d), main still idles.
+  Workers one-shot (0x38C048 wrapper, no loop): pad continuation skips the
+  job's completion-notify -> main starves. Thread survival != job completion.
+- SHOW window black (offscreen only); filmstrip is truth. TLOG dt 100-250ms.
+  Logos: 100 input-less updates = stuck Rovio (proven); renders/Resume don't
+  advance; taps (tap-to-skip) only in-harness path; phone 3s timer.
+  CallBooleanMethodV (fn#38) implemented (AudioOutput.startOutput->1).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
