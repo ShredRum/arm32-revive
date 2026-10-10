@@ -5236,6 +5236,22 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
     // the throw. Layout forensics for catch-handler field reads.
     if (std::getenv("HARNESS_EXDUMP")) {
         std::printf("[exdump] obj=%08x ti=%08x\n", (std::uint32_t)r0, (std::uint32_t)r1);
+        std::printf("[exdump] r4-r7=%08x %08x %08x %08x r8-r11=%08x %08x %08x %08x sp=%08x lr=%08x\n",
+                    regs[4], regs[5], regs[6], regs[7], regs[8], regs[9], regs[10], regs[11],
+                    regs[13], regs[14]);
+        // Validate the r11 frame chain head (FP-walk depends on it).
+        {
+            std::uint32_t fp = regs[11], sfp = 0, slr = 0;
+            bool ok0 = cb->rt_->CheckRange(fp, 4, false);
+            bool ok1 = cb->rt_->CheckRange(fp + 4, 4, false);
+            if (ok0) {
+                std::memcpy(&sfp, cb->rt_->H(fp), 4);
+            }
+            if (ok1) {
+                std::memcpy(&slr, cb->rt_->H(fp + 4), 4);
+            }
+            std::printf("[exdump] fp=%08x [%08x]=%08x [%08x]=%08x\n", fp, fp, sfp, fp + 4, slr);
+        }
         if (cb->rt_->CheckRange((std::uint32_t)r0, 64, false)) {
             const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
             for (int o = 0; o < 64; o += 16) {
@@ -5555,8 +5571,16 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
                 std::printf("\n");
             }
         }
+        // HARNESS_TTREG=1: restore callee-saved regs from the pad frame's
+        // saved slots + r11=fp (default: keep throw-time regs). Real unwind
+        // restores r4-r11 from the frame; keeping the innermost frame's regs
+        // feeds handlers garbage (BADCTX-proven: r4/r7/r10 held inner values
+        // -> 0x167d string). Assumes prologue push{r4-r11,lr} + fp=sp+28
+        // (VERIFIED for 0x19FE80: e92d4ff0/e28db01c): saved r4=[fp-28] ..
+        // r10=[fp-4]. Frame sp: TTSP if set, else fp-28 (entry sp).
+        const bool restoreregs = (std::getenv("HARNESS_TTREG") != nullptr);
         // HARNESS_TTUNW_PAD=pad: force redirect to one pad (found via its
-        // frame in the live walk; its fp anchors sp). Overrides pass order.
+        // frame in the live walk; its fp anchors sp/regs). Overrides order.
         std::uint32_t forcepad = 0;
         if (const char* e = std::getenv("HARNESS_TTUNW_PAD")) {
             forcepad = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
@@ -5585,9 +5609,29 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
                         continue;
                     }
                     bool iscatch = (e.flt == 0);
-                    std::printf("[ttunw] forced pad=%08x fn=%08x filter=%d fp=%08x%s\n",
-                                e.pad, fn, e.flt, fr.slot, forcesp ? " (sp=fp+off)" : "");
+                    std::printf("[ttunw] forced pad=%08x fn=%08x filter=%d fp=%08x%s%s\n",
+                                e.pad, fn, e.flt, fr.slot, forcesp ? " (sp=fp+off)" : "",
+                                restoreregs ? " (regs<=frame)" : "");
                     tried.insert(e.pad);
+                    if (restoreregs) {
+                        // Saved r4-r10 live at [fp-28..fp-4] (prologue push
+                        // r4-r11,lr + fp=sp+28); r11=fp; sp=fp-28 unless TTSP.
+                        bool ok = true;
+                        for (int k = 0; k < 7; k++) {
+                            std::uint32_t v = 0;
+                            if (!urd(fr.slot - 28 + k * 4, v)) {
+                                ok = false;
+                                break;
+                            }
+                            regs[4 + k] = v;
+                        }
+                        regs[11] = fr.slot;
+                        std::printf("[ttunw] regs %s r4=%08x r5=%08x r6=%08x\n", ok ? "ok" : "SHORT",
+                                    regs[4], regs[5], regs[6]);
+                        if (!forcesp) {
+                            regs[13] = fr.slot - 28;
+                        }
+                    }
                     if (forcesp) {
                         regs[13] = fr.slot + (std::uint32_t)ttsp_off;
                     }
@@ -6117,6 +6161,47 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             ir.CallHostFunction(
                 &PokeShadowState,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+        }
+        // HARNESS_TRCALL=start,len: trace r0-r6 at every basic-block entry
+        // in [start,start+len) (straight-line handler forensics: which call
+        // first receives garbage). Uses the ProbeDump triple; raise
+        // HARNESS_PROBE_N accordingly (it shares the dump cap).
+        {
+            static bool trinit = false;
+            static std::uint32_t trstart = 0, trend = 0;
+            if (!trinit) {
+                trinit = true;
+                if (const char* e = std::getenv("HARNESS_TRCALL")) {
+                    unsigned s = 0, l = 0;
+                    if (std::sscanf(e, "%x,%x", &s, &l) == 2) {
+                        trstart = s;
+                        trend = s + l;
+                    }
+                }
+            }
+            if (trend > trstart && pc >= trstart && pc < trend) {
+                ir.CallHostFunction(&ProbeDump,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
+                ir.CallHostFunction(&ProbeDump2,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(2))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(3))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))));
+                ir.CallHostFunction(&ProbeDump3,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(4))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(5))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
+            }
         }
         if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3)) {
             g_probe_pc = pc;
