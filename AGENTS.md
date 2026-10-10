@@ -655,3 +655,18 @@ dead subsystem, game degrades without it).
 - DIAG: HARNESS_JOVR, HARNESS_JLAST "J", [audio] ctor log, AudioJLo/Hi.
 - NEXT: (1) consents-answer mock (registry/state archaeology), (2) object
   fields for audio, (3) menu + gameplay, (4) packaging.
+
+## 13. Session 2026-10-10 (part 4): MENU HUNT — splash path mapped, LOADING gate
+- INPUT MAP: nativeInput(IFFI)@0xc23e4 + HARNESS_JOVR per-call overrides
+  (generate index lists with python — hand-counting caused 2 index bugs).
+  Proven: 20upd no-tap=Rovio, 20upd tap=Fox. Splash screens wait for input.
+- BOOT PATH: Rovio -> Fox -> Rio LOADING (Blu+Red, landscape, 4 draws,
+  svc~1.8M). Live X window + PPM shots; HARNESS_SHOW=N keeps window open.
+- LOADING GATE (open): idle updates = identical redraws (zero JNI). Ruled
+  out: network (0 socket calls), worker (50-upd live run stuck too), count
+  (48), loading-phase taps (6x). Static gate analysis backgrounded.
+- AUDIO (live, parked): mixdata with recorded ctor J returns clean, 5x loop
+  OK. The "array=0" failure was my JOVR index bug, NOT field mocks
+  (retracted). Mixing so far doesn't unblock loading.
+- SHOT/GL DIAG: RGBA reads (RGB=INVALID_OPERATION on alpha configs),
+  swap-after-read, draw-state/MVP/texsize dumps, upload checksums, glScissor.
