@@ -1123,6 +1123,55 @@ dead subsystem, game degrades without it).
 - NEXT: trace the body's session checks (0xC21EC strings + 0xC5104 vcall
   result) with the gate open.
 
+## 31. Session 2026-10-11 (part 22): registry crypto broken, one-shot dynamics
+- DEVICE FORENSICS (rooted emulator over SSH, read-only + mem):
+  load bias 0x12EB6000 (deterministic twice); manager *0x672E98 live;
+  gate#1-manager+164=0 (matches ours); live POST /sessions (518B, real
+  clientSalt/Signature); response-ish {200,200,...} struct; session-state
+  struct (session/time keys); healthy 320B registry pulled (work/dreg_device320.bin);
+  thread cast (Configuration/NetworkTime/AsyncHttpQueue/TaskDispatcher work/
+  ServerLogger/Analytics/Ads/Thread-N); futex topology (waits never signaled,
+  broadcasts to empty, waiter 0x9B203224 across boots). NO strace marathons
+  (killed game twice); passive reads only. GDB: no arm gdbserver in NDK.
+- REGISTRY CRYPTO (subagent, VERIFIED by decrypting both myself): AES-256-CBC,
+  zero IV, app-fixed key 3a7d2e03...4660ea. No 32B header (first-32B-identical
+  = CBC determinism on same prefix). Format = JSON + Crypto++-style random pad.
+  DEV: real UUIDs, Apprater block, NO cloud section. OURS: cloud{...fake tokens},
+  installationID "0", zero pad (our lrand48 flaw, cosmetic).
+  SMOKING GUN: decomp FUN_000eabd4 throws underflow_error("Missing or invalid
+  refresh token, automatic login not available") — token PRESENCE enables
+  auto-login (network); ABSENCE → offline path. Our fake token forces login path.
+- ONE-SHOT DYNAMICS (PROVEN): r5 (0xD6F90) = STORED refresh token length.
+  EMPTY registry -> r5==0 -> success path (flag 1 via mov). Registry WITH
+  tokens -> refresh-fetch -> offline fail -> flag 0 (jump-in with r0=0).
+  Every run's save poisons the next (496B vs poison-416B which kills update#1;
+  files12_snap.tar + work/clean_registry.bin forged via key, DEV shape, fresh
+  UUIDs, 224B; reset before EVERY run!). Device clean-boot-offline == fresh path.
+- COMBO2 (fresh+flag1+latch+condsatisfy+spurwake+taps+film): NO abort, worker
+  survives looping (spurwake x3), exit flag=1 HELD, film LOADING. +164=2.
+- PACING (PROVEN): main sprinting (3s) murders workers via _exit before they
+  reach raiser. HARNESS_PACEMS=N sleeps after each JNI (deterministic).
+- ROLE MAP (setname, live): tid2 Configuration, tid3/6 NetworkTime, tid5
+  Analytics, tid7 Ads, tid9/11 TaskDispatcher work (sessions), tid10 Assets
+  (apdrive), tid12 ServerLogger. AsyncHttpQueue (device-only) never spawns
+  (ads backend? deprioritized).
+- DNS TIMELINES (tid3=time, tid10=apdrive): sscanf URL -> socket(DGRAM) ->
+  connect(8.8.8.8:53) -> send(33B) -> (DNSALLOW: real 140B reply recvd!) ->
+  TCP sockets -> connect fails 101 -> strerror error-handling -> poll-park.
+  EXACTLY ONE DNS cycle each (no retries observed) -> single-shot waits.
+- SIGNAL PROTOCOL (decomp FUN_0039f2a4/0x39F170/0x39F21C): predicate =
+  mutex->__size[8]&1; set writes 1+broadcast; reset writes 0; wait aborts on
+  nonzero (Signal.cpp). CONDSATISFY corrected to mutex+8 (was Link+8, wrong).
+- MCSM COMPARE (subagent, verified): same pattern (guest assets + arm64 host +
+  JNI_OnLoad + thunks), cannot explain stall (offline SDL vs rcs handshake).
+  REAL gaps adopted: pthread_rwlock_* forwarding (implemented, mirror mutex),
+  packaging notes (assets/guestlib + max-page-size later). Guest exports own
+  __cxa_* (like MCSM stub).
+- 0x74168 CHAIN CLOSED: zero callers of 0x74168/70/74 (all kinds) -> STACKBT
+  frame was stale-lr artifact. Gate setter dead in practice.
+- OPEN (narrow): post-TCP-fail park (single-shot waits, no backend posts);
+  main never observes sessions (no flag/pipe reads); menu scene never
+  activates (r1=1 sites never translate). NEXT: main-observation channel.
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata

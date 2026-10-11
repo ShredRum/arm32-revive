@@ -985,6 +985,21 @@ int main(int argc, char** argv) {
             }
             Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, stk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
+            // HARNESS_PACEMS=N: sleep N ms after each JNI call (deterministic
+            // pacing so concurrent workers reach completion before main exits
+            // via _exit; sprinting main otherwise murders them mid-flight).
+            {
+                static int pacems = -1;
+                if (pacems < 0) {
+                    pacems = 0;
+                    if (const char* e = std::getenv("HARNESS_PACEMS")) {
+                        pacems = std::atoi(e);
+                    }
+                }
+                if (pacems > 0 && pacems < 10000) {
+                    ::usleep((useconds_t)(pacems * 1000));
+                }
+            }
             // HARNESS_TLOG=1: host monotonic ms at each JNI call boundary
             // (frame pacing diagnostics: what dt does the game observe?).
             if (std::getenv("HARNESS_TLOG")) {
