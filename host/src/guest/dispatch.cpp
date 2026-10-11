@@ -5005,8 +5005,11 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     // and its +164/+1187 over time. The FLIP below stays POKE164-gated.
     {
         static int pd = 0;
-        if (pd < 6) {
+        static std::uint32_t lastv = 0xFFFFFFFFu;
+        // Log first 2 fires + every CHANGE of +164 (natural transitions).
+        if ((pd < 2 || v != lastv) && pd < 40) {
             pd++;
+            lastv = v;
             std::uint8_t b1187 = 0;
             std::uint32_t s168 = 0;
             if (cb->rt_->CheckRange(o + 1187, 1, false)) {

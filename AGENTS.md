@@ -1158,6 +1158,13 @@ dead subsystem, game degrades without it).
   boot with real frames. +164 still 2 (loading not yet built).
 - HARNESS_POKE164_DELAY=N added (flip on/after Nth firing; early flips
   white). Long run: 27 updates + 27 renders + 3 tap pairs, DELAY=10.
+- FLIP KILLS BOOT (PROVEN film): longrun1 shot008=Rovio, shot024+=WHITE.
+  Forcing +164=0 with unbuilt content whites everything (taps never even
+  reach Fox). POKE164 shelved; natural path only.
+- NATURAL BREAKTHROUGH (natrun1, no flip): Rovio -> Fox -> Blue Sky ->
+  RIO LOADING with real art (Blu + landscape + LOADING text)! Taps advance
+  splashes; sessions 2x clean; /time + apdrive sscanf fire first time.
+  +164 stays 2. Remaining: LOADING -> menu (time/apdrive complete?).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
