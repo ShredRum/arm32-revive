@@ -990,8 +990,9 @@ int main(int argc, char** argv) {
             if (std::getenv("HARNESS_TLOG")) {
                 struct timespec ts {};
                 ::clock_gettime(CLOCK_MONOTONIC, &ts);
-                std::printf("[tlog] fn=%08x t=%lld.%03lld\n", fns[i],
-                            (long long)ts.tv_sec, (long long)(ts.tv_nsec / 1000000));
+                std::printf("[tlog] fn=%08x t=%lld.%03lld r0=%08x\n", fns[i],
+                            (long long)ts.tv_sec, (long long)(ts.tv_nsec / 1000000),
+                            jit.Regs()[0]);
             }
             // HARNESS_SHOT_EVERY=N: filmstrip screenshot every Nth call.
             {

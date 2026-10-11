@@ -5001,8 +5001,26 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     }
     std::uint32_t v = 0;
     std::memcpy(&v, cb->rt_->H(o + 164), 4);
-    // TEMP-DIAG (menu gate): identify the surface object ([o+168]): its
-    // vtable, the state-setter at vtable+36, and current +180 state.
+    // TEMP-DIAG (update bail): dump the Gate#1 singleton *0x672E98.
+    {
+        static int pg1 = 0;
+        if (pg1 < 2 && cb->rt_->CheckRange(0x672E98, 4, false)) {
+            pg1++;
+            std::uint32_t g = 0;
+            std::memcpy(&g, cb->rt_->H(0x672E98), 4);
+            std::printf("[poke164] gate1 singleton *0x672E98=%08x\n", g);
+        }
+    }
+    // TEMP-DIAG (update bail): Gate#3 byte [manager+1187] (must be 1).
+    {
+        static int pg3 = 0;
+        if (pg3 < 2 && cb->rt_->CheckRange(o + 1187, 1, false)) {
+            pg3++;
+            std::uint8_t b = 0;
+            std::memcpy(&b, cb->rt_->H(o + 1187), 1);
+            std::printf("[poke164] gate3 [manager+1187]=%u\n", b);
+        }
+    }
     {
         static int pg = 0;
         if (pg < 2 && cb->rt_->CheckRange(o + 168, 4, false)) {
@@ -5296,7 +5314,7 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
         static const char sjson[] =
             "{\"segments\":[0],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
             "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000},"
-            "\"profile\":{},\"config\":{}}";
+            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":true}}";
         body = (std::uint8_t*)sjson;
         blen = sizeof(sjson) - 1;
     } else if (u.find("variantconfig.json") != std::string::npos) {

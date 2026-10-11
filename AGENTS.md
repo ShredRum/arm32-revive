@@ -1110,6 +1110,18 @@ dead subsystem, game degrades without it).
   expiresIn 9999999999 wraps 32-bit (2014!); 2000000000 used.
 - NEXT: gated-poke film (loading built -> flip -> menu?); else find apdrive
   queue trigger / main's session poll target.
+
+## 28. Session 2026-10-11 (part 19): update gate opened (r0=0!)
+- TLOG r0: nativeUpdate returned 1 (idle-bail) EVERY update. Gates (subagent):
+  #1 *0x672E98 (manager, non-null live PROVEN), #2 vcall+148, #3
+  [manager+1187]==1. Gate#3 byte reads 0 live (PROVEN) -> all updates bail.
+- Writer 0xBE704 (single in binary: mov r2,#1 + strb +1187 + str +1188, no
+  callers/refs -> virtual/computed dispatch). NOT Resume (tested, still 0).
+- POKE1187 (+1187=1) + POKE1188 (+1188=1) at 0xC2144: updates now return
+  r0=0 (FULL body runs!) but screenshot still LOADING. Body runs yet keeps
+  +164=2 (loading): its session checks fail silently.
+- NEXT: trace the body's session checks (0xC21EC strings + 0xC5104 vcall
+  result) with the gate open.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
