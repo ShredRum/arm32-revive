@@ -1592,6 +1592,32 @@ dead subsystem, game degrades without it).
   (canned offline session for dead 2026 servers); honesty via logging, ship
   criterion = offline menu+play, not method purity. #3/#4/#5 stay strict.
 
+## 45. Walk interrogation: empty vector proven live (2026-10-12, walk2.log)
+- Walk 0xC45FC runs EVERY update (27x, [probe]#N execution dumps, NOT
+  probe-emit). Guard fails EVERY time: r0=0 at 0xC4710, no fault => impl valid,
+  subscriber count *(impl+0x10)==0. Invoke 0xC4830 NEVER runs (zero dumps with
+  fitting lr). Vector EMPTY the whole run. r1=0x672DA8 const, entry r0 =
+  EventProcessor (vtable 0x66B7B8, class sniff). impl = *0x672DA8 = heap
+  (0x10000A0C here — drifts, runtime discovery mandatory, never hardcode).
+  Sessions succ + flag=1 as usual; +164=2; film RIO LOADING (real art).
+- INFRA LESSONS (burned, load-bearing): [probe-emit] = TRANSLATION time,
+  [probe]#N = EXECUTION (census1/2 counts were translation noise; walk2 verdict
+  rests on 56/56 accounted execution dumps: 27 entries + 27 fails + fill +
+  raiser). PCTRACE = translation-only, NEVER execution evidence. ProbeDump cap
+  (PROBE_N) is shared across all 5 slots. Slot budget: fill + raiser
+  UNTOUCHABLE (dropping fill = ParseError death at update#1, main-thread spiral
+  with R7 in MAIN stack, same stale shape => spiral class is thread-
+  independent, context-init — census1/walk1 died this way TWICE). 3 free slots
+  max. zsh: no `echo ===`, grep brackets need -F.
+- Subscribe executions: census2's "2 hits" were translations; walk2 shows ZERO
+  subscribe execution dumps (init#50 + void-event 0x18D734 paths vary run to
+  run — OPEN, not load-bearing). Neither subscriber is EVENT_UPDATE.
+- NEXT: HARNESS_EVENTPOST (new, minimal): at walk entry, if count==0, build
+  synthetic pi/arr/elem/callable in guest heap from LIVE slot reads
+  (*0x672DA8, never hardcoded); callable +0x18 -> new safe SVC slot (logs
+  marker + Ret, walk continues, update completes). Binary: marker in log <=>
+  walk invokes our event. Design only — implement + build + run next.
+
 ## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
 - SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
   query (no early walk; 1026 unanimous). 0x45A778 inside raise driver
