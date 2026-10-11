@@ -1196,6 +1196,15 @@ dead subsystem, game degrades without it).
   live-verified (addr math in python, behavior via probes). Where checked
   (sessions flow, Signal predicate mutex+8) it is exact. Redo only if a
   decomp-vs-live contradiction blocks us.
+  REFINED (screenshot of Analysis Options): red Prototypes (Aggressive
+  Instruction Finder etc.) risk = phantom functions from data bytes — mitigate
+  by distv-cross-checking any "orphan" function before calling it dead.
+  Bigger caveat: Data Reference + ELF Scalar Operand References are OFF ->
+  xref coverage is WEAKER, so static "zero callers/refs" claims (0x74168
+  chain, gate setter 0xBE704) may be false negatives from missing xrefs, not
+  just virtual dispatch. Key ones already have live confirmation; don't trust
+  static zero-ref claims alone. If a redo ever happens: prototypes OFF,
+  Data Reference + ELF Scalar ON.
 - AIRPLANE1 (files17 = seeds + files12 496B token-registry, pure NONET, no
   DNSALLOW, combo otherwise; work/airplane1.log): job#1 (tid9) reads 496B
   registry (tokens present -> r5!=0 -> refresh path), gathers device info
