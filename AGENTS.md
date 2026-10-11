@@ -1173,6 +1173,22 @@ dead subsystem, game degrades without it).
 - OPEN (narrow): post-TCP-fail park (single-shot waits, no backend posts);
   main never observes sessions (no flag/pipe reads); menu scene never
   activates (r1=1 sites never translate). NEXT: main-observation channel.
+
+## 32. Session 2026-10-11 (part 23): update-body checks sterile, full reread
+- FULL REREAD (all 1297 lines, by ranges): section numbering is broken
+  (28->31->30, no §29 heading) — navigate by CONTENT, not numbers. Re-bitten
+  by zsh (`echo ===` breaks it); shell analysis goes in script files.
+- PROBE_UPDATE1 (clean registry + paced + PROBE4=c21f8/PROBE5=c2240/PROBE_N=200,
+  work/probe_update1.log): flag=1 held, +164=2, film = real RIO LOADING art.
+- RESULTS (PROVEN, ~25 updates, pairwise chained: odd-hit r0 == next even-hit
+  r4, e.g. hit2 r0=f100322c -> hit3 r4=f100322c): c21f8: r0=fresh f10032xx
+  (+4/update = bump-alloc no-reuse, normal), r1=0, r2=manager 0x140E2205
+  STABLE, r6=BSS 0x672E6C; c2240: r0=0 (quit-poller NULL every time),
+  r1=r2=0x140E2205. ZERO variance across updates.
+- VERDICT: update body does NOT observe sessions — sterile normal path
+  (stable manager lookup + NULL quit + r0=0, same shape as device must take).
+  +164 stall is NOT here. NEXT: apdrive completion delivery (0x28E328 queue
+  format / main pickup) or menu-scene activation trigger.
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
