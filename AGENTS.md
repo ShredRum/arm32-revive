@@ -1165,6 +1165,9 @@ dead subsystem, game degrades without it).
   RIO LOADING with real art (Blu + landscape + LOADING text)! Taps advance
   splashes; sessions 2x clean; /time + apdrive sscanf fire first time.
   +164 stays 2. Remaining: LOADING -> menu (time/apdrive complete?).
+- STUCK-WORKER HUNT: 10 created (tids 2-11, all start=0x38C048), only 4 done
+  (4,8,9,11). 6 hang: time/apdrive sscanf but never reach raiser (no succ,
+  no throw). HARNESS_WBEAT=1 added (per-worker PC sampler, wbeat1.log).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

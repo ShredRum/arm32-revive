@@ -5,6 +5,7 @@
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <ctime>
 #include <dirent.h>
@@ -3950,6 +3951,21 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         Dynarmic::A32::Jit jit(cfg);
         t_active_jit = &jit;
+        // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
+        // workers; racy values, liveness only — same caveat as main beat).
+        if (std::getenv("HARNESS_WBEAT")) {
+            std::thread([st, tid, &jit]() {
+                for (int i = 0; i < 60 && !st->done; i++) {
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    if (st->done) {
+                        break;
+                    }
+                    auto& rr = jit.Regs();
+                    std::printf("[wbeat] tid=%u pc=%08x lr=%08x sp=%08x\n", tid, rr[15],
+                                rr[14], rr[13]);
+                }
+            }).detach();
+        }
         auto& regs = jit.Regs();
         regs.fill(0);
         regs[13] = stack + 0x200000u - 8;  // 8-aligned top
