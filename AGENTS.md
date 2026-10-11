@@ -1230,6 +1230,21 @@ dead subsystem, game degrades without it).
   device must throw+catch here (error 6) — divergence point unproven.
 - ASKED USER: exact offline methodology on emulator + offline-boot logcat
   markers (DNS/error-6/sessions/apdrive lines) + cache state of that boot.
+- ANSWERED (user): airplane on host+guest + wiped data; works with/without
+  cache, with/without network. Device clean-boot-offline == our combo2 shape
+  (fresh registry + offline) -> divergence is purely time/apdrive fate.
+- LOGCAT GOLD (rio_boot2.log, user's file, READ-ONLY): offline boot logs
+  3x `E RovioAccount: Login failed: -1 => HTTP Exception: HTTP request failed
+  with code 6: Could not resolve: cloud.rovio.com (Could not contact DNS
+  servers)` — then continues to menu. PROVEN device DNS shape: queries
+  UNANSWERED (not send-error) -> timeout -> HttpRequestException(6) -> caught
+  (Java logs Login failed) -> fallback -> menu.
+- DIVERGENCE (INFERRED, sharp): our NONET fails DNS sends IMMEDIATELY
+  (ENETUNREACH) -> silent-park branch; device sends (or attempts) and times
+  out -> throw branch. FIX: HARNESS_DNSHUSH=1 (swallow DNS sends as fake-full,
+  no reply -> resolver timeout; implemented in send path, rebuilding).
+  NEXT: dnshush run on clean registry (exact device config) — watch for throw
+  (type? caught? thread death?) + flag + film.
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
