@@ -1415,3 +1415,35 @@ dead subsystem, game degrades without it).
   [28e7c4,189ef0], [28e7c4,2848c4] — both rethrow. r0/r1/sp questions
   remain (r1=switch? sp=scratch?). NEXT: app-level catch (main-side?) or
   real unwinder (phase1 driver + opcode interp + personality hijack).
+
+## 34. Session 2026-10-11 (part 25): subagent waves + nopoke kills poke
+- POKE THEORY DEAD (work/nopoke1.log, full combo WITHOUT POKE1187): identical
+  stall (flag=1, succ, +164=2, LOADING film, full 63 calls). Natural gate
+  changes nothing. POKE1187 kept (harmless) but no longer suspected.
+- MARATHON early _exit (work/marathon1.log, 483-call list): guest quits cleanly
+  at ~102 calls (census, no BAD). Cause OPEN (tap pattern? update count? NOT
+  poke — nopoke ran full length). Waiting-test blocked until understood.
+- SUBAGENT WAVE-1 (all read-only, all completed):
+  1. Time-forensics: SLOW bg level-preload to 99.7% (new handles + real
+     glTexImage2D of INGAME stone/wood/steel); subsystems freeze ~50%.
+     Game alive, menu trigger parked.
+  2. Assets: loading set COMPLETE (LOADING art/fonts/menu sheets as pairs).
+     Early-asset-error EXCLUDED.
+  3. Queue: struct mapped (+0x24 read-fd/+0x28 write-fd/+0x2C pending; reader
+     +process loop; enqueue sites). CORRECTION: file 0x5E0FC = constructor,
+     NOT the loop (real loop file 0x5E164, never runs); calls virtual-only.
+  4. Login: reachable ONLY via Lua global native_RovioAccount.loginRovioId
+     (Lua 5.1 closures PROVEN in-binary); no native BL callers; no Java.
+- INVOKER/LAMBDA/HEAP negatives (live): file 0x5E434 (slot-6 invoker)
+  translates in RETSUCC runs; hit lr=0x5E270 carries event-link-shaped object
+  (vtable file 0x66B824, self-ref) + loginRovioId lambda as r1 — chain fires
+  but functor bodies (0x5EBA4/0x5FE70) never translate. Heap scans clean for:
+  fail/success functor code addrs, vtable-A/B users, lambda vtable 0x65E590
+  (fail configs), manager vtable 0x65D560 user. Login callback machinery never
+  materializes in fail runs. Login poll reader 0x5D838 + all 6 account handlers
+  silent. Decrypted Lua in heap references loginRovioId (sendStatsToAccount
+  neighborhood) but never invokes.
+- RELIABLE DEATH (work/relthrow1.log, servers+sendfail, no RETSUCC): tid9+tid12
+  die via unwind 2/2 (Find_exidx, retval 0x45A778). Playground for REDIR.
+- WAVE-2 launched (read-only, background): JNI mock audit, time/apdrive
+  endings, Lua execution forensics.
