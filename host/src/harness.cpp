@@ -1016,6 +1016,7 @@ int main(int argc, char** argv) {
         if (std::getenv("HARNESS_SCREENSHOT")) {
             rt.RealGLBackend()->Screenshot("work/shot.ppm", 800, 480);
         }
+        rt.ThreadCensus();
         // HARNESS_SHOW=N: keep the live GL window open N seconds (viewing).
         if (const char* sh = std::getenv("HARNESS_SHOW")) {
             int secs = std::atoi(sh);

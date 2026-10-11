@@ -424,6 +424,48 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
                         GuestTid() == 1 ? "" : "(T2+)", mod_.imports[idx].name.c_str(), regs[0],
                         regs[1], regs[2], regs[3], regs[14]);
         }
+        // HARNESS_LASTSVC=1: remember each worker's current import (parked-
+        // SVC triage for stuck workers; read by ThreadCensus).
+        {
+            static int lsen = -1;
+            if (lsen < 0) {
+                lsen = std::getenv("HARNESS_LASTSVC") ? 1 : 0;
+            }
+            if (lsen && GuestTid() != 1) {
+                const auto it = threads_.find(GuestTid());
+                if (it != threads_.end()) {
+                    std::lock_guard<std::mutex> l(it->second->m);
+                    it->second->last_svc = mod_.imports[idx].name;
+                    // Ring history (last ~8 MEANINGFUL calls; housekeeping
+                    // noise excluded so the job's real path survives).
+                    static const char* noise[] = {
+                        "poll",         "free",         "malloc",       "pthread_mutex_lock",
+                        "pthread_mutex_unlock", "clock_gettime", "pthread_cond_signal",
+                        "__aeabi_memcpy", "memcmp",     "memset",       "pthread_mutex_destroy",
+                        "gettimeofday",  nullptr};
+                    bool skip = false;
+                    for (int k = 0; noise[k]; k++) {
+                        if (mod_.imports[idx].name == noise[k]) {
+                            skip = true;
+                            break;
+                        }
+                    }
+                    if (!skip) {
+                        std::string& hst = it->second->svc_hist;
+                        if (hst.size() < 320) {
+                            if (!hst.empty()) {
+                                hst += ",";
+                            }
+                            hst += mod_.imports[idx].name;
+                        } else {
+                            const std::size_t c = hst.find(',');
+                            hst = (c == std::string::npos ? "" : hst.substr(c + 1) + ",") +
+                                  mod_.imports[idx].name;
+                        }
+                    }
+                }
+            }
+        }
         call_total++;
     }
     CallImport(idx, regs);
@@ -439,7 +481,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         n == "recvfrom" || n == "bind" || n == "listen" || n == "accept" || n == "getaddrinfo" ||
         n == "freeaddrinfo" || n == "gethostbyname" || n == "setsockopt" || n == "shutdown" ||
         n == "sendmsg" || n == "recvmsg") {
-        std::printf("[netsock]%s %s(%08x %08x %08x %08x) lr=%08x\n",
+        std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                     GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
     }
 
@@ -826,7 +868,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             static int sc = 0;
             if (sc < 30) {
                 sc++;
-                std::printf("[sscanf]%s \"%s\" fmt \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
+                std::printf("[sscanf][t%u]%s \"%s\" fmt \"%s\"\n", GuestTid(),
+                            GuestTid() == 1 ? "" : "(T2+)",
                             inp.c_str(), fmt.c_str());
             }
         }
@@ -1501,6 +1544,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         // TEMP-DIAG (worker hang): log the job name (inline C string at
         // [arg+0x20], seen as "Configuration") so runs inventory jobs.
+        // Also scan [arg,arg+0x200] for an http URL (job identity).
         {
             std::string jn = "?";
             if (CheckRange(a3 + 0x20, 32, false)) {
@@ -1517,7 +1561,31 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     jn = tmp;
                 }
             }
-            std::printf("[thread] create start=%08x arg=%08x job=\"%s\"\n", a2, a3, jn.c_str());
+            std::string surl = "-";
+            if (CheckRange(a3, 0x200, false)) {
+                for (std::uint32_t k = 0; k + 8 < 0x200; k++) {
+                    char c4[5] = {0};
+                    std::memcpy(c4, H(a3 + k), 4);
+                    if (!std::strcmp(c4, "http")) {
+                        char ub[81] = {0};
+                        for (int j = 0; j < 80; j++) {
+                            char c = 0;
+                            if (!CheckRange(a3 + k + j, 1, false)) {
+                                break;
+                            }
+                            std::memcpy(&c, H(a3 + k + j), 1);
+                            if (!c) {
+                                break;
+                            }
+                            ub[j] = (c >= 32 && c < 127) ? c : '?';
+                        }
+                        surl = ub;
+                        break;
+                    }
+                }
+            }
+            std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
+                        jn.c_str(), surl.c_str());
         }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
@@ -1575,19 +1643,112 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (++poll_hits <= 400) {
                 std::string ds;
                 for (std::size_t i = 0; i < pfds.size() && i < 4; i++) {
-                    char b[32];
+                    char b[48];
                     std::int32_t gfd = -99;
                     std::memcpy(&gfd, H(a0 + i * 8), 4);
                     std::int16_t ev = 0;
                     std::memcpy(&ev, H(a0 + i * 8 + 4), 2);
-                    std::snprintf(b, sizeof(b), "g%d:%04x ", gfd, (unsigned)ev & 0xFFFF);
+                    char ft = '?';
+                    if (pfds[i].fd >= 0) {
+                        struct stat fs {};
+                        if (::fstat(pfds[i].fd, &fs) == 0) {
+                            ft = S_ISSOCK(fs.st_mode) ? 'S'
+                                 : S_ISFIFO(fs.st_mode) ? 'P'
+                                 : S_ISREG(fs.st_mode)  ? 'F'
+                                                        : 'o';
+                        }
+                    }
+                    std::snprintf(b, sizeof(b), "g%d->h%d%c:%04x ", gfd, pfds[i].fd, ft,
+                                  (unsigned)ev & 0xFFFF);
                     ds += b;
                 }
-                std::printf("[poll] nfds=%u to=%d fds=[%s]%s\n", a1, (int)a2, ds.c_str(),
+                std::printf("[poll][t%u]%s nfds=%u to=%d fds=[%s]%s\n", GuestTid(),
+                            GuestTid() == 1 ? "" : "(T2+)", a1, (int)a2, ds.c_str(),
                             poll_hits == 5 ? " (quiet henceforth)" : "");
             }
         }
         int r = ::poll(pfds.data(), (nfds_t)pfds.size(), to);
+        // TEMP-EXP (HARNESS_POLLFAIL=1): fail-fast synthesis for starved
+        // dispatcher waits. A single-fd worker poll with >=10 straight zero
+        // results AFTER sessions succeeded gets NVAL lied from then on
+        // (device delivers fast network failure -> graceful; we hang).
+        // Paced 100ms, no fd destruction (writer-safe, reversible).
+        // HARNESS_POLLFAIL=err: return -1/EINTR instead (different reader
+        // branch; NVAL proved swallowed).
+        // HARNESS_PIPEWAKE=1: instead write a 1B wake (0x00) to the paired
+        // write end (guest G+1, verified FIFO) when streak hits 10, re-arming
+        // (mimics observed main/worker 1B wakes; may advance the job to its
+        // next step, e.g. recv -> EAGAIN -> graceful).
+        {
+            static int pfmode = -1;
+            static int pwake = -1;
+            if (pfmode < 0) {
+                pfmode = 0;
+                pwake = 0;
+                if (const char* e = std::getenv("HARNESS_POLLFAIL")) {
+                    pfmode = (!std::strcmp(e, "err")) ? 2 : 1;
+                }
+                if (std::getenv("HARNESS_PIPEWAKE")) {
+                    pwake = 1;
+                }
+            }
+            extern bool g_succ_done_hack;
+            static std::unordered_map<std::uint32_t, int> streak;
+            static std::unordered_map<std::uint32_t, char> lying;
+            if ((pfmode || pwake) && a1 == 1 && g_succ_done_hack) {
+                std::int32_t gfd0 = -99;
+                std::memcpy(&gfd0, H(a0), 4);
+                const std::uint32_t ug = (std::uint32_t)gfd0;
+                if (gfd0 > 2 && lying.find(ug) == lying.end() && streak.size() < 64) {                    if (r == 0) {
+                        if (++streak[ug] == 10) {
+                            if (pwake) {
+                                // Wake via paired write end (guest G+1).
+                                int wh = -1;
+                                {
+                                    std::lock_guard<std::mutex> io(io_mutex_);
+                                    const auto wit = fd_map_.find(ug + 1);
+                                    if (wit != fd_map_.end()) {
+                                        wh = wit->second;
+                                    }
+                                }
+                                struct stat wfs {};
+                                if (wh >= 0 && ::fstat(wh, &wfs) == 0 &&
+                                    S_ISFIFO(wfs.st_mode)) {
+                                    const std::uint8_t wb = 0;
+                                    if (::write(wh, &wb, 1) == 1) {
+                                        std::printf("[pipewake] 1B -> g%d (h%d)\n", gfd0 + 1,
+                                                    wh);
+                                    }
+                                }
+                                streak[ug] = 0;  // re-arm
+                            } else {
+                                std::printf("[pollfail] %s starved g%d\n",
+                                            pfmode == 2 ? "ERR-lie" : "NVAL-lie", gfd0);
+                                lying[ug] = 1;
+                            }
+                        }
+                    } else {
+                        streak.erase(ug);
+                    }
+                }
+                if (gfd0 > 2 && lying.find(ug) != lying.end()) {
+                    ::usleep(100000);
+                    if (pfmode == 2) {
+                        const std::uint32_t es = ErrnoSlot();
+                        if (CheckRange(es, 4, true)) {
+                            const int ee = EINTR;
+                            std::memcpy(H(es), &ee, 4);
+                        }
+                        r = -1;
+                    } else {
+                        r = 1;
+                        for (auto& p : pfds) {
+                            p.revents = (int16_t)(POLLNVAL | POLLERR);
+                        }
+                    }
+                }
+            }
+        }
         // TEMP-DIAG (worker hang): log which fd fires on nonzero returns.
         if (r > 0) {
             std::string ds;
@@ -1889,7 +2050,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            std::printf("[files] fopen(\"%s\",\"%s\") -> %08x\n", hp.c_str(), mode.c_str(), h);
+            std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %08x\n", GuestTid(), hp.c_str(),
+                        mode.c_str(), h);
             // TEMP-DIAG (registry ParseError): track registry handles to dump
             // their exact bytes on fread/fwrite below.
             if (hp.find("registry") != std::string::npos) {
@@ -2113,7 +2275,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             const std::uint32_t g = alloc_guest_fd(fd);
-            std::printf("[files] open(\"%s\",%o) -> fd %u\n", hp.c_str(), a1, g);
+            std::printf("[files][t%u] open(\"%s\",%o) -> fd %u\n", GuestTid(), hp.c_str(), a1, g);
             Ret(regs, g);
             return;
         }
@@ -2146,7 +2308,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::uint32_t g1 = alloc_guest_fd(hfds[1]);
             std::memcpy(H(a0), &g0, 4);
             std::memcpy(H(a0 + 4), &g1, 4);
-            std::printf("[files] pipe() -> [%u %u]\n", g0, g1);
+            std::printf("[files][t%u] pipe() -> [%u %u]\n", GuestTid(), g0, g1);
             Ret(regs, 0);
             return;
         }
@@ -2225,10 +2387,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             ssize_t r = (n == "read") ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
-            // pipes show up here via fd_map_; files too, capped).
+            // pipes show up here via fd_map_; files too, capped). Skip
+            // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
             if ((n == "write" || n == "read") && r > 0) {
                 static int wlog = 0;
-                if (wlog < 200) {
+                bool interesting = false;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    const auto it = fd_map_.find(a0);
+                    if (it != fd_map_.end()) {
+                        struct stat fs {};
+                        if (::fstat(it->second, &fs) == 0 &&
+                            (S_ISFIFO(fs.st_mode) || S_ISSOCK(fs.st_mode))) {
+                            interesting = true;
+                        }
+                    } else if (a0 <= 2) {
+                        interesting = true;
+                    }
+                }
+                if (interesting && wlog < 200) {
                     wlog++;
                     const std::uint8_t* p = H<const std::uint8_t>(a1);
                     std::string hex;
@@ -2238,25 +2415,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         std::snprintf(b, sizeof(b), "%02x", p[i]);
                         hex += b;
                     }
-                    // Thread marker: main=0, workers get small ids.
-                    static std::mutex idm;
-                    static std::unordered_map<std::thread::id, int> ids;
-                    static int nextid = 1;
-                    int who = 0;
-                    {
-                        std::lock_guard<std::mutex> L(idm);
-                        auto tid = std::this_thread::get_id();
-                        auto it = ids.find(tid);
-                        if (it == ids.end()) {
-                            // Main thread registered itself? Heuristic: the
-                            // first thread to log here during init is main.
-                            who = (GuestTid() == 1 && nextid == 1) ? 0 : nextid++;
-                            ids[tid] = who;
-                        } else {
-                            who = it->second;
-                        }
-                    }
-                    std::printf("[pipelog][t%d]%s %s gfd=%u %zdB: %s%s\n", who,
+                    // Thread marker: GuestTid directly (1=main, else worker).
+                    std::printf("[pipelog][t%u]%s %s gfd=%u %zdB: %s%s\n", GuestTid(),
                                 GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
                                 r > show ? "..." : "");
                 }
@@ -2733,7 +2893,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
         // stub kept fds blocking -> handshake breakage -> HttpRequestException).
         if (n == "fcntl") {
+            // TEMP-DIAG (stuck workers): pinpoint the parking line.
+            static int fcl = 0;
+            const int fldiag = (fcl < 40) ? fcl++ : -1;
+            if (fldiag >= 0) {
+                std::printf("[fcntl] #%d enter tid=%u fd=%d cmd=%d arg=%d\n", fldiag, GuestTid(),
+                            (int)a0, (int)a1, (int)a2);
+            }
             const int hfd = host_fd_of(a0);
+            if (fldiag >= 0) {
+                std::printf("[fcntl] #%d mapped tid=%u hfd=%d\n", fldiag, GuestTid(), hfd);
+            }
             if (hfd < 0) {
                 set_guest_errno(EBADF);
                 Ret(regs, static_cast<std::uint32_t>(-1));
@@ -3579,6 +3749,22 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             mutex_.unlock();
             const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
             mutex_.lock();
+            // TEMP-DIAG (cond triage): who waits/signals which cond.
+            {
+                static int cw = 0;
+                if (cw < 10) {
+                    cw++;
+                    std::printf("[cond] wait c=%08x m=%08x t=%u -> %d\n", cond, arg1,
+                                GuestTid(), r);
+                }
+            }
+            // TEMP-EXP (HARNESS_SPURWAKE=1): report spurious success instead
+            // of ETIMEDOUT (POSIX-legal; predicates re-check). Probes whether
+            // the waiter proceeds (predicate already true) or re-waits.
+            if (r != 0 && std::getenv("HARNESS_SPURWAKE")) {
+                std::printf("[cond] spurwake c=%08x t=%u (was %d)\n", cond, GuestTid(), r);
+                return 0;
+            }
             return static_cast<std::uint32_t>(r);
         }
         mutex_.unlock();
@@ -3955,9 +4141,14 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         // workers; racy values, liveness only — same caveat as main beat).
         if (std::getenv("HARNESS_WBEAT")) {
             std::thread([st, tid, &jit]() {
-                for (int i = 0; i < 60 && !st->done; i++) {
+                for (int i = 0; i < 60; i++) {
                     std::this_thread::sleep_for(std::chrono::seconds(5));
-                    if (st->done) {
+                    bool dd = false;
+                    {
+                        std::lock_guard<std::mutex> l(st->m);
+                        dd = st->done;
+                    }
+                    if (dd) {
                         break;
                     }
                     auto& rr = jit.Regs();
@@ -4000,6 +4191,27 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     });
     st->th.detach();
     return 0;
+}
+
+// End-of-run census (see dispatch.h): detached workers can't be joined, so
+// report tid/done/retval here instead of losing them to _exit.
+void Runtime::ThreadCensus() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const auto& kv : threads_) {
+        bool done = false;
+        std::uint32_t rv = 0;
+        std::string ls = "?";
+        std::string hist;
+        {
+            std::lock_guard<std::mutex> l(kv.second->m);
+            done = kv.second->done;
+            rv = kv.second->retval;
+            ls = kv.second->last_svc;
+            hist = kv.second->svc_hist;
+        }
+        std::printf("[census] tid=%u done=%d retval=%08x last=%s hist=%.320s\n", kv.first,
+                    (int)done, rv, ls.c_str(), hist.c_str());
+    }
 }
 
 std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) {
@@ -4842,8 +5054,23 @@ template <typename T>
 T GuestCallbacks::Read(VAddr addr, bool exec) {
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem] BAD %s @ %08x size %zu guest-pc=%08x -- halting\n", exec ? "exec" : "read",
-                        addr, sizeof(T), rt_->ActiveJit()->Regs()[15]);
+            std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
+                        t_tid, exec ? "exec" : "read", addr, sizeof(T),
+                        rt_->ActiveJit()->Regs()[15], rt_->ActiveJit()->Regs()[14],
+                        rt_->ActiveJit()->Regs()[4]);
+            // TEMP-DIAG (sessions epilogue crash): hexdump around r4 (r8+40
+            // shared_ptr block) to see the struct layout.
+            {
+                const std::uint32_t badr4 = rt_->ActiveJit()->Regs()[4];
+                if (rt_->CheckRange(badr4 - 64, 80, false)) {
+                    const std::uint8_t* p = rt_->H<const std::uint8_t>(badr4 - 64);
+                    std::printf("[mem] r4-64:");
+                    for (int j = 0; j < 80; j++) {
+                        std::printf(" %02x", p[j]);
+                    }
+                    std::printf("\n");
+                }
+            }
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -5369,9 +5596,9 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
         // Schema discovered iteratively via KeyNotFound messages (phone-
         // proven graceful path needs these present; extra keys tolerated).
         static const char sjson[] =
-            "{\"segments\":[0],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+            "{\"segments\":[],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
             "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000},"
-            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":true}}";
+            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"}}";
         body = (std::uint8_t*)sjson;
         blen = sizeof(sjson) - 1;
     } else if (u.find("variantconfig.json") != std::string::npos) {
@@ -5419,6 +5646,30 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
         std::uint32_t L = (std::uint32_t)blen;
         std::memcpy(o + 4, &L, 4);
         std::memcpy(o + 8, &bmem, 4);
+        // TEMP-EXP (P1 req-tail, PROVEN by reqdump/baddump correlation):
+        // the parser copies req+0..48 1:1 into the session struct; the
+        // epilogue releases r8+28 AND r8+40 as shared_ptr (bl 0x62530 at
+        // 0xD74B8/C0). Leftover words there crash the releases one by one
+        // (retval-1, then retval-8 residues; epilogue never completes).
+        // NULL both px slots (healthy minimal responses carry no objects
+        // here); the cn words (+32/+44) go unread when px is null.
+        std::uint32_t z40 = 0;
+        std::memcpy(cb->rt_->H(req + 28), &z40, 4);
+        std::memcpy(cb->rt_->H(req + 40), &z40, 4);
+    }
+    // TEMP-DIAG (P1 req-tail): dump POST-fill [req+0..64] to correlate with
+    // the sessions-epilogue struct (r8+44=1 crash source hunt).
+    {
+        static int rd = 0;
+        if (rd < 3 && cb->rt_->CheckRange(req, 64, false)) {
+            rd++;
+            const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(req);
+            std::printf("[succ] reqdump:");
+            for (int j = 0; j < 64; j++) {
+                std::printf(" %02x", p[j]);
+            }
+            std::printf("\n");
+        }
     }
     std::printf("[succ] %s: status=200 blen=%zu -> resume %08x\n", u.c_str() + u.find_last_of('/')
                                                                 + 1,

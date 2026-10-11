@@ -142,6 +142,9 @@ public:
     std::uint32_t GuestTid();
     std::uint32_t PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, std::uint32_t start,
                                 std::uint32_t arg);
+    // End-of-run census: tid/done/retval for every worker (detached threads
+    // can't be joined; _exit would silence them).
+    void ThreadCensus();
     std::uint32_t PthreadJoin(std::uint32_t tid, std::uint32_t retval_out);
     std::uint32_t PthreadDetach(std::uint32_t tid);
     std::uint32_t ErrnoSlot();
@@ -218,6 +221,8 @@ private:
         std::uint32_t retval = 0;
         bool detached = false;
         bool joined = false;
+        std::string last_svc = "?";  // HARNESS_LASTSVC triage: parked import
+        std::string svc_hist;        // ring of recent imports (path shape)
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<ThreadState>> threads_;
     std::uint32_t next_tid_ = 2;

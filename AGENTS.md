@@ -1168,6 +1168,17 @@ dead subsystem, game degrades without it).
 - STUCK-WORKER HUNT: 10 created (tids 2-11, all start=0x38C048), only 4 done
   (4,8,9,11). 6 hang: time/apdrive sscanf but never reach raiser (no succ,
   no throw). HARNESS_WBEAT=1 added (per-worker PC sampler, wbeat1.log).
+- WBEAT+HISTories: all 6 park in poll() on PIPES (h12/14/16/18/20/23, POLLIN
+  1s loop), never sockets. Main created all pipes, holds write ends.
+  tids 2,5,6,7,12 = spares (bootstrap-only SVCs, never assigned).
+  tid3=/time + tid10=apdrive: assigned (1B wakes), did DNS sends, park.
+- PIPE PROTOCOL (PROVEN): 1B 0x00 wakes only, no data messages. Queue validated
+  ([r4+44] count). NVAL/ERR lies swallowed (queue-checked reader 0x28E328).
+  Pipewakes consumed without progress. Backend poster doesn't exist in runs.
+- +164 WRITERS: callers pass r1=1 (0x2506B4/0x250DB0/0x2511D0, menu fns, ZERO
+  BL callers = virtual) vs r1=2 (0x260B88/0x261378, loading, runs every
+  render). r1=1 site 0x250680+ never translates (PCTRACE-proven). Menu scene
+  never activates. Flip futile (overwritten next render, PROVEN longrun1).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
