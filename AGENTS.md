@@ -1533,6 +1533,36 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
+## 41. Ten-subagent synthesis (2026-10-12, all read-only, all completed)
+- Branches DEAD (proven): Lua initiation (never calls; only path, silent),
+  time/apdrive relevance (park forever, zero device lines, no consumers),
+  update gate (both states stall identically; +1187 = quit-subblock only),
+  missing mocks (no halts ever), 0xBC100-login (ads binding, correlation).
+- Branches LIVE:
+  1. +164 writers: EXACT store (str r10,[r9,#0xA4] @0x284078 via 0x283A3C,
+     emptiness-gated); r1=1 sites virtual-only (scene walk); recipe = single
+     BL 0x283A3C(r0=mgr,r1=1) when vector empty.
+  2. loginFinished entries: ONLY the two functors (0x5EBA4/1, 0x5FE70/0);
+     virtual via ce50/eb658; no JNI/Lua-direct path. Cheapest offline =
+     fail-functor with a record.
+  3. Functor/record construction: record = new(0x2C)+init @FUN_0009fed4
+     (gate outer+0x34C==0, boot init — runs in ours, record EXISTS with
+     +0x19=1); stack functors via ce50 (gate +0x19==0 first! then set 1);
+     heap clones inside eb658; async outcome needed after.
+  4. Sessions dispatch is BARE by construction (tag 2, no fork; config
+     this+0x28 empty -> functor assembly SKIPPED in raiser). Sync throw flies
+     out; single covering pad swallows. loginWithUI is the ONLY functor-
+     creating path (needs UI).
+  5. Main observers: main reads NO network channel statically; menu = scene-
+     activation mechanics (+164 builders r1=1 vs r1=2, event vector
+     FUN_000d45fc), not data delivery.
+  6. Unwinder spiral: 0x45A778 INSIDE the raise driver (post-context-save);
+     exidx entry CORRECT (SU16 vsp=R7); top hypothesis = bad initial R7 from
+     context-init under Dynarmic. SVC frames provably innocent.
+- CONVERGED NEXT (uses only proven pieces): REDIR the reliable sessions-POST
+  throw -> fail-functor 0x5FE70 with OUR runtime-found record (RAWPOST proved
+  the call runs clean; REDIR lands THROUGH pads whose side effects the direct
+  call skips). Binary: menu/progress (chain lives) vs same stall (dead).
 ## 40. Device per-update login poller 0xBC100 (cold boot 5445, full capture)
 - 0xBC100 runs INSIDE Java nativeUpdate (GL thread, jstack: nativeUpdate <-
   doUpdate <- onFrame <- onDrawFrame <- GLThread), repeatedly, constant args:
