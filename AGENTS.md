@@ -1150,6 +1150,9 @@ dead subsystem, game degrades without it).
   UUIDs, 224B; reset before EVERY run!). Device clean-boot-offline == fresh path.
 - COMBO2 (fresh+flag1+latch+condsatisfy+spurwake+taps+film): NO abort, worker
   survives looping (spurwake x3), exit flag=1 HELD, film LOADING. +164=2.
+  (CORRECTION 2026-10-11 audit: failpath2 (no RETSUCC) = writes 1@D70FC,
+  flag=1 — free fresh path, RETSUCC not needed for the flag. The 0@D7100
+  writes belong to airplane1.log (token registry), not failpath2.)
 - PACING (PROVEN): main sprinting (3s) murders workers via _exit before they
   reach raiser. HARNESS_PACEMS=N sleeps after each JNI (deterministic).
 - ROLE MAP (setname, live): tid2 Configuration, tid3/6 NetworkTime, tid5
@@ -1163,6 +1166,9 @@ dead subsystem, game degrades without it).
 - SIGNAL PROTOCOL (decomp FUN_0039f2a4/0x39F170/0x39F21C): predicate =
   mutex->__size[8]&1; set writes 1+broadcast; reset writes 0; wait aborts on
   nonzero (Signal.cpp). CONDSATISFY corrected to mutex+8 (was Link+8, wrong).
+  (CORRECTION 2026-10-11 audit: signal-set fn is file 0x38F170, NOT 0x39F170
+  (that was a Ghidra-VA/file-VA mixup); predicate itself CONFIRMED via
+  FUN_0039f2a4 — premise holds.)
 - MCSM COMPARE (subagent, verified): same pattern (guest assets + arm64 host +
   JNI_OnLoad + thunks), cannot explain stall (offline SDL vs rcs handshake).
   REAL gaps adopted: pthread_rwlock_* forwarding (implemented, mirror mutex),
@@ -1447,3 +1453,18 @@ dead subsystem, game degrades without it).
   die via unwind 2/2 (Find_exidx, retval 0x45A778). Playground for REDIR.
 - WAVE-2 launched (read-only, background): JNI mock audit, time/apdrive
   endings, Lua execution forensics.
+
+## 35. Session 2026-10-11 (part 26): load-bearing audit (8 claims)
+- Subagent audit (read-only): 1 Ghidra-delta CONFIRMED (+pairs). 2 flag
+  mechanics CONFIRMED with attribution fix (failpath2=flag1-free; 0-writes =
+  airplane1). 3 queue struct CONFIRMED. 4 login chain 6/7 CONFIRMED (string
+  file-offset unverified, immaterial). 5 RETSUCC linkage: flag-1-free proven
+  WITHOUT it (failpath2/3, nopoke1 runs) — RETSUCC adds only token-save
+  (poison); succ+flag co-occurrence in one run still open but immaterial.
+  6 crypto: RE-VERIFIED BY EXECUTION today (all 3 registries decrypt: valid
+  pad 9/13/9 + valid JSON + expected top keys) — weakest link closed.
+  7 CONDSATISFY predicate CONFIRMED, file-VA attribution fixed (0x38F170).
+  8 worker posts + swallowed reads CONFIRMED literally (t9/t12→t10 pairs).
+- Standing: every load-bearing claim now has >=2 independent supports except
+  string file-offsets (immaterial). Next intervention unchanged: login
+  initiation (Lua) or functor invocation.
