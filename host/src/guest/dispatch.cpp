@@ -1841,6 +1841,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
+        // HARNESS_EXIDXLOG=1: temp-diag (unwinder spiral): log every lookup.
+        if (std::getenv("HARNESS_EXIDXLOG")) {
+            std::printf("[exidxlog] pc=%08x -> entry=%08x\n", a0, FindExidx(a0));
+        }
         Ret(regs, FindExidx(a0));
         return;
     }
@@ -6206,7 +6210,65 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
     std::printf("[redir] throw r0=%08x r1=%08x lr=%08x sp=%08x -> pad %08x%s\n", (std::uint32_t)r0,
                 (std::uint32_t)r1, (std::uint32_t)lr, regs[13], pad,
                 cb->rt_->GuestTid() == 1 ? "" : " (T2+)");
-    cb->rt_->ParkRedirect(pad);
+    // HARNESS_REDIROBJ=<hexneedle>: resolve a heap object at redirect time
+    // (login record fingerprint) and resume with r0=obj instead of the
+    // exception object. Fingerprint: anchor word + [+0x14]==0x11.
+    if (const char* hx = std::getenv("HARNESS_REDIROBJ")) {
+        std::string hxs(hx);
+        std::vector<std::uint8_t> needle;
+        for (std::size_t k = 0; k + 1 < hxs.size() && needle.size() < 64; k += 2) {
+            auto hv = [](char c) -> int {
+                if (c >= '0' && c <= '9') {
+                    return c - '0';
+                }
+                if (c >= 'a' && c <= 'f') {
+                    return c - 'a' + 10;
+                }
+                if (c >= 'A' && c <= 'F') {
+                    return c - 'A' + 10;
+                }
+                return -1;
+            };
+            int hi = hv(hxs[k]), lo = hv(hxs[k + 1]);
+            if (hi < 0 || lo < 0) {
+                break;
+            }
+            needle.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+        }
+        std::uint32_t found = 0;
+        if (!needle.empty()) {
+            const std::uint32_t lo = 0x10000000u;
+            const std::uint32_t hi = cb->rt_->HeapTop();
+            const std::size_t nl = needle.size();
+            for (std::uint32_t a = lo; a + nl <= hi; a++) {
+                if (!cb->rt_->CheckRange(a, nl, false)) {
+                    a = (a + 0xFFFu) & ~0xFFFu;
+                    a -= 1;
+                    continue;
+                }
+                if (std::memcmp(cb->rt_->H(a), needle.data(), nl) != 0) {
+                    continue;
+                }
+                std::uint32_t w14 = 0;
+                if (cb->rt_->CheckRange(a + 0x14, 4, false)) {
+                    std::memcpy(&w14, cb->rt_->H(a + 0x14), 4);
+                }
+                if (w14 == 0x11) {
+                    found = a;
+                    break;
+                }
+            }
+        }
+        if (found != 0) {
+            std::printf("[redir] obj=%08x -> pad %08x with r0=obj\n", found, pad);
+            cb->rt_->ParkRedirectObj(pad, found);
+        } else {
+            std::printf("[redir] obj not found, plain redirect\n");
+            cb->rt_->ParkRedirect(pad);
+        }
+    } else {
+        cb->rt_->ParkRedirect(pad);
+    }
     cb->rt_->stop_step_ = true;
     cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
 }
@@ -6214,6 +6276,12 @@ void Runtime::ParkRedirect(std::uint32_t pad) {
     pending_redir_ = pad;
     pending_jit_ = ActiveJit();
     pending_r1_ = ~0u;
+}
+void Runtime::ParkRedirectObj(std::uint32_t pad, std::uint32_t r0val) {
+    pending_redir_ = pad;
+    pending_jit_ = ActiveJit();
+    pending_r1_ = ~0u;
+    pending_r0_ = r0val;
 }
 void Runtime::ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val) {
     pending_redir_ = pad;
@@ -6634,6 +6702,9 @@ bool Runtime::ApplyRedirect() {
     if (pending_r1_ != ~0u) {
         regs[1] = pending_r1_;
     }
+    if (pending_r0_ != 0u) {
+        regs[0] = pending_r0_;
+    }
     // Unwind state applied AT RESUME (see header): restore callee-saved
     // regs from the frame's saved slots ([fp-28..fp-4] for the standard
     // push{r4-r11,lr}+fp=sp+28 prologue), r11=fp, sp per flags/offset.
@@ -6681,6 +6752,7 @@ bool Runtime::ApplyRedirect() {
     std::printf("[redir] resume at %08x (r0=%08x r1=%08x sp=%08x)%s\n", pending_redir_, regs[0],
                 regs[1], regs[13], GuestTid() == 1 ? "" : " (T2+)");
     pending_redir_ = 0;
+    pending_r0_ = 0;
     pending_jit_ = nullptr;
     pending_r1_ = ~0u;
     pending_fp_ = 0;

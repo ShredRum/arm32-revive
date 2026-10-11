@@ -1533,6 +1533,18 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
+## 42. REDIR->functor executed, then BAD crash, no menu (2026-10-12)
+- Build: ParkRedirectObj (r0 override) + HARNESS_REDIROBJ=<needle> (heap scan
+  + [+0x14]==0x11 verify, else plain redirect). Config: reliable-throw
+  (servers+sendfail, no RETSUCC) + PROBE2=457f90 + REDIR=5fe70,5fe70/REDIRN=2.
+- LIVE (work/redirfun1.log): BOTH throws redirected (r0=record 0x10AD4F10
+  found by needle); fail-functor ran; loginFinished logged
+  ("Login failed: 279793516 => ..."); then [mem] BAD write @4 at pc 0x457FAE
+  (inside __cxa_throw region) on both threads; threads halted (done with heap
+  retval, NOT spiral-death). Film: LOADING. +164: 2.
+- VERDICT: step 1 MISS (no menu) + crash side-effect to root-cause (null-r0?
+  operator new/delete stubs? return-to-raiser-tail?). NEXT per plan: step 2
+  (direct +164=1 via BL 0x283A3C) — awaiting go.
 ## 41. Ten-subagent synthesis (2026-10-12, all read-only, all completed)
 - Branches DEAD (proven): Lua initiation (never calls; only path, silent),
   time/apdrive relevance (park forever, zero device lines, no consumers),

@@ -1065,6 +1065,116 @@ int main(int argc, char** argv) {
                     ::usleep((useconds_t)(pacems * 1000));
                 }
             }
+            // HARNESS_RAWPOST=<fnhex> + HARNESS_RAWAT=<n> + HARNESS_RAWOBJ=<hexneedle>:
+            // after JNI call index N, scan guest heap for needle, call fn with
+            // r0=found (or HARNESS_RAW0), r1=r2=r3=0, then continue sequence.
+            // (loginFinished-style completion pump; skips cleanly if missing.)
+            {
+                static int rawat = -2;
+                static std::uint32_t rawfn = 0;
+                static std::vector<std::uint8_t> rawneedle;
+                static bool rawdone = false;
+                if (rawat == -2) {
+                    rawat = -1;
+                    if (const char* e = std::getenv("HARNESS_RAWPOST")) {
+                        rawfn = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+                    }
+                    if (const char* e = std::getenv("HARNESS_RAWAT")) {
+                        rawat = std::atoi(e);
+                    }
+                    if (const char* hx = std::getenv("HARNESS_RAWOBJ")) {
+                        std::string hxs(hx);
+                        for (std::size_t k = 0; k + 1 < hxs.size() && rawneedle.size() < 64;
+                             k += 2) {
+                            auto hv = [](char c) -> int {
+                                if (c >= '0' && c <= '9') {
+                                    return c - '0';
+                                }
+                                if (c >= 'a' && c <= 'f') {
+                                    return c - 'a' + 10;
+                                }
+                                if (c >= 'A' && c <= 'F') {
+                                    return c - 'A' + 10;
+                                }
+                                return -1;
+                            };
+                            int hi = hv(hxs[k]), lo = hv(hxs[k + 1]);
+                            if (hi < 0 || lo < 0) {
+                                break;
+                            }
+                            rawneedle.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+                        }
+                    }
+                }
+                if (!rawdone && rawfn != 0 && rawat >= 0 && i == (std::size_t)rawat) {
+                    rawdone = true;
+                    std::uint32_t found = 0;
+                    if (const char* r0e = std::getenv("HARNESS_RAW0")) {
+                        found = static_cast<std::uint32_t>(std::strtoul(r0e, nullptr, 16));
+                    } else if (!rawneedle.empty()) {
+                        const std::uint32_t lo = 0x10000000u;
+                        const std::uint32_t hi = rt.HeapTop();
+                        const std::size_t nl = rawneedle.size();
+                        // Fingerprint: anchor word AND [+0x14]==0x11 (login
+                        // record skeleton, device ctxdump). Lookalikes sharing
+                        // the anchor alone are skipped.
+                        for (std::uint32_t a = lo; a + nl <= hi; a++) {
+                            if (!rt.CheckRange(a, nl, false)) {
+                                a = (a + 0xFFFu) & ~0xFFFu;
+                                a -= 1;
+                                continue;
+                            }
+                            if (std::memcmp(rt.H(a), rawneedle.data(), nl) != 0) {
+                                continue;
+                            }
+                            std::uint32_t w14 = 0;
+                            if (rt.CheckRange(a + 0x14, 4, false)) {
+                                std::memcpy(&w14, rt.H(a + 0x14), 4);
+                            }
+                            std::printf("[rawpost] candidate %08x [+0x14]=%08x %s\n", a, w14,
+                                        (w14 == 0x11) ? "MATCH" : "skip");
+                            if (w14 == 0x11) {
+                                found = a;
+                                break;
+                            }
+                        }
+                    }
+                    if (found == 0) {
+                        std::printf("[rawpost] obj not found, skipping\n");
+                    } else {
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x100;
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = found;
+                        rgs[1] = 0;
+                        rgs[2] = 0;
+                        rgs[3] = 0;
+                        // Pre/post snapshot around +0x14 (skeleton re-check).
+                        std::uint32_t pre[4] = {};
+                        if (rt.CheckRange(found, 0x20, false)) {
+                            std::memcpy(pre, rt.H(found), 0x20);
+                        }
+                        std::printf("[rawpost] pre obj=%08x [+0]=%08x [+4]=%08x [+8]=%08x "
+                                    "[+0xC]=%08x [+0x10]=%08x [+0x14]=%08x [+0x18]=%08x "
+                                    "[+0x1C]=%08x\n",
+                                    found, pre[0], pre[1], pre[2], pre[3], pre[4], pre[5],
+                                    pre[6], pre[7]);
+                        CallGuest(jit, rawfn);
+                        std::printf("[rawpost] calling @%08x obj=%08x ... ", rawfn, found);
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
+                        std::uint32_t post = 0;
+                        if (rt.CheckRange(found + 0x18, 4, false)) {
+                            std::memcpy(&post, rt.H(found + 0x18), 4);
+                        }
+                        std::printf("[rawpost] post [+0x18]=%08x\n", post);
+                    }
+                }
+            }
             // HARNESS_TLOG=1: host monotonic ms at each JNI call boundary
             // (frame pacing diagnostics: what dt does the game observe?).
             if (std::getenv("HARNESS_TLOG")) {

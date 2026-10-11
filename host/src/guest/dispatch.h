@@ -95,6 +95,9 @@ public:
     bool ApplyRedirect();
     // Park a redirect from a probe (captures calling Jit for per-thread match).
     void ParkRedirect(std::uint32_t pad);
+    // Park a redirect with r0 override (e.g. resume in a functor with a
+    // runtime-found record instead of the exception object); 0 = keep regs.
+    void ParkRedirectObj(std::uint32_t pad, std::uint32_t r0val);
     // TTFILE matcher parks pad + filter here (r1 override for the pad's
     // catch-clause switch); ApplyRedirect applies them.
     void ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val);
@@ -190,6 +193,8 @@ private:
     Dynarmic::A32::Jit* pending_jit_ = nullptr;
     // r1 override for the pad (catch-clause switch value); ~0u = keep regs.
     std::uint32_t pending_r1_ = ~0u;
+    // r0 override for the pad (functor record etc.); 0 = keep regs.
+    std::uint32_t pending_r0_ = 0;
     // Frame fp for reg/sp restore; restore-mode flags (bit0: regs, bit1: sp).
     std::uint32_t pending_fp_ = 0;
     std::uint32_t pending_flags_ = 0;
