@@ -1454,6 +1454,40 @@ dead subsystem, game degrades without it).
 - WAVE-2 launched (read-only, background): JNI mock audit, time/apdrive
   endings, Lua execution forensics.
 
+## 36. Bets 1-2 (binary outcomes)
+- BET 1 (loginRovioId in RETSUCC config): SILENT. Lua path dead in BOTH
+  configs. RETRACTED: functor1 hit-#5 "lambda" = class-sniff artifact on event
+  memory (handler 0x5D7C8 never translates anywhere, so no lambda object can
+  exist via it). Lua hypothesis DEAD by elimination.
+- BET 2 (process 0x28DAF4 + loop 0x5E164 in fail config): process RUNS 318x
+  round-robin over 7 queues (48/46/45/45/45/45/44) INCLUDING completion queue
+  B (46x); loop 0x5E164 SILENT. Swallow is INSIDE process (or downstream).
+- Entry shape (failpath3 hits 5,9, both t-posts to B): {objA, objB-0x10,
+  MAGIC 0xFB048F99, 0, ptrY, ptrZ, RET 0x28DC18, ptrW} — well-formed job
+  records, identical skeleton. [+12]=0 both.
+- NEXT (Bet 3): process's per-entry skip-branch — static body read first.
+
+## 37. Bets ledger (binary outcomes, agreed format)
+- BET 1 (loginRovioId fires in RETSUCC config): MISS (work/bet1.log — silent).
+  Lua hypothesis DEAD in both configs. Retracted functor1 hit-#5 "lambda" as
+  class-sniff artifact (handler never translates anywhere).
+- BET 2 (process 0x28DAF4 + loop 0x5E164 execute in fail config): SPLIT.
+  Process RUNS (work/bet2.log: 318 calls round-robin over 7 queues incl. B
+  46x); loop SILENT. Entries well-formed (failpath3: {objA,objB,MAGIC
+  0xFB048F99,0,ptrY,ptrZ,RET 0x28DC18,ptrW}), drained with zero effect (B
+  oscillates 1-entry/empty live).
+- BET 3 (WPA catches B's consumer, work/wpa1.log): MISS (caught only queue
+  construction near raiser: begin=0 via str at 0x28A4D4). BONUS: B stable
+  3/3 configs (0x12D64DB0); B is per-flow (built under raiser path), shared
+  by both sessions posts.
+- RULE (safety, agreed): subagents NEVER get dynamic analysis (their runs
+  would mutate work/files* registry + heap addrs + shots, breaking my
+  determinism). Dynamics only with separate files dir + registry backup +
+  my runs paused. Statics get decomp + byte access.
+- NEXT: subagent decoding process's callees (0x28E424/0x28E548/0x28F698/
+  0x28F76C + far blx) for entry fate: free vs move vs drop + condition
+  (ses_ed3888397ffeFbwgN2bjOlT1Pb, background).
+
 ## 35. Session 2026-10-11 (part 26): load-bearing audit (8 claims)
 - Subagent audit (read-only): 1 Ghidra-delta CONFIRMED (+pairs). 2 flag
   mechanics CONFIRMED with attribution fix (failpath2=flag1-free; 0-writes =
