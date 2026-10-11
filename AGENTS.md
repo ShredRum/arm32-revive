@@ -1134,8 +1134,9 @@ dead subsystem, game degrades without it).
   broadcasts to empty, waiter 0x9B203224 across boots). NO strace marathons
   (killed game twice); passive reads only. GDB: no arm gdbserver in NDK.
 - REGISTRY CRYPTO (subagent, VERIFIED by decrypting both myself): AES-256-CBC,
-  zero IV, app-fixed key 3a7d2e03...4660ea. No 32B header (first-32B-identical
-  = CBC determinism on same prefix). Format = JSON + Crypto++-style random pad.
+  zero IV, app-fixed key (NOT device-bound). KEY hex 32B:
+  3a7d2e0379e64985a01fa80104d5d77da1bc7ae70363248e7ac9c0ad5f4660ea
+  No 32B header (first-32B-identical = CBC determinism on same prefix). Format = JSON + Crypto++-style random pad.
   DEV: real UUIDs, Apprater block, NO cloud section. OURS: cloud{...fake tokens},
   installationID "0", zero pad (our lrand48 flaw, cosmetic).
   SMOKING GUN: decomp FUN_000eabd4 throws underflow_error("Missing or invalid
