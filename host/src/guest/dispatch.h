@@ -325,12 +325,18 @@ public:
     // HARNESS_RDUMP=1: deep dump of the HTTP raiser entry ABI (PROBE3).
     static void RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2);
     static void RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp);
+    // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser entry
+    // (PROBE3) for the .../time endpoint (canned timestamp + test sig).
+    static void SuccInject(std::uint64_t r0, std::uint64_t lr);
     // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
     static void PokeGateByte(std::uint64_t r7slot);
     // HARNESS_POKE180=1: loading render-state advance. At 0x263338
     // (ldr r0,[r4,#180] in ShadowingSurfaceData draw), if [r4+180]==3 write 4
     // (flips the 0x263340 bne + switch mode). r4 is live — no hardcode.
     static void PokeShadowState(std::uint64_t r4obj);
+    // HARNESS_POKE164=1: [loading-manager+164]=0 at 0x283B5C entry (forces
+    // the state-1/menu branch at the 0x283C34 fork).
+    static void PokeManagerFlag(std::uint64_t r10obj);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

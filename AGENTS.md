@@ -1056,6 +1056,60 @@ dead subsystem, game degrades without it).
   stepper). Conclusion: 0x167d is a data-dependent int-for-string confusion
   AT ENTRY (msg already poisoned) — not created in the loop.
 - NEXT: full msg dump (BIGDUMP=1, 256B) at 0x38E9D8 entry to see the poison.
+
+## 25. Session 2026-10-11 (part 16): RETSUCC success path live
+- DEVICE clean-boot-offline PASSES (user-tested) -> our seeds suspected.
+  Provenance hunt: empty dir dies on highscores.lua IOException; +lua files
+  dies on registry IOException. Missing file = throw (needs catch); any
+  registry (0B touch OR phone's) -> cloud attempt. First-launch-offline
+  theory DEAD: cloud is unavoidable, graceful-catch is the only offline door
+  (or success fabrication).
+- RETSUCC (raiser-entry success synthesis, PROBE3): fills response struct
+  (status 200 + heap JSON string, E1 tag copied from live strings) and
+  resumes caller. Time (epoch+test-sig) + sessions + apdrive (real 1904B
+  variantconfig.bin). URL-suffix gated.
+- SUBAGENT #3 (sessions): status 200 + keys profile+config (lookups PROVEN,
+  handler 0xD6C78, same JSON parser). Inner schema unknown.
+- BREAKTHROUGH: fabricated sessions JSON ACCEPTED by real parser ->
+  KeyNotFound names the next missing key ("segments" first, via EXDUMP of
+  the exception object). Schema iteration: each run names one key.
+- NEXT: sessions JSON with segments -> next KeyNotFound (or completion).
+
+## 26. Session 2026-10-11 (part 17): sessions schema solved, clean completion
+- RETSUCC (success synthesis at raiser entry): status 200 + heap JSON body
+  (E1 tag pattern copied from live strings) + resume caller. URL-gated:
+  /time (epoch+test-sig), /sessions, apdrive (real 1904B variantconfig.bin).
+- SUBAGENT (sessions): status 200 + profile/config lookups (0x2AC65C).
+  SUBAGENT (segments consumer 0x19D034): TOP-LEVEL segments Array<Number>,
+  userAuth{accessToken:String,refreshToken:String,expiresIn:Number};
+  type ids Null0 Bool1 Number2 String3 Array4 Object5; per-element Number
+  assert; empty skips; joined into output+24. Correct JSON:
+  {"segments":[0],"userAuth":{...},"profile":{},"config":{}}.
+- ITERATION LOOP (works!): fabricated JSON -> real parser consumes ->
+  KeyNotFound/BadType names the next gap (segments -> userAuth ->
+  segments-entries-must-be-Numbers). EXDUMP reads the key from the exception.
+- BREAKTHROUGH: sessions now COMPLETES CLEANLY (workers return 1/2, zero
+  throws, registry grows 320->464B with saved tokens!). Main still idles:
+  time/apdrive never attempted; next: who queues them (main pickup of
+  session state? session-global hunt via 0x19D034 entry regs).
+- PROBE5 added (extra dump slot; PROBE3 shared by RDUMP/RETSUCC/TRCALL).
+- CORRECTION (subagent): r2-tag (0..4) = HTTP method tag, not success flag;
+  success = normal return + response struct [r0+0..48] (status+body+...).
+  RETFAIL's "flag=0" actually zeroed an SSO string (empty-response path).
+
+## 27. Session 2026-10-11 (part 18): menu gate found, poke white
+- SUBAGENT (gate): poll = [loading-manager+164] at 0x283C34 fork (0->state
+  1/menu, else 3/loading); session writers (+120=1/+32/+36) have NO static
+  edge to +164 (structural stall); POKE180 torn (confirmed live: 6 fires).
+- POKE164 ([r10+164]=0 at 0x283B5C entry): fires, leaves LOADING -> WHITE
+  screen with border artifacts (uninit buffers), stable all run. Too-early
+  flip whites (content never builds); gated on RETSUCC success now.
+- Sessions completes cleanly (workers retval 1/2, registry 320->464B with
+  tokens) but time/apdrive NEVER attempted (no new threads; 150 updates no
+  change): not timer/count. +16..48 zero-fill tried (retval shifts, no chain).
+  expiresIn 9999999999 wraps 32-bit (2014!); 2000000000 used.
+- NEXT: gated-poke film (loading built -> flip -> menu?); else find apdrive
+  queue trigger / main's session poll target.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

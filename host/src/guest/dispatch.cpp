@@ -136,6 +136,21 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     const std::uint32_t out = heap_brk_;
     heap_brk_ += size + pad;
     heap_sizes_[out] = size;
+    // HARNESS_MALLOCLOG=1: log (addr,size,caller-lr), capped (who-allocates
+    // forensics: exception/message object provenance).
+    if (std::getenv("HARNESS_MALLOCLOG")) {
+        static int mlogn = 0;
+        if (++mlogn <= 3000) {
+            // ActiveJit (thread-local): worker mallocs get the worker lr.
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[malloc] %08x size=%u lr=%08x%s\n", out, size, lr,
+                        mlogn == 3000 ? " (quiet henceforth)" : "");
+        }
+    }
     // TEMP-DIAG (wall4 overlap): log mallocs landing in the suspect window.
     if (out >= 0x11654000u && out < 0x11656000u) {
         std::uint32_t lr = 0;
@@ -4970,8 +4985,35 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
         }
     }
 }
+bool g_succ_done_hack = false;
+
+void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
+    // HARNESS_POKE164=1: [loading-manager+164]=0 (menu branch at 0x283C34).
+    // Gated on HARNESS_RETSUCC success (a flag flip before content exists
+    // just whites the screen: loading must build first, menu after).
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb || !g_succ_done_hack) {
+        return;
+    }
+    const std::uint32_t o = (std::uint32_t)r10obj;
+    if (!cb->rt_->CheckRange(o + 164, 4, false)) {
+        return;
+    }
+    std::uint32_t v = 0;
+    std::memcpy(&v, cb->rt_->H(o + 164), 4);
+    if (v != 0) {
+        static int pm = 0;
+        if (pm < 3) {
+            pm++;
+            std::printf("[poke164] obj=%08x +164=%08x -> 0\n", o, v);
+        }
+        if (cb->rt_->CheckRange(o + 164, 4, true)) {
+            const std::uint32_t z = 0;
+            std::memcpy(cb->rt_->H(o + 164), &z, 4);
+        }
+    }
+}
 void GuestCallbacks::PokeShadowState(std::uint64_t r4obj) {
-    // HARNESS_POKE180=1: [r4+180] 3->4 (loading render-state advance).
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -5161,6 +5203,118 @@ void GuestCallbacks::RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64
         shown++;
     }
 }
+void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
+    // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser (0x28A3DC)
+    // entry for the .../time endpoint only. Fills the response struct
+    // (status 200 + JSON body string) and resumes at the caller, skipping
+    // the real network (which always throws offline). Other endpoints fall
+    // through to the natural path.
+    static int n = 0;
+    if (++n > 4) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    const std::uint32_t req = (std::uint32_t)r0;
+    const std::uint32_t ret = (std::uint32_t)lr;
+    // URL at [req+0x58] (char* per rdump chase).
+    char url[160] = {0};
+    {
+        std::uint32_t up = 0;
+        if (!cb->rt_->CheckRange(req + 0x58, 4, false)) {
+            return;
+        }
+        std::memcpy(&up, cb->rt_->H(req + 0x58), 4);
+        for (int i = 0; i < 159; i++) {
+            if (!cb->rt_->CheckRange(up + i, 1, false)) {
+                break;
+            }
+            char c = 0;
+            std::memcpy(&c, cb->rt_->H<const char>(up + i), 1);
+            url[i] = c;
+            if (!c) {
+                break;
+            }
+        }
+    }
+    std::printf("[succ] #%d url=%.100s\n", n, url);
+    std::string u(url);
+    // Response body per endpoint (time/sessions: generated JSON with
+    // static-verified shapes; apdrive variantconfig: real file bytes).
+    std::uint8_t* body = nullptr;
+    std::size_t blen = 0;
+    std::uint8_t tbuf[160];
+    if (u.size() >= 5 && u.compare(u.size() - 5, 5, "/time") == 0) {
+        struct timespec ts {};
+        ::clock_gettime(CLOCK_REALTIME, &ts);
+        int w = std::snprintf((char*)tbuf, sizeof(tbuf), "{\"time\":%lld,\"signature\":\"test\"}",
+                              (long long)ts.tv_sec);
+        if (w <= 0 || (std::size_t)w >= sizeof(tbuf)) {
+            return;
+        }
+        body = tbuf;
+        blen = (std::size_t)w;
+    } else if (u.size() >= 9 && u.compare(u.size() - 9, 9, "/sessions") == 0) {
+        // Schema discovered iteratively via KeyNotFound messages (phone-
+        // proven graceful path needs these present; extra keys tolerated).
+        static const char sjson[] =
+            "{\"segments\":[0],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000},"
+            "\"profile\":{},\"config\":{}}";
+        body = (std::uint8_t*)sjson;
+        blen = sizeof(sjson) - 1;
+    } else if (u.find("variantconfig.json") != std::string::npos) {
+        static std::vector<std::uint8_t> vc;
+        static bool vdone = false;
+        if (!vdone) {
+            vdone = true;
+            if (FILE* f = std::fopen("/tmp/opencode/fakeserv/variantconfig.bin", "rb")) {
+                std::uint8_t chunk[512];
+                std::size_t r = 0;
+                while ((r = std::fread(chunk, 1, sizeof(chunk), f)) > 0) {
+                    vc.insert(vc.end(), chunk, chunk + r);
+                }
+                std::fclose(f);
+            }
+        }
+        if (vc.empty()) {
+            return;  // no local config: natural path.
+        }
+        body = vc.data();
+        blen = vc.size();
+    } else {
+        return;  // unknown endpoint: natural path.
+    }
+    std::uint32_t bmem = cb->rt_->GuestMalloc((std::uint32_t)(blen + 1));
+    if (!bmem || !cb->rt_->CheckRange(req + 16, 16, true)) {
+        return;
+    }
+    std::memcpy(cb->rt_->H(bmem), body, blen);
+    ((char*)cb->rt_->H(bmem))[blen] = 0;
+    // Response: [req+0]=200; body string obj at [req+4] (heap form, tag
+    // copied from a live 469B heap string: E1/len/ptr). [req+16..] left
+    // UNTOUCHED (request leftovers): zeroing them whites the screen
+    // (proven: succlong2 with leftovers renders LOADING, zero-fill whites).
+    {
+        const std::uint32_t st = 200;
+        std::memcpy(cb->rt_->H(req), &st, 4);
+        std::uint8_t* o = cb->rt_->H<std::uint8_t>(req + 4);
+        o[0] = 0xE1;
+        o[1] = o[2] = o[3] = 0;
+        std::uint32_t L = (std::uint32_t)blen;
+        std::memcpy(o + 4, &L, 4);
+        std::memcpy(o + 8, &bmem, 4);
+    }
+    std::printf("[succ] %s: status=200 blen=%zu -> resume %08x\n", u.c_str() + u.find_last_of('/')
+                                                                + 1,
+                blen, ret);
+    g_succ_done_hack = true;
+    cb->rt_->ParkRedirect(ret);
+    cb->rt_->stop_step_ = true;
+    cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+}
 void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     // HARNESS_REDIR=pad: throw-to-catch emulation (unwinder stand-in).
     // Fires at the __cxa_throw entry probe: records regs, parks a redirect
@@ -5254,7 +5408,13 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
         }
         if (cb->rt_->CheckRange((std::uint32_t)r0, 64, false)) {
             const std::uint8_t* p = cb->rt_->H<const std::uint8_t>((std::uint32_t)r0);
-            for (int o = 0; o < 64; o += 16) {
+            // HARNESS_EXDUMP=2: 128B (big exception objects carry the key
+            // past +64).
+            int n = (std::getenv("HARNESS_EXDUMP") && std::getenv("HARNESS_EXDUMP")[0] == '2' &&
+                     cb->rt_->CheckRange((std::uint32_t)r0, 128, false))
+                        ? 128
+                        : 64;
+            for (int o = 0; o < n; o += 16) {
                 std::printf("[exdump] +%02x:", o);
                 for (int j = 0; j < 16; j++) {
                     std::printf(" %02x", p[o + j]);
@@ -6275,7 +6435,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
     {
         static std::int64_t probe = -2;
         static std::uint32_t probe_pc = 0, probe_len = 0, probe_pc2 = 0, probe_pc3 = 0,
-                                 probe_pc4 = 0;
+                                 probe_pc4 = 0, probe_pc5 = 0;
         if (probe == -2) {
             probe = 0;
             if (const char* pe = std::getenv("HARNESS_PROBE")) {
@@ -6299,6 +6459,11 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 probe_pc4 = static_cast<std::uint32_t>(std::strtoul(pe4, nullptr, 16));
                 probe = 1;
             }
+            // HARNESS_PROBE5=addr: extra dump slot (shares ProbeDump triple).
+            if (const char* pe5 = std::getenv("HARNESS_PROBE5")) {
+                probe_pc5 = static_cast<std::uint32_t>(std::strtoul(pe5, nullptr, 16));
+                probe = 1;
+            }
         }
         // Standalone IR fixes (independent of probe slots).
         if (std::getenv("HARNESS_FIXPVR") && pc == 0x2B0C50u) {
@@ -6319,6 +6484,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         if (std::getenv("HARNESS_POKE180") && pc == 0x263300u) {
             ir.CallHostFunction(
                 &PokeShadowState,
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+        }
+        // HARNESS_POKE164=1: loading-manager flag at 0x283B5C entry (r10=r0
+        // there per prologue r10=r0). Forces the menu branch at 0x283C34.
+        if (std::getenv("HARNESS_POKE164") && pc == 0x283B5Cu) {
+            ir.CallHostFunction(
+                &PokeManagerFlag,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
         }
         // HARNESS_PCTRACE=start,len[,cap]: pc-only trace of basic-block
@@ -6381,7 +6553,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
             }
         }
-        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3 || pc == probe_pc4)) {
+        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3 || pc == probe_pc4 ||
+                        pc == probe_pc5)) {
             g_probe_pc = pc;
             std::printf("[probe-emit] %c %08x\n", is_thumb ? 'T' : 'A', pc);
             // HARNESS_FIXPVR=1: at 0x2B0C50 (post image-format lookup) force
@@ -6413,6 +6586,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 ir.CallHostFunction(&ResumeTrap, ir.ZeroExtendWordToLong(
                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
                                                          0))));
+            }
+            // HARNESS_RETSUCC=1: success synthesis at raiser entry (PROBE3).
+            if (std::getenv("HARNESS_RETSUCC") && pc == probe_pc3) {
+                ir.CallHostFunction(&SuccInject,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
             }
             // HARNESS_RDUMP=1: deep raiser-entry ABI dump (PROBE3 slot).
             if (std::getenv("HARNESS_RDUMP") && pc == probe_pc3) {
