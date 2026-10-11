@@ -6723,6 +6723,23 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
         }
         std::printf("|\n");
     }
+    // [r0+16] 16B (entry+16 layouts: the handler ptr often sits at +16 of
+    // the probed base, e.g. completion-invoker entries). CheckRange-guarded.
+    {
+        const std::uint32_t r0p16 = (std::uint32_t)r0 + 16;
+        if (cb->rt_->CheckRange(r0p16, 16, false)) {
+            const std::uint8_t* p016 = cb->rt_->H<const std::uint8_t>(r0p16);
+            std::printf("[probe] [r0+16]:");
+            for (int j = 0; j < 16; j++) {
+                std::printf(" %02x", p016[j]);
+            }
+            std::printf("  |");
+            for (int j = 0; j < 16; j++) {
+                std::printf("%c", (p016[j] >= 32 && p016[j] < 127) ? (char)p016[j] : '.');
+            }
+            std::printf("|\n");
+        }
+    }
     // [r1] raw 32B (forwarder inputs are objects; the range/longstr
     // interpretation above misfires on them). HARNESS_BIGDUMP=1: 256B.
     if (cb->rt_->CheckRange((std::uint32_t)r1, 32, false)) {

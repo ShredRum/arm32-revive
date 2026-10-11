@@ -330,6 +330,71 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
             std::printf("[hexfind] \"%s\": no hits in heap range\n", hf);
         }
     }
+    // HARNESS_HEXFINDHEX=<hexbytes>: same heap scan with a hex needle
+    // (for pointer values containing NULs, e.g. vtable addrs like 0x65d560
+    // as "60d56500"). Prints up to 5 contexts.
+    if (const char* hx = std::getenv("HARNESS_HEXFINDHEX")) {
+        std::string hxs(hx);
+        std::vector<std::uint8_t> needle;
+        for (std::size_t i = 0; i + 1 < hxs.size() && needle.size() < 64; i += 2) {
+            auto hv = [](char c) -> int {
+                if (c >= '0' && c <= '9') {
+                    return c - '0';
+                }
+                if (c >= 'a' && c <= 'f') {
+                    return c - 'a' + 10;
+                }
+                if (c >= 'A' && c <= 'F') {
+                    return c - 'A' + 10;
+                }
+                return -1;
+            };
+            int hi = hv(hxs[i]), lo = hv(hxs[i + 1]);
+            if (hi < 0 || lo < 0) {
+                break;
+            }
+            needle.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+        }
+        if (!needle.empty()) {
+            std::uint32_t lo = 0x10000000u, shown = 0;
+            const std::uint32_t hi = rt.HeapTop();
+            const std::size_t nl = needle.size();
+            for (std::uint32_t a = lo; a + nl <= hi && shown < 5; a++) {
+                if (!rt.CheckRange(a, nl, false)) {
+                    a = (a + 0xFFFu) & ~0xFFFu;
+                    a -= 1;
+                    continue;
+                }
+                if (std::memcmp(rt.H(a), needle.data(), nl) != 0) {
+                    continue;
+                }
+                shown++;
+                std::printf("[hexfindhex] @%08x:\n", a);
+                for (int k = -32; k < 64; k += 16) {
+                    if ((std::int64_t)a + k < (std::int64_t)lo) {
+                        continue;
+                    }
+                    const std::uint32_t b = (std::uint32_t)((std::int64_t)a + k);
+                    if (!rt.CheckRange(b, 16, false)) {
+                        break;
+                    }
+                    const std::uint8_t* p = rt.H<std::uint8_t>(b);
+                    std::printf("[hexfindhex] %08x:", b);
+                    for (int j = 0; j < 16; j++) {
+                        std::printf(" %02x", p[j]);
+                    }
+                    std::printf("  |");
+                    for (int j = 0; j < 16; j++) {
+                        std::printf("%c", (p[j] >= 32 && p[j] < 127) ? (char)p[j] : '.');
+                    }
+                    std::printf("|\n");
+                }
+            }
+            if (!shown) {
+                std::printf("[hexfindhex] \"%s\": no hits in heap range\n", hx);
+            }
+        }
+    }
     // HARNESS_JNIBT=1: guest-stack backtrace. Buckets code pointers per 64KB.
     if (std::getenv("HARNESS_JNIBT")) {
         std::uint32_t sp = regs[13] & ~std::uint32_t(3);

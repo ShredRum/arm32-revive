@@ -1261,6 +1261,37 @@ dead subsystem, game degrades without it).
   functor (file 0x5FE70) -> loginFinished(ctx,0). OUR RUNS: neither fires ->
   jobs die/park pre-completion. NEXT: probe both functors live
   (PROBE4=5eba4/PROBE5=5fe70) in dnshush run.
+- FUNCTOR1 (work/functor1.log, dnshush, PROBE4=5eba4/PROBE5=5fe70): NEITHER
+  functor translates (certainly never runs). BONUS hit #5: live std::function
+  object of class `RovioAccount::loginRovioId...$_0` passed at a probed site
+  (lr=0x5E270, r1=functor addr) — completion machinery is SET UP, never fired.
+- PIPE TRUTH (live, 4 events/run): main(t1)->t11 and t4->t3 wakes (job ASSIGN);
+  ZERO worker->main wakes (no completion reports). Main assigns, workers run
+  (sessions parses, flag=1) but never post results; main never reads flag
+  (sesswatch zero reads) -> circular stall; loading scene re-asserts +164=2
+  every render.
+- FUNCTOR1 (work/functor1.log, dnshush, PROBE4=5eba4/PROBE5=5fe70): NEITHER
+  functor translates (certainly never runs). BONUS hit #5: live std::function
+  object of class `RovioAccount::loginRovioId...$_0` passed at a probed site
+  (lr=0x5E270, r1=functor addr) — completion machinery is SET UP, never fired.
+- PIPE TRUTH (live, 4 events/run): main(t1)->t11 and t4->t3 wakes (job ASSIGN);
+  ZERO worker->main wakes (no completion reports). Main assigns, workers run
+  (sessions parses, flag=1) but never post results; main never reads flag
+  (sesswatch zero reads) -> circular stall; loading scene re-asserts +164=2
+  every render.
+- NOTIFY VERIFIED BY BYTES: file 0x28ED64 = notify (r4=r0 queue, [r4+40]=wfd,
+  strb 0 + write); file 0x28DD04 = enqueue entry. NEXT: notifymap1 run
+  (PROBE4=28ed64/PROBE5=28dd04) — who-notifies-whom + queue addrs live.
+- FAILPATH TURN (no RETSUCC, nodns shape): sessions POST fails -> THROW ->
+  unwind (tid9 done=1, last=__gnu_Unwind_Find_exidx, retval=0x45A778) -> t9
+  POSTS pipe wake (t9-write gfd157 -> t10-read gfd156) -> thread dies. Device
+  path unfolding! BUT no catch lands (5fe70 never translates, no Login-failed)
+  -> t10 swallows wake, parks. HYPOTHESIS: wake posted WITHOUT queue entry
+  (queue-checked reader swallows) — verify via enqueue probe.
+- EXIDX RECIPE from old notes did NOT reproduce (garbage fn addrs) — dropped,
+  marked untrusted. Ghidra-0x10000 delta stands (3 independent prologue hits).
+- NEXT: failpath3 (enqueue 28dd04 + fail-functor 5fe70 probes, no RETSUCC) —
+  does the exception path enqueue? does t10 dequeue? does functor fire?
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). Ghidra VA = file VA + 0x10000 (CORRECTED 2026-10-11:
