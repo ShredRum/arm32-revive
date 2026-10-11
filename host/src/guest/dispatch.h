@@ -313,6 +313,11 @@ private:
     // Real GLES backend (HARNESS_REALGL=1); null until first gl* call.
     // Harness-only bring-up; same forwarding serves the device build later.
     class RealGL* realgl_ = nullptr;
+    // HARNESS_EVENTPOST/FILL (synthetic-event intervention, harness-only):
+    // pi captured from the walk (r6 after BL 0xC4654); callable recorded for
+    // the free-thunk invocation marker. Guest VAs; 0 = none.
+    std::uint32_t eventpost_pi_ = 0;
+    std::uint32_t eventpost_callable_ = 0;
   public:
     class RealGL* RealGLBackend();
 };
@@ -350,6 +355,12 @@ public:
     // HARNESS_POKE164=1: [loading-manager+164]=0 at 0x283B5C entry (forces
     // the state-1/menu branch at the 0x283C34 fork).
     static void PokeManagerFlag(std::uint64_t r10obj);
+    // HARNESS_EVENTPOST=1: capture the event-walk's pi (r6 right after the
+    // BL 0xC4654 pi acquisition at PROBE4) for the synthetic-event fill.
+    static void EventPiStash(std::uint64_t r6);
+    // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, PROBE5 slot), fake a
+    // nonzero subscriber count while natural is 0 (see EventPiStash).
+    static void EventEntry(std::uint64_t r1slot);
     // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
     // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
     // must observe for the sessions->menu handoff.

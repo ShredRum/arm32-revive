@@ -499,6 +499,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "free" || n == "cfree") {
+        // HARNESS_EVENTPOST=1: synthetic-event invocation marker. The forged
+        // vtable's +0x18 slot points at this thunk; any arg equal to the
+        // recorded callable proves the walk invoked our event (arg layout
+        // agnostic: all four checked). free itself is a safe no-op.
+        if (eventpost_callable_ != 0 &&
+            (a0 == eventpost_callable_ || a1 == eventpost_callable_ ||
+             a2 == eventpost_callable_ || a3 == eventpost_callable_)) {
+            std::printf("[eventpost] INVOKE callable=%08x args=%08x %08x %08x %08x\n",
+                        eventpost_callable_, a0, a1, a2, a3);
+        }
         GuestFree(a0);
         RetVoid(regs);
         return;
@@ -5451,6 +5461,158 @@ void GuestCallbacks::DumpR9(std::uint64_t r9) {
     }
 }
 
+void GuestCallbacks::EventPiStash(std::uint64_t r6) {
+    // HARNESS_EVENTPOST=1: capture the event-walk's pi (r6 right after the
+    // BL 0xC4654 pi acquisition, PROBE4 slot) for the synthetic-event fill
+    // (harness fills the natural pi while it is empty). Logs every capture;
+    // the fill stands down on natural activity (see harness EVENTFILL).
+    if (!std::getenv("HARNESS_EVENTPOST")) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    cb->rt_->eventpost_pi_ = (std::uint32_t)r6;
+    Runtime* rt = cb->rt_;
+    // TEMP-DIAG (hook-attribution paradox): log our own pc/lr/r6 + seq.
+    {
+        static int eseq = 0;
+        std::uint32_t pc = rt->ActiveJit()->Regs()[15];
+        std::uint32_t lr = rt->ActiveJit()->Regs()[14];
+        std::printf("[eventpost] stash#%d pc=%08x lr=%08x r6=%08x\n", ++eseq, pc, lr,
+                    (std::uint32_t)r6);
+    }
+    // (fill extension: the pi is acquired fresh every walk, so the synthetic
+    // event must be written HERE, inside the walk — never between updates.)
+    const std::uint32_t pi = (std::uint32_t)r6;
+    // Build synthetic objects ONCE (bump heap, never reused: stable forever).
+    static bool ebuilt = false;
+    static std::uint32_t earr = 0, eelem = 0, ecall = 0, evt = 0, efree = 0;
+    static int enote = 0;
+    if (!ebuilt) {
+        for (const auto& im : rt->mod().imports) {
+            if (im.name == "free") {
+                efree = im.tramp_va;
+                break;
+            }
+        }
+        earr = rt->GuestCalloc(1, 4);
+        eelem = rt->GuestCalloc(1, 0x24);
+        ecall = rt->GuestCalloc(1, 8);
+        evt = rt->GuestCalloc(1, 0x20);
+        if (!efree || !earr || !eelem || !ecall || !evt) {
+            std::printf("[eventpost] build failed, skipping\n");
+            return;
+        }
+        const std::uint32_t one = 1;
+        std::memcpy(rt->H(eelem + 8), &one, 4);      // elem flag
+        std::memcpy(rt->H(eelem + 0x20), &ecall, 4);  // elem callable
+        std::memcpy(rt->H(ecall), &evt, 4);           // callable vtable
+        std::memcpy(rt->H(evt + 0x18), &efree, 4);    // vt+0x18 = free thunk
+        std::memcpy(rt->H(earr), &eelem, 4);          // arr[0] = elem
+        rt->eventpost_callable_ = ecall;
+        ebuilt = true;
+        std::printf("[eventpost] built arr=%08x elem=%08x call=%08x vt=%08x free=%08x\n",
+                    earr, eelem, ecall, evt, efree);
+    }
+    if (pi == 0) {
+        if (enote < 3) {
+            enote++;
+            std::printf("[eventpost] pi NULL, nothing to fill\n");
+        }
+        return;
+    }
+    if (!rt->CheckRange(pi, 16, true)) {
+        if (enote < 3) {
+            enote++;
+            std::printf("[eventpost] pi %08x unreadable, skipping\n", pi);
+        }
+        return;
+    }
+    std::uint32_t b0 = 0, b4 = 0, b12 = 0;
+    std::memcpy(&b0, rt->H(pi), 4);
+    std::memcpy(&b4, rt->H(pi + 4), 4);
+    std::memcpy(&b12, rt->H(pi + 12), 4);
+    if (b12 != 0) {
+        static bool stood = false;
+        if (!stood) {
+            stood = true;
+            std::printf("[eventpost] pi busy ([+12]=%08x), standing down\n", b12);
+        }
+        return;
+    }
+    if (b0 != b4) {
+        static bool stood2 = false;
+        if (!stood2) {
+            stood2 = true;
+            std::printf("[eventpost] NATURAL EVENTS present, standing down\n");
+        }
+        return;
+    }
+    {
+        const std::uint32_t z = 0, eend = earr + 4;
+        std::memcpy(rt->H(pi + 12), &z, 4);   // busy = 0
+        std::memcpy(rt->H(pi), &earr, 4);     // begin
+        std::memcpy(rt->H(pi + 4), &eend, 4);  // end (1 elem)
+        static int efn = 0;
+        if (efn < 3) {
+            efn++;
+            std::printf("[eventpost] filled pi=%08x\n", pi);
+        }
+    }
+}
+
+void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
+    // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, r1 = event slot),
+    // fake a nonzero subscriber count while the natural one is 0 so the walk
+    // reaches the pi acquisition (BL 0xC4654) where EventPiStash fills it.
+    // Stands down (loudly) on any natural count. Run-scoped, logged.
+    if (!std::getenv("HARNESS_EVENTPOST")) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    Runtime* rt = cb->rt_;
+    const std::uint32_t slot = (std::uint32_t)r1slot;
+    static int enote = 0;
+    if (!rt->CheckRange(slot, 4, false)) {
+        if (enote < 2) {
+            enote++;
+            std::printf("[eventpost] slot %08x unreadable\n", slot);
+        }
+        return;
+    }
+    std::uint32_t impl = 0;
+    std::memcpy(&impl, rt->H(slot), 4);
+    if (impl == 0 || !rt->CheckRange(impl + 16, 4, true)) {
+        if (enote < 2) {
+            enote++;
+            std::printf("[eventpost] no impl\n");
+        }
+        return;
+    }
+    std::uint32_t cnt = 0;
+    std::memcpy(&cnt, rt->H(impl + 16), 4);
+    if (cnt != 0) {
+        static bool stood = false;
+        if (!stood) {
+            stood = true;
+            std::printf("[eventpost] NATURAL count=%u, standing down\n", cnt);
+        }
+        return;
+    }
+    const std::uint32_t one = 1;
+    std::memcpy(rt->H(impl + 16), &one, 4);
+    if (enote < 3) {
+        enote++;
+        std::uint32_t pc = rt->ActiveJit()->Regs()[15];
+        std::printf("[eventpost] count faked 0->1 impl=%08x (at pc=%08x)\n", impl, pc);
+    }
+}
+
 void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     // HARNESS_POKE164=1: [loading-manager+164]=0 (menu branch at 0x283C34).
     // Gated on HARNESS_RETSUCC success (a flag flip before content exists
@@ -7287,7 +7449,23 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
                                                          0))));
             }
+            // HARNESS_EVENTPOST=1: capture the walk's pi at PROBE4 (r6 right
+            // after the BL 0xC4654 pi acquisition) for the synthetic-event
+            // fill. Plain stash (no walk resume semantics).
+            if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc4 && probe_pc4) {
+                ir.CallHostFunction(&EventPiStash, ir.ZeroExtendWordToLong(
+                                                       ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                           6))));
+            }
             // HARNESS_RETSUCC=1: success synthesis at raiser entry (PROBE3).
+            // HARNESS_EVENTPOST=1: fake the subscriber count at walk entry
+            // (PROBE5 = 0xC45FC, r1 = event slot) so the walk reaches the pi
+            // acquisition where EventPiStash (PROBE4) fills it.
+            if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc5 && probe_pc5) {
+                ir.CallHostFunction(&EventEntry, ir.ZeroExtendWordToLong(
+                                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                         1))));
+            }
             if (std::getenv("HARNESS_RETSUCC") && pc == probe_pc3) {
                 ir.CallHostFunction(&SuccInject,
                                     ir.ZeroExtendWordToLong(
