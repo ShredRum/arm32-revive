@@ -1502,3 +1502,20 @@ dead subsystem, game degrades without it).
 - Standing: every load-bearing claim now has >=2 independent supports except
   string file-offsets (immaterial). Next intervention unchanged: login
   initiation (Lua) or functor invocation.
+
+## 38. Frida on device (2026-10-11 eve)
+- Host: project-local .venv (python3.13), frida 17.23.3 first (wheels ok),
+  then 16.7.19 + frida-tools 12.3.0 (frida-tools CLI broken on 3.13 —
+  top-level `import _frida` fails; use lib API directly, it works).
+  Server origin: github.com/frida releases over TLS (official), ELF sanity
+  checked (Android arm64 PIE, NDK-built). NO system-wide installs.
+- Device (SSH u0_a41@192.168.1.202:8022, Termux, root via sudo): frida-server
+  runs as root, listens 127.0.0.1:27042; host reaches it via ssh -L tunnel
+  (KEEP the tunnel process alive for all Frida work). Game NOT running at
+  setup; spawn broken in vphoneos (helper-exec fails, activity started but
+  process died on start-timeout — recovered via plain am start, pid 1801).
+- INJECT MATRIX (live): Termux bash (64-bit, own uid) OK; Gboard (64-bit app)
+  OK; game (32-bit, vphoneos emulation) FAILS identically on 17.23.3 and
+  16.7.19 (helper-exec error). Container API 25. Conclusion: 32-bit inject
+  broken and/or game-context-specific. NEXT: user creates pure 32-bit sandbox
+  to split the two; fallback = gadget-repack route.
