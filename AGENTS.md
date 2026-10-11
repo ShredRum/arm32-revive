@@ -1189,6 +1189,26 @@ dead subsystem, game degrades without it).
   (stable manager lookup + NULL quit + r0=0, same shape as device must take).
   +164 stall is NOT here. NEXT: apdrive completion delivery (0x28E328 queue
   format / main pickup) or menu-scene activation trigger.
+
+## 33. Session 2026-10-11 (part 24): airplane-with-cache fails locally, no throw
+- GHIDRA VERDICT (user: analysis ran with ALL options incl. red-warned ones):
+  NO redo needed. Decomp is hypothesis-only; every load-bearing claim is
+  live-verified (addr math in python, behavior via probes). Where checked
+  (sessions flow, Signal predicate mutex+8) it is exact. Redo only if a
+  decomp-vs-live contradiction blocks us.
+- AIRPLANE1 (files17 = seeds + files12 496B token-registry, pure NONET, no
+  DNSALLOW, combo otherwise; work/airplane1.log): job#1 (tid9) reads 496B
+  registry (tokens present -> r5!=0 -> refresh path), gathers device info
+  (cpuinfo, Build.MODEL/RELEASE, UUID), rewrites 496B .tmp, then writes flag
+  0 at 0xD7100 — NO network attempt, NO throw (zero `throw type` in run).
+  Job#2 later reaches raiser -> RETSUCC 200 -> parsed, flag stays 0.
+- MECHANISM (disasm 0xD6F80..0xD7088): refresh block ends in fall-through
+  `mov r0,#0` (0xD7084) -> fail-cleanup 0xD7100; success jump from beq 0xD7078
+  -> 0xD708C. Gates: ldrb [sp+324]/[sp+336] + tst #1 (SSO/presence shape TBD).
+- IMPLICATION: token-registry + offline != device menu path. Device's
+  airplane catch must key on something else (DNS-throw path? error-code-6
+  surfacing?). NEXT: live branch probe (airplane2: PROBE4=d7084/PROBE5=d708c)
+  + static refresh-block decode (background subagent ses_ed405048effeJSVcwBodXmm8KM).
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
