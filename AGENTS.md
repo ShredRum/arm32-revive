@@ -1523,6 +1523,21 @@ dead subsystem, game degrades without it).
   bc100, NO flag writes, NO raiser across minutes of navigation. Login
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
+
+## 40. Device per-update login poller 0xBC100 (cold boot 5445, full capture)
+- 0xBC100 runs INSIDE Java nativeUpdate (GL thread, jstack: nativeUpdate <-
+  doUpdate <- onFrame <- onDrawFrame <- GLThread), repeatedly, constant args:
+  r0=heap (stable per boot, == ctx+0x10!), r1=module-static (file 0x69F2C),
+  r2=0, r3=0x20(32). Downstream (same tree): 0x388904 -> 0x63B54 -> 0x63EE4
+  -> loginFinished(ctx,0). It IS the per-update login pump.
+- ctxdump (ctx+0): vtable-ish file 0x612504; +0x10 = bc100-r0; +0x18..:
+  `01 01 53 57` => +0x19=1 (in-progress, pre-clear, both attempts).
+- Gate settles to 1 after loginFinished pair; menu follows.
+- OUR HARNESS (work/ourbc100.log, full body + poke): 0xBC100 NEVER translates.
+  Its call is conditional on state ours lacks. Zero static callers (ARM BL /
+  BLX-imm / Thumb BL / absolute refs) -> reached intra-function or indirectly.
+- NEXT: subagent decoding fn 0xBC0AC (args/callers/subtree/success branch);
+  then replicate the enabling condition or call it directly.
 ## 38. Frida on device (2026-10-11 eve)
 - Host: project-local .venv (python3.13), frida 17.23.3 first (wheels ok),
   then 16.7.19 + frida-tools 12.3.0 (frida-tools CLI broken on 3.13 —
