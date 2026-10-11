@@ -5261,10 +5261,9 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
     // (status 200 + JSON body string) and resumes at the caller, skipping
     // the real network (which always throws offline). Other endpoints fall
     // through to the natural path.
+    static int calls = 0;
     static int n = 0;
-    if (++n > 4) {
-        return;
-    }
+    ++calls;
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -5291,7 +5290,7 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
             }
         }
     }
-    std::printf("[succ] #%d url=%.100s\n", n, url);
+    std::printf("[succ] #%d url=%.100s\n", calls, url);
     std::string u(url);
     // Response body per endpoint (time/sessions: generated JSON with
     // static-verified shapes; apdrive variantconfig: real file bytes).
@@ -5338,6 +5337,10 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
         blen = vc.size();
     } else {
         return;  // unknown endpoint: natural path.
+    }
+    // Budget counts injected endpoints only (unknown URLs must not burn it).
+    if (++n > 64) {
+        return;
     }
     std::uint32_t bmem = cb->rt_->GuestMalloc((std::uint32_t)(blen + 1));
     if (!bmem || !cb->rt_->CheckRange(req + 16, 16, true)) {

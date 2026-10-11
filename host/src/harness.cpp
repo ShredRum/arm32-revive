@@ -143,10 +143,10 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
     regs[2] = r2;
     regs[3] = r3;
     // HARNESS_POKE1187=1 (loading->menu gate): the gate is byte
-    // [*(0x672e9c)+1187]==1 (reader 0xBE714 from update 0xC2148; sole writer
+    // [*(0x672e98)+1187]==1 (reader 0xBE714 from update 0xC2148; sole writer
     // 0xBE704 never fires). Poke it before every call (BSS valid post-init).
     if (std::getenv("HARNESS_POKE1187")) {
-        const std::uint32_t slot = 0x672e9cu;
+        const std::uint32_t slot = 0x672e98u;
         if (rt.CheckRange(slot, 4, false)) {
             std::uint32_t obj = 0;
             std::memcpy(&obj, mem.host(slot), 4);

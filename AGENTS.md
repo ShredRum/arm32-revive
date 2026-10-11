@@ -1122,6 +1122,20 @@ dead subsystem, game degrades without it).
   +164=2 (loading): its session checks fail silently.
 - NEXT: trace the body's session checks (0xC21EC strings + 0xC5104 vcall
   result) with the gate open.
+
+## 29. Session 2026-10-11 (part 20): hygiene fixes, quit-branch dead end
+- 0a SLOT FIX (real typo): pre-call poke used 0x672E9C (INVALID obj every
+  call); now 0x672E98, obj=10003250 matches mid-update hook (PROVEN live).
+- 0b RETSUCC BUDGET: `++n>4` counted unknown endpoints (burned by retries);
+  now `calls` (log) vs `n` (injected only, cap 64).
+- 0c POKE1187-ALONE holds r0=0 on ALL updates (no 1188/164 needed) —
+  +1188=1 was unnecessary (P3 supported). Sessions 2x clean, zero throws.
+- QUIT-BRANCH EXCLUDED: body reaches 0xC223C bl 0xC524C (quitRequested
+  poller); +912 vcall returns NULL every time -> clean early return, no
+  throw. quitRequested chain completes silently BY DESIGN (nothing requests
+  quit). Session/time/apdrive logic is NOT in this branch.
+- Body start: 0xC2160 bl 0xC1254 with BSS-resident key ptr (add r1,pc -> 
+  0x672DF0, file-empty). Phase-1 probe: WPA=672df0 + TRCALL=c2160,a0.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
