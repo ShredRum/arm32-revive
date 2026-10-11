@@ -2722,8 +2722,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // HARNESS_DNSALLOW=1: punch UDP/53 past NONET (real 8.8.8.8
             // replies for the custom resolver; ordinary userspace traffic).
             if (std::getenv("HARNESS_NONET")) {
-                bool dnsout = false;
-                if (std::getenv("HARNESS_DNSALLOW")) {
+                bool dns53 = false;
+                {
                     int st = 0;
                     socklen_t sl = sizeof(st);
                     struct sockaddr_storage ss {};
@@ -2735,10 +2735,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         ss.ss_family == AF_INET) {
                         const auto* sa = reinterpret_cast<const struct sockaddr_in*>(&ss);
                         if (ntohs(sa->sin_port) == 53) {
-                            dnsout = true;
+                            dns53 = true;
                         }
                     }
                 }
+                // HARNESS_DNSHUSH=1: device-airplane DNS shape (PROVEN by
+                // device logcat: "Could not resolve ... (Could not contact DNS
+                // servers)" -> HttpRequestException(6) -> caught -> menu).
+                // Queries are swallowed (fake full send, nothing leaves), no
+                // reply ever arrives -> resolver times out instead of taking
+                // the immediate-ENETUNREACH silent-park branch.
+                if (dns53 && std::getenv("HARNESS_DNSHUSH")) {
+                    std::printf("[netsock] dnshush swallowed %uB [t%u]\n", a2, GuestTid());
+                    Ret(regs, a2);
+                    return;
+                }
+                bool dnsout = dns53 && std::getenv("HARNESS_DNSALLOW");
                 if (!dnsout) {
                     set_guest_errno(ENETUNREACH);
                     Ret(regs, static_cast<std::uint32_t>(-1));

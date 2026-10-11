@@ -1245,10 +1245,27 @@ dead subsystem, game degrades without it).
   no reply -> resolver timeout; implemented in send path, rebuilding).
   NEXT: dnshush run on clean registry (exact device config) — watch for throw
   (type? caught? thread death?) + flag + film.
+- DNSHUSH1 RESULT (work/dnshush1.log): 13 swallowed sends (t3 x7, t11 x6 —
+  resolver RETRIES on timeout, unlike immediate-fail single-shot) then park;
+  NO throw, sessions flag=1 (RETSUCC, transport-independent), +164=2.
+  Unanswered-DNS alone does not reproduce the device throw.
+- CORRECTION (PROVEN by own check): Ghidra VA = file VA + 0x10000 (NOT equal).
+  Verified: FUN_0006eba4/0006fe70 -> file 0x5EBA4/0x5FE70 land EXACTLY on
+  stmdb prologues (distv). §30's "FUN_ == file VA (verified)" was a bad
+  verification — lesson: re-verify VA claims by prologue/bytes. Rule: subtract
+  0x10000 from any Ghidra code VA to get file VA.
+- LOGCAT-ANCHORED CHAIN (bytes): "Login failed: %d => %s" fmt at file 0x5C0C0F
+  == logcat text exactly. Logger = loginFinished callback (file 0x5D2F0):
+  param_2==1 success (promptLogin...), else "Login failed" log + continue.
+  Callers: success functor (file 0x5EBA4) -> loginFinished(ctx,1); failure
+  functor (file 0x5FE70) -> loginFinished(ctx,0). OUR RUNS: neither fires ->
+  jobs die/park pre-completion. NEXT: probe both functors live
+  (PROBE4=5eba4/PROBE5=5fe70) in dnshush run.
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
-  (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
-  DAT_ mapping: use file VAs, NOT Ghidra DAT_ blindly. Ghidra splits fns at
+  (23MB, 75511 FUNs). Ghidra VA = file VA + 0x10000 (CORRECTED 2026-10-11:
+  old "FUN_ == file VA" claim was wrong; FUN_0006eba4/0006fe70 -> 0x5EBA4/
+  0x5FE70 prologues prove the delta). .rodata DAT_ mapping: use file VAs, Ghidra splits fns at
   tail calls (e.g. 0xD6C78 inside FUN_000d6bfc) — request decomp by inner addr.
 - DECOMP WINS (sessions fn ~line 92900): uVar2/+0x1E = fresh(1)/refresh(0)
   ROUTING (not success!). +0x1E=1 -> THROW "Login failed: "+underflow_error
