@@ -2713,10 +2713,31 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // send/sendto fail ENETUNREACH (no route), recv waits out the
             // kernel timeout below (EAGAIN). Previously sends went out over
             // the HOST uplink even under NONET (unfaithful).
+            // HARNESS_DNSALLOW=1: punch UDP/53 past NONET (real 8.8.8.8
+            // replies for the custom resolver; ordinary userspace traffic).
             if (std::getenv("HARNESS_NONET")) {
-                set_guest_errno(ENETUNREACH);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+                bool dnsout = false;
+                if (std::getenv("HARNESS_DNSALLOW")) {
+                    int st = 0;
+                    socklen_t sl = sizeof(st);
+                    struct sockaddr_storage ss {};
+                    socklen_t slen = sizeof(ss);
+                    if (::getsockopt(hfd, SOL_SOCKET, SO_TYPE, &st, &sl) == 0 &&
+                        st == SOCK_DGRAM &&
+                        ::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&ss),
+                                      &slen) == 0 &&
+                        ss.ss_family == AF_INET) {
+                        const auto* sa = reinterpret_cast<const struct sockaddr_in*>(&ss);
+                        if (ntohs(sa->sin_port) == 53) {
+                            dnsout = true;
+                        }
+                    }
+                }
+                if (!dnsout) {
+                    set_guest_errno(ENETUNREACH);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
             }
             // TLS version DOWNGRADE (harness bridge): the in-module stack
             // is capped at TLS 1.0 (any 0303 ServerHello record -> fatal
@@ -3737,6 +3758,25 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         return 22;
     }
     if (n == "pthread_cond_wait") {
+        // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
+        // Otherwise bound unbounded waits like timedwait: a worker/main
+        // deadlock on a never-signaled cond (seen at loading: worker waits
+        // for main's processing, main polls for worker's message) hangs
+        // forever; spurious wakeups let predicates re-check instead.
+        // TEMP-DIAG (rendezvous hunt): dump around cond+mutex (find the
+        // predicate flag the waiter polls, e.g. Signal.cpp [r4+8]).
+        {
+            static int cd = 0;
+            if (cd < 3 && CheckRange(cond > 64 ? cond - 64 : 0, 128, false)) {
+                cd++;
+                const std::uint8_t* p = H<const std::uint8_t>(cond - 64);
+                std::printf("[cond] wait c=%08x m=%08x t=%u dump:", cond, arg1, GuestTid());
+                for (int j = 0; j < 128; j++) {
+                    std::printf(" %02x", p[j]);
+                }
+                std::printf("\n");
+            }
+        }
         // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
         // Otherwise bound unbounded waits like timedwait: a worker/main
         // deadlock on a never-signaled cond (seen at loading: worker waits

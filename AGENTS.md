@@ -1179,6 +1179,10 @@ dead subsystem, game degrades without it).
   BL callers = virtual) vs r1=2 (0x260B88/0x261378, loading, runs every
   render). r1=1 site 0x250680+ never translates (PCTRACE-proven). Menu scene
   never activates. Flip futile (overwritten next render, PROVEN longrun1).
+- DNSALLOW BREAKTHROUGH (HARNESS_DNSALLOW=1 punches UDP/53 past NONET):
+  real 8.8.8.8 replies (140B) recvd by workers (tid3/time first); TCP legs
+  fail fast (101); time/apdrive enter ERROR HANDLING (strerror+errno hists)
+  instead of poll-park. Needs time to complete -> 5-min run going.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
