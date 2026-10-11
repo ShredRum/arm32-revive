@@ -1563,6 +1563,14 @@ dead subsystem, game degrades without it).
   throw -> fail-functor 0x5FE70 with OUR runtime-found record (RAWPOST proved
   the call runs clean; REDIR lands THROUGH pads whose side effects the direct
   call skips). Binary: menu/progress (chain lives) vs same stall (dead).
+- EXECUTION ORDER (agreed, strictly serial, verdict after each):
+  1. REDIR throw -> 0x5FE70(record). 2. If miss: direct +164=1 via BL 0x283A3C
+     (scene-liveness proof). 3. In parallel (static): R7-spiral root cause.
+  4. Do NOT touch: time/apdrive, +1187 gate, mocks (except 2 cosmetic VALUE
+     fixes opportunistically), Lua initiation, 0xBC100.
+- MOCKS VERDICT (2026-10-12): leave as-is. No evidence any mock blocks;
+  networkType tested live; Locale/Build divergences cosmetic until proven
+  otherwise by a failing branch (none observed).
 ## 40. Device per-update login poller 0xBC100 (cold boot 5445, full capture)
 - 0xBC100 runs INSIDE Java nativeUpdate (GL thread, jstack: nativeUpdate <-
   doUpdate <- onFrame <- onDrawFrame <- GLThread), repeatedly, constant args:
