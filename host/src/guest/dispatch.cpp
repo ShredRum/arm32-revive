@@ -1837,6 +1837,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // and the original throw is ~512 levels up, intact for forensics.
             std::printf("[unwind] LOUD nesting %u deep at pc=%08x sp=%08x -- halting\n", tr.depth,
                         a0, a1);
+            // TEMP-DIAG (spiral root cause): dump R7 + the 6 words the SU16
+            // pop-frame reads ([R7-12..R7+8]): stale self-ref vs valid frame?
+            {
+                std::uint32_t r7v = regs[7];
+                std::printf("[unwind] R7=%08x SP=%08x LR=%08x : ", r7v, regs[13], regs[14]);
+                for (int k = -12; k <= 8; k += 4) {
+                    std::uint32_t w = 0xDEADBEEFu;
+                    if (CheckRange(r7v + k, 4, false)) {
+                        std::memcpy(&w, H<const std::uint8_t>(r7v + k), 4);
+                    }
+                    std::printf("[%+d]=%08x ", k, w);
+                }
+                std::printf("\n");
+            }
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;

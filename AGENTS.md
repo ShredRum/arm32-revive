@@ -1533,6 +1533,30 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
+## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
+- SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
+  query (no early walk; 1026 unanimous). 0x45A778 inside raise driver
+  post-context-save. Context: phase-2 loop (FUN_0046AF30 calls Find_exidx per
+  step). R7 at halt = heap (worker stacks live in heap arena) with heap word
+  in lr slot (stale frame). EXONERATED (verified): exidx table+search (bridge
+  == independent linear scan); heap/stack overlap (bump discipline, NULL on
+  full, no wrap); Ret()/T-bit (Thumb BL sets lr-bit, mechanism correct);
+  SVC-trampoline poisoning (no guest frames carry tramp pcs, mechanism).
+  OPEN: why VRS/R7 holds stale (Dynarmic context-init? clobber class?);
+  personality behavior under emulation. Builds: EXIDXLOG + R7-dump diag
+  (committed, keep for one more round then drop).
+- RESOLVE BRANCH (work/resolvebranch1.log, nodns): fail site 0x468D70 AND
+  success site 0x468C9C BOTH translate; 185 executions cluster (lr=0x466F34,
+  r0 = 4 heap states ~even). INFERRED (weak): success x3 threads vs fail x2
+  threads (retranslation counts). Per-hit site attribution OPEN (no pc tags).
+- DEATHS NEW: marathon3 (long, early taps): time worker tid3 DIED (BAD read
+  @0x50006358, pc 0x470D90 resolver region, r4=wild) — first time-death ever
+  (was always park). relthrow shape: tid9+tid12 die via unwind 2/2 reliable.
+- MISSES (recorded, no menu): devcache (device 288B registry, P2 dead),
+  devid (device ANDROID_ID, still LOADING), nopoke (poke theory dead),
+  rawpost+clear (flag cleared, no menu), REDIR-functor (ran, BAD crash).
+- Builds in tree (all committed): DNSHUSH, HEXFINDHEX, RAWPOST/RAW1/snapshots,
+  ParkRedirectObj/REDIROBJ, EXIDXLOG, R7-dump. Binary == tree HEAD.
 ## 42. REDIR->functor executed, then BAD crash, no menu (2026-10-12)
 - Build: ParkRedirectObj (r0 override) + HARNESS_REDIROBJ=<needle> (heap scan
   + [+0x14]==0x11 verify, else plain redirect). Config: reliable-throw

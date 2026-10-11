@@ -1150,6 +1150,11 @@ int main(int argc, char** argv) {
                         rgs[1] = 0;
                         rgs[2] = 0;
                         rgs[3] = 0;
+                        // HARNESS_RAW1=<hex>: r1 override for the post call
+                        // (e.g. writer-select r1=1).
+                        if (const char* r1e = std::getenv("HARNESS_RAW1")) {
+                            rgs[1] = static_cast<std::uint32_t>(std::strtoul(r1e, nullptr, 16));
+                        }
                         // Pre/post snapshot around +0x14 (skeleton re-check).
                         std::uint32_t pre[4] = {};
                         if (rt.CheckRange(found, 0x20, false)) {
