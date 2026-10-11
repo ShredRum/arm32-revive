@@ -1533,6 +1533,65 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
+## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
+- All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
+  (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
+  284078=e589a0a4, 466F34=344087e5, 46B618=0660a003 — ALL 6 MATCH.
+- A1 (0xBC100): ADS 0.97. 0xBC100 = interior (+0x54) of Lua addPlacementNative
+  binding (reg triple @0xBA478 byte-proven); chain addPlacementNative->0xBBF64->
+  0xBBFD4->0xBC0AC->0xBC158. Backtrace edges REFUTED in bytes (0x63B54=tst,
+  0x388904=add, 0x63EE4 never BLs loginFinished). §40 DEAD (§39 backtrace was
+  stale-lr garbage). RULE: never call 0xBC100. True fail site: BL @0x5FEE0
+  (functor 0x5FE70 -> loginFinished(ctx+4,0)); success site BL @0x5EBE0 (r1=1).
+- A2 (sessions chain): NO covering typed pad 0.87. BARE dispatch verified
+  (0x28B140 no fork; this+0x28 empty -> functor assembly skipped @0x28A680-6CC).
+  Throw A/B -> PLT 0x53708 -> GOT 0x670E60 -> Thumb __cxa_throw (PLT math python-
+  verified). extab/LSDA python-decoded: 0x28A3DC 36 sites act0, throw rets in
+  pad-0 sites; neighbors cleanup-only; 0x28DAF4 compact no-pads. Functor reads:
+  (ctx+4,0,ctx+8)->loginFinished, needs ctx+0xC string flag; NO cmp #0x11
+  anywhere in 0x5FE70-40 => [+0x14]==0x11 needle SUSPECT (explains RAWPOST-no-
+  menu: clean call, wrong object). Record claim REFUTED: FUN_0009fed4 = file
+  0x8FED4 (analytics new(0x74)/new(0x28)), no new(0x2C) — another 0x10000 slip
+  in MY prompt. True ctx provenance OPEN. "Never derived" globally FALSE (one
+  derived catch in 0x19FE80) but TRUE for dispatcher chain.
+- A3 (builders): trigger recipe 0.71. CORRECTIONS: FUN_000d45fc = file 0xC45FC
+  (not 0xD45FC — my prompt slip, agent caught); DAT_ addrs are GHIDRA VAs too
+  (rule now uniform: Ghidra-0x10000=file, code AND data). Builders zero direct
+  BL (full ARM+Thumb32 scan) — virtual via 0x6684/0x400 tables (0x41F9B0 entry
+  = Thumb-code false positive). Activation: nativeUpdate 0xC2014 -> BL 0xC2140
+  -> walk 0xC45FC (event-vector non-empty + pi[3]==0 + +8 gates -> +0x18 fan-out)
+  -> surface loop 0x250018 -> builders. r1=0x101929 PROVEN non-static (zero
+  hits everywhere) = dynamic scene key. r1=1/r1=2 BL sites: SIX (extra 0x2616DC
+  in loading fn 0x261468 was omitted).
+- A4 (BL recipe): 2-reg recipe REFUTED (P~0.15, faults on ldm/memcpy/vector).
+  Exact 7-arg recipe 0.72: r0=mgr(heap new(0xDC)) r1=1 r2=0 r3=zeroBuf>=72B
+  stack 0,0,0, quiet point. Full decode: virtual getter ([mgr+0xA8]->vt+0x60),
+  helper 0x283AC0 must return !=0 (empty => immediate 1), tail 0x28402C (empty
+  re-check + string-swap no-ops when 0 + 156B memcpy + B4 grow). BSS-slot claim
+  NUANCED: slot 0x672E98 holds mgr POINTER (live-proven across runs); agent's
+  absolute-scan refutation is method-weak (slots read via pcrel literals). Keep
+  slot reads + heap-scan cross-check. 0x283C48 fork = r1-vs-3 select, NOT the
+  store gate (true gate 0x284058-64).
+- A5 (resolver): park-not-throw 0.87. 185-hit cluster = curl poll loop over 4
+  easy handles (0x466F34 = memcpy-return str), NOT threads — old inference
+  killed. 0x468C9C = park (r5=0); 0x468D70 = fail (r6=1, iVar12=6). Code 6 built
+  @0x46B618 (moveq r6,#6) only on COMPLETED failure (retries 4xnservers
+  exhausted via FUN_004A6890); pure silence = in-flight = park. Timer gives 28,
+  never 6. Retries TRUE (bounds verified). Consequence: failure path needs
+  minute-scale exhaustion; DNSHUSH-no-throw explained.
+- VA RULE (final): GhidraVA - 0x10000 = fileVA, uniformly. My prompts carried
+  two 0x10000-class slips (0xD45FC, DAT_ rule) — agents caught both; verify-all
+  stands.
+- REVISED PLAN (serial): (i) ctx provenance (static ctors of 0x5FE70-ctx class
+  + callers of 0x5FEE0; live WPA on ctx+0xC writes); (ii) event-vector filler +
+  element format + live post (gate at 0xC45FC entry); (iii) 7-arg BL as scene-
+  liveness diag (expect WHITE — proves liveness, not menu); (iv) code-6 long run
+  only if failure path revived. KILLED: 0xBC100 calls, 2-reg BL, timer-28,
+  [+0x14] needle criterion, thread-attribution of poll loop. NON-NEGOTIABLE #1
+  SOFTENED (user-approved): fabrication allowed as scaffold AND ship candidate
+  (canned offline session for dead 2026 servers); honesty via logging, ship
+  criterion = offline menu+play, not method purity. #3/#4/#5 stay strict.
+
 ## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
 - SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
   query (no early walk; 1026 unanimous). 0x45A778 inside raise driver
