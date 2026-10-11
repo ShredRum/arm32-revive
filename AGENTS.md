@@ -1134,8 +1134,15 @@ dead subsystem, game degrades without it).
   poller); +912 vcall returns NULL every time -> clean early return, no
   throw. quitRequested chain completes silently BY DESIGN (nothing requests
   quit). Session/time/apdrive logic is NOT in this branch.
-- Body start: 0xC2160 bl 0xC1254 with BSS-resident key ptr (add r1,pc -> 
+- Body start: 0xC2160 bl 0xC1254 with BSS-resident key ptr (add r1,pc ->
   0x672DF0, file-empty). Phase-1 probe: WPA=672df0 + TRCALL=c2160,a0.
+- PHASE-1 RESULTS (live, PROVEN): 0x672DF0 written once at init (0 ->
+  f1003008 by 0x2F9690); read every update from 0x2F971C (main DOES poll
+  the slot). f1003228 = GetObjectClass(f1003008): C5104's first arg is a
+  jclass (Java method lookup quitRequested ()V). C5160-block r0 =
+  f100322c..325c non-null x16 (vcall+132 SUCCEEDS, no MemberNotFound).
+- 160x `throw type: EE4swapERS3_` (20/update, caught internally, r0=0) —
+  raiser hunt via lr print added to throw line (throwlr.log).
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

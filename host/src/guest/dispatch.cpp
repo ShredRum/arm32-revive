@@ -5001,6 +5001,24 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     }
     std::uint32_t v = 0;
     std::memcpy(&v, cb->rt_->H(o + 164), 4);
+    // TEMP-DIAG (always on when hooked): identify the loading-manager object
+    // and its +164/+1187 over time. The FLIP below stays POKE164-gated.
+    {
+        static int pd = 0;
+        if (pd < 6) {
+            pd++;
+            std::uint8_t b1187 = 0;
+            std::uint32_t s168 = 0;
+            if (cb->rt_->CheckRange(o + 1187, 1, false)) {
+                std::memcpy(&b1187, cb->rt_->H(o + 1187), 1);
+            }
+            if (cb->rt_->CheckRange(o + 168, 4, false)) {
+                std::memcpy(&s168, cb->rt_->H(o + 168), 4);
+            }
+            std::printf("[diag164] obj=%08x +164=%08x +1187=%u +168=%08x succ=%d\n", o, v,
+                        b1187, s168, (int)g_succ_done_hack);
+        }
+    }
     // TEMP-DIAG (update bail): dump the Gate#1 singleton *0x672E98.
     {
         static int pg1 = 0;
@@ -5041,17 +5059,13 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
         }
     }
     if (v != 0) {
-        // Gate: flip only when the surface EXISTS with loading built
-        // (state180==3). Flipping before construction whites the screen
-        // (proven: state180=garbage at early poke).
-        std::uint32_t s = 0, st = 0;
-        if (cb->rt_->CheckRange(o + 168, 4, false)) {
-            std::memcpy(&s, cb->rt_->H(o + 168), 4);
-        }
-        if (s && cb->rt_->CheckRange(s + 180, 4, false)) {
-            std::memcpy(&st, cb->rt_->H(s + 180), 4);
-        }
-        if (st != 3) {
+        // (Was: flip only when surf state180==3. Removed: surf is
+        // gr::gles2::GL_Context, +180 is not a state field.)
+        // NOTE (2026-10-11): the st==3 gate was based on a WRONG-TYPE
+        // premise (old subagent: ShadowingSurfaceData). Live vptr 0x669404 =
+        // gr::gles2::GL_Context (PROVEN via vtable-4 typeinfo), so +180 is
+        // NOT a state field (reads heap garbage). Gate on succ only now.
+        if (!std::getenv("HARNESS_POKE164")) {
             return;
         }
         static int pm = 0;
@@ -5125,6 +5139,23 @@ void GuestCallbacks::PokeGateByte(std::uint64_t r7slot) {
         if (pg < 4) {
             pg++;
             std::printf("[poke1187] mid-update slot=%08x obj=%08x\n", slot, obj);
+        }
+        // TEMP-DIAG (session publication): dump the BSS session object header
+        // (f1003008, written once at init) + [manager+164] across updates.
+        // Reads only. Compares pre/post sessions completion.
+        {
+            static int dg = 0;
+            if (dg < 14 && cb->rt_->CheckRange(0xF1003008, 32, false) &&
+                cb->rt_->CheckRange(obj + 164, 4, false)) {
+                dg++;
+                std::uint32_t h[8], st = 0;
+                std::memcpy(h, cb->rt_->H(0xF1003008), 32);
+                std::memcpy(&st, cb->rt_->H(obj + 164), 4);
+                std::printf("[sesspub] #%d succ=%d st164=%08x obj308=%08x %08x %08x %08x %08x "
+                            "%08x %08x %08x\n",
+                            dg, (int)g_succ_done_hack, st, h[0], h[1], h[2], h[3], h[4], h[5],
+                            h[6], h[7]);
+            }
         }
     }
 }
@@ -6276,7 +6307,7 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
             }
             buf[k] = 0;
             if (k > 0 && k < 128) {
-                std::printf("[probe] throw type: %s\n", buf);
+                std::printf("[probe] throw type: %s lr=%08x\n", buf, (std::uint32_t)lr);
             }
             // TEMP-DIAG (unwinder bring-up): measure the exception header by
             // scanning back from the thrown object for the exception-class
@@ -6543,7 +6574,9 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         }
         // HARNESS_POKE164=1: loading-manager flag at 0x283B5C entry (r10=r0
         // there per prologue r10=r0). Forces the menu branch at 0x283C34.
-        if (std::getenv("HARNESS_POKE164") && pc == 0x283B5Cu) {
+        // HARNESS_DIAG164=1: same hook, diag only (no flip).
+        if ((std::getenv("HARNESS_POKE164") || std::getenv("HARNESS_DIAG164")) &&
+            pc == 0x283B5Cu) {
             ir.CallHostFunction(
                 &PokeManagerFlag,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
