@@ -5068,6 +5068,14 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
         if (!std::getenv("HARNESS_POKE164")) {
             return;
         }
+        // HARNESS_POKE164_DELAY=N: flip only on/after the Nth firing (lets
+        // loading content build first; early flips white the screen).
+        if (const char* de = std::getenv("HARNESS_POKE164_DELAY")) {
+            static int dc = 0;
+            if (++dc < (int)std::strtoul(de, nullptr, 0)) {
+                return;
+            }
+        }
         static int pm = 0;
         if (pm < 3) {
             pm++;

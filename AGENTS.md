@@ -1143,6 +1143,21 @@ dead subsystem, game degrades without it).
   f100322c..325c non-null x16 (vcall+132 SUCCEEDS, no MemberNotFound).
 - 160x `throw type: EE4swapERS3_` (20/update, caught internally, r0=0) —
   raiser hunt via lr print added to throw line (throwlr.log).
+- SUBAGENT-ERROR CAUGHT (user asked to verify): surf vptr 0x669404 =
+  gr::gles2::GL_Context (vtable-4 typeinfo PROVEN), NOT ShadowingSurfaceData.
+  +180 is NOT a state field (garbage). st==3 flip-gate REMOVED (it could never
+  open); POKE164 runs never actually flipped anything. Rollback: b6f185a^.
+- RENDER HYPOTHESIS DEAD: 16 nativeRender calls execute clean, sessions 2x
+  clean, but state stays +164=2, surf unchanged. Screenshot = Rovio LOGO
+  (not loading!): short runs never leave the logo phase.
+- TAP INSIGHT (§12 reread): 20 updates no-tap = Rovio splash, 20 with tap =
+  Fox splash — taps ADVANCE boot. Current run: taps (JOVR down/up center)
+  + renders + RETSUCC + POKE1187 + DIAG164, no POKE164 (watch natural +164).
+- TAP BREAKTHROUGH (PROVEN filmstrip): taprun1 shot008=Rovio logo,
+  shot032=FOX logo, final=FOX. Input (JOVR down/up center 400,240) advances
+  boot with real frames. +164 still 2 (loading not yet built).
+- HARNESS_POKE164_DELAY=N added (flip on/after Nth firing; early flips
+  white). Long run: 27 updates + 27 renders + 3 tap pairs, DELAY=10.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47
