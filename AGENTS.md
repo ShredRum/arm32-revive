@@ -1503,6 +1503,26 @@ dead subsystem, game degrades without it).
   string file-offsets (immaterial). Next intervention unchanged: login
   initiation (Lua) or functor invocation.
 
+## 39. Frida device gold (2026-10-11 night, gadget repack works)
+- Gadget route PROVEN: apktool decode + loadLibrary in App.onCreate +
+  libfridagadget.so (arm32) + listen :27044, debug-signed; engine md5-identical;
+  gadget LISTENS (no ptrace). vphoneos hides engine mappings (no process maps
+  the .so); base found by byte-pattern memscan (needle nativeConfig@0xC1550):
+  0x147F4000/0x146F4000 per boot (NOT 1MB-aligned — slot probing unreliable,
+  full scan required). NOTE: frida sessions lag 30-100s+; read logs AFTER end;
+  per-frame hooks destabilize (2 crashes) — sparse/change-only hooks only;
+  NEVER hook the throw site (prime crash suspect).
+- COLD BOOT CAPTURE (pid 4742, full): flag d70fc writes xN, raiser POSTs xN
+  (r2=2), loginFinished(ctx=0x15289710, flag=0) x2 SAME ctx, backtrace:
+  loginFinished <- 0x63EE4 <- 0x63B54 <- 0x388904 <- 0xBC100 <- JNI trampoline
+  <- libart (JAVA calls native 0xBC100!). 0xBC100 has NO Java_* symbol
+  (dynsym-checked) -> dynamic registration (our bridge lacks fn#215 entirely,
+  zero fn#215 in all logs). Gate settles to 1. Menu follows.
+- IN-MENU (pid 5221/3388): gate164 polls flip 2<->1 EVERY poll (6650 hits;
+  object addrs not logged — one vs two managers OPEN); NO loginFinished, NO
+  bc100, NO flag writes, NO raiser across minutes of navigation. Login
+  subsystem active ONLY at boot. Menu lives without it.
+- NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 ## 38. Frida on device (2026-10-11 eve)
 - Host: project-local .venv (python3.13), frida 17.23.3 first (wheels ok),
   then 16.7.19 + frida-tools 12.3.0 (frida-tools CLI broken on 3.13 —
@@ -1519,3 +1539,12 @@ dead subsystem, game degrades without it).
   16.7.19 (helper-exec error). Container API 25. Conclusion: 32-bit inject
   broken and/or game-context-specific. NEXT: user creates pure 32-bit sandbox
   to split the two; fallback = gadget-repack route.
+- GADGET ROUTE (live, works): repacked COPY (apktool 3.0.3 + smali loadLibrary
+  in App.onCreate + libfridagadget.so arm32 + listen-config :27044, debug-
+  signed via jarsigner; engine lib md5-identical 9c21a987). Installed in
+  sandbox (uninstall wiped saves, approved). Gadget LISTENS on 27044 via
+  tunnel — no ptrace needed. Hook scripts attach fine.
+- vphoneos HIDES the engine: no process maps libAngryBirdsRio.so (file bytes
+  loaded privately by the emulator). Hook-by-module impossible; going by
+  byte-pattern memscan (nativeConfig@0xC1550 + sessions@0xD6C78 16B needles)
+  to find engine base, then hook by raw address.
