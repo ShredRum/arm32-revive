@@ -5001,7 +5001,41 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     }
     std::uint32_t v = 0;
     std::memcpy(&v, cb->rt_->H(o + 164), 4);
+    // TEMP-DIAG (menu gate): identify the surface object ([o+168]): its
+    // vtable, the state-setter at vtable+36, and current +180 state.
+    {
+        static int pg = 0;
+        if (pg < 2 && cb->rt_->CheckRange(o + 168, 4, false)) {
+            pg++;
+            std::uint32_t s = 0, vt = 0, slot36 = 0, st = 0;
+            std::memcpy(&s, cb->rt_->H(o + 168), 4);
+            if (cb->rt_->CheckRange(s, 4, false)) {
+                std::memcpy(&vt, cb->rt_->H(s), 4);
+            }
+            if (cb->rt_->CheckRange(vt + 36, 4, false)) {
+                std::memcpy(&slot36, cb->rt_->H(vt + 36), 4);
+            }
+            if (cb->rt_->CheckRange(s + 180, 4, false)) {
+                std::memcpy(&st, cb->rt_->H(s + 180), 4);
+            }
+            std::printf("[poke164] surf=%08x vptr=%08x slot36=%08x state180=%u\n", s, vt, slot36,
+                        st);
+        }
+    }
     if (v != 0) {
+        // Gate: flip only when the surface EXISTS with loading built
+        // (state180==3). Flipping before construction whites the screen
+        // (proven: state180=garbage at early poke).
+        std::uint32_t s = 0, st = 0;
+        if (cb->rt_->CheckRange(o + 168, 4, false)) {
+            std::memcpy(&s, cb->rt_->H(o + 168), 4);
+        }
+        if (s && cb->rt_->CheckRange(s + 180, 4, false)) {
+            std::memcpy(&st, cb->rt_->H(s + 180), 4);
+        }
+        if (st != 3) {
+            return;
+        }
         static int pm = 0;
         if (pm < 3) {
             pm++;
