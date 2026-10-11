@@ -70,6 +70,8 @@ public:
     void SvcHistDump();
 
     std::uint32_t PthreadMutex(const std::string& n, std::uint32_t obj);
+    // Real rwlock map (MCSM-compare gap: guest imports 5 rwlock symbols).
+    std::uint32_t PthreadRwlock(const std::string& n, std::uint32_t obj);
     std::uint32_t PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                               std::uint32_t arg2);
     std::uint32_t PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t destr);
@@ -206,6 +208,7 @@ private:
 
     // Host-side pthread object maps (guest addr -> host object).
     std::unordered_map<std::uint32_t, pthread_mutex_t*> mutex_map_;
+    std::unordered_map<std::uint32_t, pthread_rwlock_t*> rwlock_map_;
     std::unordered_map<std::uint32_t, pthread_cond_t*> cond_map_;
     std::unordered_map<std::uint32_t, pthread_key_t> key_map_;
     std::uint32_t next_key_ = 1;
@@ -342,6 +345,10 @@ public:
     // HARNESS_POKE164=1: [loading-manager+164]=0 at 0x283B5C entry (forces
     // the state-1/menu branch at the 0x283C34 fork).
     static void PokeManagerFlag(std::uint64_t r10obj);
+    // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
+    // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
+    // must observe for the sessions->menu handoff.
+    static void DumpR9(std::uint64_t r9);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;
@@ -409,5 +416,8 @@ private:
     }
     Runtime* rt_;
 };
+
+// Session-flag watch address (DumpR9-armed; read by harness census).
+extern std::uint32_t g_sess_watch;
 
 }  // namespace abr

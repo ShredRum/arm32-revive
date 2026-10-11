@@ -420,7 +420,7 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
         static bool threadlog = std::getenv("HARNESS_THREADLOG") != nullptr;
         const bool lineal = (GuestTid() == 1) || threadlog;
         if ((++h <= 3 || call_total < callmax) && lineal) {
-            std::printf("[call]%s %s(%08x %08x %08x %08x) lr=%08x\n",
+            std::printf("[call][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                         GuestTid() == 1 ? "" : "(T2+)", mod_.imports[idx].name.c_str(), regs[0],
                         regs[1], regs[2], regs[3], regs[14]);
         }
@@ -1497,6 +1497,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy" || n == "pthread_mutex_lock" ||
         n == "pthread_mutex_unlock" || n == "pthread_mutex_trylock") {
         Ret(regs, PthreadMutex(n, a0));
+        return;
+    }
+    if (n == "pthread_rwlock_init" || n == "pthread_rwlock_destroy" || n == "pthread_rwlock_rdlock" ||
+        n == "pthread_rwlock_wrlock" || n == "pthread_rwlock_unlock" ||
+        n == "pthread_rwlock_tryrdlock" || n == "pthread_rwlock_trywrlock") {
+        Ret(regs, PthreadRwlock(n, a0));
         return;
     }
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy" || n == "pthread_cond_signal" ||
@@ -3721,6 +3727,57 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
     return 22;
 }
 
+std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
+    // Same discipline as PthreadMutex: resolve under guard, operate outside.
+    // Lazy-creates static initializers (PTHREAD_RWLOCK_INITIALIZER).
+    pthread_rwlock_t* rw = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "pthread_rwlock_init") {
+            auto* r = new pthread_rwlock_t;
+            pthread_rwlock_init(r, nullptr);
+            rwlock_map_[obj] = r;
+            return 0;
+        }
+        if (n == "pthread_rwlock_destroy") {
+            auto it = rwlock_map_.find(obj);
+            if (it != rwlock_map_.end()) {
+                rw = it->second;
+                rwlock_map_.erase(it);
+            }
+            if (rw) {
+                pthread_rwlock_destroy(rw);
+                delete rw;
+            }
+            return 0;
+        }
+        auto it = rwlock_map_.find(obj);
+        if (it == rwlock_map_.end()) {
+            auto* r = new pthread_rwlock_t;
+            pthread_rwlock_init(r, nullptr);
+            rwlock_map_[obj] = r;
+            it = rwlock_map_.find(obj);
+        }
+        rw = it->second;
+    }  // guard released: blocking rdlock/wrlock below must not hold mutex_.
+    if (n == "pthread_rwlock_rdlock") {
+        return static_cast<std::uint32_t>(pthread_rwlock_rdlock(rw));
+    }
+    if (n == "pthread_rwlock_wrlock") {
+        return static_cast<std::uint32_t>(pthread_rwlock_wrlock(rw));
+    }
+    if (n == "pthread_rwlock_unlock") {
+        return static_cast<std::uint32_t>(pthread_rwlock_unlock(rw));
+    }
+    if (n == "pthread_rwlock_tryrdlock") {
+        return static_cast<std::uint32_t>(pthread_rwlock_tryrdlock(rw));
+    }
+    if (n == "pthread_rwlock_trywrlock") {
+        return static_cast<std::uint32_t>(pthread_rwlock_trywrlock(rw));
+    }
+    return 22;
+}
+
 std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                                    std::uint32_t arg2) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -3758,6 +3815,35 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         return 22;
     }
     if (n == "pthread_cond_wait") {
+        // HARNESS_CONDSATISFY=1: satisfy lang::Signal waits. Decomp
+        // (FUN_0039f2a4): predicate is mutex_obj->__size[8]&1 (set by
+        // 0x39F170 writes 1 + broadcast; reset writes 0). The signaler never
+        // runs here, so set [mutex+8]|=1 (arg1) and return 0 (predicate true
+        // -> proceed, no abort). Plausibility-gated (flag clear); first wait
+        // per cond.
+        {
+            static int csen = -1;
+            if (csen < 0) {
+                csen = std::getenv("HARNESS_CONDSATISFY") ? 1 : 0;
+            }
+            static std::unordered_map<std::uint32_t, char> csdone;
+            if (csen && csdone.find(cond) == csdone.end() && csdone.size() < 16) {
+                csdone[cond] = 1;
+                bool ok = CheckRange(arg1 + 8, 1, false);
+                std::uint8_t fl = 0;
+                if (ok) {
+                    std::memcpy(&fl, H(arg1 + 8), 1);
+                    ok = (fl == 0);
+                }
+                std::printf("[cond] satisfy c=%08x m=%08x fl=%u %s\n", cond, arg1, fl,
+                            ok ? "SATISFIED" : "skipped");
+                if (ok && CheckRange(arg1 + 8, 1, true)) {
+                    const std::uint8_t one = 1;
+                    std::memcpy(H(arg1 + 8), &one, 1);
+                    return 0;
+                }
+            }
+        }
         // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
         // Otherwise bound unbounded waits like timedwait: a worker/main
         // deadlock on a never-signaled cond (seen at loading: worker waits
@@ -5078,6 +5164,8 @@ void Runtime::SvcHistDump() {
 static std::int64_t ReadWP() {
     return WriteWP();
 }
+std::uint32_t g_sess_watch = 0;  // session-flag watch (armed by DumpR9)
+
 // Address watchpoint (HARNESS_WPA=hexaddr): log every data read from addr.
 static std::int64_t WatchAddr() {
     static std::int64_t wa = -2;
@@ -5149,6 +5237,16 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
             std::printf("[wpa] read from %08x = %08x guest-pc=%08x\n", addr, v,
                         rt_->ActiveJit()->Regs()[15]);
         }
+        // Session-flag watch (DumpR9-armed): who observes sessions?
+        if (g_sess_watch != 0 && addr == g_sess_watch) {
+            std::printf("[sesswatch] t=%u read from %08x = %08x guest-pc=%08x\n", t_tid, addr,
+                        v, rt_->ActiveJit()->Regs()[15]);
+        }
+    }
+    // Same for sub-word accesses (flag protocol uses strb/ldrb!).
+    if (g_sess_watch != 0 && sizeof(T) != 4 && addr == g_sess_watch) {
+        std::printf("[sesswatch] t=%u read%zu from %08x = %08x guest-pc=%08x\n", t_tid,
+                    sizeof(T), addr, (std::uint32_t)v, rt_->ActiveJit()->Regs()[15]);
     }
     return v;
 }
@@ -5168,6 +5266,28 @@ void GuestCallbacks::Write(VAddr addr, T v) {
     if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
         std::printf("[wpa-w] write to %08x = %08x guest-pc=%08x\n", addr,
                     static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
+    }
+    if (g_sess_watch != 0 && addr == g_sess_watch) {
+        std::printf("[sesswatch-w] t=%u write to %08x = %08x guest-pc=%08x\n", t_tid, addr,
+                    static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
+    }
+    if (g_sess_watch != 0 && sizeof(T) != 4 && addr == g_sess_watch) {
+        std::printf("[sesswatch-w] t=%u write%zu to %08x = %08x guest-pc=%08x\n", t_tid,
+                    sizeof(T), addr, static_cast<std::uint32_t>(v),
+                    rt_->ActiveJit()->Regs()[15]);
+    }
+    // TEMP-EXP (sessions race): first 1 wins. Sessions #1 (success) and #2
+    // (offline-fail) share one object; #2's 0 clobbers #1's 1 and kills the
+    // cond predicate. Latch 1 (best-effort, triage only).
+    if (g_sess_watch != 0 && addr == g_sess_watch) {
+        static bool latched = false;
+        if ((std::uint32_t)v == 1 || (sizeof(T) == 1 && (v & 0xFFu) == 1)) {
+            latched = true;
+        } else if (latched) {
+            const std::uint8_t one = 1;
+            std::memcpy(rt_->H(g_sess_watch), &one, 1);
+            std::printf("[sesswatch] latch restored 1 (t=%u)\n", t_tid);
+        }
     }
     std::uint8_t* p = rt_->H<std::uint8_t>(addr);
     for (std::size_t i = 0; i < sizeof(T); i++) {
@@ -5269,6 +5389,37 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
     }
 }
 bool g_succ_done_hack = false;
+
+void GuestCallbacks::DumpR9(std::uint64_t r9) {
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    const std::uint32_t o = (std::uint32_t)r9;
+    // Arm the session-flag watch (first session object wins): the Read
+    // path logs every 4B read of [obj+120] with pc+tid (who observes?).
+    {
+        extern std::uint32_t g_sess_watch;
+        if (g_sess_watch == 0 && cb->rt_->CheckRange(o + 120, 4, false)) {
+            g_sess_watch = o + 120;
+            std::printf("[dumpr9] watch armed @%08x\n", g_sess_watch);
+        }
+    }
+    static int dn = 0;
+    if (dn < 4 && cb->rt_->CheckRange(o, 128, false)) {
+        dn++;
+        std::uint8_t fl = 0;
+        if (cb->rt_->CheckRange(o + 120, 1, false)) {
+            std::memcpy(&fl, cb->rt_->H(o + 120), 1);
+        }
+        const std::uint8_t* p = cb->rt_->H<const std::uint8_t>(o);
+        std::printf("[dumpr9] obj=%08x flag120=%u head:", o, fl);
+        for (int j = 0; j < 32; j++) {
+            std::printf(" %02x", p[j]);
+        }
+        std::printf("\n");
+    }
+}
 
 void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     // HARNESS_POKE164=1: [loading-manager+164]=0 (menu branch at 0x283C34).
@@ -5636,11 +5787,32 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
         // Schema discovered iteratively via KeyNotFound messages (phone-
         // proven graceful path needs these present; extra keys tolerated).
         static const char sjson[] =
-            "{\"segments\":[],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
-            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000},"
-            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"}}";
+            "{\"segments\":[],\"access\":{\"token\":\"offline-test-access-12345\"},"
+            "\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000,"
+            "\"refresh\":{}},"
+            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"},\"refresh\":{}}";
         body = (std::uint8_t*)sjson;
         blen = sizeof(sjson) - 1;
+    } else if (u.size() >= 9 && u.compare(u.size() - 9, 9, "/refresh") == 0) {
+        // Token-refresh leg (the r5-nonempty path in 0xD6C78 builds the
+        // refresh token string then fetches; offline it fails -> flag 0).
+        // Same sessions schema (new tokens accepted by the real parser).
+        static const char rjson[] =
+            "{\"segments\":[],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000,\"refresh\":{}}},"
+            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"},\"refresh\":{}}";
+        body = (std::uint8_t*)rjson;
+        blen = sizeof(rjson) - 1;
+    } else if (((u.size() >= 9 && u.compare(u.size() - 9, 9, "/register") == 0)) ||
+               (u.size() >= 6 && u.compare(u.size() - 6, 6, "/login") == 0) ||
+               (u.find("sessions/my") != std::string::npos)) {
+        static const char qjson[] =
+            "{\"segments\":[],\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000,\"refresh\":{}}},"
+            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"},\"refresh\":{}}";
+        body = (std::uint8_t*)qjson;
+        blen = sizeof(qjson) - 1;
     } else if (u.find("variantconfig.json") != std::string::npos) {
         static std::vector<std::uint8_t> vc;
         static bool vdone = false;
@@ -6897,6 +7069,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             pc == 0x283B5Cu) {
             ir.CallHostFunction(
                 &PokeManagerFlag,
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+        }
+        // HARNESS_DUMPR9=1: log session object at a probe slot
+        // (e.g. PROBE2=0xd6c78 entry: r0 = session object, before mov r9,r0).
+        if (std::getenv("HARNESS_DUMPR9") && pc == probe_pc2 && probe_pc2) {
+            ir.CallHostFunction(
+                &DumpR9,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
         }
         // HARNESS_PCTRACE=start,len[,cap]: pc-only trace of basic-block

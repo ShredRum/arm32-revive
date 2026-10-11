@@ -1123,7 +1123,45 @@ dead subsystem, game degrades without it).
 - NEXT: trace the body's session checks (0xC21EC strings + 0xC5104 vcall
   result) with the gate open.
 
-## 29. Session 2026-10-11 (part 20): hygiene fixes, quit-branch dead end
+## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
+- User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
+  (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
+  DAT_ mapping: use file VAs, NOT Ghidra DAT_ blindly. Ghidra splits fns at
+  tail calls (e.g. 0xD6C78 inside FUN_000d6bfc) — request decomp by inner addr.
+- DECOMP WINS (sessions fn ~line 92900): uVar2/+0x1E = fresh(1)/refresh(0)
+  ROUTING (not success!). +0x1E=1 -> THROW "Login failed: "+underflow_error
+  (LAB_000e7aa0) = our unwind deaths (0x45A778). +0x1E=0 -> bVar1=true, skips
+  logger gate, returns normally. Logger gate (len 4 + memcmp "true") CONFIRMS
+  our sdkDebugLoggingEnabled shape. r8+28/+40 cleanups = 0x72530 (our crash!).
+- "access"(6)/"token"(5)/"refresh"(7) lookups read STORED creds (registry),
+  NOT the response -> adding keys to sjson was useless by construction
+  (access1/2 runs confirmed no change). Throwing getters: segments,
+  accessToken, refreshToken, expiresIn, message. Tolerant: profile/config.
+- r5-empty success path (beq 0xD6F94): r5 = STORED refresh token length.
+  Registry WITH tokens -> r5!=0 -> refresh-fetch -> offline fail -> flag 0.
+  Registry EMPTY (fresh boot) -> r5==0 -> flag 1. REGISTRY IS ONE-SHOT:
+  every run's save poisons the next (496B vs poison-416B that kills update#1;
+  snap rollback works). Device clean-boot-offline == fresh-registry path.
+- Subagents (3 parallel, all completed): menu-trigger (writer/callers/scene
+  table 0x400B0 + viewport guard mapped), reader protocol (VALID = queue
+  entry + wake; 0x18D734 NOT enqueue, real one 0x28DD04), sessions-fail
+  (above). Rate-limit hiccup resumed via sessionID (no recreation needed).
+- LOADING animation hypothesis (user): REJECTED — frames byte-identical
+  across dozens of updates (md5), clean returns, no crash markers. Static
+  hold of state machine (+164=2), not crash.
+- NEXT: satisfy tid9's Signal cond (predicate [Link+8], Link in r4) via
+  HARNESS_CONDSATISFY (set flag + return 0) + latch + spurwake; watch for
+  post-cond notify (+164? new threads?).
+- COMBO2 BREAKTHROUGH (live, PROVEN): fresh registry -> tid9 writes 1 (SUCCESS
+  PATH via mov, not jump!) -> cond SATISFIED at correct mutex+8 (decomp
+  FUN_0039f2a4 proved predicate = mutex->__size[8], NOT Link+8; old satisfy
+  wrote wrong place) -> NO abort. tid9 survives, loops (spurwake x3, awaiting
+  jobs). exit flag=1 HELD. +164 still 2, film LOADING.
+- r5 = STORED refresh token: registry WITH tokens -> refresh-fetch -> offline
+  fail -> flag 0; EMPTY registry -> r5==0 -> flag 1. Registry is one-shot
+  (each run's save poisons the next; 416B poison kills update#1, snap
+  rollback works). Subagent: registry crypto field diff (device-320B vs
+  ours-320B) to find what main waits for.
 - 0a SLOT FIX (real typo): pre-call poke used 0x672E9C (INVALID obj every
   call); now 0x672E98, obj=10003250 matches mid-update hook (PROVEN live).
 - 0b RETSUCC BUDGET: `++n>4` counted unknown endpoints (burned by retries);

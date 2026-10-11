@@ -1017,6 +1017,14 @@ int main(int argc, char** argv) {
             rt.RealGLBackend()->Screenshot("work/shot.ppm", 800, 480);
         }
         rt.ThreadCensus();
+        // TEMP-DIAG (sessions handoff): session-flag value at exit.
+        {
+            if (abr::g_sess_watch != 0 && rt.CheckRange(abr::g_sess_watch, 1, false)) {
+                std::uint8_t fl = 0;
+                std::memcpy(&fl, rt.H(abr::g_sess_watch), 1);
+                std::printf("[sesswatch] exit flag=%u\n", fl);
+            }
+        }
         // HARNESS_SHOW=N: keep the live GL window open N seconds (viewing).
         if (const char* sh = std::getenv("HARNESS_SHOW")) {
             int secs = std::atoi(sh);
