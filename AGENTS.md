@@ -1196,15 +1196,14 @@ dead subsystem, game degrades without it).
   live-verified (addr math in python, behavior via probes). Where checked
   (sessions flow, Signal predicate mutex+8) it is exact. Redo only if a
   decomp-vs-live contradiction blocks us.
-  REFINED (screenshot of Analysis Options): red Prototypes (Aggressive
-  Instruction Finder etc.) risk = phantom functions from data bytes — mitigate
-  by distv-cross-checking any "orphan" function before calling it dead.
-  Bigger caveat: Data Reference + ELF Scalar Operand References are OFF ->
-  xref coverage is WEAKER, so static "zero callers/refs" claims (0x74168
-  chain, gate setter 0xBE704) may be false negatives from missing xrefs, not
-  just virtual dispatch. Key ones already have live confirmation; don't trust
-  static zero-ref claims alone. If a redo ever happens: prototypes OFF,
-  Data Reference + ELF Scalar ON.
+  REFINED (user clarified: ALL boxes ON, screenshot showed defaults for
+  orientation): xref coverage is MAXIMAL (Data Reference + ELF Scalar ON) ->
+  static "zero callers/refs" claims are STRONGER than default-Ghidra work.
+  Remaining risks are only the red Prototypes: phantom functions from data
+  bytes (Aggressive Instruction Finder — mitigate by distv-cross-checking any
+  "orphan" before calling it dead) + cosmetic filler condensing + variadic
+  signature display (vararg calls verified live anyway). If a redo ever
+  happens: prototypes OFF, everything else as-is.
 - AIRPLANE1 (files17 = seeds + files12 496B token-registry, pure NONET, no
   DNSALLOW, combo otherwise; work/airplane1.log): job#1 (tid9) reads 496B
   registry (tokens present -> r5!=0 -> refresh path), gathers device info
@@ -1218,6 +1217,19 @@ dead subsystem, game degrades without it).
   airplane catch must key on something else (DNS-throw path? error-code-6
   surfacing?). NEXT: live branch probe (airplane2: PROBE4=d7084/PROBE5=d708c)
   + static refresh-block decode (background subagent ses_ed405048effeJSVcwBodXmm8KM).
+- AIRPLANE2 (work/airplane2.log): d7084 translated (fail fall-through RUNS),
+  d708c never translated (success block dead); flag 0; registry byte-identical
+  after run (496B, fake tokens persist — one-shot poison reconfirmed).
+- ROLES NOT PINNED: apdrive sscanf fired on tid11 here (was tid10 before);
+  pool threads run jobs SEQUENTIALLY (tid11 = sessions-succ job, then apdrive
+  job). setname labels are per-run, not architecture.
+- DNS-FAIL SHAPE (pure NONET, tid11/tid3): socket->UDP-connect-OK->send 33B->
+  silence->close,close->other work (time/sigaction/ioctl)->poll-park. NO throw
+  anywhere (zero `throw type`), NO 'Got exception' in ANY log (airplane2,
+  combo3, paced1 all 0). Our error path ends jobs WITHOUT completion-notify;
+  device must throw+catch here (error 6) — divergence point unproven.
+- ASKED USER: exact offline methodology on emulator + offline-boot logcat
+  markers (DNS/error-6/sessions/apdrive lines) + cache state of that boot.
 ## 30. Session 2026-10-11 (part 21): Ghidra decomp breakthrough
 - User ran aggressive Ghidra analysis -> Ghidra_AngryBirdsRio/out/libAngryBirdsRio.so.c
   (23MB, 75511 FUNs). FUN_ addresses == file VAs in .text (verified); .rodata
