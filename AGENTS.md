@@ -1032,6 +1032,30 @@ dead subsystem, game degrades without it).
   Logos: 100 input-less updates = stuck Rovio (proven); renders/Resume don't
   advance; taps (tap-to-skip) only in-harness path; phone 3s timer.
   CallBooleanMethodV (fn#38) implemented (AudioOutput.startOutput->1).
+
+## 24. Session 2026-10-11 (part 15): ranges vindicated, msg hunt
+- CALL-SITE RANGES (breakthrough): pads carry [st,ln) coverage; our site
+  (0x53C in 0x19FE80) is covered by NOTHING previously tried. Full 29-frame
+  chain has exactly ONE covering pad: 0xD5EF0 (f1) at frame 0xD5DE4 (blx
+  call site verified). All 0x167d pads were out-of-range (wrong locals).
+  Range check now enforced in UnwNext (lenient ret/ret-4); ttslots4.txt.
+- 0xD5EF0 runs CLEAN (no crash, any sp) but swallows (thread exits with obj,
+  no rethrow, no completion). Its ttype slot resolves to PLT garbage
+  statically (encoding TBD) — handler runs anyway under emulation.
+- 0x1A0ACC (hub off 0xC4C) DOES cover our site ([0x514,0x53C) via call 0x538)
+  — range-legit, yet path A derails identically (0x167d) across 8 sp values
+  + zero page + faithful regs. Excludes pad-selection AND temporaries.
+- EXDUMP (Http obj): [+0]=vt [+8]=0x31 [+12]=0x28 [+16]=heap [+20]=2
+  [+24]=double 6.0 (error code!) [+44]=1 [+56]=0x51 [+60]=0x42. No 0x167d.
+- Halt-sync clobber PROVEN (pre-run diag: park-time r4/r6 rewritten by halt
+  sync) -> ParkUnwind applies state at resume (all paths). FP chain
+  validated arithmetically (868+28 exact, saved lr exact).
+- SUBAGENT #2 (0x38E9D8 loop, PROVEN): r5 latched once from entry r1; only 2
+  callers of 0x38E228; single r8 latch; bound=[sp,#12] maintained by reserve;
+  cap-doubling; template embeds ELF bytes; +0x210 = allocator stride (not a
+  stepper). Conclusion: 0x167d is a data-dependent int-for-string confusion
+  AT ENTRY (msg already poisoned) — not created in the loop.
+- NEXT: full msg dump (BIGDUMP=1, 256B) at 0x38E9D8 entry to see the poison.
 - TLS (all proven live): DNS 140B replies; TCP:443 connects; entropy
   (urandom), cacert parse (77B memsets); ClientHello 198B (record 0301 +
   body 0303); ServerHello 5B+110B read; client sends fatal alert 47

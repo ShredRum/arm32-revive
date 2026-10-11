@@ -5476,13 +5476,14 @@ void Runtime::ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val) {
 }
 // Park a redirect with unwind state (applied at resume, see header).
 void Runtime::ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t fp,
-                         std::uint32_t flags, std::int32_t spoff) {
+                         std::uint32_t flags, std::int32_t spoff, std::uint32_t regoff) {
     pending_redir_ = pad;
     pending_jit_ = ActiveJit();
     pending_r1_ = r1val;
     pending_fp_ = fp;
     pending_flags_ = flags;
     pending_spoff_ = spoff;
+    pending_regoff_ = regoff;
 }
 static std::uint32_t g_unw_lastti = 0;
 
@@ -5515,7 +5516,7 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
     struct PadEnt {
         std::uint32_t fn, pad;
         int flt;
-        std::uint32_t slot;
+        std::uint32_t slot, st, ln;
     };
     static bool uloaded = false;
     static std::unordered_map<std::uint32_t, std::vector<PadEnt>> umap;
@@ -5538,13 +5539,17 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
         if (FILE* f = std::fopen(uf, "r")) {
             char line[128];
             while (std::fgets(line, sizeof(line), f)) {
-                unsigned fn = 0, padoff = 0, se = 0;
+                unsigned fn = 0, padoff = 0, se = 0, st = 0, ln = 0;
                 int fl = 0;
-                if (std::sscanf(line, "%x %x %d %x", &fn, &padoff, &fl, &se) == 4) {
+                int nf = std::sscanf(line, "%x %x %d %x %x %x", &fn, &padoff, &fl, &se, &st,
+                                      &ln);
+                if (nf >= 4) {
                     // File stores fn-relative pad offsets; redirect needs
                     // absolute VAs (0x208-style offsets alone executed
                     // garbage low memory in ttunw1 — fixed).
-                    umap[fn].push_back({fn, fn + padoff, fl, se});
+                    // st/ln (cols 5-6): call-site range covered, fn-relative;
+                    // rows without them (older files) cover everything.
+                    umap[fn].push_back({fn, fn + padoff, fl, se, st, ln});
                 }
             }
             std::fclose(f);
@@ -5629,6 +5634,33 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
             }
         }
         return -1;
+    };
+    // Prologue-derived r4 slot: [fp-regoff] for `stmdb sp!,{...}` +
+    // `add r11,sp,#N` frames (else default 28). Returns (regoff, count of
+    // contiguous saved regs r4..). Packed: regoff | count<<16.
+    auto prologue_regoff = [&](std::uint32_t fn) -> std::uint32_t {
+        std::uint32_t w0 = 0, w1 = 0;
+        if (!urd(fn, w0) || !urd(fn + 4, w1)) {
+            return 28 | (7u << 16);
+        }
+        if ((w0 & 0xFFFF0000u) != 0xE92D0000u) {
+            return 28 | (7u << 16);
+        }
+        if ((w1 & 0xFFFFF000u) != 0xE28DB000u) {
+            return 28 | (7u << 16);
+        }
+        std::uint32_t mask = w0 & 0xFFFFu;
+        if (mask & 0x000Fu) {
+            return 28 | (7u << 16);
+        }
+        unsigned cnt = 0;
+        while (cnt < 7 && (mask & (0x10u << cnt))) {
+            cnt++;
+        }
+        if (cnt == 0) {
+            return 28 | (7u << 16);
+        }
+        return (w1 & 0xFFu) | (cnt << 16);
     };
     // Live frames: ARM frame-pointer walk (r11 chain: exact frames incl.
     // tail-call-compacted ones the BL heuristic misses) UNION the BL
@@ -5757,8 +5789,10 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
                 // here (park-time writes were observed clobbered). Reg
                 // restore only for real-fp frames (BL slots are addrs).
                 std::uint32_t flags = ((restoreregs && fr.isfp) ? 1u : 0u) | (forcesp ? 2u : 0u);
+                std::uint32_t regoff =
+                    ((restoreregs && fr.isfp) ? prologue_regoff(fn) : 28);
                 cb->rt_->ParkUnwind(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt), fr.slot,
-                                    flags, ttsp_off);
+                                    flags, ttsp_off, regoff);
                 cb->rt_->stop_step_ = true;
                 cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
                 return;
@@ -5784,6 +5818,19 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
                 if (tried.count(e.pad) || skip.count(e.pad)) {
                     continue;
                 }
+                // Call-site range: the pad only covers throws within
+                // [fn+st, fn+st+ln) (fn-relative). A pad from the right
+                // function but wrong site reads wrong locals (the 0x167d
+                // saga: 0x19FE80 never covered our site). Rows without a
+                // range (older map files) cover everything. Check both the
+                // return address and the call itself (ret-4).
+                if (e.ln > 0) {
+                    std::uint32_t off = fr.pc - fn;
+                    if (!((e.st <= off && off < e.st + e.ln) ||
+                          (off >= 4 && e.st <= off - 4 && off - 4 < e.st + e.ln))) {
+                        continue;
+                    }
+                }
                 if (!iscatch) {
                     if (umatch(e.slot) < 0) {
                         continue;
@@ -5802,15 +5849,17 @@ void GuestCallbacks::UnwNext(std::uint32_t thrown_ti) {
                 {
                     std::uint32_t flags = 0;
                     std::int32_t spoff = 8;
+                    std::uint32_t regoff = 28;
                     if (std::getenv("HARNESS_TTREG") && fr.isfp) {
                         flags |= 1u;
+                        regoff = prologue_regoff(fn);
                     }
                     if (const char* so = std::getenv("HARNESS_TTSP")) {
                         flags |= 2u;
                         spoff = std::atoi(so);
                     }
                     cb->rt_->ParkUnwind(e.pad, (std::uint32_t)(iscatch ? 0 : e.flt), fr.slot,
-                                        flags, spoff);
+                                        flags, spoff, regoff);
                 }
                 cb->rt_->stop_step_ = true;
                 cb->rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
@@ -5842,13 +5891,15 @@ bool Runtime::ApplyRedirect() {
     // push{r4-r11,lr}+fp=sp+28 prologue), r11=fp, sp per flags/offset.
     if (pending_flags_ & 1u) {
         bool ok = true;
-        for (int k = 0; k < 7; k++) {
+        const std::uint32_t ro = pending_regoff_ & 0xFFFFu;
+        const unsigned cnt = (pending_regoff_ >> 16) & 0xFFu;
+        for (unsigned k = 0; k < cnt && k < 7; k++) {
             std::uint32_t v = 0;
-            if (!CheckRange(pending_fp_ - 28 + k * 4, 4, false)) {
+            if (!CheckRange(pending_fp_ - ro + k * 4, 4, false)) {
                 ok = false;
                 break;
             }
-            std::memcpy(&v, H(pending_fp_ - 28 + k * 4), 4);
+            std::memcpy(&v, H(pending_fp_ - ro + k * 4), 4);
             regs[4 + k] = v;
         }
         regs[11] = pending_fp_;
@@ -5859,7 +5910,7 @@ bool Runtime::ApplyRedirect() {
     if (pending_flags_ & 2u) {
         regs[13] = pending_fp_ + (std::uint32_t)pending_spoff_;
     } else if (pending_flags_ & 1u) {
-        regs[13] = pending_fp_ - 28;
+        regs[13] = pending_fp_ - (pending_regoff_ & 0xFFFFu);
     }
     // HARNESS_TTZERO=1: resume sp = freshly zeroed 4KB scratch+2048 (pad
     // temporaries all-zero: SSO-empty path). Last word (overrides fp-28).
@@ -5925,11 +5976,15 @@ void GuestCallbacks::ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t
         std::printf("|\n");
     }
     // [r1] raw 32B (forwarder inputs are objects; the range/longstr
-    // interpretation above misfires on them).
+    // interpretation above misfires on them). HARNESS_BIGDUMP=1: 256B.
     if (cb->rt_->CheckRange((std::uint32_t)r1, 32, false)) {
+        int nb = std::getenv("HARNESS_BIGDUMP") ? 256 : 32;
+        if (!cb->rt_->CheckRange((std::uint32_t)r1, (std::uint32_t)nb, false)) {
+            nb = 32;
+        }
         const std::uint8_t* p1 = cb->rt_->H<const std::uint8_t>((std::uint32_t)r1);
         std::printf("[probe] [r1]-raw:");
-        for (int j = 0; j < 32; j++) {
+        for (int j = 0; j < nb; j++) {
             std::printf(" %02x", p1[j]);
         }
         std::printf("\n");

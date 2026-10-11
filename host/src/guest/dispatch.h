@@ -100,7 +100,7 @@ public:
     // offset), applied AT RESUME (register writes at park time were
     // observed clobbered before resume).
     void ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t fp, std::uint32_t flags,
-                    std::int32_t spoff);
+                    std::int32_t spoff, std::uint32_t regoff = 28);
 
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
@@ -189,6 +189,8 @@ private:
     std::uint32_t pending_fp_ = 0;
     std::uint32_t pending_flags_ = 0;
     std::int32_t pending_spoff_ = 8;
+    // r4 slot = [fp-regoff] (from the frame's prologue push pattern).
+    std::uint32_t pending_regoff_ = 28;
 
     GuestMemory& mem_;
     LoadedModule& mod_;
