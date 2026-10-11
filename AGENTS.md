@@ -15,6 +15,15 @@
 - `jev` is cheap: `jev_noul` for competing hypotheses at forks,
   `jev_verify`/`jev_gate` before reports and milestones.
 - Python with third-party libs goes into a project-local `.venv` (none needed yet).
+- NON-NEGOTIABLES (check every plan against these BEFORE acting; user-stated):
+  1. The game works OFFLINE on device with ZERO network data. NEVER fabricate
+     network success to fix the stall — execute the offline fallback instead.
+  2. No run/config that contradicts a settled PROVEN fact without new evidence.
+  3. One hypothesis -> one binary-outcome test -> journal verdict. No returns.
+  4. No parallel/interfering sessions on device (they wedge the channel and
+     crash the game); one calm session at a time.
+  5. Commit state (AGENTS + code) before switching topics, so nothing lives
+     only in conversation.
 
 ## 1. Layout (all portable, nothing outside this dir except /tmp)
 - `com.rovio.angrybirdsrio.2676.apk` — ORIGINAL, DO NOT MODIFY (sha256 of
@@ -1563,3 +1572,8 @@ dead subsystem, game degrades without it).
   loaded privately by the emulator). Hook-by-module impossible; going by
   byte-pattern memscan (nativeConfig@0xC1550 + sessions@0xD6C78 16B needles)
   to find engine base, then hook by raw address.
+- PARKED (do not run yet): device JNI-boundary capture (all Call*/Get* with
+  names+returns over boot->menu via Frida) -> diff vs our mocks -> fix mocks
+  1:1. Subagent CAN do the static half anytime (expected-truth table per
+  method from AOSP/JNI docs + pre-diff our mocks vs docs for definite bugs);
+  device capture + diffing stays manual (live timing).
