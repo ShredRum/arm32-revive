@@ -321,6 +321,9 @@ private:
     // Loading-manager object last seen by the render hook (PokeManagerFlag);
     // HARNESS_SCENEAT reads it from here (never hardcoded). Guest VA.
     std::uint32_t last_mgr_ = 0;
+    // Scene object last seen by the loading-builder hook (HARNESS_LASTTHIS);
+    // HARNESS_BUILDER calls the menu builder with it. Guest VA.
+    std::uint32_t last_this_ = 0;
   public:
     class RealGL* RealGLBackend();
 };
@@ -365,6 +368,8 @@ public:
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, PROBE5 slot), fake a
     // nonzero subscriber count while natural is 0 (see EventDecide).
     static void EventEntry(std::uint64_t r1slot);
+    // HARNESS_LASTTHIS=1: record loading-builder r0 (scene object) at PROBE4.
+    static void LastThis(std::uint64_t r0obj);
     // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
     // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
     // must observe for the sessions->menu handoff.

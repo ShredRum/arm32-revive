@@ -5531,6 +5531,19 @@ void GuestCallbacks::EventDecide(std::uint64_t r0pi) {
     }
 }
 
+void GuestCallbacks::LastThis(std::uint64_t r0obj) {
+    // HARNESS_LASTTHIS=1: record the loading-builder r0 (scene object) at
+    // PROBE4 for HARNESS_BUILDER (never hardcoded, drifts per run).
+    if (!std::getenv("HARNESS_LASTTHIS")) {
+        return;
+    }
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    cb->rt_->last_this_ = (std::uint32_t)r0obj;
+}
+
 void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, r1 = event slot),
     // fake a nonzero subscriber count while the natural one is 0 so the walk
@@ -7452,7 +7465,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             // mov r6,r0) decide the pi (mirror natural into pi#1, else synthetic)
             // then steer the walk: r6 <= pi#1 (baked; pi#1 built at entry, which
             // always executes first, so the bake is sound; same addrs forever).
-            if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc4 && probe_pc4) {
+            if (std::getenv("HARNESS_EVENTPOST") && !std::getenv("HARNESS_LASTTHIS") && pc == probe_pc4 && probe_pc4) {
                 ir.CallHostFunction(&EventDecide, ir.ZeroExtendWordToLong(
                                                       ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
                                                           0))));
@@ -7460,6 +7473,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                     using Reg = Dynarmic::A32::Reg;
                     ir.SetRegister(static_cast<Reg>(6), ir.Imm32(s_eventpost_pi1));
                 }
+            }
+            // HARNESS_LASTTHIS=1: record loading-builder r0 at PROBE4
+            // (mutually exclusive with EVENTPOST on this slot).
+            if (std::getenv("HARNESS_LASTTHIS") && !std::getenv("HARNESS_EVENTPOST") && pc == probe_pc4 && probe_pc4) {
+                ir.CallHostFunction(&LastThis, ir.ZeroExtendWordToLong(
+                                                   ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                       0))));
             }
             // HARNESS_RETSUCC=1: success synthesis at raiser entry (PROBE3).
             // HARNESS_EVENTPOST=1: fake the subscriber count at walk entry

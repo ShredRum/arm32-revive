@@ -469,6 +469,19 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // logs must survive _exit()
+    // Run fingerprint (relthrow-class lesson: lost envs waste runs): log the
+    // full HARNESS_* env so any log is reproducible from its head.
+    {
+        extern char** environ;
+        std::printf("[env]");
+        for (char** e = environ; *e; e++) {
+            std::string s(*e);
+            if (s.rfind("HARNESS_", 0) == 0) {
+                std::printf(" %s", s.c_str());
+            }
+        }
+        std::printf("\n");
+    }
     // TEMP-DIAG: host memcmp sanity (wild memcmp3 values investigation).
     {
         int t1 = std::memcmp("min", "for", 3);
@@ -1101,6 +1114,109 @@ int main(int argc, char** argv) {
                         }
                     } else {
                         std::printf("[scene7] preconditions unmet, skipping\n");
+                    }
+                }
+            }
+            // HARNESS_BUILDER=N (JNI call index): direct BL 0x250AB8 menu
+            // builder (harness-only diag, never ships). this = live scene
+            // object from the loading-builder hook (vtable-gated to 0x669620,
+            // the scene class), r1 = device-observed scene key 0x101929.
+            // Binary: builds content (film!) vs faults (pc+addr = requirement).
+            if (const char* se = std::getenv("HARNESS_BUILDER")) {
+                static bool sdone = false;
+                if (!sdone && i == (std::size_t)std::atoi(se)) {
+                    sdone = true;
+                    const std::uint32_t tho = rt.last_this_;
+                    std::uint32_t vt = 0xFFFFFFFFu;
+                    const bool tgrad =
+                        (tho != 0 && rt.CheckRange(tho, 4, false));
+                    if (tgrad) {
+                        std::memcpy(&vt, rt.H(tho), 4);
+                    }
+                    std::printf("[builder] this=%08x vtable=%08x\n", tho, vt);
+                    if (tgrad && vt == 0x669620u && rt.IsCodeAddress(0x250AB8u)) {
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x200;
+                        rgs[13] -= 16;
+                        const std::uint32_t zw = 0;
+                        for (int k = 0; k < 4; k++) {
+                            std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                        }
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = tho;
+                        rgs[1] = 0x101929u;
+                        rgs[2] = 0;
+                        rgs[3] = 0;
+                        CallGuest(jit, 0x250AB8u);
+                        std::printf("[builder] calling @000250ab8 ... ");
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
+                        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    } else {
+                        std::printf("[builder] preconditions unmet, skipping\n");
+                    }
+                }
+            }
+            // HARNESS_BPATCH=1: overwrite +16 of live queue-B completion
+            // entries (MAGIC 0xFB048F99 at +8, RET 0x28DC18 at +24, +12==0)
+            // with our free-thunk callable (vt+0x18). Binary: [eventpost]
+            // INVOKE in log <=> process drains B and invokes entry functors.
+            // Harness-only diag, never ships. Runs after updates.
+            if (std::getenv("HARNESS_BPATCH") && fns[i] == 0xC2014u) {
+                static bool bbuilt = false;
+                static std::uint32_t bcall = 0;
+                static int bpatched = 0;
+                if (!bbuilt) {
+                    bbuilt = true;
+                    std::uint32_t cb = rt.GuestCalloc(1, 8);
+                    std::uint32_t vt = rt.GuestCalloc(1, 0x20);
+                    std::uint32_t efree = 0;
+                    for (const auto& im : mod.imports) {
+                        if (im.name == "free") {
+                            efree = im.tramp_va;
+                            break;
+                        }
+                    }
+                    if (cb && vt && efree) {
+                        std::memcpy(rt.H(cb), &vt, 4);
+                        std::memcpy(rt.H(vt + 0x18), &efree, 4);
+                        bcall = cb;
+                        rt.eventpost_callable_ = cb;
+                        std::printf("[bpatch] callable=%08x free=%08x\n", cb, efree);
+                    }
+                }
+                if (bcall && bpatched < 12) {
+                    static const std::uint8_t magic[4] = {0x99, 0x8F, 0x04, 0xFB};
+                    static const std::uint32_t retc = 0x28DC18u;
+                    const std::uint32_t lo = 0x10000000u;
+                    const std::uint32_t hi = rt.HeapTop();
+                    for (std::uint32_t a = lo; a + 4 <= hi && bpatched < 12; a++) {
+                        if (!rt.CheckRange(a, 4, false)) {
+                            a = (a + 0xFFFu) & ~0xFFFu;
+                            a -= 1;
+                            continue;
+                        }
+                        if (std::memcmp(rt.H(a), magic, 4) != 0) {
+                            continue;
+                        }
+                        const std::uint32_t base = a - 8;
+                        if (!rt.CheckRange(base, 32, true)) {
+                            continue;
+                        }
+                        std::uint32_t w24 = 0, w12 = 0, w16 = 0;
+                        std::memcpy(&w24, rt.H(base + 24), 4);
+                        std::memcpy(&w12, rt.H(base + 12), 4);
+                        std::memcpy(&w16, rt.H(base + 16), 4);
+                        if (w24 != retc || w12 != 0 || w16 == bcall) {
+                            continue;
+                        }
+                        std::memcpy(rt.H(base + 16), &bcall, 4);
+                        bpatched++;
+                        std::printf("[bpatch] entry=%08x orig16=%08x\n", base, w16);
                     }
                 }
             }
