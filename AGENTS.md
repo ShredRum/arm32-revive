@@ -1535,6 +1535,19 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
+## 52. Time/apdrive DEAD for boot, 3rd confirmation (2026-10-12, S1 static)
+- Read-only subagent, byte-verified: time leg = job -> curl-multi -> parser
+  0xCBCE0 (200-check, JSON asserts, writes state+0x28/2C/30) -> publish to
+  NetworkTime LISTENERS (success functor sets +0x54/delta + cond signal).
+  Apdrive leg = local variantconfig parsed at boot (direct ctor, no queue) +
+  cloud job parks pre-raiser; listeners + state flip, no queue. NEITHER leg
+  has a main-advancing link (no main poller/reader/queue/event in update path;
+  sesswatch zero reads; pipes main->worker only). Even completed, main would
+  not move. Consistent with 10-subagent synthesis + zero device lines.
+- Recipes exist (direct 0xCBCE0 / 0xC8F90+0xC2134 calls) but pointless for menu
+  (no observer). Time/apdrive PURSUIT OVER (third independent confirmation).
+  Awaiting S2 (gate+148) for the last main-observable candidate.
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
@@ -1699,8 +1712,7 @@ dead subsystem, game degrades without it).
   NEXT: LOGINAT=11 (workers alive) + functor probes (5f96c/5fe70) — timing
   hypothesis (device initiates at boot-seconds, not mid-park).
 
-## 51. Unwinder CLOSED, ladder continues, two statics queued (2026-10-12)
-- R7=0 AT THROW ENTRY (PROVEN live, r7bisect1: 2 throws, R7=0, R11/SP valid
+## 51. Unwinder CLOSED, ladder continues, two statics queued (2026-10-12)- R7=0 AT THROW ENTRY (PROVEN live, r7bisect1: 2 throws, R7=0, R11/SP valid
   stacks, lr=28AE70 raiser tail). + Find_exidx verified + raise in-module +
   pop-into-pc epilogues (lr always stale) => unwinder path UNAVAILABLE, not
   just broken: VRS[R7]=0 poisons step 1, true R7 unrecoverable post-hoc, R7
