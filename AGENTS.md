@@ -2299,6 +2299,30 @@ Do NOT treat as fact; verify per item before building on it.
   frames instead of terminate)? resume never transfers? Awaiting
   verdict for the flip recipe (bridge answer vs register vs stack word).
 
+## 78. Raise-driver loop decoded; flip recipe (2026-10-13, read-only static)
+- CALL SITES (PROVEN): exactly ONE Find_exidx caller — Thumb BLX at
+  0x45AF62, in func 0x45AF30 (getInfo wrapper; entry==0/len==0 checks).
+  Phase1 = 0x45A758, phase2 = 0x45A80C (string `unwind_phase2`).
+  Personality codes 6/7/8/9 = HANDLER/INSTALL/CONTINUE/FAILURE.
+- CORRECTION (subagent PROVEN, my pool claim REFUTED): pc 0x45A778 is
+  CODE (Thumb ADD after BLX getcontext @0x45A774; bytes match Dynarmic
+  thumb32.inc). Walk starts CORRECTLY at the raise machinery (LR saved
+  as IP) and never LEAVES frame #1. Entry 0x5BA760 VALID, compact:
+  SET_VSP r7, DEC -12, POP {r4-r8,lr}. SHOULD pop LR=0x457FE7 ->
+  advance to 0x457FE6 (__cxa_throw 0x457F90) -> game 0x28AE70 handler.
+- MISFIRE (INFERRED): saved-LR word [R7-12] STALE (0x45AAFB/pool/
+  deadbeef instead of 0x457FE7) — pop restores R7, PC re-presents.
+  R7-only REFUTED (halt R7=heap yet stuck). SP descends ~245B/iter
+  (nesting). Heap-no-guard secondary (no-terminate), not the loop.
+- FLIP RECIPE: write Thumb 0x457FE7 to live [R7-12] (=R7+12-24) ->
+  pop advances. INFERRED (0.34, needs ONE live recon: read word,
+  watch Find_exidx pc change). If personality then non-8 (no handler
+  in harness) -> terminate: boundary = LSDA/typeinfo + login state.
+- NEXT (tomorrow): live recon run (read [R7-12] at spiral halt,
+  no new code) -> if stale-confirmed, one write-test (stack poke,
+  harness-only) -> binary (advance? where?). Then downstream
+  (personality/handler/pad) or terminate-accept.
+
 ## 75. APK-scope correction + headless-device middle path (2026-10-13)
 - CORRECTION (my "predictable LOADING" OVERSTATED — user challenged,
   correctly): split three ways. (a) CERTAIN harness-only (mocks, caps,
