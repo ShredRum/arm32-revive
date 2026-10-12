@@ -1592,8 +1592,7 @@ dead subsystem, game degrades without it).
 - NEXT (live, no build): LOGINAT=11 + functor probes (5f96c/5fe70) + session
   stash — early-timing initiation retest with 1GB heap.
 
-## 54. Builder series verdict + menu reference (2026-10-12)
-- builder1: no live this (phases drifted, 0 executions) — loading-this is
+## 54. Builder series verdict + menu reference (2026-10-12)- builder1: no live this (phases drifted, 0 executions) — loading-this is
   phase-dependent, not reliably present. builder2 (forged this vtable
   0x669428 + zeros): runs CLEAN hr=UD1 r0=0, film LOADING unchanged (builds
   into the void). builder3/4: frustum gate (bl 0x25070C, cmp r0,#1) SKIPS
@@ -1615,6 +1614,18 @@ dead subsystem, game degrades without it).
   center = post-menu tap target (queued). Popup/Apprater front parked.
 - NEXT: factory subagent (scene construction trigger) — only open builder-side
   lead. Login ladder paused (needs session-map state, deeper than trigger).
+
+## 55. Scene vector: 1 loading node, no menu node (2026-10-12)
+- Manager state satisfies factory recipe late-run (+164==2, +168==scene,
+  +172/+176 nonzero, +216==1, BSS valid; B4 non-empty with loading content;
+  scene188 steady 1 entry). DIAG164 extended (fields + vector + node dump).
+- Node layout (live, stable 2x): node=heap, [+0]=0x669710, [+4]=child-heap,
+  [+8]=[+12]=0, [+16]=1.0f, rest 0 (32B shown; full size TBD by subagent).
+- Menu node id 0x101929: 0 heap hits (HEXFINDHEX). Vtable 0x669710 objects:
+  EXACTLY 1 (loading node, addr-stable). Menu node does NOT exist (neither
+  built-dormant nor linked) — must be constructed (factory) or forged.
+- NEXT: node-layout subagent (size? id offset? loop edge? appender? recipe)
+  -> forge-or-factory. No live angle until it returns.
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check

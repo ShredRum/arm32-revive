@@ -5711,8 +5711,41 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
             if (cb->rt_->CheckRange(o + 168, 4, false)) {
                 std::memcpy(&s168, cb->rt_->H(o + 168), 4);
             }
+            // TEMP-DIAG (scene recipe): full manager + scene-vector state
+            // (compare vs factory recipe: +172/+176/+216 nonzero? +180/+184
+            // empty? scene[+188]/[+192] begin/end?).
+            std::uint32_t f172 = 0, f176 = 0, f216 = 0, f180 = 0, f184 = 0;
+            std::uint32_t sb = 0, se = 0;
+            if (cb->rt_->CheckRange(o + 220, 4, false)) {
+                std::memcpy(&f172, cb->rt_->H(o + 172), 4);
+                std::memcpy(&f176, cb->rt_->H(o + 176), 4);
+                std::memcpy(&f216, cb->rt_->H(o + 216), 4);
+                std::memcpy(&f180, cb->rt_->H(o + 180), 4);
+                std::memcpy(&f184, cb->rt_->H(o + 184), 4);
+            }
+            if (s168 && cb->rt_->CheckRange(s168 + 196, 4, false)) {
+                std::memcpy(&sb, cb->rt_->H(s168 + 188), 4);
+                std::memcpy(&se, cb->rt_->H(s168 + 192), 4);
+            }
             std::printf("[diag164] obj=%08x +164=%08x +1187=%u +168=%08x succ=%d\n", o, v,
                         b1187, s168, (int)g_succ_done_hack);
+            std::printf("[diag164] +172=%08x +176=%08x +216=%08x +180=%08x +184=%08x "
+                        "scene188=[%08x..%08x]\n",
+                        f172, f176, f216, f180, f184, sb, se);
+            // TEMP-DIAG (node layout): dump the vector's first entry (node
+            // pointer) + the node's head (vtable? id field? slots?).
+            if (sb && se > sb && cb->rt_->CheckRange(sb, 4, false)) {
+                std::uint32_t nptr = 0;
+                std::memcpy(&nptr, cb->rt_->H(sb), 4);
+                std::uint32_t nb[8] = {};
+                if (nptr && cb->rt_->CheckRange(nptr, 32, false)) {
+                    std::memcpy(nb, cb->rt_->H(nptr), 32);
+                }
+                std::printf("[diag164] vec0 node=%08x [node]=%08x,%08x,%08x,"
+                            "%08x +16=%08x,%08x,%08x,%08x\n",
+                            nptr, nb[0], nb[1], nb[2], nb[3], nb[4], nb[5],
+                            nb[6], nb[7]);
+            }
         }
     }
     // TEMP-DIAG (update bail): dump the Gate#1 singleton *0x672E98.
