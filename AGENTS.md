@@ -2026,6 +2026,26 @@ Do NOT treat as fact; verify per item before building on it.
   pumps Lua? which update-path call enters pcall?) or direct slot+64
   forge with live GL_Context (HEXFINDHEX for vtable 0x669404).
 
+## 65. L1a: Lua pump alive, drawRect dead (2026-10-13, luapump.log)
+- pcall 0x279ACC fires 4x (WATCHPC cap): r0=0x100038B8 EVERY time (same
+  LuaState; NOTE = snapshot-account +16 value — account links LuaState,
+  cross-fact), r1=0, lr=0x27A53C (same caller). Frames differ per hit
+  (#4 chain via 0xC1B5C/0xC3C70 = update/init region → updates DO pump
+  Lua). Cover1 PCTRACE+ (free mining): 0x27ECB8 x2, 0x279ACC x1,
+  0x2791A4 x1 translate — Lua machinery runs in-harness (PROVEN).
+- drawRect 0xA3EB4 exec = 0; dispatcher 0x7ECB8 exec = 0 (PROVEN,
+  probe-#N; caps not hit). Menu scripts load (full ui/ list incl.
+  rovioaccount.lua, popup.lua, menuButton.lua) but their drawRect burst
+  never fires. VERDICT: pump alive (4 pcalls), menu-draw dead.
+- RULE (user-steered, standing): device-via-Frida beats hypothesis
+  brute-force — mine the working game first, forge second.
+- NEXT D1b (device, game alive at menu, NO restart): hook float getter
+  0x2791A4 (r1=arg idx + retval float bits, cap ~60 = one 6-rect burst,
+  then detach) + drawRect 0xA3EB4 counter (cap 10) + pcall first-3 with
+  bt. Yields live rect args + burst shape + pump identity. Then harness
+  mirror (drawRect chain or direct slot+64 with captured args + live
+  GL_Context).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
