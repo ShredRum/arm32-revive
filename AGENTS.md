@@ -1524,7 +1524,9 @@ dead subsystem, game degrades without it).
 - COLD BOOT CAPTURE (pid 4742, full): flag d70fc writes xN, raiser POSTs xN
   (r2=2), loginFinished(ctx=0x15289710, flag=0) x2 SAME ctx, backtrace:
   loginFinished <- 0x63EE4 <- 0x63B54 <- 0x388904 <- 0xBC100 <- JNI trampoline
-  <- libart (JAVA calls native 0xBC100!). 0xBC100 has NO Java_* symbol
+  <- libart (JAVA calls native 0xBC100!). [REFUTED 2026-10-12, see §44/A1:
+  no such call edges in bytes (0x63B54=tst, 0x388904=add, 0x63EE4 never BLs
+  loginFinished) — stale-lr garbage; 0xBC100 = ads addPlacementNative.] 0xBC100 has NO Java_* symbol
   (dynsym-checked) -> dynamic registration (our bridge lacks fn#215 entirely,
   zero fn#215 in all logs). Gate settles to 1. Menu follows.
 - IN-MENU (pid 5221/3388): gate164 polls flip 2<->1 EVERY poll (6650 hits;
@@ -1786,7 +1788,9 @@ dead subsystem, game degrades without it).
 - Branches LIVE:
   1. +164 writers: EXACT store (str r10,[r9,#0xA4] @0x284078 via 0x283A3C,
      emptiness-gated); r1=1 sites virtual-only (scene walk); recipe = single
-     BL 0x283A3C(r0=mgr,r1=1) when vector empty.
+     BL 0x283A3C(r0=mgr,r1=1) when vector empty. [REFUTED 2026-10-12, see
+     §44/A4: needs 7 args (r2=0,r3=zerobuf,stack 0,0,0); mgr is heap, not BSS;
+     2-reg form faults. Proven live by SCENE7, see §47.]
   2. loginFinished entries: ONLY the two functors (0x5EBA4/1, 0x5FE70/0);
      virtual via ce50/eb658; no JNI/Lua-direct path. Cheapest offline =
      fail-functor with a record.
@@ -1817,6 +1821,8 @@ dead subsystem, game degrades without it).
   networkType tested live; Locale/Build divergences cosmetic until proven
   otherwise by a failing branch (none observed).
 ## 40. Device per-update login poller 0xBC100 (cold boot 5445, full capture)
+[REFUTED 2026-10-12, see §44/A1: 0xBC100 is the ads binding, not a login pump;
+the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - 0xBC100 runs INSIDE Java nativeUpdate (GL thread, jstack: nativeUpdate <-
   doUpdate <- onFrame <- onDrawFrame <- GLThread), repeatedly, constant args:
   r0=heap (stable per boot, == ctx+0x10!), r1=module-static (file 0x69F2C),
