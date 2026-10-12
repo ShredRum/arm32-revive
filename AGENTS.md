@@ -1985,6 +1985,47 @@ Do NOT treat as fact; verify per item before building on it.
   + this=GL_Context-ish + r2=r3=0). Then W5 forge with CORRECT vtable
   (0x669404) + live arg shape.
 
+## 64. Builder driver decoded: Lua drawRect, r1=color NOT key (2026-10-13,
+   read-only static subagent, byte-proven where marked)
+- DISPATCH (PROVEN): func 0x7ECB8 contains `blx r6 @0x7EE38` (ret
+  0x7EE3C = our bt[0]); r6 = [vtable+64] where vtable = [[r4+88]+0];
+  vtable VA 0x669404 slot+64 = 0x250AB8 (python bytes); typeinfo =
+  `gr::gles2::GL_Context` (PROVEN). So builder-this = live GL_Context
+  instance fetched from [r4+88] (r4 = Lua-bound scene obj). Zero direct
+  BL to any builder/loop (PROVEN exhaustive) — virtual-only stands.
+- r1=0x101929 = PACKED COLOR (PROVEN bytes: float vmov→×255→ORR chain
+  0x7EE10-34; provenance Lua floats via 0x2791A4 getters). "Menu node
+  id" label REFUTED (bytes favor color 0.59-uncertain but mechanistically
+  exact). CORRECTIONS with back-pointers: §55/56 "menu node id 0x101929
+  / dynamic graph node id / zero heap hits" = MISLABELED (never stored,
+  computed per-frame from floats — zero-hits EXPLAINED, hunts for it as
+  id were void by construction). §58d/W5 Step1 (loop with 0x101929 as
+  node key) = SUSPECT (loop key arg never observed on device; do not
+  run W5 as written).
+- CHAIN (PROVEN edges): Lua C-funcs 0xA3EB4→0xA3F40→…→0xA41FC
+  (`drawRect`, registered name bytes @0x5C161F PROVEN, zero BL callers =
+  Lua-only) → invoked via blx through Lua VM invokers (0x396B44/
+  0x396FA8 bodies PROVEN) ← LuaState pcall 0x279ACC (PROVEN) ← root
+  0x85B894/0x85B1F4 = OUT-OF-RANGE (file ends 0x6722F4; ACCURATE
+  backtracer top-2 frames are heap garbage — STALE, discard; do not
+  chase 0x85Bxxx). Best root INFERRED (0.67): nativeUpdate frame →
+  Lua menu script → pcall → drawRect ×6 rects in one frame.
+- 6 HITS = 6 RECTS, not 6 pages (identical args incl. color; ~100ms
+  burst = one frame drawing menu rects). Builder = per-rect draw call.
+- REPLAY RECIPE (INFERRED, jev 0.91/0.86): (a) natural: boot to menu-
+  construction → live GL_Context (heap-scan vtable 0x669404, never
+  hardcode; 0x9B262000-family) → Lua drawRect 9 args through pcall;
+  (b) bypass: direct slot+64 call (liveThis, 0x101929, 0, 0, ...).
+- REFINED FORGE RULE: [this]=0x669404 means r0 IS a GL_Context (vtable
+  READ, not pasted) — forge needs live object layout, vtable-swapping
+  zeros (builder2 with 0x669428 AND any 0x669404-paste) insufficient by
+  construction. §63 correction-(1) refined accordingly.
+- NEXT (free first): grep existing logs for Lua-VM translation evidence
+  (0x279ACC/0x39B6CC/0x7ECB8/0xA3EB4 in cover1 PCTRACE + probe logs) —
+  absence of translation = Lua never runs in-harness. Then: L1 (what
+  pumps Lua? which update-path call enters pcall?) or direct slot+64
+  forge with live GL_Context (HEXFINDHEX for vtable 0x669404).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
