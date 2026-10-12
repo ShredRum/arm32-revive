@@ -1663,8 +1663,7 @@ dead subsystem, game degrades without it).
   post through the PROVEN delivery (mirror path already handles natural
   content when present).
 
-## 49. Login initiation found + VA-data correction (2026-10-12)
-- Static (read-only subagent, byte-verified): loginRovioId = Lua-only
+## 49. Login initiation found + VA-data correction (2026-10-12)- Static (read-only subagent, byte-verified): loginRovioId = Lua-only
   registration (native_RovioAccount table in ctor 0x5CB28 via FUN_0028EBFC);
   zero BL to functors (vtable/event dispatch only); enabling condition
   +0x19==0 (FUN_0006CE50 gate; loginFinished clears); minimal trigger = BL
@@ -1683,6 +1682,21 @@ dead subsystem, game degrades without it).
 - Builder this: loading-this = GL_Image (wrong class for menu builder);
   menu this must be scene-class (0x669428 family) — absent in heap (never
   constructed). Direct-builder shelved behind initiation (needs graph).
+
+## 50. Heap starvation + initiation ladder (2026-10-12)
+- HEAP 99% FULL (PROVEN live): top 0x1F226820/256MB at exit, deterministic
+  across runs (0x1F226820 vs 0x1F2266D8 = 72B). Leak-only free + textures hit
+  the ceiling ~call 30; mallocs return NULL -> null+off faults (loginat clone
+  dest 0x50). FIX: kHeapSize 256MB->1GB (arena ends 0x50000000 < mmap
+  0x70000000, safe) + [heap] top print at exit. Post-bump: same top (usage
+  fixed ~254MB), fault GONE, trigger runs clean to hr=UD1, full 63 calls.
+  REFRAME: every post-~30 verdict is suspect under 256MB (null-malloc
+  artifacts: marathon deaths, worker flakes, BAD reads).
+- Initiation ladder (live): LOGINAT=31 clean no-op (no Login/builders/film).
+  loginat3 caller probe: clone dst r1=0x50 (null+0x50), lr=0xDBF80.
+  loginat4/5: heap verdict + clean run post-bump, still no Login/builders.
+  NEXT: LOGINAT=11 (workers alive) + functor probes (5f96c/5fe70) — timing
+  hypothesis (device initiates at boot-seconds, not mid-park).
 
 ## 48. Subscribe audit + functor verdict: channel, not call (2026-10-12)
 - Static (read-only subagent): helper 0x3833B8 binds NO event — event comes

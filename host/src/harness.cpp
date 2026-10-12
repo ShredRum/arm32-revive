@@ -1175,6 +1175,12 @@ int main(int argc, char** argv) {
                     if (acct) {
                         const std::uint32_t av = 0x65E504u;
                         std::memcpy(rt.H(acct), &av, 4);
+                        // +32 must be a writable block (flow stores +0x50
+                        // through it); zeros are scratch until proven content.
+                        const std::uint32_t ab = rt.GuestCalloc(1, 0x60);
+                        if (ab) {
+                            std::memcpy(rt.H(acct + 32), &ab, 4);
+                        }
                         std::printf("[loginat] forged account=%08x\n", acct);
                         auto& rgs = jit.Regs();
                         rgs.fill(0);
@@ -1451,6 +1457,10 @@ int main(int argc, char** argv) {
                 std::memcpy(&fl, rt.H(abr::g_sess_watch), 1);
                 std::printf("[sesswatch] exit flag=%u\n", fl);
             }
+            // TEMP-DIAG (heap pressure): bump top at exit (leak-only free;
+            // ceiling was 256MB (now 1GB) -> NULL mallocs -> null+off faults.
+            std::printf("[heap] top=%08x (base %08x, ceiling %08x)\n", rt.HeapTop(),
+                        abr::kHeapBase, abr::kHeapBase + abr::kHeapSize);
         }
         // HARNESS_SHOW=N: keep the live GL window open N seconds (viewing).
         if (const char* sh = std::getenv("HARNESS_SHOW")) {
