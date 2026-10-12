@@ -2278,6 +2278,27 @@ Do NOT treat as fact; verify per item before building on it.
   build. No more trigger runs until R7 moves — all trigger shapes are
   measured.
 
+## 77. Exidx bridge EXONERATED; loop is driver-side (2026-10-13)
+- TABLE SORTED (PROVEN, exact C++ replication in python): 0 inversions
+  across 18184 entries; binary search returns 0x5BA760 for pc=0x45A778
+  (matches live bridge). My two earlier contrary claims (1001
+  unsorted / linear-says-0x5BFF00) were MY python unsigned-wraparound
+  bugs — journaled as method lesson: replicate bit-exact, verify twice.
+- pc=0x45A778 = literal pool INSIDE fn 0x45A758 (+0x20; garbage in both
+  ARM+Thumb decode = pool, section .text-confirmed). Driver queries it
+  from query #1 (never visits the throw site) with a VALID entry
+  answer 1026x, never advances, sp descends -> nest-halt 513.
+- IMPORTS (PROVEN inventory): sole unwinder import =
+  __gnu_Unwind_Find_exidx. Raise/personality/VRS/resume all in-module
+  (__cxa_throw 0x457F91T, personality 0x458859T). Only host touchpoint
+  = FindExidx answer (correct). MCSM compare: their host has NO
+  _Unwind_* symbols either (not even UND) — fully in-module unwinding
+  CAN work under Dynarmic; ours gets garbage frames, not missing impl.
+- STUCK HYPOTHESES (subagent decoding now): R7=0 frame base? heap
+  stacks without guard gaps (walk never hits unmapped -> infinite
+  frames instead of terminate)? resume never transfers? Awaiting
+  verdict for the flip recipe (bridge answer vs register vs stack word).
+
 ## 75. APK-scope correction + headless-device middle path (2026-10-13)
 - CORRECTION (my "predictable LOADING" OVERSTATED — user challenged,
   correctly): split three ways. (a) CERTAIN harness-only (mocks, caps,
