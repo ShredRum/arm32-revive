@@ -2234,7 +2234,49 @@ Do NOT treat as fact; verify per item before building on it.
   -> binary: fail path fires drawRect/builders in-harness? If YES ->
   menu via fail completion (functor-free?); if NO -> producer still out.
 
-## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
+## 73. RETFAIL builder-watch: fail-throw path silent (2026-10-13)
+- RETFAIL RUN (PROVEN): 63/63 calls, sessions handler 2x, exit flag=1
+  (fresh-registry free path, no RETSUCC), but 2 worker unwind spirals
+  (513 deep @0x45A778) — RETFAIL's lr-gate didn't cover all raiser
+  paths (time/apdrive throws escaped). drawRect=0, builder=0, Login
+  failed=0, DIAG164 lines ABSENT (0x — run ended abnormally shaped).
+- VERDICT: throw-flavored fail does NOT fire builders in-harness
+  (workers die pre-completion; catch never lands — unwinder CLOSED).
+  Remaining fail shape untested with builder probes: airplane1 CLEAN
+  flag-0 (refresh fall-through, NO throw, NO spiral) = closest to
+  device (flag=0, alive). NEXT: files17 token-registry + pure NONET,
+  no RETSUCC, builder/drawRect probes.
+- SHIP SCOPE (user asked; standing): YES, this affects the APK too.
+  Device-original reaches menu via throw->catch->loginFinished(0)->
+  burst (logcat-proven); success branch also needs the completion
+  channel (functors never materialize). Both require (a) working
+  host unwinder (R7=0 open, MCSM ships libunwind-style — precedent),
+  (b) completion channel job-tail, (c) real Java/timers (free on
+  device). Harness pain = building these; device = proving them.
+  Harness-only crutches (RETSUCC/fills/pokes) must be replaced by real
+  mechanisms for ship (CRUTCH LEDGER). Unwinder + channel are
+  ship-blockers, NOT harness-only.
+- APK-NOW (user asked; verdict NO): harness-only pain (mocks/caps/
+  pacing) would vanish on device, but load-bearing walls are
+  mechanism (Dynarmic-context R7, channel, dynamic natives) and would
+  reproduce as LOADING-without-menu — predictable without building.
+  Iteration 1min vs 10+min per hypothesis. Package at first
+  in-harness menu (even crutched) as logo-on-device milestone.
+
+## 74. Airplane-flag0: all fail shapes exhausted (2026-10-13)
+- AIRFLAG (files17 496B token-registry, pure NONET, no RETSUCC,
+  fixture restored after): exit flag=0 (refresh fall-through, PROVEN),
+  63 calls, no spirals. drawRect=0, builder=0, Login failed=0.
+  VERDICT: clean flag-0 ALSO silent. All three in-harness shapes now
+  binary-zero on builders: succ/flag=1 (many runs), clean-fail/flag=0
+  (this run), throw-fail/worker-death (retfailbuild). The ONLY untested
+  combination = fail + CATCH (loginFinished(0) with live ctx ->
+  downstream) = unwinder R7 + job tail. Convergence complete.
+- NEXT (the only door left): unwinder root-cause workstream (VRS[R7]
+  init under Dynarmic; MCSM custom-_Unwind_Context precedent; §18 +
+  §43 + §51 notes). Scope first (Dynarmic headers docs-first), then
+  build. No more trigger runs until R7 moves — all trigger shapes are
+  measured.
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
   284078=e589a0a4, 466F34=344087e5, 46B618=0660a003 — ALL 6 MATCH.
