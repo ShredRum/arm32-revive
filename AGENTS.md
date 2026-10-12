@@ -1,5 +1,25 @@
 # AGENTS.md — AngryBirdsRio arm64 port (dynarmic). FULL STATE DUMP.
 
+## HANDOFF (read first after any compression; updated 2026-10-12 eve)
+- STATUS: boot→RIO LOADING stable (real art, sessions OK flag=1). Menu NOT
+  reached. Tree clean, all code+journal committed. Files dirs: work/files19
+  active (+ clean_registry.bin reset before EVERY run — registry is one-shot).
+- FUNNEL (ranked): (1) login-ladder: initiation BL 0x5CE50 runs clean, needs
+  session-linked +32 (link pattern PROVEN); functors never materialize —
+  AWAITING static verdict (trigger-subtree gates subagent) for the next rung.
+  (2) Node/loop path: loop callable directly (returns fresh node*, +0x18=7),
+  builders need graph+valid rect (gate bypass proven, writer-fault mapped).
+  (3) Manager pass: needs +172/+176 pulse (timing-jittered) or forge (faults
+  on exclusive@0 — queue-ish objects needed). (4) Unwinder: CLOSED (R7=0).
+  Time/apdrive: DEAD x3. Calls sterile. UPDATE-subscription absent.
+- NEXT ACTION (when trigger-gates verdict lands): follow its recipe (1-2
+  runs). If it dead-ends: D1 device builder-capture (QUEUED DEVICE WORK).
+- DO NOT: drop fill (death@update#1), trust probe-emit/PCTRACE counts
+  (translation≠execution — count [probe]#N), hardcode heap addrs (drift),
+  run parallel device sessions, bulk-edit without backup.
+- DETERMINISM: taskset -c 0, PACEMS=400, 63-call jni_long.txt + JOVR taps
+  (early only), NONET+DNSHUSH+empty-DNS, RETSUCC, POKE1187, REALGL film.
+
 ## 0. How to work here (rules learned the hard way)
 - RW ONLY inside this folder (+ /tmp freely). NEVER install anything system-wide.
   If a system install is truly needed: STOP and ask the human (they install).
