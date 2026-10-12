@@ -5461,11 +5461,16 @@ void GuestCallbacks::DumpR9(std::uint64_t r9) {
     }
 }
 
-void GuestCallbacks::EventPiStash(std::uint64_t r6) {
-    // HARNESS_EVENTPOST=1: capture the event-walk's pi (r6 right after the
-    // BL 0xC4654 pi acquisition, PROBE4 slot) for the synthetic-event fill
-    // (harness fills the natural pi while it is empty). Logs every capture;
-    // the fill stands down on natural activity (see harness EVENTFILL).
+// HARNESS_EVENTPOST: synthetic pi#1 + array, built once at first faked
+// walk entry (translation of later blocks bakes pi#1, so it must exist by
+// then; entry always executes first). Same addrs forever: no staleness.
+static std::uint32_t s_eventpost_pi1 = 0;
+static std::uint32_t s_eventpost_arr = 0;
+
+void GuestCallbacks::EventDecide(std::uint64_t r0pi) {
+    // HARNESS_EVENTPOST=1: at 0xC465C the walk has r0=r6=natural pi (mov ran).
+    // Refresh pi#1: mirror the natural pi when usable, else synthetic content.
+    // The baked SetRegister(r6, pi#1) right after this call steers the walk.
     if (!std::getenv("HARNESS_EVENTPOST")) {
         return;
     }
@@ -5473,100 +5478,63 @@ void GuestCallbacks::EventPiStash(std::uint64_t r6) {
     if (!cb) {
         return;
     }
-    cb->rt_->eventpost_pi_ = (std::uint32_t)r6;
     Runtime* rt = cb->rt_;
-    // TEMP-DIAG (hook-attribution paradox): log our own pc/lr/r6 + seq.
-    {
-        static int eseq = 0;
-        std::uint32_t pc = rt->ActiveJit()->Regs()[15];
-        std::uint32_t lr = rt->ActiveJit()->Regs()[14];
-        std::printf("[eventpost] stash#%d pc=%08x lr=%08x r6=%08x\n", ++eseq, pc, lr,
-                    (std::uint32_t)r6);
-    }
-    // (fill extension: the pi is acquired fresh every walk, so the synthetic
-    // event must be written HERE, inside the walk — never between updates.)
-    const std::uint32_t pi = (std::uint32_t)r6;
-    // Build synthetic objects ONCE (bump heap, never reused: stable forever).
-    static bool ebuilt = false;
-    static std::uint32_t earr = 0, eelem = 0, ecall = 0, evt = 0, efree = 0;
+    const std::uint32_t nat = (std::uint32_t)r0pi;
+    const std::uint32_t pi1 = s_eventpost_pi1;
     static int enote = 0;
-    if (!ebuilt) {
-        for (const auto& im : rt->mod().imports) {
-            if (im.name == "free") {
-                efree = im.tramp_va;
-                break;
-            }
-        }
-        earr = rt->GuestCalloc(1, 4);
-        eelem = rt->GuestCalloc(1, 0x24);
-        ecall = rt->GuestCalloc(1, 8);
-        evt = rt->GuestCalloc(1, 0x20);
-        if (!efree || !earr || !eelem || !ecall || !evt) {
-            std::printf("[eventpost] build failed, skipping\n");
-            return;
-        }
-        const std::uint32_t one = 1;
-        std::memcpy(rt->H(eelem + 8), &one, 4);      // elem flag
-        std::memcpy(rt->H(eelem + 0x20), &ecall, 4);  // elem callable
-        std::memcpy(rt->H(ecall), &evt, 4);           // callable vtable
-        std::memcpy(rt->H(evt + 0x18), &efree, 4);    // vt+0x18 = free thunk
-        std::memcpy(rt->H(earr), &eelem, 4);          // arr[0] = elem
-        rt->eventpost_callable_ = ecall;
-        ebuilt = true;
-        std::printf("[eventpost] built arr=%08x elem=%08x call=%08x vt=%08x free=%08x\n",
-                    earr, eelem, ecall, evt, efree);
-    }
-    if (pi == 0) {
-        if (enote < 3) {
+    if (pi1 == 0 || !rt->CheckRange(pi1, 16, true)) {
+        if (enote < 2) {
             enote++;
-            std::printf("[eventpost] pi NULL, nothing to fill\n");
+            std::printf("[eventpost] pi#1 not ready\n");
         }
         return;
     }
-    if (!rt->CheckRange(pi, 16, true)) {
-        if (enote < 3) {
-            enote++;
-            std::printf("[eventpost] pi %08x unreadable, skipping\n", pi);
+    // Natural usable? non-null, readable, sane begin/end, any busy state
+    // (busy is mirrored: natural alt-path behavior preserved).
+    bool use_nat = false;
+    std::uint32_t f[4] = {};
+    if (nat != 0 && rt->CheckRange(nat, 16, false)) {
+        std::memcpy(f, rt->H(nat), 16);
+        if (f[0] != f[1] && rt->CheckRange(f[0], 4, false) &&
+            (f[1] == f[0] + 4 || rt->CheckRange(f[1], 4, false))) {
+            use_nat = true;
         }
-        return;
     }
-    std::uint32_t b0 = 0, b4 = 0, b12 = 0;
-    std::memcpy(&b0, rt->H(pi), 4);
-    std::memcpy(&b4, rt->H(pi + 4), 4);
-    std::memcpy(&b12, rt->H(pi + 12), 4);
-    if (b12 != 0) {
+    if (use_nat) {
+        std::memcpy(rt->H(pi1), f, 16);
         static bool stood = false;
         if (!stood) {
             stood = true;
-            std::printf("[eventpost] pi busy ([+12]=%08x), standing down\n", b12);
+            std::printf("[eventpost] NATURAL pi mirrored b=%08x e=%08x busy=%08x\n",
+                        f[0], f[1], f[3]);
         }
         return;
     }
-    if (b0 != b4) {
-        static bool stood2 = false;
-        if (!stood2) {
-            stood2 = true;
-            std::printf("[eventpost] NATURAL EVENTS present, standing down\n");
-        }
-        return;
-    }
+    // Synthetic: one element (built once in EventEntry; same addrs forever).
     {
-        const std::uint32_t z = 0, eend = earr + 4;
-        std::memcpy(rt->H(pi + 12), &z, 4);   // busy = 0
-        std::memcpy(rt->H(pi), &earr, 4);     // begin
-        std::memcpy(rt->H(pi + 4), &eend, 4);  // end (1 elem)
-        static int efn = 0;
-        if (efn < 3) {
-            efn++;
-            std::printf("[eventpost] filled pi=%08x\n", pi);
+        const std::uint32_t z = 0;
+        std::uint32_t b = 0, e = 0;
+        std::memcpy(&b, rt->H(pi1), 4);
+        std::memcpy(&e, rt->H(pi1 + 4), 4);
+        if (b != s_eventpost_arr || e != s_eventpost_arr + 4) {
+            std::memcpy(rt->H(pi1), &s_eventpost_arr, 4);
+            std::uint32_t eend = s_eventpost_arr + 4;
+            std::memcpy(rt->H(pi1 + 4), &eend, 4);
+            std::memcpy(rt->H(pi1 + 8), &z, 4);
+            static int efn = 0;
+            if (efn < 3) {
+                efn++;
+                std::printf("[eventpost] synthetic pi#1 armed\n");
+            }
         }
+        std::memcpy(rt->H(pi1 + 12), &z, 4);  // busy = 0 every walk
     }
 }
 
 void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, r1 = event slot),
     // fake a nonzero subscriber count while the natural one is 0 so the walk
-    // reaches the pi acquisition (BL 0xC4654) where EventPiStash fills it.
+    // reaches the pi acquisition (BL 0xC4654) where the pi is acquired (may be NULL).
     // Stands down (loudly) on any natural count. Run-scoped, logged.
     if (!std::getenv("HARNESS_EVENTPOST")) {
         return;
@@ -5606,6 +5574,36 @@ void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
     }
     const std::uint32_t one = 1;
     std::memcpy(rt->H(impl + 16), &one, 4);
+    // Build synthetic objects once (before any later block translates: the
+    // 0xC465C override bakes pi#1 at translation time).
+    if (s_eventpost_pi1 == 0) {
+        std::uint32_t efree = 0;
+        for (const auto& im : rt->mod().imports) {
+            if (im.name == "free") {
+                efree = im.tramp_va;
+                break;
+            }
+        }
+        std::uint32_t pi1 = rt->GuestCalloc(1, 16);
+        std::uint32_t arr = rt->GuestCalloc(1, 4);
+        std::uint32_t elem = rt->GuestCalloc(1, 0x24);
+        std::uint32_t call = rt->GuestCalloc(1, 8);
+        std::uint32_t vt = rt->GuestCalloc(1, 0x20);
+        if (efree && pi1 && arr && elem && call && vt) {
+            std::memcpy(rt->H(elem + 8), &one, 4);      // elem flag
+            std::memcpy(rt->H(elem + 0x20), &call, 4);  // elem callable
+            std::memcpy(rt->H(call), &vt, 4);           // callable vtable
+            std::memcpy(rt->H(vt + 0x18), &efree, 4);   // vt+0x18 = free thunk
+            std::memcpy(rt->H(arr), &elem, 4);          // arr[0] = elem
+            s_eventpost_pi1 = pi1;
+            s_eventpost_arr = arr;
+            rt->eventpost_callable_ = call;
+            std::printf("[eventpost] built pi1=%08x arr=%08x elem=%08x call=%08x vt=%08x free=%08x\n",
+                        pi1, arr, elem, call, vt, efree);
+        } else {
+            std::printf("[eventpost] build failed\n");
+        }
+    }
     if (enote < 3) {
         enote++;
         std::uint32_t pc = rt->ActiveJit()->Regs()[15];
@@ -7449,18 +7447,23 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
                                                          0))));
             }
-            // HARNESS_EVENTPOST=1: capture the walk's pi at PROBE4 (r6 right
-            // after the BL 0xC4654 pi acquisition) for the synthetic-event
-            // fill. Plain stash (no walk resume semantics).
+            // HARNESS_EVENTPOST=1: at PROBE4 (0xC465C, right after the walk's
+            // mov r6,r0) decide the pi (mirror natural into pi#1, else synthetic)
+            // then steer the walk: r6 <= pi#1 (baked; pi#1 built at entry, which
+            // always executes first, so the bake is sound; same addrs forever).
             if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc4 && probe_pc4) {
-                ir.CallHostFunction(&EventPiStash, ir.ZeroExtendWordToLong(
-                                                       ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                           6))));
+                ir.CallHostFunction(&EventDecide, ir.ZeroExtendWordToLong(
+                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                          0))));
+                {
+                    using Reg = Dynarmic::A32::Reg;
+                    ir.SetRegister(static_cast<Reg>(6), ir.Imm32(s_eventpost_pi1));
+                }
             }
             // HARNESS_RETSUCC=1: success synthesis at raiser entry (PROBE3).
             // HARNESS_EVENTPOST=1: fake the subscriber count at walk entry
             // (PROBE5 = 0xC45FC, r1 = event slot) so the walk reaches the pi
-            // acquisition where EventPiStash (PROBE4) fills it.
+            // acquisition where the pi is acquired (may be NULL).
             if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc5 && probe_pc5) {
                 ir.CallHostFunction(&EventEntry, ir.ZeroExtendWordToLong(
                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(

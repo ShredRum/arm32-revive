@@ -1618,6 +1618,34 @@ dead subsystem, game degrades without it).
   marker + Ret, walk continues, update completes). Binary: marker in log <=>
   walk invokes our event. Design only — implement + build + run next.
 
+## 46. Synthetic event INVOKED 27/27 — delivery proven (2026-10-12, eventpost4)
+- INVOKE x27 (every update): walk -> synthetic elem -> 0xC4830 -> forged
+  vt+0x18 (free thunk) -> marker (a0==callable) -> Ret -> walk continues ->
+  update completes clean. Zero crashes. Baked-r6 design SOUND (entry builds
+  before stash-block translates; refresh same-addrs; mirror-first so natural
+  content is never clobbered). args=(callable, stack, stack, f0000020).
+- CORRECTED MODELS (all byte-verified): (1) hook reads r6 BEFORE mov — stash
+  must use r0 (natural pi), never r6 (stale update leftover 0x672E6C);
+  eventpost2's "NATURAL EVENTS" was BSS garbage via stale r6, not game state.
+  (2) pop-into-pc epilogues leave lr STALE — lr is NEVER evidence without a
+  call-edge audit (killed my catch-resume theory AND explains §40's ghost
+  backtrace class). (3) PreCodeTranslationHook is PER-INSTRUCTION pre-insn:
+  any reachable pc is hookable ("mid-block never fires" lesson REVISED: it
+  never fired because never reached). (4) 0xC474C returns NULL normally
+  (empty map, mov r0,#0 path) — no throw on this path; EE4swap lines were
+  ProbeDump r1-sniff artifacts (no such typeinfo in binary).
+- Subagent's "harness-synthesized resume" REFUTED (nothing in harness writes
+  pc; the stale-lr normal return explains all); its byte facts (no pads, NULL
+  path, corrections 0xC4910/0xC4BA8/0xC4D24, mirror recommendation) ACCEPTED.
+- sesswatch=132 this run is ARTIFACT (DUMPR9 armed on OUR synthetic elem via
+  c4830 slot) — flag meaningless when DUMPR9 fires on synthetic invokes.
+- REMAINING GAP (crisp): delivery works, CONTENT missing. Real subscriber
+  functors unknown (21 subscribe sites; scene's unidentified). NEXT (parallel):
+  (i) static audit: per-site event arg + functor vtable + enabling condition
+  -> the scene/EVENT_UPDATE subscriber; (ii) live 7-arg BL 0x283A3C via
+  HARNESS_SCENEAT (mgr from PokeManagerFlag's last_mgr_, validated + empty-
+  vector-gated) as scene-liveness proof (expect WHITE: flip without builders).
+
 ## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
 - SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
   query (no early walk; 1026 unanimous). 0x45A778 inside raise driver
