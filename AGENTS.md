@@ -1651,7 +1651,8 @@ dead subsystem, game degrades without it).
   B4 empty [12b2dcb0..12b2dcb0] => hr=UD1 clean, r0=0, +164: 2->1, HELD to end
   (single change-line; loading did NOT re-assert). Film: logos -> WHITE after
   the call (user-confirmed). Zero BAD/FATAL/LOUD. Zero builder translations
-  (no 0x250xxx emits post-flip).
+  (no 0x250xxx emits post-flip). Transition pinned: call24 = FOX art, call25
+  = flip, call32+ = white (flip landed in FOX phase, same white verdict).
 - Verdict: scene-liveness PROVEN (flip takes effect visually), content absent
   (builders never activate). Backstop closed as predicted — NOT menu. Menu
   needs builders = real subscriber functors via events.
