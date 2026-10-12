@@ -324,6 +324,10 @@ private:
     // Scene object last seen by the loading-builder hook (HARNESS_LASTTHIS);
     // HARNESS_BUILDER calls the menu builder with it. Guest VA.
     std::uint32_t last_this_ = 0;
+    // Session-ish object last seen at D5994 entry (HARNESS_WATCHPC); the
+    // login trigger links its forged account+32 to it (updates pass the real
+    // one, the trigger forged zeros). Guest VA, 0 = none seen.
+    std::uint32_t loginat_session_ = 0;
   public:
     class RealGL* RealGLBackend();
 };
@@ -370,6 +374,10 @@ public:
     static void EventEntry(std::uint64_t r1slot);
     // HARNESS_LASTTHIS=1: record loading-builder r0 (scene object) at PROBE4.
     static void LastThis(std::uint64_t r0obj);
+    // HARNESS_WATCHPC=<hexpc>: regs + stack code-pointer backtrace at pc
+    // (ladder forensics: who calls with null-derived args). Capped, no slot.
+    static void WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
+    static void WatchSP(std::uint64_t sp);
     // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
     // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
     // must observe for the sessions->menu handoff.

@@ -1177,9 +1177,16 @@ int main(int argc, char** argv) {
                         std::memcpy(rt.H(acct), &av, 4);
                         // +32 must be a writable block (flow stores +0x50
                         // through it); zeros are scratch until proven content.
+                        // Prefer the live session-ish object stashed from
+                        // D5994 entries (updates pass the real one there).
                         const std::uint32_t ab = rt.GuestCalloc(1, 0x60);
                         if (ab) {
                             std::memcpy(rt.H(acct + 32), &ab, 4);
+                        }
+                        if (rt.loginat_session_ != 0) {
+                            std::memcpy(rt.H(acct + 32), &rt.loginat_session_, 4);
+                            std::printf("[loginat] +32 linked live session=%08x\n",
+                                        rt.loginat_session_);
                         }
                         std::printf("[loginat] forged account=%08x\n", acct);
                         auto& rgs = jit.Regs();

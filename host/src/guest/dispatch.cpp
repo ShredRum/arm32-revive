@@ -5544,6 +5544,61 @@ void GuestCallbacks::LastThis(std::uint64_t r0obj) {
     cb->rt_->last_this_ = (std::uint32_t)r0obj;
 }
 
+static int wseq_shared = 0;
+static std::uint32_t wpc_shared = 0;
+void GuestCallbacks::WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
+    // HARNESS_WATCHPC=<pc>: regs at pc (part 1/2; part 2 = WatchSP).
+    // Capped at 4 fires. Own env/pc, consumes no probe slot.
+    static int wn = 0;
+    if (wn >= 4) {
+        return;
+    }
+    wn++;
+    wseq_shared++;
+    std::printf("[watchpc] #%d r0=%08x r1=%08x lr=%08x\n", wseq_shared, (std::uint32_t)r0,
+                (std::uint32_t)r1, (std::uint32_t)lr);
+    // Session stash for the login trigger: D5994 entry with a live object.
+    // (Updates pass the real session-ish object here; the forged account
+    // needs it linked at +32 or the subtree faults on null+off.)
+    if (wpc_shared == 0xD5994u && (std::uint32_t)r0 != 0) {
+        GuestCallbacks* cb2 = g_probe_cb;
+        if (cb2 && cb2->rt_->loginat_session_ == 0) {
+            cb2->rt_->loginat_session_ = (std::uint32_t)r0;
+            std::printf("[watchpc] stashed session=%08x\n", (std::uint32_t)r0);
+        }
+    }
+}
+void GuestCallbacks::WatchSP(std::uint64_t sp) {
+    // Part 2/2: stack code-pointer backtrace for the seq from WatchPC.
+    GuestCallbacks* cb = g_probe_cb;
+    if (!cb) {
+        return;
+    }
+    const std::uint32_t sp0 = (std::uint32_t)sp;
+    std::printf("[watchpc] #%d frames:", wseq_shared);
+    int n = 0;
+    for (std::uint32_t a = sp0; a < sp0 + 4096 && n < 12; a += 4) {
+        if (!cb->rt_->CheckRange(a, 4, false)) {
+            break;
+        }
+        std::uint32_t w = 0;
+        std::memcpy(&w, cb->rt_->H(a), 4);
+        if (w < 0x1000 || w >= 0x653D1C) {
+            continue;
+        }
+        if (!cb->rt_->CheckRange(w - 4, 4, false)) {
+            continue;
+        }
+        std::uint32_t prev = 0;
+        std::memcpy(&prev, cb->rt_->H(w - 4), 4);
+        if ((prev >> 25) == 0x75) {
+            std::printf(" %08x", w);
+            n++;
+        }
+    }
+    std::printf("\n");
+}
+
 void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, r1 = event slot),
     // fake a nonzero subscriber count while the natural one is 0 so the walk
@@ -6157,6 +6212,27 @@ void GuestCallbacks::ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_
                     std::printf(" %08x", w);
                     n++;
                 }
+            }
+            std::printf("\n");
+        }
+    }
+    // HARNESS_STACKBT=1 (R7 bisection): regs + frame words at throw ENTRY.
+    // Compare with the NESTMAX-halt dump: R7 already stale here => pre-throw
+    // clobber class (callbacks? thread seed? game -fomit-frame-pointer?);
+    // valid here but stale at Find_exidx #1 => driver/context-init class.
+    if (std::getenv("HARNESS_STACKBT")) {
+        GuestCallbacks* cbb = g_probe_cb;
+        if (cbb) {
+            auto& rgs = cbb->rt_->ActiveJit()->Regs();
+            const std::uint32_t r7v = rgs[7];
+            std::printf("[r7entry] R7=%08x R11=%08x SP=%08x LR=%08x : ", r7v, rgs[11],
+                        rgs[13], rgs[14]);
+            for (int k = -12; k <= 8; k += 4) {
+                std::uint32_t w = 0xDEADBEEFu;
+                if (cbb->rt_->CheckRange(r7v + k, 4, false)) {
+                    std::memcpy(&w, cbb->rt_->H<const std::uint8_t>(r7v + k), 4);
+                }
+                std::printf("[%+d]=%08x ", k, w);
             }
             std::printf("\n");
         }
@@ -7359,6 +7435,30 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             ir.CallHostFunction(
                 &PokeManagerFlag,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+        }
+        // HARNESS_WATCHPC=<hexpc>: regs + backtrace at pc (no slot).
+        {
+            static bool winit = false;
+            static std::uint32_t wpc = 0;
+            if (!winit) {
+                winit = true;
+                if (const char* e = std::getenv("HARNESS_WATCHPC")) {
+                    wpc = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+                }
+            }
+            if (wpc && pc == wpc) {
+                wpc_shared = wpc;
+                ir.CallHostFunction(&WatchPC,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
+                ir.CallHostFunction(&WatchSP, ir.ZeroExtendWordToLong(
+                                                   ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
+                                                       13))));
+            }
         }
         // HARNESS_DUMPR9=1: log session object at a probe slot
         // (e.g. PROBE2=0xd6c78 entry: r0 = session object, before mov r9,r0).

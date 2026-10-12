@@ -1683,8 +1683,7 @@ dead subsystem, game degrades without it).
   menu this must be scene-class (0x669428 family) — absent in heap (never
   constructed). Direct-builder shelved behind initiation (needs graph).
 
-## 50. Heap starvation + initiation ladder (2026-10-12)
-- HEAP 99% FULL (PROVEN live): top 0x1F226820/256MB at exit, deterministic
+## 50. Heap starvation + initiation ladder (2026-10-12)- HEAP 99% FULL (PROVEN live): top 0x1F226820/256MB at exit, deterministic
   across runs (0x1F226820 vs 0x1F2266D8 = 72B). Leak-only free + textures hit
   the ceiling ~call 30; mallocs return NULL -> null+off faults (loginat clone
   dest 0x50). FIX: kHeapSize 256MB->1GB (arena ends 0x50000000 < mmap
@@ -1697,6 +1696,31 @@ dead subsystem, game degrades without it).
   loginat4/5: heap verdict + clean run post-bump, still no Login/builders.
   NEXT: LOGINAT=11 (workers alive) + functor probes (5f96c/5fe70) — timing
   hypothesis (device initiates at boot-seconds, not mid-park).
+
+## 51. Unwinder CLOSED, ladder continues, two statics queued (2026-10-12)
+- R7=0 AT THROW ENTRY (PROVEN live, r7bisect1: 2 throws, R7=0, R11/SP valid
+  stacks, lr=28AE70 raiser tail). + Find_exidx verified + raise in-module +
+  pop-into-pc epilogues (lr always stale) => unwinder path UNAVAILABLE, not
+  just broken: VRS[R7]=0 poisons step 1, true R7 unrecoverable post-hoc, R7
+  games would only change the death shape (END_OF_STACK vs spiral), never
+  reach pads. Offline (catch-needing) path CLOSED. Success path (zero throws)
+  is the only viable one. Rule: no more unwinder work.
+- Loginat ladder (live): +32-block -> same fault (base NOT +32: exact addr
+  0x50); caller probe (0x5F430: r1=0x50, lr=DBF80); heap EXONERATED (same top
+  post-bump, fault persists => null-object, not malloc); WATCHPC built (regs
+  + backtrace, no slot); chain = trigger -> big -> update-code (C524C) ->
+  D59CC/D5D40 -> tree-op -> clone; D5994 gets NULL in trigger, live object
+  0x10071FA0/0x10072220 in updates; +32 linked live => trigger runs CLEAN
+  (no BAD, full 63 calls) but sterile (no Login/builders/film change).
+  Forged zeros flow down as NULLs; real session linkage fixes the fault but
+  not the outcome. Initiation works mechanically; functors never materialize
+  (5f96c/5fe70 silent even early).
+- Main observes (static): gates #1/#2/#3 ONLY — no network/session/queue.
+  Trigger is calls, never data. Queued statics: (S1) time/apdrive consumers
+  + notify + direct-call recipes; (S2) gate#2 (+148) object + writer +
+  downstream + recipe. Next live depends on both (no decisive angle pending).
+- Infra: WATCHPC (+WatchSP, wpc_shared), loginat_session_ stash+link,
+  [heap] print, [env] fingerprint — all committed, harness-only.
 
 ## 48. Subscribe audit + functor verdict: channel, not call (2026-10-12)
 - Static (read-only subagent): helper 0x3833B8 binds NO event — event comes
