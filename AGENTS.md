@@ -1867,6 +1867,39 @@ Do NOT treat as fact; verify per item before building on it.
   faithful account copy from snapshot (replaces zeros) + holder link
   -> LOGINAT rerun -> binary (functors/events/builders/film?).
 
+## 61. Faithful-account verdict: necessary, not sufficient (2026-10-13,
+   faithful1.log)
+- F1 SETUP (PROVEN lines): natural initiation #1 r0=10ad5068 (lr=93a54,
+  same chain); snap 64B from it; faithful copy @133a1518 (verbatim 64B:
+  vtable 0x65E504, +25=0, +32=live link, all pointers same-run-valid);
+  forged initiation #2 r0=133a1518 lr=halt (our call, PROVEN); r1=1 on
+  the copy hr=UD1 clean, +25 0->0 (PROVEN).
+- F1 STERILE (PROVEN): functors 5f96c/5fe70 = 0 exec; Login failed = 0;
+  +164=2 held; film LOADING (white-frac 0.043, sky px e3c9f5, no
+  whiteout, no menu); 4 workers done retval=0; flag=1 (sessions succ as
+  usual). VERDICT: MISS — faithful bytes change nothing downstream.
+- INVERSION (PROVEN lines, mechanism INFERRED): pre25=1 happened ONLY
+  with zeros+direct-session (chain1, the variant that later faulted at
+  r1=1); holder (chain2) and faithful (F1) both give pre25=0 with clean
+  runs. The +25 write belongs to the faulty/early-out path, NOT to
+  successful initiation. +25=1 is NOT a success marker — stop treating
+  it as one (corrects §57's implicit reading).
+- INFRA NOTE: RAWPOST did NOT fire this run (no rawpost lines) — stash
+  fills only when WATCHPC=d5994 (WatchPC code), this run watched 5ce50.
+  Not a game fact; D5994(r1=2)-clean stands from chain1/chain2.
+- CONVERGENCE: initiation (natural AND faithful-forged) runs clean and
+  parks; r1=1 runs clean and stalls; sessions succeeds and notifies no
+  one. The dead piece is the COMPLETION CHANNEL (job tail
+  notify/post/wake/loop-continuation), never the call — agrees with §48
+  (channel-not-call) and §58c (impossibility 0.94). Calls are EXHAUSTED
+  as a menu path; all three account shapes (zeros-direct, zeros-holder,
+  faithful) tested live with binary zeros.
+- NEXT: T2 static (read-only subagent): process 0x28DAF4 [+12] branch +
+  entry fate (free/move/drop) + sessions-succ job tail (who posts
+  completion? what condition? who consumes?) + minimal live recipe.
+  Then loop-MISS menu args (W5 recipe attempt with forged graph args?);
+  backstop D1 device capture (queued).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,

@@ -1288,8 +1288,26 @@ int main(int argc, char** argv) {
                 static bool sdone = false;
                 if (!sdone && i == (std::size_t)std::atoi(se)) {
                     sdone = true;
-                    const std::uint32_t acct = rt.GuestCalloc(1, 0x2C);
+                    // Faithful mode (HARNESS_LOGINAT_FAITHFUL=1): copy the live
+                    // account bytes snapshotted at the natural 0x5CE50 hit
+                    // (WATCHPCSNAP) instead of zeros. Same-run pointers stay
+                    // valid; heap drift between runs cannot poison it.
+                    bool faithful = false;
+                    if (std::getenv("HARNESS_LOGINAT_FAITHFUL") &&
+                        rt.loginat_acct_len_ >= 44) {
+                        faithful = true;
+                    }
+                    const std::uint32_t acct =
+                        rt.GuestCalloc(1, faithful ? 0x40 : 0x2C);
                     if (acct) {
+                        if (faithful) {
+                            std::memcpy(rt.H(acct), rt.loginat_acct_snap_,
+                                        rt.loginat_acct_len_);
+                            std::printf("[loginat] faithful %uB from live @%08x"
+                                        " -> copy @%08x\n",
+                                        rt.loginat_acct_len_, rt.loginat_acct_,
+                                        acct);
+                        } else {
                         const std::uint32_t av = 0x65E504u;
                         std::memcpy(rt.H(acct), &av, 4);
                         // +32 must be a writable block (flow stores +0x50
@@ -1317,6 +1335,7 @@ int main(int argc, char** argv) {
                                             rt.loginat_session_);
                             }
                         }
+                        }  // end zeros+holder path (faithful skips it)
                         std::printf("[loginat] forged account=%08x\n", acct);
                         g_login_acct = acct;
                         auto& rgs = jit.Regs();
