@@ -883,5 +883,8 @@ bool RealGL::Ensure() {
 bool RealGL::Handle(const char*, Regs&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {
     return false;
 }
+bool RealGL::Screenshot(const char*, int, int) {
+    return false;  // headless-device runs take no screenshots
+}
 }  // namespace abr
 #endif
