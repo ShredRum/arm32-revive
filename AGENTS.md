@@ -1631,6 +1631,33 @@ dead subsystem, game degrades without it).
 - NEXT: node-layout subagent (size? id offset? loop edge? appender? recipe)
   -> forge-or-factory. No live angle until it returns.
 
+## 56. Factory verdict + loopcall + coverage map (2026-10-12)
+- Factory (read-only subagent): SCENE factory 0x24DB38 (w,h,orient; new 704B;
+  vtable 0x669404 = GL_Context!) called ONLY from nativeInit (once). GL_Image
+  factories build splash/loading images. NO menu-scene factory exists. Builder
+  key 0x101929 = graph node id (dynamic; loop iterates scene+188 calling node
+  virtuals). Appender = loop MISS path itself (allocate+construct 0x26305C +
+  push/grow). Recipe needs LOGIN-ONLY STATE (mgr fields + loginFinished +0x19
+  + sessions/catalog populating scene+188) — the populate step never fires.
+- Loopcall1 (direct BL 0x250018(scene, 0x101929)): runs CLEAN hr=UD1, writes
+  scene+0x18=7, returns FRESH node* 0x133A2CD0 (miss path built!), next update
+  returns node* (update observes loop state!). NO builder translations, film
+  unchanged. Verdict: loop acquirable, builders not reached from it (need the
+  loop's post-miss invocation path or manager drive, or node activation).
+- Cover1 (PCTRACE 0x250000+0x40000, 24k blocks): builders NEVER translate;
+  surface loop translates (reached); manager entry/tail/store translate (1x);
+  loading twins (0x260xxx) NEVER translate (draw path = 0x263xxx direct!);
+  event walk translates. CORRECTS old "twins run every render" (grep artifact;
+  all pctrace/emits must be read exact, never pattern-guessed).
+- Mgrat series: manager pass needs +172/+176 (pulse timing-jittered; missed
+  twice); forged zeros reach an exclusive-write fault @0 (queue-ish object
+  needed — loading-side mechanics, deprioritized vs login ladder). Poll-mode
+  fixed (fire-once). +216 steady 1 (pass clears, something re-sets or never
+  runs naturally).
+- Node verdicts: 1 loading node only (vtable 0x669710, layout known); menu
+  node absent (id + vtable scans empty). Forge recipe exists but needs graph
+  attach (contradicted 0.96 alone). Node subagent pending (size/id/edge).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,

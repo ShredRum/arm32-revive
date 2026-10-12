@@ -1063,8 +1063,7 @@ int main(int argc, char** argv) {
             }
             Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, stk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
-            // HARNESS_SCENEAT=N (JNI call index): direct 7-arg BL 0x283A3C
-            // (mgr,1,0,zerobuf + zero stack) scene-liveness proof (harness-only
+            // HARNESS_SCENEAT=N (JNI call index): direct 7-arg BL 0x283A3C            // (mgr,1,0,zerobuf + zero stack) scene-liveness proof (harness-only
             // diag, never ships). mgr from the render hook (never hardcoded);
             // gated on +164==2 and empty B4 vector; expects WHITE when content
             // was never built (flip without builders).
@@ -1114,6 +1113,91 @@ int main(int argc, char** argv) {
                         }
                     } else {
                         std::printf("[scene7] preconditions unmet, skipping\n");
+                    }
+                }
+            }
+            // HARNESS_MGRAT=N (JNI call index): direct BL 0x283B5C manager
+            // pass (harness-only diag, never ships). Single arg r0=mgr (head
+            // ignores rest); gates (+216/+172/+176/+164==2) all true live.
+            // One-shot (clears +216). Binary: runs (post +216==0 proves it)
+            // vs bails; downstream loop/nodes/builders/film observed.
+            // POLL MODE: from call N on, fires on the FIRST satisfied gate
+            // (+172/+176 pulse and drain with loading progress; a fixed index
+            // can miss it).
+            if (const char* se = std::getenv("HARNESS_MGRAT")) {
+                static bool sdone = false;
+                if (!sdone && i >= (std::size_t)std::atoi(se)) {
+                    const std::uint32_t mgr = rt.last_mgr_;
+                    std::uint32_t g216 = 0, g172 = 0, g176 = 0, g164 = 0;
+                    const bool mgrad =
+                        (mgr != 0 && rt.CheckRange(mgr + 220, 4, false));
+                    if (mgrad) {
+                        std::memcpy(&g216, rt.H(mgr + 216), 1);
+                        std::memcpy(&g172, rt.H(mgr + 172), 4);
+                        std::memcpy(&g176, rt.H(mgr + 176), 4);
+                        std::memcpy(&g164, rt.H(mgr + 164), 4);
+                    }
+                    static int mno = 0;
+                    const bool fire =
+                        (mgrad && g216 != 0 && g172 != 0 && g164 == 2 &&
+                         rt.IsCodeAddress(0x283B5Cu));
+                    if (fire || mno < 3) {
+                        mno++;
+                        std::printf("[mgrat] mgr=%08x +216=%u +172=%08x +176=%08x "
+                                    "+164=%08x\n",
+                                    mgr, g216, g172, g176, g164);
+                    }
+                    // HARNESS_MGRFORGE=1: satisfy the +172/+176 presence gates
+                    // with zeroed heap blocks when they are null (loading
+                    // progress normally fills them; timing-jittered). If the
+                    // pass derefs them expecting objects, the fault names the
+                    // requirement (bounded). Else the pass runs: observe
+                    // loop/nodes/builders/film.
+                    bool forged = false;
+                    if (std::getenv("HARNESS_MGRFORGE") && mgrad && g172 == 0 &&
+                        g176 == 0) {
+                        const std::uint32_t zb = rt.GuestCalloc(1, 16);
+                        if (zb && rt.CheckRange(mgr + 180, 4, true)) {
+                            std::memcpy(rt.H(mgr + 172), &zb, 4);
+                            std::memcpy(rt.H(mgr + 176), &zb, 4);
+                            g172 = zb;
+                            g176 = zb;
+                            forged = true;
+                            std::printf("[mgrat] forged +172/+176=%08x\n", zb);
+                        }
+                    }
+                    if (fire || forged) {
+                        sdone = true;
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x200;
+                        rgs[13] -= 16;
+                        const std::uint32_t zw = 0;
+                        for (int k = 0; k < 4; k++) {
+                            std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                        }
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = mgr;
+                        rgs[1] = 0;
+                        rgs[2] = 0;
+                        rgs[3] = 0;
+                        CallGuest(jit, 0x283B5Cu);
+                        std::printf("[mgrat] calling @000283b5c ... ");
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::uint32_t post = 0;
+                        if (rt.CheckRange(mgr + 216, 1, false)) {
+                            std::uint8_t b = 0;
+                            std::memcpy(&b, rt.H(mgr + 216), 1);
+                            post = b;
+                        }
+                        std::printf("hr=%d r0=%08x +216: %u -> %u\n",
+                                    static_cast<int>(hr2), rgs[0], g216, post);
+                        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    } else {
+                        std::printf("[mgrat] preconditions unmet, skipping\n");
                     }
                 }
             }
