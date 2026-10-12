@@ -1646,6 +1646,22 @@ dead subsystem, game degrades without it).
   HARNESS_SCENEAT (mgr from PokeManagerFlag's last_mgr_, validated + empty-
   vector-gated) as scene-liveness proof (expect WHITE: flip without builders).
 
+## 47. SCENE7: flip proven live, white as predicted (2026-10-12, scene7.log)
+- 7-arg BL @call25: mgr=10002f98 (hook-observed, never hardcoded), +164==2,
+  B4 empty [12b2dcb0..12b2dcb0] => hr=UD1 clean, r0=0, +164: 2->1, HELD to end
+  (single change-line; loading did NOT re-assert). Film: logos -> WHITE after
+  the call (user-confirmed). Zero BAD/FATAL/LOUD. Zero builder translations
+  (no 0x250xxx emits post-flip).
+- Verdict: scene-liveness PROVEN (flip takes effect visually), content absent
+  (builders never activate). Backstop closed as predicted — NOT menu. Menu
+  needs builders = real subscriber functors via events.
+- INVOKE=0 here is EXPLAINED, not a regression: PROBE4/5 unset this run, so
+  EVENTPOST hooks never wired (slot budget). Slot rule stands.
+- NEXT: subscribe-site audit (background subagent) -> real scene subscriber
+  -> enabling condition or direct subscribe-path call -> real-subscriber event
+  post through the PROVEN delivery (mirror path already handles natural
+  content when present).
+
 ## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
 - SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
   query (no early walk; 1026 unanimous). 0x45A778 inside raise driver

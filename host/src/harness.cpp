@@ -1050,6 +1050,60 @@ int main(int argc, char** argv) {
             }
             Dynarmic::HaltReason hr = RunOneJni(jit, rt, mem, mod, fns[i], r2, r3, stk);
             ok = (hr == Dynarmic::HaltReason::UserDefined1);
+            // HARNESS_SCENEAT=N (JNI call index): direct 7-arg BL 0x283A3C
+            // (mgr,1,0,zerobuf + zero stack) scene-liveness proof (harness-only
+            // diag, never ships). mgr from the render hook (never hardcoded);
+            // gated on +164==2 and empty B4 vector; expects WHITE when content
+            // was never built (flip without builders).
+            if (const char* se = std::getenv("HARNESS_SCENEAT")) {
+                static bool sdone = false;
+                if (!sdone && i == (std::size_t)std::atoi(se)) {
+                    sdone = true;
+                    const std::uint32_t mgr = rt.last_mgr_;
+                    std::uint32_t m164 = 0xFFFFFFFFu, b4b = 0, b4e = 0;
+                    const bool mgrad = (mgr != 0 && rt.CheckRange(mgr + 0xB8, 4, false));
+                    if (mgrad) {
+                        std::memcpy(&m164, rt.H(mgr + 0xA4), 4);
+                        std::memcpy(&b4b, rt.H(mgr + 0xB4), 4);
+                        std::memcpy(&b4e, rt.H(mgr + 0xB8), 4);
+                    }
+                    std::printf("[scene7] mgr=%08x +164=%08x b4=[%08x..%08x]\n", mgr,
+                                m164, b4b, b4e);
+                    if (mgrad && m164 == 2 && b4b == b4e && rt.IsCodeAddress(0x283A3Cu)) {
+                        const std::uint32_t zb = rt.GuestCalloc(1, 128);
+                        if (zb) {
+                            auto& rgs = jit.Regs();
+                            rgs.fill(0);
+                            rgs[13] = abr::kStackTop - 0x200;
+                            rgs[13] -= 16;
+                            const std::uint32_t zw = 0;
+                            for (int k = 0; k < 4; k++) {
+                                std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                            }
+                            rgs[14] = mod.halt_va;
+                            rgs[0] = mgr;
+                            rgs[1] = 1;
+                            rgs[2] = 0;
+                            rgs[3] = zb;
+                            CallGuest(jit, 0x283A3Cu);
+                            std::printf("[scene7] calling @000283a3c ... ");
+                            std::fflush(stdout);
+                            alarm(60);
+                            Dynarmic::HaltReason hr2 = jit.Run();
+                            alarm(0);
+                            std::uint32_t post = 0xFFFFFFFFu;
+                            if (rt.CheckRange(mgr + 0xA4, 4, false)) {
+                                std::memcpy(&post, rt.H(mgr + 0xA4), 4);
+                            }
+                            std::printf("hr=%d r0=%08x +164: %08x -> %08x\n",
+                                        static_cast<int>(hr2), rgs[0], m164, post);
+                            jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                        }
+                    } else {
+                        std::printf("[scene7] preconditions unmet, skipping\n");
+                    }
+                }
+            }
             // HARNESS_PACEMS=N: sleep N ms after each JNI call (deterministic
             // pacing so concurrent workers reach completion before main exits
             // via _exit; sprinting main otherwise murders them mid-flight).

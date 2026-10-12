@@ -5623,6 +5623,7 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
     if (!cb->rt_->CheckRange(o + 164, 4, false)) {
         return;
     }
+    cb->rt_->last_mgr_ = o;  // HARNESS_SCENEAT reads the manager from here.
     std::uint32_t v = 0;
     std::memcpy(&v, cb->rt_->H(o + 164), 4);
     // TEMP-DIAG (always on when hooked): identify the loading-manager object

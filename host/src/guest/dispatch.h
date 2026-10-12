@@ -318,6 +318,9 @@ private:
     // the free-thunk invocation marker. Guest VAs; 0 = none.
     std::uint32_t eventpost_pi_ = 0;
     std::uint32_t eventpost_callable_ = 0;
+    // Loading-manager object last seen by the render hook (PokeManagerFlag);
+    // HARNESS_SCENEAT reads it from here (never hardcoded). Guest VA.
+    std::uint32_t last_mgr_ = 0;
   public:
     class RealGL* RealGLBackend();
 };
