@@ -1,6 +1,6 @@
 # AGENTS.md — AngryBirdsRio arm64 port (dynarmic). FULL STATE DUMP.
 
-## HANDOFF (read first after any compression; updated 2026-10-13 night)
+## HANDOFF (read first after any compression; updated 2026-10-13 day)
 - STATUS: boot→RIO LOADING stable (real art, sessions OK flag=1). Menu NOT
   reached. Tree clean, all code+journal committed. Files dirs: work/files19
   active (+ clean_registry.bin reset before EVERY run — registry is one-shot).
@@ -17,6 +17,9 @@
   58c delivery-impossibility / 58d appender+recipe). Status HYPOTHESES —
   nothing ran live. Convergent picture: producers dead at every level,
   structure fully mapped, delivery proven only synthetically.
+- §59 JOURNALED: loginchain2 (holder kills the fault, sterile), nowait1
+  (wait-cap REFUTED as pool-killer), plus912 (+912 always-NULL, CLOSED).
+  PROBE5 freed for recon targets.
 - NEXT ACTION: ONE live recon run (no new code): standard combo + WATCHPC on
   reachable sites, dump live values for forge recipes (§58 synthesis). Then
   fill per W1+W2 recipe (forge outer + populate L1/L2 + BL 0x5F96C), verify
@@ -1793,6 +1796,43 @@ Do NOT treat as fact; verify per item before building on it.
   BL 0x5F96C) and verify binary. If functors fire -> downstream (events?
   builders? film?). D1 device capture stays queued backstop (needs live
   game + gadget reinstall + calm session).
+
+## 59. Loginchain2 / nowait1 / plus912 verdicts (2026-10-12, journals the
+   06:09-06:13 runs; no new runs needed)
+- LOGINCHAIN2 (holder fix live): +32 holder=1a6515d0 wired to session
+  10072230 on forged acct 1a651540 (PROVEN log lines). Initiation forged
+  call hr=UD1 clean, spawned worker tid=13 (job 1a6517e0), tid=13 done
+  retval=0 (PROVEN). r1=1 forged call hr=UD1 CLEAN — chain1's wild jump
+  (pc=0x134) GONE (PROVEN). Holder fix removes the fault (PROVEN).
+- LOGINCHAIN2 DELTA vs chain1 (PROVEN lines, mechanism INFERRED): forged
+  acct+25 NOT set (pre25=0, post25=0; chain1 had pre25=1). Initiation's
+  guard write went elsewhere with holder link. Natural D5994 fired inside
+  the forged-call window (#3 r0=10072230 == session exact, frames
+  C2240/57D10/57508/57228 — NOT the natural 93A50 chain of chain1 #2).
+  Thread attribution OPEN (concurrent worker possible; WATCHPC is global).
+  r1 interpretation: watchpc #3/#4 are D5994 hits (WATCHPC=d5994), NOT
+  5ce50 hits — earlier "initiation r0" reading corrected (lr=5CED0 is
+  stale-lr garbage per §46, never evidence).
+- LOGINCHAIN2 STERILE (PROVEN): functors 5f96c/5fe70 = 0 exec; Login
+  failed = 0; +164=2 held (diag164 obj=10002f98 succ=1); film stable
+  non-white (shot.ppm==shot056.ppm md5 d7ae0c9862d1, white-frac 0.043,
+  sky px e3c9f5) = LOADING held, no menu, no whiteout. D5994(r1=2)
+  forged clean, post [+0x18]="ault" pre-existing bytes (PROVEN).
+  Sesswatch exit flag=1 (PROVEN). Verdict: fault fixed, channel still
+  dead — r1=1 runs but length/observer check downstream stalls silently.
+- NOWAIT1 (HARNESS_NOCAPWAIT=1; hypothesis: uncapped cond waits keep pool
+  alive -> completions): REFUTED. Workers STILL all done retval=0 (tid
+  4,8,12,13 — same shape as capped). Functors 0, Login failed 0, heap
+  top 1f426908 (1GB arena, no starvation). Pool death is NOT the wait
+  cap. Keep NOCAPWAIT off default (no signal either way); worker
+  one-shot lifecycle stands as mechanism (exit-after-job, no waiter).
+- PLUS912 (PROBE5=c52ac; hypothesis: +912 vcall sometimes non-null):
+  27 exec (every update), r0=00000000 ALL 27 (PROVEN). Always-NULL.
+  Quit branch early-returns BY DESIGN every update; session/menu logic
+  is NOT in this branch. Verdict: +912 CLOSED as menu path — stop
+  spending probe slots on it (frees PROBE5 for recon targets).
+- Slot budget after this: fill + raiser untouchable; PROBE5 now free
+  (was c52ac). Recon targets per §58: 0x5F9C0 / 0xC4654 / 0x250124.
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
