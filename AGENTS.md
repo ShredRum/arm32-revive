@@ -2303,6 +2303,31 @@ Do NOT treat as fact; verify per item before building on it.
   full APK becomes rational (triggers free); (3) if spiral reproduces
   -> R7 workstream with device-grounded evidence. Harness stays the
   fast loop either way.
+
+## 76. A64-backend abort forensics; unwinder back to PC (2026-10-13)
+- ABORT (device-PROVEN, 3 runs): `GetImmediateAsU64 on incompatible
+  Value` (asserts ON build) while translating manager 0x283B5C region
+  (last [tr] 0x283B78-84; beat pc=0x283B5C lr=0x25142C). Same code runs
+  clean on x86_64 (manager every render). Probes exonerated (abort
+  without throw/functor probes; trans1 c1550,c19f8 clean).
+- SOURCE-LEVEL (computer, free): assert callers = IR const-prop pass
+  (backend-INDEPENDENT — would abort on x86 too; exonerated) +
+  arm64/riscv64/x64 reg_alloc accessors. So it's the A64 reg_alloc
+  assuming a constant operand — backend-specific bug (or our IR-hook
+  interaction at those pcs — none armed there; DIAG164 only at entry).
+  Suspect pattern: predicated ldr/ldrb+cmp+beq run (0x283B84 beq /
+  0x283B88 ldr r0,[r10,#172] + ldreq/cmpeq after). NOT proven — needs
+  a short-prefix repro (~90s/run) + workaround hunt (can't skip manager;
+  no upstream fix: HEAD==origin/master 2026-09-26).
+- USER HYPOTHESIS (x86-path vs arm64-path incompatible): PARTLY TRUE.
+  Same IR/callbacks/guest (inits 948 SVCs identical!), but backends
+  differ in maturity (x64 battle-tested, A64 young). Not "incompatible",
+  but expect A64-only backend bugs like this one.
+- DECISION (easiest path): unwinder root-cause BACK ON PC (relthrow
+  2/2 reproducible in-harness; no device/backend involved). Park the
+  A64 abort with repro recipe (full combo + TRANSLOG; abort ~svc1100
+  at manager translate). Next: raise-driver 0x45A778 + FindExidx
+  bridge interplay (why 500+ queries from one pc?) — bytes + our code.
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
   284078=e589a0a4, 466F34=344087e5, 46B618=0660a003 — ALL 6 MATCH.
