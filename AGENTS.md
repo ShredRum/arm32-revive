@@ -1900,6 +1900,51 @@ Do NOT treat as fact; verify per item before building on it.
   Then loop-MISS menu args (W5 recipe attempt with forged graph args?);
   backstop D1 device capture (queued).
 
+## 62. T2 job-tail + E1 enqueue attribution: sessions never posts
+   (2026-10-13, notifylive.log + enqueuewho.log)
+- T2 STATIC (read-only subagent, jev-scored): success runner 0xD5DA4
+  (gate [job+60]==0, virtual slot+28 = handler 0xD6C78, lr=D5DE4) ->
+  flag write 0xD70FC (mov#1/strb+120, PROVEN bytes) -> tail
+  (0x6141C/new/0x1A96EC, NO bl to 28DD04/28ED64/28DB9C/28DBBC on success
+  path — PROVEN absence) -> 0x1A96EC posts ONLY to Identity event array
+  (append under mutex, NO pipe write, NO counter inc, NO cond-signal —
+  PROVEN). Dead link 0.91: channel mismatch (array vs pipe/queue).
+  [+12] branch UNRESOLVED (3 hypotheses ~0.35-0.5; do not gate on it).
+  Dead producer named: 0x2A1A34 (zero static callers) + worker->main
+  pipe-notify. Recipe: direct 0xD5DA4 with live objects, or accept
+  impossibility if array stays empty (needs HTTP-200 response object +
+  subscriber table + 0x2A1A34 poster — all dead).
+- T2a NOTIFYLIVE (RETSUCC combo, WATCHPC=28ed64): notify FIRES 2x
+  (#1 r0=1028e3e8 @line 1114 post-registry-save; #2 r0=12f75198 @line
+  8481 amid DNS phase; both lr=28dd6c = called FROM enqueue, as T2
+  decoded). Sessions handler ran 2x (10072230 via D5DE4 @8354/@8561),
+  flag=1, +164=2, film LOADING, functors 0, Login failed 0. So notify
+  channel ALIVE but sessions-adjacent zeros everywhere.
+- E1 ENQUEUEWHO (WATCHPC=28dc00 trampoline + PROBE4=28dd04): 2 enqueues
+  (caps NOT hit: 2<4 WATCHPC, small probe totals — observation
+  complete). Both via 0x291A5C (lr=291a74; BL scan: 5 callers incl.
+  live 0x198990). #1 @line 1010 (early boot, pre-sessions) = non-
+  sessions job, PROVEN by timeline. #2 @line 8507 carries a STACK-BUILT
+  entry (28DD04 r1=fe7ff10c) = synchronous inline post, NOT a heap
+  job-completion record (BET2's well-formed {MAGIC...} shape absent).
+  Sessions runs (@8354/@8561, obj 10071FA8) have NO adjacent heap-
+  record enqueue. VERDICT E1: sessions completions NEVER enqueue —
+  T2 dead-link CONFIRMED live in RETSUCC config. The 2 observed
+  enqueues belong to other flows (early-boot job + main-side inline
+  post); poster helper 0x291A5C shared, outer roots differ (1a1c1c vs
+  17ea58). r1=5fc18471 constant across notify hits = stale (side-show,
+  not evidence).
+- CONSEQUENCE: T2's direct-0xD5DA4 recipe half is REDUNDANT (natural
+  sessions-succ IS that path running live every run — flag=1 proves
+  it); its impossibility condition is ACCEPTED (array drains nowhere,
+  subscriber count stays 0, worker->main wakes stay 0). Stop spending
+  runs on the sessions completion channel — closed from both ends
+  (static absence + live silence).
+- NEXT: loop-MISS menu args (funnel #2; W5 recipe: scene+0 virtual
+  with menu-id + Step2 builder 0x250AB8) — check existing loopcall
+  infra first. Then D1 device capture (needs live game + gadget
+  reinstall + calm session — user-gated).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
