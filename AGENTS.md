@@ -1663,6 +1663,26 @@ dead subsystem, game degrades without it).
   post through the PROVEN delivery (mirror path already handles natural
   content when present).
 
+## 48. Subscribe audit + functor verdict: channel, not call (2026-10-12)
+- Static (read-only subagent): helper 0x3833B8 binds NO event — event comes
+  from the functor in both shapes (wrapper-fresh and direct-existing). All 21
+  sites bind void(void)-family; UPDATE (Event<void(float,Context*)>) has only
+  2 refs in binary (create _INIT_3 + publish 0xC2140). NO static UPDATE
+  subscriber (0.96). Live: 13 subscribe executions/boot (init, void x7, ads
+  x2, wrappers x2 with r2=processor not event), none UPDATE. +164 writer is an
+  EFFECT of builders (r1=1 sites inside builders), not a trigger — causality
+  flipped: build menu to flip +164, not vice versa.
+- Live functor (functor1.log, forged __func ctx via RAWBUILD): 0x5FE70 runs
+  CLEAN (hr ok, "Login failed" x1 logged, post [+0x18]=0), film RIO LOADING,
+  +164=2, zero builders. Forged ctx suffices (no real account needed for clean
+  execution+log). Verdict: MISS — the functor CALL is sterile (like direct
+  loginFinished: r2=0 skips +40/+16 reads, one +19 write + log).
+- REFRAMED GAP: trigger is the completion CHANNEL around the call (job tail
+  notify/post/wake/loop-continuation), never the call. Sessions SUCCESS also
+  stalls (flag=1, registry saved) => channel dead in both outcomes =>
+  independent of login/catch/unwinder. NEXT: T2 static (process [+12] branch
+  + writers + functor epilogue + job tail + consumers + minimal recipe).
+
 ## 43. Unwinder forensics + resolve-branch + deaths (2026-10-12, pre-compression)
 - SPIRAL MECHANISM (live): death = 500+ Find_exidx(pc=0x45A778) from FIRST
   query (no early walk; 1026 unanimous). 0x45A778 inside raise driver

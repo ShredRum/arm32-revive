@@ -1165,6 +1165,20 @@ int main(int argc, char** argv) {
                     std::uint32_t found = 0;
                     if (const char* r0e = std::getenv("HARNESS_RAW0")) {
                         found = static_cast<std::uint32_t>(std::strtoul(r0e, nullptr, 16));
+                    } else if (std::getenv("HARNESS_RAWBUILD")) {
+                        // Forge a login-functor ctx (for direct 0x5FE70 calls):
+                        // [+0]=functor vtable (unread, realistic), [+4]=zeroed
+                        // account-sized block, [+8]=0 (=> loginFinished skips
+                        // +40/+16 reads), [+0xC]=empty SSO (all zero).
+                        const std::uint32_t zb = rt.GuestCalloc(1, 0x2C);
+                        const std::uint32_t cx = rt.GuestCalloc(1, 0x20);
+                        if (zb && cx) {
+                            const std::uint32_t fv = 0x65E650u;
+                            std::memcpy(rt.H(cx), &fv, 4);
+                            std::memcpy(rt.H(cx + 4), &zb, 4);
+                            found = cx;
+                            std::printf("[rawpost] forged ctx=%08x acct=%08x\n", cx, zb);
+                        }
                     } else if (!rawneedle.empty()) {
                         const std::uint32_t lo = 0x10000000u;
                         const std::uint32_t hi = rt.HeapTop();
@@ -1187,7 +1201,16 @@ int main(int argc, char** argv) {
                             }
                             std::printf("[rawpost] candidate %08x [+0x14]=%08x %s\n", a, w14,
                                         (w14 == 0x11) ? "MATCH" : "skip");
-                            if (w14 == 0x11) {
+                            // HARNESS_RAWANY=1: accept the first needle hit
+                            // without the login-record fingerprint (e.g. the
+                            // RovioAccount singleton by its vtable needle).
+                            static bool rawany = false;
+                            static bool rawany_init = false;
+                            if (!rawany_init) {
+                                rawany_init = true;
+                                rawany = (std::getenv("HARNESS_RAWANY") != nullptr);
+                            }
+                            if (rawany || w14 == 0x11) {
                                 found = a;
                                 break;
                             }
