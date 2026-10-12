@@ -2183,6 +2183,26 @@ Do NOT treat as fact; verify per item before building on it.
   — one static scan + pctrace grep per rung (all free) to the highest
   dead link, then forge/call THAT.
 
+## 71. drawRect-is-not-Lua; producer-timeline plan (2026-10-13)
+- KILL (PROVEN, free): all 649 APK lua files contain ZERO drawRect
+  (case-insensitive). No script calls it — the "Lua C-func" label is
+  WRONG (registration real: 0x28EBFC code + rodata drawRect@0x5C161F,
+  prologue 0xA3EB4 real — a live-but-script-unreferenced binding, or
+  misread decomp). 0xA4xxx = NATIVE scene-graph draw path (rect
+  primitive via GL_Context slot+64; 0x2791A4 = generic float reader;
+  0x279ACC = generic protected-call). Lua EXISTS separately (scripts
+  load, 4 boot pcalls) but is NOT the menu-draw driver.
+- CONSEQUENCE: menu driver = scene-graph with menu NODES (device has
+  them; we have 1 loading node). Appender still loop-MISS only; node
+  key source still unknown; r1=color correction stands (draw param,
+  not id). Every framing converges on the same missing live producer
+  (completion -> subscribers -> nodes -> draws).
+- NEXT D1e (device, ONE fresh boot, all sparse): loginFinished (2 hits)
+  + drawRect 0xA3EB4 (cap 10) + builder 0x250AB8 (cap 6, this/r1) +
+  gate164-change-only, ALL with timestamps. Yields the PRODUCER
+  TIMELINE (what fires between loginFinished and the +11s burst?) —
+  sequences the missing link without guessing it. No arg-heavy hooks.
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
