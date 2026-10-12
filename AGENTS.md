@@ -1651,8 +1651,7 @@ dead subsystem, game degrades without it).
 - NEXT: node-layout subagent (size? id offset? loop edge? appender? recipe)
   -> forge-or-factory. No live angle until it returns.
 
-## 56. Factory verdict + loopcall + coverage map (2026-10-12)
-- Factory (read-only subagent): SCENE factory 0x24DB38 (w,h,orient; new 704B;
+## 56. Factory verdict + loopcall + coverage map (2026-10-12)- Factory (read-only subagent): SCENE factory 0x24DB38 (w,h,orient; new 704B;
   vtable 0x669404 = GL_Context!) called ONLY from nativeInit (once). GL_Image
   factories build splash/loading images. NO menu-scene factory exists. Builder
   key 0x101929 = graph node id (dynamic; loop iterates scene+188 calling node
@@ -1677,6 +1676,19 @@ dead subsystem, game degrades without it).
 - Node verdicts: 1 loading node only (vtable 0x669710, layout known); menu
   node absent (id + vtable scans empty). Forge recipe exists but needs graph
   attach (contradicted 0.96 alone). Node subagent pending (size/id/edge).
+
+## 57. Login chain ordered triple + session+72 null (2026-10-12)
+- loginchain1 (LOGINAT=25, LOGINAT1=35 r1=1, D5994(r1=2)@40, functor probes):
+  initiation clean (+25 0->1 PROVEN via pre25=1); r1=1 jumps wild (pc=0x134,
+  sp=unmapped gap — virtual through null, NOT setjmp (no such imports));
+  GuestMmap properly maps (gap theory dead); D5994(r1=2) clean, post [+0x18]
+  = pre-existing "ault" bytes; functors 0; film LOADING.
+- sessdump1 (HEXDUMP session window): session+64..+96 ALL ZEROS => +72 null.
+  The r1=1 path's +72 virtual reads null -> module-zero-page deref chain ->
+  wild jump. +72 filler unknown (JSON keys? account link? server-signed?).
+- Queued static: +72 provenance + filler recipe (JSON shapes vs object link
+  vs crypto). Next live depends on it (extend sjson? link account? bypass?).
+- WATCHPC proven as universal ladder tool (regs+backtrace, no slot, capped).
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check

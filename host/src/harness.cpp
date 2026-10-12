@@ -26,6 +26,9 @@ namespace {
 volatile int g_current_init = -1;
 volatile bool g_running = false;
 std::uint32_t g_snap_region[64] = {};
+// HARNESS_LOGINAT1: forged account shared from the LOGINAT block (same ctx
+// twice, device order: initiation, then r1=1 registration).
+std::uint32_t g_login_acct = 0;
 
 void Watchdog(int) {
     char buf[128];
@@ -1303,6 +1306,7 @@ int main(int argc, char** argv) {
                                         rt.loginat_session_);
                         }
                         std::printf("[loginat] forged account=%08x\n", acct);
+                        g_login_acct = acct;
                         auto& rgs = jit.Regs();
                         rgs.fill(0);
                         rgs[13] = abr::kStackTop - 0x200;
@@ -1323,6 +1327,52 @@ int main(int argc, char** argv) {
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
+                        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    }
+                }
+            }
+            // HARNESS_LOGINAT1=N (JNI call index): loginFinished with r1=1 on
+            // the LOGINAT-forged account (same ctx twice, device order).
+            // r1=1 executes the +32 block + virtual +72 observer registration
+            // that r1=0 skips (PROVEN). Binary: registers (functors/events/
+            // builders/film follow?) vs faults (pc+addr = requirement).
+            if (const char* se = std::getenv("HARNESS_LOGINAT1")) {
+                static bool sdone = false;
+                if (!sdone && i == (std::size_t)std::atoi(se)) {
+                    sdone = true;
+                    std::uint8_t pre25 = 0xFF;
+                    if (g_login_acct != 0 &&
+                        rt.CheckRange(g_login_acct + 25, 1, false)) {
+                        std::memcpy(&pre25, rt.H(g_login_acct + 25), 1);
+                    }
+                    std::printf("[loginat1] acct=%08x pre25=%u\n", g_login_acct,
+                                pre25);
+                    if (g_login_acct != 0 && rt.IsCodeAddress(0x5D2F0u)) {
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x200;
+                        rgs[13] -= 16;
+                        const std::uint32_t zw = 0;
+                        for (int k = 0; k < 4; k++) {
+                            std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                        }
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = g_login_acct;
+                        rgs[1] = 1;
+                        rgs[2] = 0;
+                        rgs[3] = 0;
+                        CallGuest(jit, 0x5D2F0u);
+                        std::printf("[loginat1] calling @0005d2f0 r1=1 ... ");
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::uint8_t post25 = 0xFF;
+                        if (rt.CheckRange(g_login_acct + 25, 1, false)) {
+                            std::memcpy(&post25, rt.H(g_login_acct + 25), 1);
+                        }
+                        std::printf("hr=%d r0=%08x +25: %u -> %u\n",
+                                    static_cast<int>(hr2), rgs[0], pre25, post25);
                         jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
                     }
                 }
@@ -1447,8 +1497,15 @@ int main(int argc, char** argv) {
                     std::uint32_t found = 0;
                     if (const char* r0e = std::getenv("HARNESS_RAW0")) {
                         found = static_cast<std::uint32_t>(std::strtoul(r0e, nullptr, 16));
-                    } else if (std::getenv("HARNESS_RAWBUILD")) {
-                        // Forge a login-functor ctx (for direct 0x5FE70 calls):
+                    } else if (std::getenv("HARNESS_RAWSTASH")) {
+                        // r0 = live-stashed session (e.g. D5994 traffic) for
+                        // direct calls needing real session args (r1 via
+                        // HARNESS_RAW1).
+                        found = rt.loginat_session_;
+                        if (found) {
+                            std::printf("[rawpost] stashed session=%08x\n", found);
+                        }
+                    } else if (std::getenv("HARNESS_RAWBUILD")) {                        // Forge a login-functor ctx (for direct 0x5FE70 calls):
                         // [+0]=functor vtable (unread, realistic), [+4]=zeroed
                         // account-sized block, [+8]=0 (=> loginFinished skips
                         // +40/+16 reads), [+0xC]=empty SSO (all zero).
