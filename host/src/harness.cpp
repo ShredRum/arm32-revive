@@ -1301,9 +1301,21 @@ int main(int argc, char** argv) {
                             std::memcpy(rt.H(acct + 32), &ab, 4);
                         }
                         if (rt.loginat_session_ != 0) {
-                            std::memcpy(rt.H(acct + 32), &rt.loginat_session_, 4);
-                            std::printf("[loginat] +32 linked live session=%08x\n",
-                                        rt.loginat_session_);
+                            // Holder fix (+72 verdict): [account+32] must be
+                            // a 0x10B holder with session at [+8] (NOT the
+                            // session directly — wrong level faults via
+                            // [mutex+72]). Alloc zeroed holder, link both.
+                            const std::uint32_t hh = rt.GuestCalloc(1, 0x10B);
+                            if (hh) {
+                                std::memcpy(rt.H(hh + 8), &rt.loginat_session_, 4);
+                                std::memcpy(rt.H(acct + 32), &hh, 4);
+                                std::printf("[loginat] +32 holder=%08x session=%08x\n",
+                                            hh, rt.loginat_session_);
+                            } else {
+                                std::memcpy(rt.H(acct + 32), &rt.loginat_session_, 4);
+                                std::printf("[loginat] +32 linked live session=%08x\n",
+                                            rt.loginat_session_);
+                            }
                         }
                         std::printf("[loginat] forged account=%08x\n", acct);
                         g_login_acct = acct;

@@ -1,19 +1,27 @@
 # AGENTS.md — AngryBirdsRio arm64 port (dynarmic). FULL STATE DUMP.
 
-## HANDOFF (read first after any compression; updated 2026-10-12 eve)
+## HANDOFF (read first after any compression; updated 2026-10-13 night)
 - STATUS: boot→RIO LOADING stable (real art, sessions OK flag=1). Menu NOT
   reached. Tree clean, all code+journal committed. Files dirs: work/files19
   active (+ clean_registry.bin reset before EVERY run — registry is one-shot).
 - FUNNEL (ranked): (1) login-ladder: initiation BL 0x5CE50 runs clean, needs
-  session-linked +32 (link pattern PROVEN); functors never materialize —
-  AWAITING static verdict (trigger-subtree gates subagent) for the next rung.
-  (2) Node/loop path: loop callable directly (returns fresh node*, +0x18=7),
-  builders need graph+valid rect (gate bypass proven, writer-fault mapped).
-  (3) Manager pass: needs +172/+176 pulse (timing-jittered) or forge (faults
-  on exclusive@0 — queue-ish objects needed). (4) Unwinder: CLOSED (R7=0).
-  Time/apdrive: DEAD x3. Calls sterile. UPDATE-subscription absent.
-- NEXT ACTION (when trigger-gates verdict lands): follow its recipe (1-2
-  runs). If it dead-ends: D1 device builder-capture (QUEUED DEVICE WORK).
+  session-linked +32 (link pattern PROVEN); functors never materialize.
+  Trigger-gates verdict ARRIVED (§58d-recipes below + older §notes): ordered
+  triple tested (loginchain2: holder fix works, r1=1 clean, D5994(r1=2) clean,
+  functors still 0). (2) Node/loop path: loop callable directly (returns fresh
+  node*, +0x18=7), builders need graph+valid rect (gate bypass proven,
+  writer-fault mapped). (3) Manager pass: needs +172/+176 pulse or forge
+  (faults on exclusive@0). (4) Unwinder: CLOSED (R7=0). Time/apdrive: DEAD x3.
+  Calls sterile. UPDATE-subscription absent.
+- FOUR-SUBAGENT WAVE VERDICTS: see §58 (58a lookup / 58b loop invocation /
+  58c delivery-impossibility / 58d appender+recipe). Status HYPOTHESES —
+  nothing ran live. Convergent picture: producers dead at every level,
+  structure fully mapped, delivery proven only synthetically.
+- NEXT ACTION: ONE live recon run (no new code): standard combo + WATCHPC on
+  reachable sites, dump live values for forge recipes (§58 synthesis). Then
+  fill per W1+W2 recipe (forge outer + populate L1/L2 + BL 0x5F96C), verify
+  binary (functors? events? builders? film?). Backstop: D1 device capture
+  (QUEUED DEVICE WORK; needs live game + gadget reinstall + calm session).
 - DO NOT: drop fill (death@update#1), trust probe-emit/PCTRACE counts
   (translation≠execution — count [probe]#N), hardcode heap addrs (drift),
   run parallel device sessions, bulk-edit without backup.
@@ -1689,6 +1697,102 @@ dead subsystem, game degrades without it).
 - Queued static: +72 provenance + filler recipe (JSON shapes vs object link
   vs crypto). Next live depends on it (extend sjson? link account? bypass?).
 - WATCHPC proven as universal ladder tool (regs+backtrace, no slot, capped).
+
+- WATCHPC proven as universal ladder tool (regs+backtrace, no slot, capped).
+
+## 58. Four-subagent wave: lookup/loop/delivery/appender (2026-10-12, HYPOTHESES)
+Status: read-only statics, jev-scored, byte-evidenced where marked PROVEN.
+Nothing here ran live — every recipe needs live fill + binary verification.
+Do NOT treat as fact; verify per item before building on it.
+
+### 58a. Lookup 0x5E350 (INFERRED mechanics, PROVEN bytes)
+- Semantics (bytes PROVEN): r0=map-owner Q, r1=key-holder Kptr, r2=out-ptr
+  (caller stack), r3=flag (1=insert-or-find, 0=pure lookup). Stage1 0x5E4C8:
+  RB-tree rooted at (r0)+0x20, key=**r1 double-deref, node key +16. Stage2:
+  r3==1 -> find-or-create (0x5E92C); r3==0 (all ARM callers) -> pure search,
+  returns node+20 or NULL. NOT a token/session store (type strings prove
+  login/event-functor domain; token theory REFUTED 0.07).
+- Null iff L1-null or L2-end; *out always written. r3=0 at all 7 ARM BL sites;
+  flag-1 path DEAD in ARM (Thumb scan incomplete — caveat).
+- Inputs needed: Q valid + root + matching node (producer UNKNOWN — zero
+  proven writers; sessions/registry do NOT write it); Kptr valid + key match
+  + *(P+16)!=0 (guard 0x5F9A0); r2=stack (free); r3=0 (immediate).
+- Recipe (0.25, REVIEW): obtain live functor (never hardcode heap) ->
+  satisfy guard 0x5F9A0 -> populate L1 (root *(Q+0x20), node +16==key) + L2
+  (same key, +20 valid, [+12]==0) -> call order: boot -> 0x5CE50 ->
+  RETSUCC sessions -> BL 0x5F96C / synthetic event with real functor.
+  Producers to hunt: creator of $_1 functor (this+4/+8/+12/+16 writers),
+  writer of P+0 key and P+16, writer of Q+0x20 root.
+
+### 58b. Loop 0x5F96C invocation (PROVEN edges, INFERRED wiring)
+- 0x5F96C = outer operator(), ARM, vtable 0x65E618 slot+24. Zero BL
+  (ARM+Thumb exhaustive), 1 DATA hit (own slot). ONLY vtable dispatch.
+- Virtual invoker 0x5E434 (slot +0x18): THE edge; its 7 BL callers all
+  downstream/sibling (inside other outers), never upstream.
+- Root poster chain (INFERRED async handoff, weakest link): 0x93A50 --BL-->
+  0x5CE50 (sole BL caller, PROVEN) -> BL 0xDB658 -> clones/wraps ->
+  enqueue 0x197D94 -> functors in jobs, never invoked synchronously.
+  Second 0xDB658 caller (0x604C0) is loginWithUI-flow, EXCLUDED.
+- Entry: r0 = outer __func* only (0x20B: +0=vtable 0x65E618, +4=proc,
+  +8=owner, +12/+16=account/session, +20..=SSO). Gates: observer non-empty
+  (0x5F9A0), lookup non-null (0x5F9CC), fired-flag (0x5F9D4), count
+  (0x5FA24), per-element (0x5FA78).
+- Recipe: forge outer (new 0x20, fields from live stash, NEVER hardcode) +
+  BL 0x5F96C; or natural via 0x5CE50 (sterile in harness — completion parks).
+
+### 58c. EventProcessor delivery (impossibility verdict 0.94)
+- Poster: Lua binding loginRovioId -> handler 0x5D7C8 -> $_0/$_1 lambdas ->
+  EventProcessor::enqueue chain (INFERRED decomp; entry bytes mismatch noted).
+  Trigger = USER LOGIN ACTION in Lua, NOT job completion. Dead: handler never
+  translates, Lua never calls, 0 hits everywhere.
+- Queue: DefaultEventProcessor singleton (BSS 0x6DE278 INFERRED addr, live
+  existence via class-sniff r0=0x66B7B8) + static event BSS 0x672DA8 + heap
+  subscriber vector. NOT queue-B (distinct channel, do not conflate).
+- Runner: nativeUpdate -> BL 0xC2140 -> walk 0xC45FC every update, count==0
+  always, invoke never fires. Synthetic EVENTPOST = mechanism proven
+  (INVOKE 27/27), content absent.
+- Dispatch: outer builds __func/vtable 0x65E650 per element + 0x5E434;
+  fail/success functors; loop 0x5E164 twin. All dead.
+- VERDICT: no live recipe through the REAL processor exists in-harness.
+  Needs live producer (Lua binding chain) that is itself dead. Direct
+  0x5CE50 / 0x5FE70 / REDIR all run clean-sterile (log only). Named dead
+  producer: loginRovioId -> 0x5D7C8 -> enqueue chain.
+
+### 58d. Menu-node appender (PROVEN mechanism, INFERRED trigger)
+- Node layout PROVEN: size 192 (0xC0, ctor 0x26305C), vtable VA 0x669710,
+  [+120]=scene, [+180]=key1, [+188]=key2/stack, [+184]=0. +172/+152/+164/+168
+  are VTABLE slots (0x250060 ldr+blx reads). Getters: +152 returns [+180],
+  +164 returns [+84], +168 returns [+88], +172 returns address of [+108].
+- Loop 0x250018: iterates +188 vector, per-node gates (helper==1, vt+152==r7
+  key, vt+164 vs r9, vt+168 vs stack), miss path (0x2500E4-0x250158)
+  allocates+constructs+pushes/grows — SOLE 0xC0 appender mechanism.
+  Ctor 0x26305C has exactly 2 callers: 0x24FFF4 (factory helper) + 0x250124
+  (loop). Builders zero BL (virtual-only); scene vt 0x669428 slots verified.
+- Key 0x101929: no static occurrences, no heap hits — dynamic/computed.
+  Candidate [+180] WEAK (0.13). manager 0x283B5C CANNOT append (single arg,
+  no key regs; loading branch r1=3 only).
+- Recipe (INFERRED, needs D1 to collapse this/key/caller/rect): preconds
+  (clean registry, 1GB heap, mgr fields per §56, 1 vector entry, quiet
+  workers; discover scene=[mgr+168], mgr=[scene+52], never hardcode) ->
+  Step1: scene+0 virtual 0x250018(scene, r1=menu-id?, r2=string?, r3=int?,
+  stack...) -> MISS push; Step2: scene+28 virtual 0x250AB8(subobj, key,
+  rect count=4 valid) -> body -> writer r1=1 -> +164 flips as effect.
+- Forge-suffices CONTRADICTED 0.96 (needs graph attach — proven by
+  gate-bypass fault at writer).
+
+### Cross-agent synthesis (my read, INFERRED)
+- All four converge: producers dead at every level (Lua binding, map
+  writers, posters, subscribers); structure fully mapped (exhaustive zero-BL
+  scans); delivery mechanisms proven only synthetically.
+- Sharp unknowns left: (a) guard 0x5F9A0 content (needs live functor —
+  chicken-egg), (b) L1/L2 population (no writers — forge per W1 recipe),
+  (c) loop-MISS menu args (r2-string? +84/+88? — D1 answers), (d) key source.
+- Next: ONE live recon run (no new code): standard combo + WATCHPC on
+  0x5F9C0/0xC4654/0x250124 if reachable, dump whatever live values exist
+  for the forge recipes. Then fill per recipes (W1+W2 first: outer+trees+
+  BL 0x5F96C) and verify binary. If functors fire -> downstream (events?
+  builders? film?). D1 device capture stays queued backstop (needs live
+  game + gadget reinstall + calm session).
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
