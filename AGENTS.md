@@ -1535,8 +1535,7 @@ dead subsystem, game degrades without it).
   subsystem active ONLY at boot. Menu lives without it.
 - NEXT: cold boot + bc100-entry regs (signature!) + Java caller + ctx dump.
 
-## 52. Time/apdrive DEAD for boot, 3rd confirmation (2026-10-12, S1 static)
-- Read-only subagent, byte-verified: time leg = job -> curl-multi -> parser
+## 52. Time/apdrive DEAD for boot, 3rd confirmation (2026-10-12, S1 static)- Read-only subagent, byte-verified: time leg = job -> curl-multi -> parser
   0xCBCE0 (200-check, JSON asserts, writes state+0x28/2C/30) -> publish to
   NetworkTime LISTENERS (success functor sets +0x54/delta + cond signal).
   Apdrive leg = local variantconfig parsed at boot (direct ctor, no queue) +
@@ -1547,6 +1546,22 @@ dead subsystem, game degrades without it).
 - Recipes exist (direct 0xCBCE0 / 0xC8F90+0xC2134 calls) but pointless for menu
   (no observer). Time/apdrive PURSUIT OVER (third independent confirmation).
   Awaiting S2 (gate+148) for the last main-observable candidate.
+
+## 53. Gate#2 static-always-1; main observes nothing (2026-10-12, S2 static)
+- Read-only subagent, byte-verified: gate#2 = [GL_Context *0x672E6C]+148 =
+  `mov r0,#1; bx lr` (reads NO memory; vtable fileVA 0x669404 = GL_Context,
+  object 0x2C0B heap, created nativeInit, freed only deinit). Live "0->1" was
+  null->created, not a state flip. Gate#1 (manager non-null) + gate#3 (quit 0)
+  also static. MAIN OBSERVES NOTHING DYNAMIC — trigger is calls, never data.
+  Downstream of gate#2 (always taken): time accumulator [+648], manager
+  update, EVENT WALK 0xC2140 (empty vector), quit branch. What varies per
+  update: [+648] clock, timestamps, manager/event/scene state — never gates.
+- Consequence: no completion-file/flag/queue can move main (nothing reads
+  them). Remaining menu paths: (a) early login initiation (never fairly
+  tested: loginat6 faulted on heap, now fixed), (b) natural event posters +
+  subscribers (both absent), (c) scene factory trigger (unknown).
+- NEXT (live, no build): LOGINAT=11 + functor probes (5f96c/5fe70) + session
+  stash — early-timing initiation retest with 1GB heap.
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
