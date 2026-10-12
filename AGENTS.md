@@ -1547,8 +1547,17 @@ dead subsystem, game degrades without it).
   (no observer). Time/apdrive PURSUIT OVER (third independent confirmation).
   Awaiting S2 (gate+148) for the last main-observable candidate.
 
-## CRUTCH LEDGER (harness-only diags, never ship; remove when they stop paying)
-- EVENTPOST/EVENTFILL (EventEntry/EventDecide/free-marker): synthetic events
+## QUEUED DEVICE WORK (do not forget; needs live game + single calm session)
+- D1. BUILDER-CAPTURE (fast path #1, highest information): one-shot sparse
+  hook on 0x250AB8 entry at cold boot -> this/vtable/r1/caller-backtrace +
+  event-vector state at fire time. Collapses factory+this+key+subscriber hunts
+  at once. Preconditions: game alive on emulator, tunnel up, NO flood hooks,
+  read logs only AFTER session end. (Queued 2026-10-12; log-tail diff gave
+  timing only: login pair +3s, retry +10s, no mechanism.)
+- D2. JNI-BOUNDARY DIFF (fast path #3): sparse Call*/Get* names+counts over
+  boot->menu -> diff vs our ~10/63 called natives -> call the missing ones.
+
+## CRUTCH LEDGER (harness-only diags, never ship; remove when they stop paying)- EVENTPOST/EVENTFILL (EventEntry/EventDecide/free-marker): synthetic events
   -> walk invokes. Status: PROVEN delivery (INVOKE 27/27). KEEP (infra).
 - SCENEAT (7-arg BL 0x283A3C): flip proven live + white. Status: verdict
   recorded (§47). KEEP code, no rerun needed unless builders change the scene.
