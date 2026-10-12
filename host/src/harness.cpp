@@ -1424,15 +1424,25 @@ int main(int argc, char** argv) {
                     const std::uint32_t evc = rt.GuestCalloc(1, 8);
                     const std::uint32_t evd = rt.GuestCalloc(1, 12);
                     if (evc && evd) {
-                        const std::uint32_t bxlr = 0x251260u;
+                        // HARNESS_BC158LIVE=1: live record shape from D1c
+                        // (C={0xBEA58 tag-dispatcher,0}, D={0x11,0xd,0}).
+                        // Default (J1): sterile C={bx-lr,0} + zero D.
+                        std::uint32_t c0 = 0x251260u;
+                        std::uint32_t d0 = 0, d1 = 0, d2 = 0;
+                        if (std::getenv("HARNESS_BC158LIVE")) {
+                            c0 = 0xBEA58u;
+                            d0 = 0x11;
+                            d1 = 0xd;
+                            d2 = 0;
+                        }
                         const std::uint32_t z = 0;
-                        std::memcpy(rt.H(evc), &bxlr, 4);
+                        std::memcpy(rt.H(evc), &c0, 4);
                         std::memcpy(rt.H(evc + 4), &z, 4);
-                        std::memcpy(rt.H(evd), &z, 4);
-                        std::memcpy(rt.H(evd + 4), &z, 4);
-                        std::memcpy(rt.H(evd + 8), &z, 4);
-                        std::printf("[bc158] C=%08x {bx-lr,0} D=%08x {0,0,0}\n",
-                                    evc, evd);
+                        std::memcpy(rt.H(evd), &d0, 4);
+                        std::memcpy(rt.H(evd + 4), &d1, 4);
+                        std::memcpy(rt.H(evd + 8), &d2, 4);
+                        std::printf("[bc158] C=%08x {%08x,0} D=%08x {%x,%x,%x}\n",
+                                    evc, c0, evd, d0, d1, d2);
                         auto& rgs = jit.Regs();
                         rgs.fill(0);
                         rgs[13] = abr::kStackTop - 0x200;

@@ -2137,6 +2137,35 @@ Do NOT treat as fact; verify per item before building on it.
   live-shaped record. If words unreadable (ART-guarded) -> static
   poster hunt instead (who writes {funptr,tagged}+3 words 52B apart?).
 
+## 69. D1c gold: live record + delete-dispatch + J1-safety (2026-10-13)
+- LIVE RECORD (PROVEN, this.context reads work): BC0AC#1/#2 (fresh boot,
+  +11s): r0=0x9b21c258 r1=0x9b205af0, C=[0x148aea58, 0x0],
+  D=[0x11, 0xd, 0x3950e260] then [0x21, 0x1f, 0x39410600] (D varies per
+  event). C[0] file VA = 0xBEA58 (code-verified subtraction). C[1]=0
+  (even/direct path). r0 discarded by body (mov r0,r1) — B=r1 flows to
+  functor r0.
+- 0xBEA58 = TAGGED-VALUE dispatcher (PROVEN distv): tag/ptr pairs from
+  stack buf ([sp+40]/[sp+48], [sp+16]/[sp+24], [sp+28]/[sp+36]...),
+  tst #1/beq skips, all 5-6 callees -> PLT 0x5369C/0x536A8 = idx4/5 =
+  _ZdlPv (operator delete) + __stack_chk_fail (code-verified PLT math).
+  So C is a cleanup/ack functor (frees tagged payloads), NOT the draw
+  path (draw flows via pcall<-Lua separately). Routing refined: Java
+  entry region -> native chain -> BC0AC(r0,B,C,D) -> BC158 (copies D,
+  zeroes it, blx C[0]) -> BEA58 deletes tagged words.
+- J1-SAFETY (PROVEN by code): unknown imports incl. _ZdlPv fall to
+  generic [stub]->0 (logs throttled + Ret 0); GuestFree is no-op.
+  J2 (C={0xBEA58,0} real funptr) is host-safe: deletes no-op, faults
+  (if any) name requirements. No host corruption possible.
+- GHIDRA-VA RULE (user asked; standing, journaled): GhidraVA-0x10000 =
+  fileVA uniformly (code AND data incl. DAT_). Old "FUN_==file" claim
+  burned hours (0xD45FC slip, wrong new(0x2C) record); agents caught 2
+  more slips since. Every load-bearing addr verified by prologue bytes
+  (distv) + python LE — decomp hypothesis-only. We do NOT have that
+  problem anymore (it is a checked rule, §44 VA RULE).
+- NEXT J2 (built: HARNESS_BC158LIVE=1): same BL 0xBC158 with live
+  record C={0xBEA58,0} D={0x11,0xd,0} B=0 -> binary (runs the real
+  delete-dispatch clean? faults where=next requirement? downstream?).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
