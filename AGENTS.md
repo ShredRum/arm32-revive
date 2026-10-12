@@ -2086,6 +2086,33 @@ Do NOT treat as fact; verify per item before building on it.
   drawRect/builders/film. If 0xBC0AC silent on fresh boot → next
   candidate from the 15 (or the WebView angle).
 
+## 67. BC0AC fires 4x at +11s + 18-caller table + pctrace zeros (2026-10-13)
+- BC0AC DEVICE (fresh boot, hook_bc, PROVEN): 4 hits (#1 lone, #2-4 in
+  70ms), args IDENTICAL: r0=0x9b21c2b8 r1=0x2ca623b0 r2=0x15049274
+  r3=0x15049240. Timing +11s post-attach = construction window. bt
+  (identical x4): BC0AC <- 0xB004C <- 0xAFFA8 <- 0x39720C <- 0x39D3A8
+  <- ... <- 0x6CDAC <- 0x878F8 <- 0x65AFEC <- 0x695BC <- 0xBC124 <-
+  libart JNI trampoline. So 0xBC0AC serves BOTH a native caller
+  (0xB004C) AND Java (registered native; libart frame direct). mem-read
+  (sp/[r0]) FAILED x4 (ART/protected addrs — arg shapes stay opaque).
+  Earlier "0 hits" was early-check race (attach lag 10-40s); rule: never
+  verdict zero before session end.
+- 18-CALLER TABLE (read-only subagent, PROVEN bytes): all 18 pcall
+  wrappers named (update/input/physics/ads/lifecycle/…); menu-driver
+  pick WEAK tie (0x68D3C/update 0.32, nothing >0.5 — honest, no force).
+  0xBC0AC has NO ARM BL to pcall/18 (extent scan) — path indirect.
+  0x85Bxxx OOB = MY transcription cut (0x14 prefix dropped), subagent
+  correct to flag; device addrs transcribed byte-exact from now on.
+- PCTRACEFULL (full-range, PROVEN zeros): NONE of the 18 wrapper starts
+  translate in-harness (all 0/500k); pcall body 0x279ACC = 1 (via
+  0x27A4C8 tail-path of the 4 boot loads); drawRect/dispatcher/BC0AC =
+  0. The whole direct-pcall layer is dead here; menu driver must arrive
+  via BC0AC-indirect or an untranslated wrapper.
+- NEXT (computer): static decode 0xBC0AC body (arg use: r1 jobject?
+  r2/r3 ints/strings?) + verify native caller 0xB004C (BL word?) ->
+  harness mirror BL 0xBC0AC with faithful args (new trigger J1) ->
+  binary (drawRect/builders/film?) vs fault (pc+addr = requirement).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
