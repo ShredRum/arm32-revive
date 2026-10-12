@@ -1663,6 +1663,27 @@ dead subsystem, game degrades without it).
   post through the PROVEN delivery (mirror path already handles natural
   content when present).
 
+## 49. Login initiation found + VA-data correction (2026-10-12)
+- Static (read-only subagent, byte-verified): loginRovioId = Lua-only
+  registration (native_RovioAccount table in ctor 0x5CB28 via FUN_0028EBFC);
+  zero BL to functors (vtable/event dispatch only); enabling condition
+  +0x19==0 (FUN_0006CE50 gate; loginFinished clears); minimal trigger = BL
+  0x5CE50(r0=account). loginWithUI separate, no edge. 0xBC100/ads confirmed
+  again (backtrace refuted twice).
+- VA-DATA CORRECTION (load-bearing): data file = VA-0x1000 (PH3), code
+  file==VA. So: scene-vt VA 0x669428 (values incl. builders per table),
+  GL_Image vt VA 0x669620, account vt VA 0x65E504 (needle was VA-correct).
+  My file-offset reads of data were off by 0x1000 (e.g. [+100]=8 garbage was
+  VA 0x66A48C, not the slot). RE-READ: [scene-vt+100] = file 0x66848C =
+  0x251308 (valid code!) => forged scene-this would proceed past the first
+  virtual. r1=0x101929 is CODE (not data) => stale/int-token, safely passable.
+- Trigger decoded (self, distv): 0x5CE50 guard +25==0 -> set 1, reads +32,
+  big call +#518028, virtuals. Forged zeros satisfy the head. NEXT: live
+  HARNESS_LOGINAT (forge account + BL 0x5CE50) -> login flow start?
+- Builder this: loading-this = GL_Image (wrong class for menu builder);
+  menu this must be scene-class (0x669428 family) — absent in heap (never
+  constructed). Direct-builder shelved behind initiation (needs graph).
+
 ## 48. Subscribe audit + functor verdict: channel, not call (2026-10-12)
 - Static (read-only subagent): helper 0x3833B8 binds NO event — event comes
   from the functor in both shapes (wrapper-fresh and direct-existing). All 21

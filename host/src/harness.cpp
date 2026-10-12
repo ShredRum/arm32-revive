@@ -1161,6 +1161,45 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            // HARNESS_LOGINAT=N (JNI call index): login initiation trigger —
+            // direct BL 0x5CE50 (FUN_0006CE50) with a forged RovioAccount*
+            // (harness-only diag, never ships). Account: calloc 0x2C,
+            // [+0]=0x65E504, rest zero (=> +25==0 gate passes, +32==0).
+            // Binary: login flow starts (functors/logs/events/builders/film)
+            // vs clean no-op vs fault (pc+addr = requirement).
+            if (const char* se = std::getenv("HARNESS_LOGINAT")) {
+                static bool sdone = false;
+                if (!sdone && i == (std::size_t)std::atoi(se)) {
+                    sdone = true;
+                    const std::uint32_t acct = rt.GuestCalloc(1, 0x2C);
+                    if (acct) {
+                        const std::uint32_t av = 0x65E504u;
+                        std::memcpy(rt.H(acct), &av, 4);
+                        std::printf("[loginat] forged account=%08x\n", acct);
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x200;
+                        rgs[13] -= 16;
+                        const std::uint32_t zw = 0;
+                        for (int k = 0; k < 4; k++) {
+                            std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                        }
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = acct;
+                        rgs[1] = 0;
+                        rgs[2] = 0;
+                        rgs[3] = 0;
+                        CallGuest(jit, 0x5CE50u);
+                        std::printf("[loginat] calling @0005ce50 ... ");
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
+                        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    }
+                }
+            }
             // HARNESS_BPATCH=1: overwrite +16 of live queue-B completion
             // entries (MAGIC 0xFB048F99 at +8, RET 0x28DC18 at +24, +12==0)
             // with our free-thunk callable (vt+0x18). Binary: [eventpost]
