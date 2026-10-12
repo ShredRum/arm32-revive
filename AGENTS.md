@@ -1834,6 +1834,39 @@ Do NOT treat as fact; verify per item before building on it.
 - Slot budget after this: fill + raiser untouchable; PROBE5 now free
   (was c52ac). Recon targets per §58: 0x5F9C0 / 0xC4654 / 0x250124.
 
+## 60. Natural initiation captured + heap drift + flake (2026-10-13)
+- R1 RECON (WATCHPC=5ce50, no LOGINAT/RAWPOST): natural 0x5CE50 fires
+  EXACTLY ONCE mid-run (line 8493/16432): #1 r0=10ad5060 r1=0
+  lr=00093a54 (PROVEN). lr = exact return into sole BL caller 0x93A50
+  (valid here — real BL edge, not stale). Frames: 2aee64/2af6dc/2ac2a8/
+  2ca9a8/2fc04c/0cabc8/... (PROVEN). Fires amid worker DNS/job phase
+  (t11 sscanf cloud.rovio.com, tid=12 created right after).
+  Downstream STERILE: functors 0, Login failed 0, +164=2, flag=1
+  (PROVEN). Natural initiation alone completes nothing either.
+- RETRY (exact R1 command): LIVES, full run. Natural initiation fires
+  again, same caller+frames, but r0=10ad52f0 (PROVEN). DRIFT +0x290
+  run-to-run with IDENTICAL config (worker alloc interleaving).
+  CONSEQUENCE: hardcoded heap addrs are out by construction (rule
+  stands, now with a number); post-mortem HEXDUMP of a fixed addr is
+  fragile. Forge must snapshot bytes AT HIT TIME. Code built:
+  HARNESS_WATCHPCSNAP=<hexlen> in WatchPC (first hit wins, 64B cap,
+  range-checked, rt_->loginat_acct_{_,len,snap}) — harness-only.
+- R2 DEATH (WATCHPCSNAP-less config + HEXDUMP=10ad5060,60, 6-pair
+  JOVR): instant death 0.08s at nativeConfig,
+  `[jni] LOUD GetStringUTFChars unknown str 00000320 -- halting`
+  (PROVEN line 182). JOVR-length theory KILLED by code reading (indexed
+  `idx!=i`, no positional shift). Files-state theory KILLED (retry
+  started from identical leftovers and lived).
+- BISECT (exact R2 command): LIVES, full run (24s, watchpc #1 x2, no
+  LOUD). R2 death = FLAKE, neither JOVR-6 nor HEXDUMP causal (PROVEN
+  by contradiction). NEW FLAKE SHAPE (journal): instant config death
+  via GetStringUTFChars(0x320), 1/4 this series. Early-heap
+  nondeterminism can kill even call #1. Mitigation: instant deaths
+  (<2s) get one free rerun before any theory work.
+- NEXT: recon + WATCHPCSNAP=40 at 5ce50 (live account bytes) -> forge
+  faithful account copy from snapshot (replaces zeros) + holder link
+  -> LOGINAT rerun -> binary (functors/events/builders/film?).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,

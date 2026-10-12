@@ -5567,6 +5567,39 @@ void GuestCallbacks::WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t l
             std::printf("[watchpc] stashed session=%08x\n", (std::uint32_t)r0);
         }
     }
+    // Live-object snapshot for faithful forging (HARNESS_WATCHPCSNAP=<hexlen>):
+    // copies [r0, r0+len) at first hit into rt_ (drift-immune, unlike
+    // post-mortem HEXDUMP of a hardcoded addr). Harness-only diag.
+    {
+        static bool sninit = false;
+        static std::uint32_t snlen = 0;
+        if (!sninit) {
+            sninit = true;
+            if (const char* e = std::getenv("HARNESS_WATCHPCSNAP")) {
+                snlen = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+                if (snlen > 64) {
+                    snlen = 64;
+                }
+            }
+        }
+        GuestCallbacks* cb3 = g_probe_cb;
+        if (snlen && cb3 && cb3->rt_->loginat_acct_ == 0) {
+            const std::uint32_t ao = (std::uint32_t)r0;
+            if (ao && cb3->rt_->CheckRange(ao, snlen, false)) {
+                cb3->rt_->loginat_acct_ = ao;
+                cb3->rt_->loginat_acct_len_ = snlen;
+                std::memcpy(cb3->rt_->loginat_acct_snap_,
+                            cb3->rt_->H<const std::uint8_t>(ao), snlen);
+                std::printf("[watchpc] snap %uB @%08x:", snlen, ao);
+                for (std::uint32_t j = 0; j < snlen; j++) {
+                    std::printf(" %02x", cb3->rt_->loginat_acct_snap_[j]);
+                }
+                std::printf("\n");
+            } else {
+                std::printf("[watchpc] snap BAD range %08x+%u\n", ao, snlen);
+            }
+        }
+    }
 }
 void GuestCallbacks::WatchSP(std::uint64_t sp) {
     // Part 2/2: stack code-pointer backtrace for the seq from WatchPC.

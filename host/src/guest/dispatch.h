@@ -328,6 +328,13 @@ private:
     // login trigger links its forged account+32 to it (updates pass the real
     // one, the trigger forged zeros). Guest VA, 0 = none seen.
     std::uint32_t loginat_session_ = 0;
+    // Live object last seen at a WATCHPC hit (HARNESS_WATCHPCSNAP=<hexlen>):
+    // guest VA + host-side byte snapshot (first hit wins). Lets later code
+    // forge a faithful copy without hardcoding heap addrs (which drift
+    // ±0x290 run to run even with identical configs — retry PROVEN).
+    std::uint32_t loginat_acct_ = 0;
+    std::uint32_t loginat_acct_len_ = 0;
+    std::uint8_t loginat_acct_snap_[64] = {};
   public:
     class RealGL* RealGLBackend();
 };
