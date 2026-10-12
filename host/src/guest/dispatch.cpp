@@ -5096,6 +5096,38 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, 0);  // direct pointer: nothing to copy back or free
         return;
     }
+    case 215: {  // RegisterNatives(env, clazz, methods, nMethods) -> jint
+        // Discovery logger: names the dynamic natives (e.g. the Java-driven
+        // Lua pump). Harness-only; returns JNI_OK. Never ships.
+        std::string cname = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_classes_.find(a1);
+            if (it != jni_classes_.end()) {
+                cname = it->second;
+            }
+        }
+        for (std::uint32_t k = 0; k < a3 && k < 256; k++) {
+            if (!CheckRange(a2 + k * 12, 12, false)) {
+                break;
+            }
+            std::uint32_t nm = 0, sg = 0, fp = 0;
+            std::memcpy(&nm, H(a2 + k * 12), 4);
+            std::memcpy(&sg, H(a2 + k * 12 + 4), 4);
+            std::memcpy(&fp, H(a2 + k * 12 + 8), 4);
+            std::string ns = "?", ss = "?";
+            if (nm && CheckRange(nm, 1, false)) {
+                ns = GuestStr(nm);
+            }
+            if (sg && CheckRange(sg, 1, false)) {
+                ss = GuestStr(sg);
+            }
+            std::printf("[jni] RegisterNatives %s.%s%s -> %08x\n", cname.c_str(),
+                        ns.c_str(), ss.c_str(), fp);
+        }
+        Ret(regs, 0);  // JNI_OK
+        return;
+    }
     case 6: {  // FindClass(env, name) -> jclass (interned mock)
         if (!CheckRange(a1, 1, false)) {
             std::printf("[jni] FindClass BAD name %08x -- halting\n", a1);

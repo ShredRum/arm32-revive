@@ -2046,6 +2046,46 @@ Do NOT treat as fact; verify per item before building on it.
   mirror (drawRect chain or direct slot+64 with captured args + live
   GL_Context).
 
+## 66. D1b: live rect args + Java-driven Lua pump (2026-10-13, hook_d1b)
+- IDLE MENU SILENT (PROVEN, ~105s, 0/0/0): no getter/drawRect/pcall on
+  the idle menu — all Lua/draw activity is construction-burst only.
+  (Session-1 lesson: hooks must catch boot→menu fresh.)
+- BURST (PROVEN): drawRect 0xA3EB4 x10 (cap) #1 lone + #2-10 in 141ms;
+  60 fargs (cap → detached). Rect float sets (bits→float, code-verified:
+  2.025 44.0 1.0 1066.0 488.0 19.0 21.0 1.174 73.0 74.0 1584.0 842.0
+  116.0 30.0 ...). Order per rect: 1,2,3,4,5,6,7,8 then 2,3 again
+  (nested re-read? mapping needs 0xA3EB4 body decode — open, static).
+  Steady rect shape: [1:0, 2:0, 3:C, 4:C, 5:0, 6:X, 7:Y, 8:1.0] +
+  [2:W, 3:H] (C=color-ish small floats, X/Y/W/H geometry-ish).
+- PUMP IDENTITY (PROVEN, biggest find): pcall#1/#3 bt =
+  0x6CDAC ← 0x878F8 ← 0x65AFEC ← 0x695BC ← 0xBC124 ← libart
+  JNI trampoline. #2 (builder-bt tail!): 0x6B894 ← 0x6B1F4 ← 0xBC124
+  ← libart. So a JAVA→native call (fn at 0xBC0AC, prologue-verified
+  e92d48f0) drives Lua pcall → drawRect → builders. CORRECTION (my
+  transcription error, subagent rightfully flagged OOB): bt addrs carry
+  full 0x14 prefix (0x1485B894 etc.); file VAs = 0x6B894/0x6B1F4/0xBC124
+  (code-verified subtraction, not mental). RULE: transcribe device
+  addresses byte-exact, never shorten.
+- 0xBC0AC is NOT a static Java_ export (63 exports scanned, none in
+  [0xB9000,0xBF000)) → dynamically registered native. Smali diff: 76
+  natives vs 63 exports = 15 callback-natives without exports
+  (VideoPlayer/Location/Camera/Share/RemoteNotifications) = the
+  registration family. fn#215 numbering VERIFIED vs NDK r27 jni.h
+  (NDK idx 211 + 4 reserved = ours 215 — numbering stands); case-215
+  logger built, but OnLoad never calls it in-harness (PROVEN silence) —
+  registration happens on a path that doesn't run here (another dead
+  producer of the same class).
+- DEVICE LOGCAT TIMING (rio_boot2.log, read-only, PROVEN lines):
+  Login failed x2 @01:02:19 → WebViewFactory loading @01:02:28 →
+  "Main menu entered" @01:02:29 (+retry login-fail same second). Menu
+  builds as WebView loads — pump trigger sits in that window (WebView
+  bridge? login retry? coincidental ads init? — open, not evidence).
+- NEXT: device hook 0xBC0AC onEnter (r0/r1/r2/r3 + sp + short bt) on a
+  FRESH boot (builders at +11s) → live arg shape → harness mirror: BL
+  0xBC0AC with faithful JNI args (new trigger!) → watch
+  drawRect/builders/film. If 0xBC0AC silent on fresh boot → next
+  candidate from the 15 (or the WebView angle).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
