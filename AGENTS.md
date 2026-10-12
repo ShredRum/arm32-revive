@@ -2203,6 +2203,37 @@ Do NOT treat as fact; verify per item before building on it.
   TIMELINE (what fires between loginFinished and the +11s burst?) —
   sequences the missing link without guessing it. No arg-heavy hooks.
 
+## 72. Producer timeline + gate-hook verdict (2026-10-13, d1f3.log)
+- TIMELINE (PROVEN, fresh boot, no gate hook, session survived to
+  detached-ok): loginFinished(ctx=0x152934d0, flag=0) t=…649205 ->
+  10.2s gap -> drawRect#1+builder#1 (this=0x9b262000, r1=0x101929) ->
+  alternating builders r1=0x101929/0x7F000000 (odd/even; 0x7F000000 =
+  ARGB half-black — second draw color!) x6 in ~30ms -> drawRect#7,#8
+  -> loginFinished(SAME ctx, flag=0) t=…659491 (retry, DURING burst)
+  -> drawRect#9,#10 (cap) -> clean session end. Matches §39 gold
+  (login pair same ctx) + D1 burst shape.
+- GATE VERDICT: full 200s session, zero hang, zero crash WITHOUT the
+  gate-hotpoll hook (d1e WITH gate died at builder#1 twice... though
+  d1e-death also fits timeout-race; gate-guilty INFERRED 0.7, not
+  proven — keep gate hooks OFF by default regardless: cost/benefit).
+- CORRECTION: builder-this 0x9b262000 (this boot) vs 0x9b258000 (d1e
+  boot) — same arena, NOT stable. Never hardcode; §63 "stable" weakened
+  to "same-arena". (Slot base also varies: 0x14804000 3rd slot —
+  slot-verify list extended, full-scan fallback KEPT (this attach
+  needed it and survived: scan-stall-kill theory weakened too).)
+- PRODUCER BOUNDED: 10.2s gap login#1 -> burst; retry-login#2 lands
+  DURING burst (+10.3s). Producer ≈ login-retry job path (refresh/
+  fail-cleanup -> drawRect burst), NOT a timer (burst tied to retry
+  completion, not wall clock).
+- COVERAGE GAP FOUND (self-critique): fail-path harness runs NEVER had
+  builder/drawRect probes (all builder watches were in RETSUCC/succ
+  configs!). Device burst follows login-FAIL — our fail configs
+  (airplane1 flag=0, relthrow, failpath3) may well fire builders
+  unobserved. NEXT RUN (cheap, decisive): fail config (servers+
+  sendfail, NO RETSUCC) + PROBE4=a3eb4 + PROBE5=7ecb8 + WATCHPC=250ab8
+  -> binary: fail path fires drawRect/builders in-harness? If YES ->
+  menu via fail completion (functor-free?); if NO -> producer still out.
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
