@@ -2277,6 +2277,32 @@ Do NOT treat as fact; verify per item before building on it.
   §43 + §51 notes). Scope first (Dynarmic headers docs-first), then
   build. No more trigger runs until R7 moves — all trigger shapes are
   measured.
+
+## 75. APK-scope correction + headless-device middle path (2026-10-13)
+- CORRECTION (my "predictable LOADING" OVERSTATED — user challenged,
+  correctly): split three ways. (a) CERTAIN harness-only (mocks, caps,
+  pacing, DNS shapes, fills/RETSUCC/pokes) — gone on device. (b)
+  MECHANISM-STARVED (posters exist as code: 0x291A5C has 5 callers,
+  queue machinery real; only TRIGGERS missing: Java callbacks,
+  timers, WebView, dynamic natives) — on device REAL Java may supply
+  them for free → APK could go FURTHER than harness, UNPREDICTABLE
+  without building. My LOADING-prediction assumed triggers stay dead;
+  that assumption is harness-colored, not proven. (c) UNWINDER R7 —
+  genuinely unknown on device (Dynarmic-context vs harness-thread
+  artifact): the throw path runs the same guest code, but our threads
+  (bump-heap stacks, emulated TLS) differ from bionic threads. Settle
+  empirically, not by assertion.
+- MIDDLE PATH (no full packaging): headless arm64 harness on device
+  via scp (tunnel exists; Termux+su runs NDK PIEs). Toolchain ready
+  (arm64-v8a/api-26, libdynarmic.a built Oct 9); harness target builds
+  for Android too (only gltest/eglmin are PC-guarded; guest links
+  EGL/GLESv2). Push harness + guest.so + files + APK, run with shim
+  GLES (no X11) and watch throw->catch/functors with REAL bionic
+  threads. Settles (c) for hours of work vs days of packaging.
+- ORDER: (1) headless-device unwinder test; (2) if catch works ->
+  full APK becomes rational (triggers free); (3) if spiral reproduces
+  -> R7 workstream with device-grounded evidence. Harness stays the
+  fast loop either way.
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
   284078=e589a0a4, 466F34=344087e5, 46B618=0660a003 — ALL 6 MATCH.
