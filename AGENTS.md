@@ -1548,7 +1548,11 @@ dead subsystem, game degrades without it).
   Awaiting S2 (gate+148) for the last main-observable candidate.
 
 ## QUEUED DEVICE WORK (do not forget; needs live game + single calm session)
-- D1. BUILDER-CAPTURE (fast path #1, highest information): one-shot sparse
+- STATE 2026-10-12 (user): original APK installed and ALIVE (gadget repack
+  uninstalled; saves reset). User pre-approved (re)installing the patched
+  gadget APK when D1/D2 come (repack workspace: work/gadget/, engine md5
+  identical). No device action until the no-device queue is exhausted.
+- D1. BUILDER-CAPTURE (fast path #1, highest information): one-shot sparseRE (fast path #1, highest information): one-shot sparse
   hook on 0x250AB8 entry at cold boot -> this/vtable/r1/caller-backtrace +
   event-vector state at fire time. Collapses factory+this+key+subscriber hunts
   at once. Preconditions: game alive on emulator, tunnel up, NO flood hooks,
