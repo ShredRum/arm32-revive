@@ -1547,8 +1547,28 @@ dead subsystem, game degrades without it).
   (no observer). Time/apdrive PURSUIT OVER (third independent confirmation).
   Awaiting S2 (gate+148) for the last main-observable candidate.
 
-## 53. Gate#2 static-always-1; main observes nothing (2026-10-12, S2 static)
-- Read-only subagent, byte-verified: gate#2 = [GL_Context *0x672E6C]+148 =
+## CRUTCH LEDGER (harness-only diags, never ship; remove when they stop paying)
+- EVENTPOST/EVENTFILL (EventEntry/EventDecide/free-marker): synthetic events
+  -> walk invokes. Status: PROVEN delivery (INVOKE 27/27). KEEP (infra).
+- SCENEAT (7-arg BL 0x283A3C): flip proven live + white. Status: verdict
+  recorded (§47). KEEP code, no rerun needed unless builders change the scene.
+- BUILDER (+BUILDERFORGE): direct 0x250AB8 with live/forged this. Status:
+  FORGE verdict RECORDED (builder2: forged this vtable 0x669428 + zeros runs
+  CLEAN hr=UD1 r0=0, film unchanged LOADING, +164=2 — builds into the void,
+  no graph attachment). Keep dormant (env-gated); never ship.
+- RAWPOST/RAWBUILD/LOGINAT (login calls): all sterile. Status: verdicts
+  recorded. KEEP code (cheap), no rerun unless ctx recipe changes.
+- POKE164/POKE180/POKE1187: harness-only pokes. POKE1187 kept (harmless),
+  POKE164 shelved, POKE180 torn-record only. Never ship.
+- RETSUCC (canned HTTP): most successful scaffold. KEEP; ship-candidate ONLY
+  as documented offline-session strategy, never as "network works".
+- Fill (1a410c,{}): boot-critical scaffold. KEEP until cloud-config has a
+  real source. Never ship as-is (needs honest equivalent at packaging).
+- Rule: every crutch logs its marker lines; a crutch that fires zero times
+  across 3 runs gets removed. SHIP: loader, real thunks, threads, asset
+  bridge, build (see §10 PORT LEDGER).
+
+## 53. Gate#2 static-always-1; main observes nothing (2026-10-12, S2 static)- Read-only subagent, byte-verified: gate#2 = [GL_Context *0x672E6C]+148 =
   `mov r0,#1; bx lr` (reads NO memory; vtable fileVA 0x669404 = GL_Context,
   object 0x2C0B heap, created nativeInit, freed only deinit). Live "0->1" was
   null->created, not a state flip. Gate#1 (manager non-null) + gate#3 (quit 0)
@@ -1562,6 +1582,30 @@ dead subsystem, game degrades without it).
   subscribers (both absent), (c) scene factory trigger (unknown).
 - NEXT (live, no build): LOGINAT=11 + functor probes (5f96c/5fe70) + session
   stash — early-timing initiation retest with 1GB heap.
+
+## 54. Builder series verdict + menu reference (2026-10-12)
+- builder1: no live this (phases drifted, 0 executions) — loading-this is
+  phase-dependent, not reliably present. builder2 (forged this vtable
+  0x669428 + zeros): runs CLEAN hr=UD1 r0=0, film LOADING unchanged (builds
+  into the void). builder3/4: frustum gate (bl 0x25070C, cmp r0,#1) SKIPS
+  (post-gate never translates; predicate args rect=stack-NaN, count=4).
+  builder5 (BUILDERGATE r0=1 @0x250C80): body runs, faults writing via
+  builder->writer(r1=1) call (lr=250DB4; pc-lag ±1 known) — needs live scene
+  graph state. builder6 (+borrowed live render obj): SAME fault (not +0xA8).
+  builder7 (tail/store probes): 166 executions all loading traffic (r1=2,
+  lr=261378, +164=2 held); ours never reaches tail.
+- VERDICT: direct-builder path FULLY MAPPED (entry->virtuals->gate->body->
+  writer-call->fault-on-missing-graph-state) and CLOSED as menu path (needs
+  live graph; forge cannot attach). Builder code itself proven runnable.
+- MENU REFERENCE (user device shots): main menu = Rio landscape bg (SAME art
+  as our LOADING) + logo top + ORANGE PLAY DISC center + ToonsTV + gear
+  bottom-right + Bird-Coins popup w/ OK (first-run; Apprater block in registry
+  is the likely condition) + slight bg animation. Implications: bg already
+  loaded (only UI layer missing); film verdict = play disc present (structure,
+  not md5 — animation moves); motion in film = menu-alive detector; play disc
+  center = post-menu tap target (queued). Popup/Apprater front parked.
+- NEXT: factory subagent (scene construction trigger) — only open builder-side
+  lead. Login ladder paused (needs session-map state, deeper than trigger).
 
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check

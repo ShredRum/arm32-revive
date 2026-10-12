@@ -7419,6 +7419,15 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                 &PokeGateByte,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))));
         }
+        // HARNESS_BUILDERGATE=1: force the menu-builder frustum gate open
+        // (set r0=1 right before `cmp r0,#1` at 0x250C80; menu content is
+        // on-screen by definition, and forged rects come out NaN). The body
+        // then runs with forged this: faults name requirements, clean run
+        // tests graph attachment. Harness-only diag.
+        if (std::getenv("HARNESS_BUILDERGATE") && pc == 0x250C80u) {
+            using Reg = Dynarmic::A32::Reg;
+            ir.SetRegister(static_cast<Reg>(0), ir.Imm32(1));
+        }
         // HARNESS_POKE180=1: render-state advance at 0x263300 (FuncA entry,
         // a block start; r0=this). The 0x263338 site is mid-block (hook never
         // fires there). Sets [this+180] 3->4 when loading-state.

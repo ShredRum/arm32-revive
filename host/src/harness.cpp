@@ -1134,7 +1134,37 @@ int main(int argc, char** argv) {
                         std::memcpy(&vt, rt.H(tho), 4);
                     }
                     std::printf("[builder] this=%08x vtable=%08x\n", tho, vt);
-                    if (tgrad && vt == 0x669620u && rt.IsCodeAddress(0x250AB8u)) {
+                    // HARNESS_BUILDERFORGE=1: forge this instead (scene vtable
+                    // VA 0x669428 + zeros; +100 slot = 0x251308 valid code).
+                    // Graph attachment unknown: expect faults (each names the
+                    // next requirement) or invisible builds, not menu pixels.
+                    std::uint32_t bthis = tho;
+                    if (std::getenv("HARNESS_BUILDERFORGE")) {
+                        bthis = rt.GuestCalloc(1, 512);
+                        if (bthis) {
+                            const std::uint32_t svt = 0x669428u;
+                            std::memcpy(rt.H(bthis), &svt, 4);
+                            // Borrow the live render sub-object so the
+                            // builder-called writer (r1=1) proceeds past its
+                            // [r0+0xA8]->vtable+0x60 getter (else wild read).
+                            // If builders self-register via globals, content
+                            // may still reach the live graph (film decides).
+                            if (rt.last_mgr_ != 0 &&
+                                rt.CheckRange(rt.last_mgr_ + 0xAC, 4, false)) {
+                                std::uint32_t robj = 0;
+                                std::memcpy(&robj, rt.H(rt.last_mgr_ + 0xA8), 4);
+                                if (robj && rt.CheckRange(robj, 4, false)) {
+                                    std::memcpy(rt.H(bthis + 0xA8), &robj, 4);
+                                    std::printf("[builder] borrowed render=%08x\n",
+                                                robj);
+                                }
+                            }
+                            std::printf("[builder] forged this=%08x\n", bthis);
+                        }
+                    }
+                    if (((std::getenv("HARNESS_BUILDERFORGE") && bthis) ||
+                         (tgrad && vt == 0x669620u)) &&
+                        rt.IsCodeAddress(0x250AB8u)) {
                         auto& rgs = jit.Regs();
                         rgs.fill(0);
                         rgs[13] = abr::kStackTop - 0x200;
@@ -1144,7 +1174,7 @@ int main(int argc, char** argv) {
                             std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
                         }
                         rgs[14] = mod.halt_va;
-                        rgs[0] = tho;
+                        rgs[0] = bthis;
                         rgs[1] = 0x101929u;
                         rgs[2] = 0;
                         rgs[3] = 0;
