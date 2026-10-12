@@ -2113,6 +2113,30 @@ Do NOT treat as fact; verify per item before building on it.
   harness mirror BL 0xBC0AC with faithful args (new trigger J1) ->
   binary (drawRect/builders/film?) vs fault (pc+addr = requirement).
 
+## 68. J1: consumer runs deep, faults on null content (2026-10-13, j1.log)
+- J1 (PROVEN lines): forged C={0x251260 bx-lr,0} + D={0,0,0} + B=0 ->
+  BL 0xBC158 -> blx C[0] returned fine -> continuation via
+  0x27EEB0-chain -> 0x27F1BC struct-copy with r0(dest)=0: BAD writes
+  @8,@C,@10,@14 (pc-lag shows 0x27F228), hr=UD2 abnormal, r0=stack.
+  0xBC158 does NOT call 0x27F1BC directly (its BLs -> 0x27EE8C/0x27EEB0;
+  0x27F1BC has 2 callers: 0x27B59C/0x27EE70 — chain via 0x27EEB0,
+  PROVEN words). Downstream probes (drawRect/dispatcher/builder): 0.
+  +164=2, film LOADING (continuity).
+- VERDICT J1 (mechanism ALIVE, content DEAD): consumer machinery runs
+  (BC158 -> 27EEB0 -> … -> 27F1BC attempted 4 writes) — the fault is
+  null CONTENT (B=0/D-zero -> lookup yields null dest). FORGE REQUIRES
+  live B/C/D content (poster-supplied). Note: device C/D live at heap
+  0x15049xxx (inside our heap-range shape!) with Δ(C-D)=0x34=52 — same
+  52B Δ as account+32->session (0x100721F4->0x10072228): possibly one
+  container class (event record? session-link?), INFERRED, open.
+- NEXT D1c (device, fresh boot): hook 0xBC0AC + 0xBC158 entries, read
+  [r2+0/4/8] + [r3+0/4/8] as WORDS via this.context (not this.sp —
+  this.sp.readPointer failed x10 total, use this.context like hook16's
+  working r10 read), cap 4, short bt. Yields live C[0] as file VA
+  (directly reusable!) + content shape -> J2 mirror with live funptr +
+  live-shaped record. If words unreadable (ART-guarded) -> static
+  poster hunt instead (who writes {funptr,tagged}+3 words 52B apart?).
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,

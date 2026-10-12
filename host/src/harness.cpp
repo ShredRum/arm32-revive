@@ -1408,6 +1408,55 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            // HARNESS_BC158=N (JNI call index): event-consumer mirror —
+            // direct BL 0xBC158 (0xBC0AC's worker) with a forged event
+            // record: C={bx-lr,0} (even path, no deref), D=3 zero words
+            // (copied then cleared by the body), B=0 (flows only into the
+            // benign call's r0). Device fires this 4x at +11s (Java->…->
+            // B004C->BC0AC) feeding menu construction; in-harness the poster
+            // never runs. Harness-only diag, never ships. Binary: clean run
+            // (+ drawRect/builder/film downstream?) vs fault (pc+addr =
+            // requirement: which word must be live?).
+            if (const char* se = std::getenv("HARNESS_BC158")) {
+                static bool sdone = false;
+                if (!sdone && i == (std::size_t)std::atoi(se)) {
+                    sdone = true;
+                    const std::uint32_t evc = rt.GuestCalloc(1, 8);
+                    const std::uint32_t evd = rt.GuestCalloc(1, 12);
+                    if (evc && evd) {
+                        const std::uint32_t bxlr = 0x251260u;
+                        const std::uint32_t z = 0;
+                        std::memcpy(rt.H(evc), &bxlr, 4);
+                        std::memcpy(rt.H(evc + 4), &z, 4);
+                        std::memcpy(rt.H(evd), &z, 4);
+                        std::memcpy(rt.H(evd + 4), &z, 4);
+                        std::memcpy(rt.H(evd + 8), &z, 4);
+                        std::printf("[bc158] C=%08x {bx-lr,0} D=%08x {0,0,0}\n",
+                                    evc, evd);
+                        auto& rgs = jit.Regs();
+                        rgs.fill(0);
+                        rgs[13] = abr::kStackTop - 0x200;
+                        rgs[13] -= 16;
+                        for (int k = 0; k < 4; k++) {
+                            std::memcpy(mem.host(rgs[13] + k * 4), &z, 4);
+                        }
+                        rgs[14] = mod.halt_va;
+                        rgs[0] = 0;
+                        rgs[1] = 0;
+                        rgs[2] = evc;
+                        rgs[3] = evd;
+                        CallGuest(jit, 0xBC158u);
+                        std::printf("[bc158] calling @000bc158 ... ");
+                        std::fflush(stdout);
+                        alarm(60);
+                        Dynarmic::HaltReason hr2 = jit.Run();
+                        alarm(0);
+                        std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2),
+                                    rgs[0]);
+                        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    }
+                }
+            }
             // HARNESS_BPATCH=1: overwrite +16 of live queue-B completion
             // entries (MAGIC 0xFB048F99 at +8, RET 0x28DC18 at +24, +12==0)
             // with our free-thunk callable (vt+0x18). Binary: [eventpost]
