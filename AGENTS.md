@@ -2166,6 +2166,23 @@ Do NOT treat as fact; verify per item before building on it.
   record C={0xBEA58,0} D={0x11,0xd,0} B=0 -> binary (runs the real
   delete-dispatch clean? faults where=next requirement? downstream?).
 
+## 70. J2: same fault; consumer chain fully dead in-harness (2026-10-13)
+- J2 (PROVEN): live C[0]=0xBEA58 runs SAFE (deletes no-op via [stub]->0,
+  zero crash) -> identical fault (BAD @8..@14, pc 0x27F228, hr=UD2).
+  Fault is DOWNSTREAM of C[0] (27EEB0-chain dest null), independent of
+  C content. VERDICT J2: mechanics alive, needs live B/D content.
+- TRANSLATION MAP (pctracefull, PROVEN zeros): b004c=0, bc048=0,
+  bc158=0, bea58=0, 27eeb0=0, 27ee70=0, bc124=0; only 27f1bc=1 (via the
+  OTHER caller 0x27B59C — unrelated flow) and 27ecb8=2 (Lua cover).
+  The ENTIRE event-consumer side never translates in-harness;
+  poster+consumer both dead. J-ladder needs live B/D (deep poster
+  chain) — expensive; climb the DRIVER side instead (who calls AFFDC?).
+- 0xB004C lives in fn 0xAFFDC (prologue scan); sole ARM BL->BC0AC is
+  0xBC048 (same region — Java-entry family's own wiring).
+- NEXT: driver ladder UP from 0xAFFDC (BL callers? do they translate?)
+  — one static scan + pctrace grep per rung (all free) to the highest
+  dead link, then forge/call THAT.
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
