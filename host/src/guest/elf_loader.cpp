@@ -98,7 +98,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         if (!mem_.Map(start, end - start, PROT_READ | PROT_WRITE)) {
             return fail("segment map failed");
         }
-        out.segments.push_back({start, end - start, ProtFromFlags(ph.p_flags)});
+        out.segments.push_back({start, end - start, static_cast<int>(ProtFromFlags(ph.p_flags))});
         std::uint8_t* dst = mem_.host(ph.p_vaddr);
         if (ph.p_filesz > 0) {
             if (ph.p_offset + ph.p_filesz > len) {

@@ -45,6 +45,7 @@ endif()
 # Private frontend header (a32_ir_emitter.h) for the HARNESS_PROBE IR emitter.
 target_include_directories(guest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/dynarmic/externals/mcl/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/dynarmic/externals/fmt/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty)
 
 # Bring-up harness: loads the real game .so, runs DT_INIT_ARRAY.
