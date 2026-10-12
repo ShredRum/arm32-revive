@@ -1945,6 +1945,46 @@ Do NOT treat as fact; verify per item before building on it.
   infra first. Then D1 device capture (needs live game + gadget
   reinstall + calm session — user-gated).
 
+## 63. D1 BUILDER-CAPTURE GOLD (2026-10-12 eve, gadget repack + hook_d1)
+- SETUP (PROVEN): gadget APK (engine md5 9c21a987 identical) reinstalled
+  over wiped original (user-approved); sandbox-only, /sdcard untouched.
+  Gadget hangs till connect (user-warned) + connect-timeout kills the
+  process (user-warned): must force-stop before start + attach fast.
+  Base 0x147F4000 deterministic 3rd boot (needle nativeConfig@0xC1550).
+  Hook method VALID (hookcold2.log 01:15 captured same VA before).
+- SELF-CRITIQUE (burned, journaled so it sticks): mid-run "0 hits"
+  checks were (a) grepping the OLD session file (d1_boot.log vs
+  d1_boot2.log) and (b) tail-truncating the live file. Session 1 = 0
+  hits TRUTHFULLY (stale pre-booted process, builders fired pre-attach).
+  Session 2 (true cold boot) = 6/6 hits ~11s post-attach, identical.
+  RULE: always grep the CURRENT session file + full hit pattern.
+- D1 HITS x6 (PROVEN, identical, ~100ms burst): builder 0x250AB8,
+  this=0x9B262000 (SAME addr as hookcold2 01:15 + stable across boots),
+  [this]=vtable file-VA 0x669404 (code-verified: 0x14E5D404-0x147F4000;
+  = GL_Context vtable per §40-correction — NOT scene 0x669428!),
+  r1=0x101929 (menu key, device-confirmed 2nd time), r2=0, r3=0
+  (recipe's r2=string/r3=int guess REFUTED — both zero live).
+  Stack args LOST (this.sp.readPointer FAIL x6 — Frida/ARM quirk, open).
+  bt (ACCURATE, identical x6, file VAs): 7ee3c a427c a41d0 a4108 a4058
+  a3fb0 a3f14 39720c 39d3a8 3977b0 396b8c 397a60 39b744 279b44 85b894
+  85b1f4 (return addrs; decode pending).
+- MENU WITHOUT 250AB8? NO — resolved: builders fired +11s = menu
+  construction itself (boot is 10s; menu+popup visible right after).
+  Session-1 zero was stale-process artifact, not an alternate path.
+- CORRECTIONS: (1) builder-this vtable = 0x669404 (GL_Context family),
+  NOT 0x669428 (builder2 forge used the wrong vtable — explains void
+  build). (2) r0 stable 0x9B262000 across boots = shared build context
+  (surface-ish singleton?), NOT per-node. (3) r2=r3=0 live.
+- DEVICE MENU STATE (screenshots, PROVEN): boot->menu works on gadget
+  build; Bird-Coins popup first run; OK tap (900,745 shot-coords==input
+  coords) dismisses -> full menu (PLAY disc + ToonsTV + gear, = §54
+  reference exactly). Game+frida stable through all of it (no crashes).
+- NEXT: decode bt driver chain (direct caller 0x7EE3C fn? 0xA4xxx
+  cluster? 0x39xxxx cluster? root 0x85Bxxx?) via distv/BL-scan ->
+  natural driver recipe for harness (who calls builders with menu key
+  + this=GL_Context-ish + r2=r3=0). Then W5 forge with CORRECT vtable
+  (0x669404) + live arg shape.
+
 ## 44. Five-subagent static wave: contradictions killed + new info (2026-10-12)
 - All 5 read-only (no runs/device/writes), jev-scored, byte-evidenced. My spot-check
   (python, LE bytes): BC048=eb000017, 5FEE0=ebfff502, 5EBE0=ebfff9c2,
