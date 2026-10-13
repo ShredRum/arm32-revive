@@ -611,6 +611,13 @@ int main(int argc, char** argv) {
     // we kept bring-up mode for debuggability. Compare baselines first.
     cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
                                                         : Dynarmic::no_optimizations;
+    // Fastmem prototype (HARNESS_FASTMEM=1): direct host access to the 1:1
+    // 4GB reservation; faults fall back to callbacks (BAD halting
+    // preserved via slow path). Diags that sniff callbacks (WP/ScanWP/
+    // HEXFIND/memcmp3) go blind under fastmem. Default off.
+    if (std::getenv("HARNESS_FASTMEM")) {
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());
+    }
     Dynarmic::ExclusiveMonitor monitor(1);
     cfg.global_monitor = &monitor;
     Dynarmic::A32::Jit jit(cfg);

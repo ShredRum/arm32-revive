@@ -191,6 +191,9 @@ std::shared_ptr<HostThread> Enter() {
     cfg.callbacks = g_cb;
     cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
                                                         : Dynarmic::no_optimizations;
+    if (std::getenv("HARNESS_FASTMEM")) {
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
+    }
     static Dynarmic::ExclusiveMonitor shared_mon(8);
     cfg.global_monitor = &shared_mon;
     st->jit = new Dynarmic::A32::Jit(cfg);
@@ -423,6 +426,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_PROBE3", "28a3dc", 1);
     setenv("HARNESS_PROBE_N", "500", 1);
     setenv("HARNESS_RDUMP", "1", 1);
+    // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
+    // Metric = updates/min + same-behavior verdicts (sessions/rdump).
+    setenv("HARNESS_FASTMEM", "1", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {

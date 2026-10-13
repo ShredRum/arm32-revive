@@ -4385,6 +4385,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         cfg.callbacks = cb_;
         cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
                                                             : Dynarmic::no_optimizations;
+        if (std::getenv("HARNESS_FASTMEM")) {
+            cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
+        }
         static Dynarmic::ExclusiveMonitor shared_mon(8);
         cfg.global_monitor = &shared_mon;
         static std::atomic<unsigned> next_cpu{1};
