@@ -3176,6 +3176,21 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   episode select -> GAMEPLAY?; instrument input path (which guest
   fn consumes taps? event queue?); journal tap-driven progress.
 
+## 104. MENU reproducible: soak+taps recipe on gold (2026-10-14)
+- Second menu (gold 6f6c1d0): soak on LOADING, then taps -> MENU
+  (pixel-proof menu2, +164 flips). REPRODUCIBLE, not luck.
+- Functor EXONERATED: gold has FUNCTORAT armed (fired, 2 lines)
+  and menu still comes -> forged login-failed does NOT suppress
+  menu. Menu-blocker theory RETRACTED (my correlation was across
+  different builds/data - junk inference, lesson logged).
+- CONVICTED for the black boot (35844): UNSCOPED RealNewObject
+  (cf5c181, all classes real -> mock-lookup misses downstream).
+  Gold predates audio entirely. Current master has the AudioOutput
+  scope guard (acc4c7d) = untested for menu; proper fix = delegate
+  the lookups (GetObjectClass/arrays/strings) before going general.
+- Recipe stands: fresh seeds -> boot -> soak (sessions/jobs cook)
+  -> taps (pump) -> menu. Taps+time, not build luck.
+
 ## 102. FIRST REAL PIXELS: Rovio logo on device (2026-10-14)
 - Android real-GL backend (shared Handle; caller's context; no EGL
   init): live ctx=0x7ad8c25600 on first try; driver answers real
