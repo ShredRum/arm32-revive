@@ -476,11 +476,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Gate-writer capture (0x74168, sole static path to +1187 setter):
     // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
     setenv("HARNESS_WATCHPC", "74168", 1);
-    // Synthesis (writer never fires naturally, 4 silent boots + zero
-    // static edges): force +1187=1 at the 0xC2144 poller (same IR probe
-    // as PC POKE1187). Binary: body runs (Frida doUpdate-TRUE stops)?
-    // sessions observed? loginFinished? burst?
-    setenv("HARNESS_POKE1187", "1", 1);
+    // Synthesis: DISABLED (POKE forces early body with unbuilt content
+    // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
+    // Gate opens naturally only when content is ready; forcing it kills.
+    // setenv("HARNESS_POKE1187", "1", 1);
     // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
     // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
     setenv("HARNESS_PROBE4", "c52ac", 1);

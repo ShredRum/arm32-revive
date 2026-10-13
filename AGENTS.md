@@ -3054,6 +3054,41 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   (doInit overwrite) masks EXITING. THE device wall = +1187 writer
   0xBE704 never invoked (PC: POKE1187 forced it; device needs the
   natural caller).
+- SUBAGENT (read-only static, PROVEN bytes): 0xBE704 = OSInterface
+  gate-setter ([+1187]=1 always, [+1188]=r1); sole static path =
+  wrapper 0x74168 -B-> 0xBE704 (r1=0); 0x74168 has ZERO static edges
+  of any kind (BL/B/Thumb/absolute/init/got/pools all 0) -> dynamic/
+  computed callback. No vtable holds 0xBE704 (both OSInterface tables
+  skip it). Poller 0xC2144-50 (BL 0xBE714, BNE bail) confirmed. R1=1
+  path: no static source (word 1188 stays 0 naturally).
+- NEXT: dynamic capture on live device (Frida hook 0x74168 entry,
+  one-shot + bt) -> name the lifecycle caller; if silent -> device-
+  side POKE1187 synthesis (same IR probe as PC) as the one binary
+  test (body runs? r0=0? sessions observed? burst?).
+
+## 97. if-nez inversion: the paradox dissolves; POKE kills the app (2026-10-13)
+- SUBAGENT S1 (PROVEN): Dalvik `if-nez` = branch iff !=0 (I had it
+  BACKWARDS for hours). Corrected ST.onFrame: ready->doUpdate;
+  doUpdate!=0 -> return 1 (continue, skip a()); doUpdate==0 -> a()
+  -> doShutdown. doUpdate returns nativeUpdate verbatim (dexdump-
+  verified, no transform). MyRenderer: onFrame 1 -> keep buffer;
+  0 -> black clear (the black screen!). EXITING latches on r0=0.
+- CORRECTED MODEL (fits EVERY boot, no paradox): no-poke bail
+  r0=1 -> TRUE -> live (9762: 394 updates, 10 min). POKE body r0=0
+  -> FALSE -> EXITING + a() -> deinit + suicide in seconds (12024,
+  10463, 10821, 11125...). Convention: 1=keep going, 0=quit.
+  Original body must return 1 (alive); ours returns 0 -> DIVERGENCE
+  inside the body (POKE-forced-early with unbuilt content? +164=2?
+  mocks?). Gate opens naturally only when content is READY.
+- CONSEQUENCE: REMOVE POKE1187 from device (it guarantees death).
+  Real wall = completion channel (sessions-succ posts nowhere,
+  functors never fire, §62) + dynamic natives (BC0AC pump needs
+  real RegisterNatives). Long-lived bail is the base again.
+- METHOD (burned): verify branch opcode in dex FIRST (0x38/0x39),
+  never trust "nez ~= zero" intuition; S1-style fresh-eyes audit
+  beats my re-reading (I re-read it wrong 4 times).
+- Frida attach now times out on live process (frida-helper sync
+  fail; fastmem sighandler suspect or boot storm). Retry as needed.
 
 ## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
 - 4 days on the desktop harness past LOADING with zero menu progress
