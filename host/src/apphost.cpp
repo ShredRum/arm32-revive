@@ -310,6 +310,18 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     if (hr != Dynarmic::HaltReason::UserDefined1) {
         Log("%s ended hr=%d r0=%08x", name, (int)hr, regs[0]);
     }
+#ifdef __ANDROID__
+    // r0-polarity forensics: log EVERY nativeUpdate return (clean ones
+    // are silent above). Java quits on r0=1; need per-update 0/1.
+    // Capped (updates are ~30/s idle).
+    else if (std::strstr(name, "nativeUpdate")) {
+        static int un = 0;
+        if (un < 400) {
+            Log("%s r0=%08x", name, regs[0]);
+        }
+        un++;
+    }
+#endif
     return (std::uint64_t)regs[0] | ((std::uint64_t)regs[1] << 32);
 }
 
@@ -437,6 +449,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // as PC POKE1187). Binary: body runs (Frida doUpdate-TRUE stops)?
     // sessions observed? loginFinished? burst?
     setenv("HARNESS_POKE1187", "1", 1);
+    // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
+    // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
+    setenv("HARNESS_PROBE4", "c52ac", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
