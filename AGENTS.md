@@ -2395,6 +2395,18 @@ Do NOT treat as fact; verify per item before building on it.
   per rung. If success stalls like harness (no burst) -> back to R7
   (fail path) with no regrets: both doors tried.
 
+## 92. Main-thread IOException, no workers (2026-10-13, device APK)
+- THROW (PROVEN): update#1 throws io::IOException (lr=0x2C86DC,
+  FileInputStream region) EXACTLY once -> spiral (r0=0x45A778) ->
+  0x39B1E8 cascade. Zero worker spawns (no thread-create lines) —
+  game dies before networking. Real IOException = missing/unreadable
+  FILE (which path? file-open lines just before the throw in the full
+  log hold it — NOT yet pulled).
+- NEXT (after maintenance): pull open/fopen context around the throw
+  ([files]/[regio]/asset lines) -> name the missing path -> map it
+  (files alias? asset STORED? CWD-relative?) -> relaunch. Then workers
+  should spawn -> sessions -> (unwinder for fail | continuation).
+
 ## 89. LSDA verdict: frame confusion; live-frame answer test (2026-10-13)
 - SUBAGENT (PROVEN bytes): entry 0x5BA760 = compact Su16 short (pr0),
   descriptors 97/42/AC + Finish, LSDA ABSENT (no pads/actions).
