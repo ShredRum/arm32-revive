@@ -2332,6 +2332,23 @@ Do NOT treat as fact; verify per item before building on it.
 - NEXT: repack/reinstall/launch -> update#1 passes? config BAD persists
   (then: Call*-delegation for real Activity)?
 
+## 87. Pointer-width airtight + Call delegation (2026-10-13)
+- BUG CLASS (PROVEN maps): ART lives high (0x7x-dominant) — raw 64-bit
+  pointers must NEVER enter 32-bit guest regs/fields. Design: guest
+  keeps OUR 32-bit table/handles; thunks delegate per-call (real reads,
+  guest-side copies/cookies/wraps).
+- BUILT: WrapObject/UnwrapObject (0xF1100000+ arena, stable per real
+  ptr, null-safe) + entry-wrapping (thiz + L/[ params) + RealCallObject
+  (resolve mock class/method -> real global/methodID (cached) ->
+  AAPCS jvalue marshal (V/A/direct, J-align, unwrap-or-materialize) ->
+  real A-form by ret (V/primitives/String-guest-copy/wrap) +
+  exception-clear+log) + strings delegate (168/169) + mock JNIEnv* in
+  forwarders + RealEnv hook. Tuned mocks stay as fallback (harness
+  identical: hook null). RegisterNatives stays fake+log (stubs next
+  phase; real-without-stubs = wild jump, never).
+- NEXT: repack/reinstall/launch -> config BAD gone? updates proceed?
+  sessions attempt (real net) -> throw? catch? burst?
+
 ## 82. Context compare: coherent march, same pc (2026-10-13, ctxcmp1)
 - 1026 queries, ALL pc=0x45A778: R7 descends 0x48/iter, SP=R7-0x20
   always, LR=0x45AF67 constant. Coherent pairs marching together —
@@ -2370,6 +2387,24 @@ Do NOT treat as fact; verify per item before building on it.
   mid-entry BY DESIGN (prologue skipped everywhere) => fix = emulate
   prologue (IR SetRegister r7/sp + host mem writes) or set R7 at
   block, then watch walk advance.
+
+## 84. Only 2 throws (system_error); pivot to APK config (2026-10-13)
+- THROWCOUNT (PROVEN): RETFAIL run throws EXACTLY 2x, both
+  system_error (NOT Http!), lr=0x44275B (throw-region caller), each ->
+  one 513-spiral (retval=0x45A778). No rethrow recursion (would show
+  many throw lines). Spiral is per-throw deterministic, type-
+  independent. Driver loop ignores answers/pokes; entries/steps never
+  execute; vsp likely FIXED-stale (re-reads getcontext-saved pc slot
+  forever) while driver allocates fresh context/iter (R7 march).
+- PAUSE unwinder (diminishing returns: 6+ runs, no advance). The loop
+  needs its caller (dynamic, unscannable) or prologue emulation (IR
+  work) — parked with repro recipes intact (r7poke/skipframe/stepwatch/
+  callsite/adjudicate logs + R7POKE/SKIPFRAME/WATCHPC infra committed).
+- PIVOT (movement toward menu): APK config BAD (getActivity-mock vs
+  real use) — the update UD2 cascade starts there. Phase-2 delegation
+  (Call*/GetMethodID/refs/fields delegate-to-real; RegisterNatives
+  real + dynamic stubs) per §85 design. Unwinder resumes if APK needs
+  the fail path (likely) with LSDA verdict + fixed-vsp theory in hand.
 
 ## 77. Exidx bridge EXONERATED; loop is driver-side (2026-10-13)
 - TABLE SORTED (PROVEN, exact C++ replication in python): 0 inversions

@@ -89,6 +89,9 @@ public:
     // directly, only via GetStringUTFChars which returns the same pointer).
     std::uint32_t JniEnv();
     std::uint32_t NewStringUTF(const char* s);
+    // Product host: real-ART <-> mock-handle map (pointer-width airtight).
+    std::uint32_t WrapObject(void* real);
+    void* UnwrapObject(std::uint32_t mock);
     // Throw-to-catch emulation (unwinder stand-in, harness-only): consume a
     // pending redirect (set by ProbeRedir) by resuming ActiveJit at the pad
     // in ARM state. Returns true if redirected (caller must Run() again).
@@ -252,6 +255,19 @@ private:
     // JNI bridge state.
     std::uint32_t jni_table_ = 0;   // guest VA of 256-entry function table
     std::uint32_t jni_env_ = 0;     // guest VA of JNIEnv* (word -> jni_table_)
+    // Product host: real-ART <-> mock-handle object map (pointer-width
+    // airtight: guest only ever sees 32-bit mock handles from 0xF1100000+;
+    // real 64-bit pointers never enter guest regs/fields).
+    std::uint32_t next_obj_ = 0xF1100000u;
+    std::unordered_map<void*, std::uint32_t> obj_fwd_;
+    std::unordered_map<std::uint32_t, void*> obj_rev_;
+#ifdef __ANDROID__
+    // Real-call delegation (product host; see dispatch.cpp).
+    bool RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                        std::uint32_t a3, Regs& regs, const std::string& mdesc);
+    std::unordered_map<std::string, void*> real_classes_;
+    std::unordered_map<std::uint32_t, void*> real_methods_;
+#endif
     std::uint32_t jni_str_next_ = 0;  // bump pointer for interned UTF-8 bytes
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
     std::uint32_t jvm_ = 0;         // guest VA of JavaVM* (word -> jvm_table_)

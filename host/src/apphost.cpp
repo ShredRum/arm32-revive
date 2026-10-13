@@ -234,11 +234,13 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             vacache[name] = va;
         }
     }
-    // AAPCS words: env, thiz, then sig-driven (J 8-aligned + split, F via
-    // double promotion, I/Z/B/S/C ints, L/[ pointers).
+    // AAPCS words: mock env + wrapped thiz (guest only ever sees 32-bit
+    // mock handles; real 64-bit pointers never enter guest regs/fields),
+    // then sig-driven (J 8-aligned + split, F via double promotion,
+    // I/Z/B/S/C ints, L/[ wrapped).
     std::vector<std::uint32_t> words;
-    words.push_back((std::uint32_t)(std::uintptr_t)env);
-    words.push_back((std::uint32_t)(std::uintptr_t)thiz);
+    words.push_back(g_rt->JniEnv());
+    words.push_back(g_rt->WrapObject(thiz));
     for (const char* p = sig; *p && *p != ')'; p++) {
         if (*p == '(') {
             continue;
@@ -267,7 +269,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             words.push_back((std::uint32_t)(u >> 32));
         } else if (*p == 'L' || *p == '[') {
             void* o = va_arg(ap, void*);
-            words.push_back((std::uint32_t)(std::uintptr_t)o);
+            words.push_back(g_rt->WrapObject(o));
             if (*p == 'L') {
                 while (*p && *p != ';') {
                     p++;

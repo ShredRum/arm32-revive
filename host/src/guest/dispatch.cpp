@@ -1874,6 +1874,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
                         FindExidx(a0), regs[7], regs[13], regs[14]);
         }
+        // HARNESS_SKIPFRAME=1: flip-test (§87): the walk sticks at frame
+        // 0x45A758 (queried as pc=0x45A778, mid-function entry skips its
+        // prologue so vsp never anchors). Answer as if asked about its true
+        // caller 0x457FE7 (BL @0x457FE2 ret into __cxa_throw): entry 0x5BA430.
+        // No guest state touched (bridge answer only). Binary: walk advances
+        // past frame #1 (new pcs/handlers?) vs same loop. Harness-only.
+        std::uint32_t ask_pc = a0;
+        if (std::getenv("HARNESS_SKIPFRAME") && a0 == 0x45A778u) {
+            ask_pc = 0x457FE7u;
+            std::printf("[skipframe] pc=0045a778 -> answering for 00457fe7\n");
+            // Caller hunt: the re-invoker leaves return addrs on stack.
+            // Dump first code-range words in [sp,sp+512) (outer frames).
+            static int skdump = 0;
+            if (skdump < 2) {
+                skdump++;
+                std::printf("[skipframe] stack:");
+                int shown = 0;
+                for (std::uint32_t a = regs[13]; a < regs[13] + 512 && shown < 8; a += 4) {
+                    if (!CheckRange(a, 4, false)) {
+                        break;
+                    }
+                    std::uint32_t w = 0;
+                    std::memcpy(&w, H<const std::uint8_t>(a), 4);
+                    if (w >= 0x1000 && w < 0x653D1Cu) {
+                        std::printf(" %08x", w);
+                        shown++;
+                    }
+                }
+                std::printf("\n");
+            }
+        }
         // HARNESS_R7POKE=1: flip-test (§79): the raise driver's frame #1
         // has a stale saved-LR ([R7+8] reads heap, never 0x457FE7), so
         // pop re-presents pc=0x45A778 forever. Poke the LR slot with the
@@ -1894,7 +1925,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 poke_n++;
             }
         }
-        Ret(regs, FindExidx(a0));
+        Ret(regs, FindExidx(ask_pc));
         return;
     }
     // --- file bridge (bring-up) ---
@@ -4458,6 +4489,16 @@ std::uint32_t Runtime::PthreadDetach(std::uint32_t tid) {
 
 // ---- JNI bridge (bring-up) ----
 
+#ifdef __ANDROID__
+// Current thread's real JNIEnv* (product host) or null (harness).
+static JNIEnv* RealEnv() {
+    if (GuestCallbacks::g_real_env_hook) {
+        return static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook());
+    }
+    return nullptr;
+}
+#endif
+
 std::uint32_t Runtime::JniEnv() {
     return jni_env_;
 }
@@ -4465,6 +4506,366 @@ std::uint32_t Runtime::JniEnv() {
 std::uint32_t Runtime::Jvm() {
     return jvm_;
 }
+
+std::uint32_t Runtime::WrapObject(void* real) {
+    if (!real) {
+        return 0;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = obj_fwd_.find(real);
+    if (it != obj_fwd_.end()) {
+        return it->second;
+    }
+    const std::uint32_t h = next_obj_;
+    next_obj_ += 4;
+    obj_fwd_[real] = h;
+    obj_rev_[h] = real;
+    return h;
+}
+
+void* Runtime::UnwrapObject(std::uint32_t mock) {
+    if (!mock) {
+        return nullptr;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = obj_rev_.find(mock);
+    return it != obj_rev_.end() ? it->second : nullptr;
+}
+
+#ifdef __ANDROID__
+// Real-call delegation for Call*Method (product host): resolve mock
+// class/method cookies to real ART refs (cached), marshal guest args to
+// jvalues (unwrapping objects, materializing strings), invoke the real
+// A-form, wrap object results. Returns true if fully handled (Ret done).
+// Any failure -> false (caller falls through to tuned mocks).
+bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a1,
+                             std::uint32_t a2, std::uint32_t a3, Regs& regs,
+                             const std::string& mdesc) {
+    JNIEnv* re = GuestCallbacks::g_real_env_hook
+                       ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                       : nullptr;
+    if (!re) {
+        return false;
+    }
+    const bool is_static = fn >= 114;
+    const int vtag = (fn == 114 || fn == 34) ? 0 : ((fn == 115 || fn == 35) ? 1 : 2);
+    // Split "static com/a/B.name(sig)" -> cls, name, sig, ret.
+    std::string d = mdesc;
+    const std::string pfx = is_static ? "static " : "";
+    if (d.compare(0, pfx.size(), pfx) == 0) {
+        d = d.substr(pfx.size());
+    }
+    const std::size_t dot = d.rfind('.');
+    const std::size_t par = d.find('(');
+    if (dot == std::string::npos || par == std::string::npos || dot > par) {
+        return false;
+    }
+    const std::string cls = d.substr(0, dot);
+    const std::string name = d.substr(dot + 1, par - dot - 1);
+    const std::string sig = d.substr(par);
+    const std::size_t rp = sig.find(')');
+    if (rp == std::string::npos) {
+        return false;
+    }
+    const std::string argstr = sig.substr(1, rp - 1);
+    const std::string retstr = sig.substr(rp + 1);
+    // Real class (global-cached) + method (per-cookie cached).
+    jclass rclazz = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = real_classes_.find(cls);
+        if (it != real_classes_.end()) {
+            rclazz = static_cast<jclass>(it->second);
+        }
+    }
+    if (!rclazz) {
+        jclass lc = re->FindClass(cls.c_str());
+        if (!lc || re->ExceptionCheck()) {
+            re->ExceptionClear();
+            return false;
+        }
+        rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
+        re->DeleteLocalRef(lc);
+        if (!rclazz) {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        real_classes_[cls] = rclazz;
+    }
+    jmethodID rmid = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = real_methods_.find(a2);
+        if (it != real_methods_.end()) {
+            rmid = static_cast<jmethodID>(it->second);
+        }
+    }
+    if (!rmid) {
+        rmid = is_static ? re->GetStaticMethodID(rclazz, name.c_str(), sig.substr(par).c_str())
+                         : re->GetMethodID(rclazz, name.c_str(), sig.substr(par).c_str());
+        if (!rmid || re->ExceptionCheck()) {
+            re->ExceptionClear();
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        real_methods_[a2] = rmid;
+    }
+    jobject robj = nullptr;
+    if (!is_static) {
+        robj = static_cast<jobject>(UnwrapObject(a1));
+        if (!robj) {
+            return false;
+        }
+    }
+    // Marshal guest args -> jvalues (absolute AAPCS word index from r0).
+    jvalue jv[16];
+    int nj = 0;
+    std::uint32_t word_idx = 3;  // next unread word position (r3 first)
+    auto next_word = [&]() -> std::uint32_t {
+        std::uint32_t w = 0;
+        if (word_idx == 3) {
+            w = a3;
+        } else if (CheckRange(regs[13] + (word_idx - 4) * 4, 4, false)) {
+            std::memcpy(&w, H(regs[13] + (word_idx - 4) * 4), 4);
+        }
+        word_idx++;
+        return w;
+    };
+    auto next_va = [&]() -> std::uint32_t {
+        // V form: a3 = guest va_list (sequential words); A form handled below.
+        std::uint32_t w = 0;
+        if (CheckRange(a3 + (word_idx - 3) * 4, 4, false)) {
+            std::memcpy(&w, H(a3 + (word_idx - 3) * 4), 4);
+        }
+        word_idx++;
+        return w;
+    };
+    bool ok = true;
+    for (std::size_t i = 0; i < argstr.size() && ok;) {
+        char c = argstr[i];
+        std::string full;
+        if (c == 'L') {
+            const std::size_t sc = argstr.find(';', i);
+            if (sc == std::string::npos) {
+                ok = false;
+                break;
+            }
+            full = argstr.substr(i, sc - i + 1);
+            i = sc + 1;
+        } else if (c == '[') {
+            std::size_t j = i;
+            while (j < argstr.size() && argstr[j] == '[') {
+                j++;
+            }
+            if (j < argstr.size() && argstr[j] == 'L') {
+                const std::size_t sc = argstr.find(';', j);
+                if (sc == std::string::npos) {
+                    ok = false;
+                    break;
+                }
+                full = argstr.substr(i, sc - i + 1);
+                i = sc + 1;
+            } else {
+                full = argstr.substr(i, j - i + 1);
+                i = j + 1;
+            }
+        } else {
+            full = std::string(1, c);
+            i++;
+        }
+        if (nj >= 16) {
+            ok = false;
+            break;
+        }
+        const char k = full[0];
+        if (k == 'J' || k == 'D') {
+            if (vtag == 2) {  // A form: 8B slots
+                std::uint64_t u = 0;
+                if (CheckRange(a3 + (std::uint32_t)nj * 8, 8, false)) {
+                    std::memcpy(&u, H(a3 + (std::uint32_t)nj * 8), 8);
+                }
+                if (k == 'J') {
+                    jv[nj].j = (jlong)u;
+                } else {
+                    double dd = 0;
+                    std::memcpy(&dd, &u, 8);
+                    jv[nj].d = dd;
+                }
+            } else {
+                if (vtag == 0 && ((word_idx) & 1u)) {
+                    next_word();  // AAPCS align
+                }
+                const std::uint32_t lo = (vtag == 0) ? next_word() : next_va();
+                const std::uint32_t hi = (vtag == 0) ? next_word() : next_va();
+                if (k == 'J') {
+                    jv[nj].j = ((std::uint64_t)hi << 32) | lo;
+                } else {
+                    const std::uint64_t u = ((std::uint64_t)hi << 32) | lo;
+                    double dd = 0;
+                    std::memcpy(&dd, &u, 8);
+                    jv[nj].d = dd;
+                }
+            }
+        } else if (k == 'F') {
+            std::uint32_t w = (vtag == 2) ? 0 : ((vtag == 0) ? next_word() : next_va());
+            if (vtag == 2 && CheckRange(a3 + (std::uint32_t)nj * 8, 4, false)) {
+                std::memcpy(&w, H(a3 + (std::uint32_t)nj * 8), 4);
+            }
+            float f = 0;
+            std::memcpy(&f, &w, 4);
+            jv[nj].f = f;
+        } else if (k == 'L' || k == '[') {
+            std::uint32_t w = 0;
+            if (vtag == 2) {
+                std::uint64_t u = 0;
+                if (CheckRange(a3 + (std::uint32_t)nj * 8, 8, false)) {
+                    std::memcpy(&u, H(a3 + (std::uint32_t)nj * 8), 8);
+                }
+                w = (std::uint32_t)u;
+            } else {
+                w = (vtag == 0) ? next_word() : next_va();
+            }
+            jobject ro = nullptr;
+            if (w) {
+                ro = static_cast<jobject>(UnwrapObject(w));
+                if (!ro) {
+                    // Mock string/array buffers (guest-side): materialize real.
+                    if (CheckRange(w, 1, false)) {
+                        std::size_t n = 0;
+                        const auto* p = H<const std::uint8_t>(w);
+                        while (n < 4096 && CheckRange(w + (std::uint32_t)n, 1, false) && p[n]) {
+                            n++;
+                        }
+                        std::string s(reinterpret_cast<const char*>(p), n);
+                        ro = re->NewStringUTF(s.c_str());
+                    }
+                    if (!ro) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            jv[nj].l = ro;
+        } else {
+            std::uint32_t w = 0;
+            if (vtag == 2) {
+                if (CheckRange(a3 + (std::uint32_t)nj * 8, 4, false)) {
+                    std::memcpy(&w, H(a3 + (std::uint32_t)nj * 8), 4);
+                }
+            } else {
+                w = (vtag == 0) ? next_word() : next_va();
+            }
+            jv[nj].i = (jint)w;
+        }
+        nj++;
+    }
+    if (!ok) {
+        return false;
+    }
+    // Invoke by return type (A-forms).
+    if (retstr == "V") {
+        if (is_static) {
+            re->CallStaticVoidMethodA(rclazz, rmid, jv);
+        } else {
+            re->CallVoidMethodA(robj, rmid, jv);
+        }
+        if (re->ExceptionCheck()) {
+            re->ExceptionClear();
+        }
+        Ret(regs, 0);
+        return true;
+    }
+    if (retstr.size() == 1 && std::string("ZBCSIJFD").find(retstr[0]) != std::string::npos) {
+        jlong lv = 0;
+        switch (retstr[0]) {
+            case 'Z':
+                lv = is_static ? re->CallStaticBooleanMethodA(rclazz, rmid, jv)
+                               : re->CallBooleanMethodA(robj, rmid, jv);
+                break;
+            case 'B':
+                lv = is_static ? re->CallStaticByteMethodA(rclazz, rmid, jv)
+                               : re->CallByteMethodA(robj, rmid, jv);
+                break;
+            case 'C':
+                lv = is_static ? re->CallStaticCharMethodA(rclazz, rmid, jv)
+                               : re->CallCharMethodA(robj, rmid, jv);
+                break;
+            case 'S':
+                lv = is_static ? re->CallStaticShortMethodA(rclazz, rmid, jv)
+                               : re->CallShortMethodA(robj, rmid, jv);
+                break;
+            case 'I':
+                lv = is_static ? re->CallStaticIntMethodA(rclazz, rmid, jv)
+                               : re->CallIntMethodA(robj, rmid, jv);
+                break;
+            case 'J':
+                lv = is_static ? re->CallStaticLongMethodA(rclazz, rmid, jv)
+                               : re->CallLongMethodA(robj, rmid, jv);
+                break;
+            case 'F': {
+                const jfloat f = is_static ? re->CallStaticFloatMethodA(rclazz, rmid, jv)
+                                           : re->CallFloatMethodA(robj, rmid, jv);
+                std::uint32_t w = 0;
+                std::memcpy(&w, &f, 4);
+                lv = w;
+                break;
+            }
+            case 'D': {
+                const jdouble d = is_static ? re->CallStaticDoubleMethodA(rclazz, rmid, jv)
+                                           : re->CallDoubleMethodA(robj, rmid, jv);
+                std::uint64_t u = 0;
+                std::memcpy(&u, &d, 8);
+                Ret(regs, (std::uint32_t)u, (std::uint32_t)(u >> 32));
+                if (re->ExceptionCheck()) {
+                    re->ExceptionClear();
+                }
+                return true;
+            }
+        }
+        if (retstr[0] == 'J') {
+            Ret(regs, (std::uint32_t)(std::uint64_t)lv, (std::uint32_t)((std::uint64_t)lv >> 32));
+        } else {
+            Ret(regs, (std::uint32_t)(std::uint64_t)lv);
+        }
+        if (re->ExceptionCheck()) {
+            re->ExceptionClear();
+        }
+        return true;
+    }
+    // Object/String/array: real call, then guest-usable result.
+    {
+        jobject ro = is_static ? re->CallStaticObjectMethodA(rclazz, rmid, jv)
+                               : re->CallObjectMethodA(robj, rmid, jv);
+        if (re->ExceptionCheck() || !ro) {
+            re->ExceptionClear();
+            Ret(regs, 0);
+            return true;
+        }
+        if (retstr == "Ljava/lang/String;") {
+            const char* p = re->GetStringUTFChars(static_cast<jstring>(ro), nullptr);
+            std::uint32_t g = 0;
+            if (p) {
+                const std::uint32_t n = static_cast<std::uint32_t>(std::strlen(p));
+                g = GuestMalloc(n + 1);
+                if (g) {
+                    std::memcpy(H(g), p, n + 1);
+                }
+                re->ReleaseStringUTFChars(static_cast<jstring>(ro), p);
+            }
+            re->DeleteLocalRef(ro);
+            if (!g) {
+                return false;
+            }
+            Ret(regs, g);
+            return true;
+        }
+        const std::uint32_t h = WrapObject(ro);
+        re->DeleteLocalRef(ro);
+        Ret(regs, h);
+        return true;
+    }
+}
+#endif
 
 void Runtime::SetFilesDir(const std::string& guest_prefix, const std::string& host_base) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -4608,8 +5009,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
 #ifdef __ANDROID__
             // Product host: real ART string (unknown to mocks) -> delegate.
             if (GuestCallbacks::g_real_env_hook) {
-                if (JNIEnv* re =
-                        static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())) {
+                if (JNIEnv* re = RealEnv()) {
                     Ret(regs, static_cast<std::uint32_t>(re->GetStringUTFLength(
                                    reinterpret_cast<jstring>(a1))));
                     return;
@@ -4631,8 +5031,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             // Product host: copy real ART bytes into guest heap (guest-safe
             // 32-bit pointer; free is a no-op so Release stays trivial).
             if (GuestCallbacks::g_real_env_hook) {
-                if (JNIEnv* re =
-                        static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())) {
+                if (JNIEnv* re = RealEnv()) {
                     const char* p = re->GetStringUTFChars(reinterpret_cast<jstring>(a1),
                                                            nullptr);
                     if (p) {
@@ -4888,6 +5287,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // content (the game immediately reads them via GetStringRegion etc.).
         // Known: getPathToFileCacheDirectory -> files-dir path (real-world
         // value; host file bridge lands later). Unknown String method: "".
+#ifdef __ANDROID__
+        // Product host first: real ART call (tuned mocks below = fallback).
+        if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
+            return;
+        }
+#endif
         if (mdesc.size() >= 20 &&
             mdesc.compare(mdesc.size() - 20, 20, "()Ljava/lang/String;") == 0) {
             std::string content;
