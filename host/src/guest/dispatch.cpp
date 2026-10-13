@@ -4847,8 +4847,10 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         if (retstr == "Ljava/lang/String;") {
             const char* p = re->GetStringUTFChars(static_cast<jstring>(ro), nullptr);
             std::uint32_t g = 0;
+            std::string content;
             if (p) {
                 const std::uint32_t n = static_cast<std::uint32_t>(std::strlen(p));
+                content.assign(p, n);
                 g = GuestMalloc(n + 1);
                 if (g) {
                     std::memcpy(H(g), p, n + 1);
@@ -4858,6 +4860,11 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             re->DeleteLocalRef(ro);
             if (!g) {
                 return false;
+            }
+            // Intern the delegated copy (see above).
+            {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                jni_strings_[g] = content;
             }
             Ret(regs, g);
             return true;
@@ -5044,6 +5051,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         const std::uint32_t g = GuestMalloc(n + 1);
                         if (g) {
                             std::memcpy(H(g), p, n + 1);
+                            // Intern (caller holds mutex_): see above.
+                            jni_strings_[g] = std::string(p, n);
                             if (a2 && CheckRange(a2, 4, true)) {
                                 const std::uint32_t one = 1;
                                 std::memcpy(H(a2), &one, 4);
