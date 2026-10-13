@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <filesystem>
 #include <mutex>
 #include <random>
@@ -306,7 +307,24 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
 }
 
 std::string FindApk() {
-    // Our own base.apk: /data/app/*/com.rovio.angrybirdsrio*/base.apk
+    // Our own base.apk: derived from our own .so path via dladdr (no
+    // permission issues: own maps always readable). .../lib/arm64/xxx.so
+    // -> .../base.apk. Falls back to /data/app scan (rooted shells).
+    {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<const void*>(&FindApk), &info) && info.dli_fname) {
+            std::string self = info.dli_fname;
+            const std::size_t p = self.find("/lib/");
+            if (p != std::string::npos) {
+                const std::string cand = self.substr(0, p) + "/base.apk";
+                FILE* f = std::fopen(cand.c_str(), "rb");
+                if (f) {
+                    std::fclose(f);
+                    return cand;
+                }
+            }
+        }
+    }
     const char* roots[] = {"/data/app", nullptr};
     for (int r = 0; roots[r]; r++) {
         DIR* d = opendir(roots[r]);
