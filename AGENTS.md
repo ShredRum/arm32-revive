@@ -2294,6 +2294,29 @@ Do NOT treat as fact; verify per item before building on it.
   (C) correctly-handlerless -> close catch-branch as impossible,
   pivot to success-branch/device-APK. No harness runs meanwhile.
 
+## 83. Adjudication: WATCHPC fires, probes starve; mid-function entry
+   (2026-10-13, adjudicate1/2 + midfn1/2 + callsite1)
+- WATCHPC @0x45AF62 FIRES (4x, r0=pc, frames) while ALL slot-probes
+  at 0x45AF30/34/38/62/74 + step sites show 0 exec. Two candidate
+  causes: (a) probe BUDGET starvation (PROBE_N shared; callsite1 hit
+  3001/3000 cap -> suppressed ✓ proven for that run); (b) genuine
+  mid-function entry. midfn2 (budget 200k, clean full run): entries
+  STILL 0, WATCHPC fires -> (b) STANDS with budget confound removed.
+  RULE (load-bearing): end-of-run probe verdicts REQUIRE total <<
+  cap, else void; WATCHPC (own cap-4) as cross-sensor.
+- No static edge of ANY kind enters [0x45AF30,0x45AF70] (ARM BL/Bcond/
+  BLX-imm, Thumb BL/cond/CBZ all zero) yet the block runs 1k-78k/run.
+  => dynamic entry (blx-reg/functor) past the prologue (push/add/sub
+  skipped) => R7 never set => vsp garbage => re-present loop. Stack
+  frames are mixed-live (throw pads, dispatcher, account) — ordinary
+  worker flight, not garbage.
+- DEVICE DECIDES (next, cheapest decisive): hook getInfo ENTRY +
+  0x45AF62 on fresh boot. Entry executes there => our caller path
+  diverges (capture its bt -> replicate). Entry silent there too =>
+  mid-entry BY DESIGN (prologue skipped everywhere) => fix = emulate
+  prologue (IR SetRegister r7/sp + host mem writes) or set R7 at
+  block, then watch walk advance.
+
 ## 77. Exidx bridge EXONERATED; loop is driver-side (2026-10-13)
 - TABLE SORTED (PROVEN, exact C++ replication in python): 0 inversions
   across 18184 entries; binary search returns 0x5BA760 for pc=0x45A778
