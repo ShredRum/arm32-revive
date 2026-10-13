@@ -358,6 +358,21 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         if (beat_on < 0) {
             beat_on = std::getenv("HARNESS_TAPBEAT") ? 1 : 0;
         }
+        // Seed template (PLAY center MOVE) so the pulse fires even with
+        // zero real taps. Guest overwrites r1 (app obj) immediately and
+        // never uses env on this path (byte-proven); thiz=0 safe here.
+        if (lastw.empty() && words.size() >= 6) {
+            lastw = words;
+            float dx = 1124.0f, dy = 629.0f;
+            std::uint32_t xb = 0, yb = 0;
+            std::memcpy(&xb, &dx, 4);
+            std::memcpy(&yb, &dy, 4);
+            lastw[1] = 0;
+            lastw[2] = 2;
+            lastw[3] = xb;
+            lastw[4] = yb;
+            lastw[5] = 0;
+        }
         auto now_ms = []() -> long long {
             struct timespec ts {};
             ::clock_gettime(CLOCK_MONOTONIC, &ts);
