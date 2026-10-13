@@ -385,6 +385,38 @@ std::string FindApk() {
 }  // namespace
 
 std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* thiz, ...) {
+#ifdef __ANDROID__
+    // Deinit forensics: who calls nativeDeinit (orderly-suicide chain)?
+    // Dump the Java stack via real ART (no race: runs synchronously).
+    if (std::strstr(name, "nativeDeinit") && abr::GuestCallbacks::g_real_env_hook) {
+        JNIEnv* re = static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
+        if (re && !re->ExceptionCheck()) {
+            jclass exCls = re->FindClass("java/lang/Exception");
+            jmethodID exCtor = exCls ? re->GetMethodID(exCls, "<init>", "()V") : nullptr;
+            jobject ex = (exCls && exCtor) ? re->NewObject(exCls, exCtor) : nullptr;
+            jclass logCls = re->FindClass("android/util/Log");
+            jmethodID strace = logCls ? re->GetStaticMethodID(logCls, "getStackTraceString",
+                                                              "(Ljava/lang/Throwable;)Ljava/lang/String;")
+                                      : nullptr;
+            jstring js = (logCls && strace && ex)
+                             ? static_cast<jstring>(re->CallStaticObjectMethod(logCls, strace, ex))
+                             : nullptr;
+            if (js && !re->ExceptionCheck()) {
+                const char* c = re->GetStringUTFChars(js, nullptr);
+                if (c) {
+                    Log("deinit-JAVA-STACK:\n%.3000s", c);
+                    re->ReleaseStringUTFChars(js, c);
+                }
+                re->DeleteLocalRef(js);
+            } else {
+                re->ExceptionClear();
+            }
+            if (ex) {
+                re->DeleteLocalRef(ex);
+            }
+        }
+    }
+#endif
     va_list ap;
     va_start(ap, thiz);
     static int calln = 0;
