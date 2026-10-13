@@ -6663,6 +6663,15 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_
     std::uint8_t* body = nullptr;
     std::size_t blen = 0;
     std::uint8_t tbuf[160];
+    // Sessions schema (discovered iteratively via KeyNotFound messages;
+    // phone-proven graceful path needs these present; extra keys tolerated).
+    // Shared by /sessions and the singular /session/1/apps/... call.
+    static const char sjson[] =
+        "{\"segments\":[],\"access\":{\"token\":\"offline-test-access-12345\"},"
+        "\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
+        "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000,"
+        "\"refresh\":{}},"
+        "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"},\"refresh\":{}}";
     if (u.size() >= 5 && u.compare(u.size() - 5, 5, "/time") == 0) {
         struct timespec ts {};
         ::clock_gettime(CLOCK_REALTIME, &ts);
@@ -6674,14 +6683,13 @@ void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_
         body = tbuf;
         blen = (std::size_t)w;
     } else if (u.size() >= 9 && u.compare(u.size() - 9, 9, "/sessions") == 0) {
-        // Schema discovered iteratively via KeyNotFound messages (phone-
-        // proven graceful path needs these present; extra keys tolerated).
-        static const char sjson[] =
-            "{\"segments\":[],\"access\":{\"token\":\"offline-test-access-12345\"},"
-            "\"userAuth\":{\"accessToken\":\"offline-test-token-12345\","
-            "\"refreshToken\":\"offline-test-refresh-67890\",\"expiresIn\":2000000000,"
-            "\"refresh\":{}},"
-            "\"profile\":{},\"config\":{\"sdkDebugLoggingEnabled\":\"true\"},\"refresh\":{}}";
+        body = (std::uint8_t*)sjson;
+        blen = sizeof(sjson) - 1;
+    } else if (u.find("/session/") != std::string::npos) {
+        // Singular /session/1/apps/... (authenticated session call built
+        // from stored tokens; seen live on device AFTER sessions-succ
+        // saved offline-test tokens to the registry). Schema TBD — start
+        // with the sessions shape, iterate via KeyNotFound like before.
         body = (std::uint8_t*)sjson;
         blen = sizeof(sjson) - 1;
     } else if (u.size() >= 9 && u.compare(u.size() - 9, 9, "/refresh") == 0) {
