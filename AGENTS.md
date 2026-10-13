@@ -3158,6 +3158,24 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   or fire at login-retry timing; (c) success functor 0x5EBA4 with
   live session (sessions-succ state exists!) as the sibling test.
 
+## 103. MENU REACHED on device via taps (2026-10-14, THE milestone)
+- USER tapped through LOADING: each tap briefly unpauses the game
+  (input-driven progress; game behaves PAUSED without input, same
+  class as PC splash-taps §12). MENU APPEARED.
+- PIXEL-PROOF (screencap): full main menu — Rio logo, Blu+Red,
+  orange PLAY disc center, ToonsTV, gear. Matches §54 reference
+  exactly. First menu frame of the port.
+- CODE-PROOF: +164 flips 2<->1 (live menu oscillation, same as
+  original in-menu §39). Manager/scene alive.
+- MECHANISM (INFERRED): taps pump nativeInput -> guest event
+  machinery -> work quantum -> stall. The "completion channel"
+  may be INPUT-driven (events!), not network. All static
+  no-delivery verdicts stand for the network channel; the input
+  channel was never instrumented (PC JOVR taps = same phenomenon).
+- NEXT: stabilize (does menu persist without taps?); tap PLAY ->
+  episode select -> GAMEPLAY?; instrument input path (which guest
+  fn consumes taps? event queue?); journal tap-driven progress.
+
 ## 102. FIRST REAL PIXELS: Rovio logo on device (2026-10-14)
 - Android real-GL backend (shared Handle; caller's context; no EGL
   init): live ctx=0x7ad8c25600 on first try; driver answers real
