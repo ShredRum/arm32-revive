@@ -2347,6 +2347,21 @@ Do NOT treat as fact; verify per item before building on it.
   with real bionic (R7 reproduces -> fix here) vs catch/functors
   (wall was harness artifact -> APK road open).
 
+## 81. Device unwinder verdict: spiral reproduces (2026-10-13, unwind5)
+- DEVICE FAIL (real bionic threads, DNSALLOW, no RETSUCC): 2x
+  HttpRequestException (lr=0x28AE70, same raiser tail), tid 9+12 die
+  in the SAME 513-deep spiral at pc=0x45A778 (retval=0x45A778).
+  Functors 0, loginFinished 0, clean run end. VERDICT: wall
+  REPRODUCES on device — not a harness artifact. R7/frame fix needed
+  in shared code (helps both). §75(c) CLOSED.
+- STEPWATCH CORRECTION (PC): step sites 0x45A7B8/0x45A7E6 never
+  EXECUTE (0 [probe]#N) though queries flow — the mapped phase1-step
+  is NOT the looping path (my "step stuck" framing wrong; translation
+  of Thumb blocks unmeasured — translog was off, no inference there).
+  Loop re-invokes per iteration (SP -245B/iter). NEXT: probe getInfo
+  entry 0x45AF30 + phase1 entry 0x45A758 with EXIDXLOG -> entries ==
+  queries (re-entry loop) vs << (inner loop elsewhere).
+
 ## 79. R7 recon from archive: stale CONFIRMED; LR slot is [R7+8]
    (2026-10-13, retfailbuild.log, no new run)
 - 4 spiral halts (2 threads x2): R7=heap (12d27da8/1339eb90/...),
