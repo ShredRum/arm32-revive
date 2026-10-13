@@ -3046,6 +3046,14 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - NEXT MEASUREMENT: relaunch + Frida-from-birth (UpdateThread.run/a/
   doUpdate entry-exit-returns + starts) -> name the stopper. THEN
   fastmem (user-approved after analysis).
+- RESULT (Frida birth-hooks, pid 9480): doUpdate TRUE fires REPEATEDLY
+  from boot (guest r0=1 every update -> Java sets EXITING, loops via
+  access$200, never dies); UT.run enter NEVER fired -> updates come
+  from a finite init burst (main?), UpdateThread never starts. Gate#3
+  (+1187) never opens on device -> idle-bail forever. RENDER_READY
+  (doInit overwrite) masks EXITING. THE device wall = +1187 writer
+  0xBE704 never invoked (PC: POKE1187 forced it; device needs the
+  natural caller).
 
 ## 95. SAFEOPTS A/B: identical, ~20% faster on short combo (2026-10-13, PC)
 - A (no_opt): 5.85s; B (all_safe_optimizations): 4.67s. Identical:
@@ -3056,3 +3064,9 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   bit us once, §80). Default stays no_opt; SAFEOPTS opt-in.
 - NEXT: fastmem design (page-table 1:1 + sighandler + fallback), then
   A64 validation on device (opts+fastmem) withupdate-rate metric.
+- RESULT (fmboot1, PC long combo + FASTMEM): 42s, 2 known worker
+  spirals (time/apdrive escaping RETSUCC gate, §73 shape), film
+  Rovio->...->LOADING end (user-confirmed normal end state; final
+  white-frac 0.93 = bright LOADING art, not whiteout). Fastmem reaches
+  the same stages as bring-up mode. A/B parity HOLDS long. Control
+  (fmboot0, same combo no-fastmem) running to confirm.
