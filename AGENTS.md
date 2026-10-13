@@ -2332,6 +2332,19 @@ Do NOT treat as fact; verify per item before building on it.
 - NEXT: repack/reinstall/launch -> update#1 passes? config BAD persists
   (then: Call*-delegation for real Activity)?
 
+## 88. Product hits the unwinder wall (2026-10-13, device APK)
+- FILES ALIAS WORKED (no unmapped lines; seeds open). Config BAD gone
+  (no BAD @config). First update: hr=UD2 r0=0x45A778 = THROW+spiral
+  (real network -> dead API/TLS -> HttpRequestException -> R7 wall),
+  then 0x39B1E8 NULL-write cascade (r0=8), black screen. Same shape as
+  harness/device-headless predicts NOTHING (all three agree).
+- VERDICT: unwinder catch is UNAVOIDABLE for any menu (API dead online
+  and offline -> always throws -> must catch -> loginFinished(0) ->
+  burst). The R7 workstream is THE product critical path (PC lab, fix
+  transfers everywhere). No more routing around it.
+- NEXT: resume R7 root cause (LSDA verdict pending; mid-function entry
+  / prologue emulation / caller hunt).
+
 ## 87. Pointer-width airtight + Call delegation (2026-10-13)
 - BUG CLASS (PROVEN maps): ART lives high (0x7x-dominant) — raw 64-bit
   pointers must NEVER enter 32-bit guest regs/fields. Design: guest
