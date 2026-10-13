@@ -3030,9 +3030,19 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   birth-hook run to settle).
 - Last main-thread guest acts: settings/bi_data saves + Flurry onEvent
   (real delegation OK). Workers done; GL spins black.
-- LESSON: updates<<40 => file count == truth; logcat timestamps beat
-  file logs for rate; task-comm list beats utime aggregates (cumulative
-  utime falsely suggested all-spin; states showed 1 R + 17 S).
+- CORRECTION (2026-10-13, process 8305 GONE with no tombstone): the
+  "34 then zero" reading was a LOG-CAP ARTIFACT (same bug class as
+  §83 probe budgets!). call# logs only while calln<40; 6 non-updates +
+  34 updates = 40 EXACTLY -> updates #35+ ran UNLOGGED. Workers kept
+  going ([succ] sessions 4x + time 2x + [poll-ret] prove later
+  activity); utime burned; THEN the process died silently (no
+  tombstone, no exception). Zombie verdict above: RETRACTED as
+  "frozen at 34" (updates continued unseen); the DEATH itself is real
+  and unexplained (clean exit? watchdog _exit? Java quit path?).
+  doUpdate-nonzero loops (access$200), does not exit the thread.
+- LESSON (load-bearing): call#-style caps hide continuation; any
+  "stopped" verdict needs an uncapped sensor (raise caps on Android
+  first, conclude second).
 - NEXT MEASUREMENT: relaunch + Frida-from-birth (UpdateThread.run/a/
   doUpdate entry-exit-returns + starts) -> name the stopper. THEN
   fastmem (user-approved after analysis).

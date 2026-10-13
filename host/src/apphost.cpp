@@ -373,9 +373,17 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     va_list ap;
     va_start(ap, thiz);
     static int calln = 0;
+#ifdef __ANDROID__
+    if (calln < 400) {  // device runs long; 40 hid continuation (§94)
+#else
     if (calln < 40) {
+#endif
         Log("call#%d %s", calln, name);
+#ifdef __ANDROID__
     }
+#else
+    }
+#endif
     calln++;
     const std::uint64_t rv = AppHost_CallImpl(name, sig, env, thiz, ap);
     va_end(ap);
