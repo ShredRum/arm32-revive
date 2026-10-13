@@ -370,6 +370,11 @@ std::string FindApk() {
 std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* thiz, ...) {
     va_list ap;
     va_start(ap, thiz);
+    static int calln = 0;
+    if (calln < 40) {
+        Log("call#%d %s", calln, name);
+    }
+    calln++;
     const std::uint64_t rv = AppHost_CallImpl(name, sig, env, thiz, ap);
     va_end(ap);
     return rv;

@@ -4554,6 +4554,7 @@ void* Runtime::UnwrapObject(std::uint32_t mock) {
 bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a1,
                              std::uint32_t a2, std::uint32_t a3, Regs& regs,
                              const std::string& mdesc) {
+    std::printf("[realcall] fn=%u obj=%08x m=%.90s\n", fn, fn >= 114 ? a1 : a1, mdesc.c_str());
     JNIEnv* re = GuestCallbacks::g_real_env_hook
                        ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
                        : nullptr;
