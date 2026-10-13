@@ -540,11 +540,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
-    // Fail-functor synthesis timing: fire once after the 150th update
-    // (boot + sessions done; workers settled). Forged ctx needs no
-    // session state for clean execution (PC functor1); burst downstream
-    // may want tokens saved (they are by then).
-    setenv("HARNESS_FUNCTORAT", "150", 1);
+    // Fail-functor synthesis timing: DISABLED (2026-10-14). Correlation:
+    // boots WITH functor fire (14932 died, 35844 black-after-loading)
+    // vs boot WITHOUT (15265 menu). Suspect: forged login-failed state
+    // suppresses menu construction downstream. Binary test: off -> menu?
+    // setenv("HARNESS_FUNCTORAT", "150", 1);
     // Real GLES on device (shared Handle; caller's context, no EGL init).
     // PC parity verified post-split (54/54, 948). First test: live ctx?
     // GL errors? survival? (pixels need content+burst; LOADING art first.)
