@@ -3143,6 +3143,21 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   (PC REDIR proved the call runs + logs.) Unwinder R7 stays the
   "real" fix; synthesis is cheaper per rung.
 
+## 101. Fail functor fires clean on device; no burst yet (2026-10-14)
+- FUNCTORAT=150 (cf711d6/5a9e017): forged ctx (0x65E650 + zeros,
+  PC RAWBUILD recipe) + BL 0x5FE70 on device -> hr=UD1 CLEAN
+  r0=0, `[glog] Login failed: 0 =>` logged, process ALIVE (no
+  suicide). Door OPENS: fail path executes with real Java/threads.
+- No burst follows (so far): +164=2 held (DIAG164), no new
+  endpoints, no loginFinished(1). Forged-zeros ctx likely a dead
+  end downstream (as PC functor1: clean but sterile) — needs
+  live account/session linkage OR the retry cycle (D1: 10.2s gap;
+  retry login#2 lands DURING burst).
+- NEXT: (a) keep watching this boot for late burst (retry cycle?);
+  (b) enrich ctx (live session link? +0x19? account holder §59?)
+  or fire at login-retry timing; (c) success functor 0x5EBA4 with
+  live session (sessions-succ state exists!) as the sibling test.
+
 ## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
 - 4 days on the desktop harness past LOADING with zero menu progress
   (login ladder, builders, loop, manager, unwinder — all mapped, none
