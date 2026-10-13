@@ -3055,6 +3055,15 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   0xBE704 never invoked (PC: POKE1187 forced it; device needs the
   natural caller).
 
+## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
+- 4 days on the desktop harness past LOADING with zero menu progress
+  (login ladder, builders, loop, manager, unwinder — all mapped, none
+  delivering). Pivot to Android APK was the explicitly chosen exit
+  (§75 correction -> §84 online-first packaging -> product boots on
+  device same day). Standing rule from that pivot: device-via-Frida
+  beats harness brute-force; PC stays a build+smoke forge, never the
+  menu hunt. If a future thread proposes "one more harness trigger
+  series" — re-read §§51-74 first (all shapes measured).
 ## 95. SAFEOPTS A/B: identical, ~20% faster on short combo (2026-10-13, PC)
 - A (no_opt): 5.85s; B (all_safe_optimizations): 4.67s. Identical:
   54/54, svc=948, halts=53, updates/render r0=1 clean, same call
