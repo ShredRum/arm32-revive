@@ -265,8 +265,23 @@ private:
     // Real-call delegation (product host; see dispatch.cpp).
     bool RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
                         std::uint32_t a3, Regs& regs, const std::string& mdesc);
+    // Real NewObject (audio + future real objects): same resolution as
+    // RealCallObject, V-form marshal, NewObjectA, Wrap. False = mock path.
+    bool RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2, std::uint32_t a3,
+                       Regs& regs, const std::string& mdesc);
     std::unordered_map<std::string, void*> real_classes_;
     std::unordered_map<std::uint32_t, void*> real_methods_;
+    // Real field IDs per mock GetFieldID cookie (audio buffer fields).
+    std::unordered_map<std::uint32_t, void*> real_fields_;
+    // Pinned real byte arrays: guest mock handle -> {real array, host
+    // elems ptr, guest copy, len}. Release copies back per mode.
+    struct ArrayPin {
+        void* real_arr = nullptr;
+        void* host_elems = nullptr;
+        std::uint32_t guest_buf = 0;
+        std::uint32_t len = 0;
+    };
+    std::unordered_map<std::uint32_t, ArrayPin> array_pins_;
 #endif
     std::uint32_t jni_str_next_ = 0;  // bump pointer for interned UTF-8 bytes
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table

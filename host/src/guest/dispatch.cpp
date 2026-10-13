@@ -4923,6 +4923,199 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         return true;
     }
 }
+
+// Real NewObject (product host): resolve mock class/<init> cookies to
+// real ART refs (cached), marshal the V-form va_list (a3) to jvalues,
+// NewObjectA, Wrap. False = caller falls through to mock objects.
+// V-form word order mirrors RealCallObject's next_va (sequential words;
+// J/D = 2 words lo,hi; F = 1 word float bits, same quirk).
+bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2, std::uint32_t a3,
+                            Regs& regs, const std::string& mdesc) {
+    std::printf("[realnew] %s\n", mdesc.c_str());
+    JNIEnv* re = GuestCallbacks::g_real_env_hook
+                     ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                     : nullptr;
+    if (!re) {
+        return false;
+    }
+    const int vtag = (fn == 28) ? 0 : ((fn == 29) ? 1 : 2);
+    std::string d = mdesc;
+    const std::size_t dot = d.find(".<init>");
+    const std::size_t par = d.find('(');
+    if (dot == std::string::npos || par == std::string::npos || dot > par) {
+        return false;
+    }
+    const std::string cls = d.substr(0, dot);
+    const std::string sig = d.substr(par);
+    const std::size_t rp = sig.find(')');
+    if (rp == std::string::npos) {
+        return false;
+    }
+    const std::string argstr = sig.substr(1, rp - 1);
+    jclass rclazz = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = real_classes_.find(cls);
+        if (it != real_classes_.end()) {
+            rclazz = static_cast<jclass>(it->second);
+        }
+    }
+    if (!rclazz) {
+        jclass lc = re->FindClass(cls.c_str());
+        if (!lc || re->ExceptionCheck()) {
+            re->ExceptionClear();
+            return false;
+        }
+        rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
+        re->DeleteLocalRef(lc);
+        if (!rclazz) {
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        real_classes_[cls] = rclazz;
+    }
+    jmethodID rmid = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = real_methods_.find(a2);
+        if (it != real_methods_.end()) {
+            rmid = static_cast<jmethodID>(it->second);
+        }
+    }
+    if (!rmid) {
+        rmid = re->GetMethodID(rclazz, "<init>", sig.c_str());
+        if (!rmid || re->ExceptionCheck()) {
+            re->ExceptionClear();
+            return false;
+        }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        real_methods_[a2] = rmid;
+    }
+    jvalue jv[16];
+    int nj = 0;
+    std::uint32_t word_idx = 3;
+    auto next_va = [&]() -> std::uint32_t {
+        std::uint32_t w = 0;
+        if (CheckRange(a3 + (word_idx - 3) * 4, 4, false)) {
+            std::memcpy(&w, H(a3 + (word_idx - 3) * 4), 4);
+        }
+        word_idx++;
+        return w;
+    };
+    auto next_w = [&]() -> std::uint32_t {
+        // vtag 0 (direct): r3 then guest stack; else va_list. Only V (1)
+        // and A (2) occur for ctors in practice; A-form reads jvalue slots.
+        std::uint32_t w = 0;
+        if (vtag == 0) {
+            if (word_idx == 3) {
+                w = a3;
+            } else if (CheckRange(regs[13] + (word_idx - 4) * 4, 4, false)) {
+                std::memcpy(&w, H(regs[13] + (word_idx - 4) * 4), 4);
+            }
+            word_idx++;
+        } else if (vtag == 1) {
+            w = next_va();
+        } else {
+            std::uint64_t u = 0;
+            if (CheckRange(a3 + (std::uint32_t)nj * 8, 8, false)) {
+                std::memcpy(&u, H(a3 + (std::uint32_t)nj * 8), 8);
+            }
+            w = (std::uint32_t)u;
+        }
+        return w;
+    };
+    bool ok = true;
+    for (std::size_t i = 0; i < argstr.size() && ok;) {
+        char c = argstr[i];
+        std::string full;
+        if (c == 'L') {
+            const std::size_t sc = argstr.find(';', i);
+            if (sc == std::string::npos) {
+                ok = false;
+                break;
+            }
+            full = argstr.substr(i, sc - i + 1);
+            i = sc + 1;
+        } else if (c == '[') {
+            std::size_t j = i;
+            while (j < argstr.size() && argstr[j] == '[') {
+                j++;
+            }
+            if (j < argstr.size() && argstr[j] == 'L') {
+                const std::size_t sc = argstr.find(';', j);
+                if (sc == std::string::npos) {
+                    ok = false;
+                    break;
+                }
+                full = argstr.substr(i, sc - i + 1);
+                i = sc + 1;
+            } else {
+                full = argstr.substr(i, j - i + 1);
+                i = j + 1;
+            }
+        } else {
+            full = std::string(1, c);
+            i++;
+        }
+        if (nj >= 16) {
+            ok = false;
+            break;
+        }
+        const char k = full[0];
+        if (k == 'J' || k == 'D') {
+            const std::uint32_t lo = next_w();
+            const std::uint32_t hi = next_w();
+            if (k == 'J') {
+                jv[nj].j = ((std::uint64_t)hi << 32) | lo;
+            } else {
+                const std::uint64_t u = ((std::uint64_t)hi << 32) | lo;
+                double dd = 0;
+                std::memcpy(&dd, &u, 8);
+                jv[nj].d = dd;
+            }
+        } else if (k == 'F') {
+            const std::uint32_t w = next_w();
+            float f = 0;
+            std::memcpy(&f, &w, 4);
+            jv[nj].f = f;
+        } else if (k == 'L' || k == '[') {
+            const std::uint32_t w = next_w();
+            jobject ro = nullptr;
+            if (w) {
+                ro = static_cast<jobject>(UnwrapObject(w));
+                if (!ro && CheckRange(w, 1, false)) {
+                    std::size_t n = 0;
+                    const auto* p = H<const std::uint8_t>(w);
+                    while (n < 4096 && CheckRange(w + (std::uint32_t)n, 1, false) && p[n]) {
+                        n++;
+                    }
+                    std::string s(reinterpret_cast<const char*>(p), n);
+                    ro = re->NewStringUTF(s.c_str());
+                }
+                if (!ro) {
+                    ok = false;
+                    break;
+                }
+            }
+            jv[nj].l = ro;
+        } else {
+            jv[nj].i = (jint)next_w();
+        }
+        nj++;
+    }
+    if (!ok) {
+        return false;
+    }
+    jobject ro = re->NewObjectA(rclazz, rmid, jv);
+    if (re->ExceptionCheck() || !ro) {
+        re->ExceptionClear();
+        return false;
+    }
+    const std::uint32_t h = WrapObject(ro);
+    re->DeleteLocalRef(ro);
+    Ret(regs, h);
+    return true;
+}
 #endif
 
 void Runtime::SetFilesDir(const std::string& guest_prefix, const std::string& host_base) {
@@ -5239,6 +5432,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 mdesc = it->second;
             }
         }
+#ifdef __ANDROID__
+        // Product host first: real ART object (audio + future stateful
+        // objects need real fields/arrays; mocks below = fallback).
+        if (RealNewObject(fn, a1, a2, a3, regs, mdesc)) {
+            return;
+        }
+#endif
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
         const std::uint32_t o = jni_obj_next_;
@@ -5307,6 +5507,65 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // AudioOutput.startOutput()Z: our mixer is live (mixdata proven) —
         // report started, as on device. Everything else defaults to false
         // (logged-out services etc.).
+#ifdef __ANDROID__
+        // Product host: real startOutput on real objects (starts real
+        // audio -> real callbacks -> mixdata). No-arg boolean only; other
+        // shapes stay mocked below.
+        if (mdesc.find("startOutput()Z") != std::string::npos) {
+            JNIEnv* re = GuestCallbacks::g_real_env_hook
+                             ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                             : nullptr;
+            void* robj = UnwrapObject(a1);
+            if (re && robj) {
+                std::string d = mdesc;
+                const std::size_t dot = d.rfind('.');
+                const std::size_t par = d.find('(');
+                if (dot != std::string::npos && par != std::string::npos && dot < par) {
+                    const std::string cls = d.substr(0, dot);
+                    jclass rclazz = nullptr;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        const auto it = real_classes_.find(cls);
+                        if (it != real_classes_.end()) {
+                            rclazz = static_cast<jclass>(it->second);
+                        }
+                    }
+                    if (!rclazz) {
+                        jclass lc = re->FindClass(cls.c_str());
+                        if (lc && !re->ExceptionCheck()) {
+                            rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
+                            re->DeleteLocalRef(lc);
+                            if (rclazz) {
+                                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                                real_classes_[cls] = rclazz;
+                            }
+                        } else {
+                            re->ExceptionClear();
+                        }
+                    }
+                    jmethodID rmid = nullptr;
+                    if (rclazz) {
+                        rmid = re->GetMethodID(rclazz, "startOutput", "()Z");
+                        if (!rmid || re->ExceptionCheck()) {
+                            re->ExceptionClear();
+                            rmid = nullptr;
+                        }
+                    }
+                    if (rmid) {
+                        jboolean rr = re->CallBooleanMethodA(static_cast<jobject>(robj),
+                                                             rmid, nullptr);
+                        if (!re->ExceptionCheck()) {
+                            std::printf("[jni] CallBooleanMethod startOutput -> %u (real)\n",
+                                        (unsigned)rr);
+                            Ret(regs, rr ? 1u : 0u);
+                            return;
+                        }
+                        re->ExceptionClear();
+                    }
+                }
+            }
+        }
+#endif
         const std::uint32_t rv =
             (mdesc.find("startOutput") != std::string::npos) ? 1 : 0;
         std::printf("[jni] CallBooleanMethod%s %s -> %u\n", vtag, mdesc.c_str(), rv);
@@ -5618,6 +5877,48 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 184: {  // GetByteArrayElements(env, array, isCopy) -> jbyte*
+#ifdef __ANDROID__
+        // Real arrays (audio buffers): pin host elems, copy into a guest
+        // buffer (guest only ever sees 32-bit), record the pin for
+        // Release copy-back. Falls through to mocks for mock arrays.
+        {
+            void* rarr = UnwrapObject(a1);
+            JNIEnv* re = GuestCallbacks::g_real_env_hook
+                             ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                             : nullptr;
+            if (re && rarr) {
+                jsize len = re->GetArrayLength(static_cast<jarray>(rarr));
+                if (!re->ExceptionCheck() && len > 0 && len < 10000000) {
+                    const std::uint32_t gb = GuestMalloc((std::uint32_t)len);
+                    jbyte* hp = gb ? re->GetByteArrayElements(static_cast<jbyteArray>(rarr),
+                                                              nullptr)
+                                   : nullptr;
+                    if (gb && hp && !re->ExceptionCheck()) {
+                        std::memcpy(H(gb), hp, (std::size_t)len);
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(mutex_);
+                            array_pins_[a1] = ArrayPin{rarr, hp, gb, (std::uint32_t)len};
+                        }
+                        if (a2 && CheckRange(a2, 4, true)) {
+                            const std::uint32_t t = 1;  // JNI_TRUE: copy
+                            std::memcpy(H(a2), &t, 4);
+                        }
+                        std::printf("[jni] GetByteArrayElements real len=%d -> %08x\n",
+                                    (int)len, gb);
+                        Ret(regs, gb);
+                        return;
+                    }
+                    if (hp) {
+                        re->ReleaseByteArrayElements(static_cast<jbyteArray>(rarr), hp,
+                                                     JNI_ABORT);
+                    }
+                    re->ExceptionClear();
+                } else {
+                    re->ExceptionClear();
+                }
+            }
+        }
+#endif
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_array_lens_.find(a1);
         if (it == jni_array_lens_.end() || !CheckRange(a1, it->second, false)) {
@@ -5634,6 +5935,41 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 192: {  // ReleaseByteArrayElements(env, array, elems, mode) -> void
+#ifdef __ANDROID__
+        // Pinned real array: copy back per mode, unpin.
+        {
+            ArrayPin pin;
+            bool have = false;
+            {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                const auto it = array_pins_.find(a1);
+                if (it != array_pins_.end()) {
+                    pin = it->second;
+                    array_pins_.erase(it);
+                    have = true;
+                }
+            }
+            if (have) {
+                JNIEnv* re = GuestCallbacks::g_real_env_hook
+                                 ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                                 : nullptr;
+                if (re && pin.host_elems &&
+                    CheckRange(pin.guest_buf, pin.len, false)) {
+                    if (a3 == 0 || a3 == 1) {  // 0/JNI_COMMIT: copy back
+                        std::memcpy(pin.host_elems, H(pin.guest_buf), pin.len);
+                    }
+                    re->ReleaseByteArrayElements(static_cast<jbyteArray>(pin.real_arr),
+                                                 static_cast<jbyte*>(pin.host_elems),
+                                                 (jint)a3);
+                    if (re->ExceptionCheck()) {
+                        re->ExceptionClear();
+                    }
+                }
+                Ret(regs, 0);
+                return;
+            }
+        }
+#endif
         Ret(regs, 0);  // direct pointer: nothing to copy back or free
         return;
     }
@@ -5740,6 +6076,138 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
                     (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);
         Ret(regs, c);
+        return;
+    }
+    case 95: {  // GetObjectField(env, obj, field) -> value
+#ifdef __ANDROID__
+        // Real-first (audio buffer fields live on real objects).
+        // Mock field cookies carry "field Cls.name(sig)".
+        {
+            std::string fdesc = "?";
+            {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                const auto it = jni_methods_.find(a2);
+                if (it != jni_methods_.end()) {
+                    fdesc = it->second;
+                }
+            }
+            JNIEnv* re = GuestCallbacks::g_real_env_hook
+                             ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                             : nullptr;
+            void* robj = UnwrapObject(a1);
+            std::string d = fdesc;
+            const std::string pfx = "field ";
+            if (re && robj && d.compare(0, pfx.size(), pfx) == 0) {
+                d = d.substr(pfx.size());
+                const std::size_t dot = d.rfind('.');
+                const std::size_t par = d.find('(');
+                // Field desc shape: "Cls.name(sig)" (no parens; tolerate).
+                std::string cls, name, sig;
+                if (dot != std::string::npos) {
+                    cls = d.substr(0, dot);
+                    const std::string rest = d.substr(dot + 1);
+                    const std::size_t lp = rest.find('(');
+                    if (lp != std::string::npos) {
+                        name = rest.substr(0, lp);
+                        sig = rest.substr(lp);
+                    } else {
+                        name = rest;
+                    }
+                }
+                // Field sig follows the name directly ("name[Sig") when the
+                // mock cookie was built as name+sig. Split trailing type.
+                if (!name.empty() && sig.empty()) {
+                    const std::size_t tp = name.find_first_of("ZBCDFIJSV[(");
+                    if (tp != std::string::npos && tp > 0) {
+                        sig = name.substr(tp);
+                        name = name.substr(0, tp);
+                    }
+                }
+                jfieldID rfid = nullptr;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    const auto it = real_fields_.find(a2);
+                    if (it != real_fields_.end()) {
+                        rfid = static_cast<jfieldID>(it->second);
+                    }
+                }
+                if (!rfid && !cls.empty() && !name.empty() && !sig.empty()) {
+                    jclass rclazz = nullptr;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        const auto it = real_classes_.find(cls);
+                        if (it != real_classes_.end()) {
+                            rclazz = static_cast<jclass>(it->second);
+                        }
+                    }
+                    if (!rclazz) {
+                        jclass lc = re->FindClass(cls.c_str());
+                        if (lc && !re->ExceptionCheck()) {
+                            rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
+                            re->DeleteLocalRef(lc);
+                            if (rclazz) {
+                                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                                real_classes_[cls] = rclazz;
+                            }
+                        } else {
+                            re->ExceptionClear();
+                        }
+                    }
+                    if (rclazz) {
+                        rfid = re->GetFieldID(rclazz, name.c_str(), sig.c_str());
+                        if (!rfid || re->ExceptionCheck()) {
+                            re->ExceptionClear();
+                            rfid = nullptr;
+                        } else {
+                            std::lock_guard<std::recursive_mutex> lock(mutex_);
+                            real_fields_[a2] = rfid;
+                        }
+                    }
+                }
+                if (rfid) {
+                    const char rk = sig.empty() ? 'L' : sig[0];
+                    if (rk == 'L' || rk == '[') {
+                        jobject ro = re->GetObjectField(static_cast<jobject>(robj), rfid);
+                        if (!re->ExceptionCheck()) {
+                            const std::uint32_t h = WrapObject(ro);
+                            if (ro) {
+                                re->DeleteLocalRef(ro);
+                            }
+                            std::printf("[jni] GetObjectField %s -> %08x (real)\n",
+                                        fdesc.c_str(), h);
+                            Ret(regs, h);
+                            return;
+                        }
+                        re->ExceptionClear();
+                    } else if (rk == 'I' || rk == 'Z' || rk == 'B' || rk == 'S' ||
+                               rk == 'C') {
+                        jint v = 0;
+                        if (rk == 'I') {
+                            v = re->GetIntField(static_cast<jobject>(robj), rfid);
+                        } else if (rk == 'Z') {
+                            v = re->GetBooleanField(static_cast<jobject>(robj), rfid);
+                        } else if (rk == 'B') {
+                            v = re->GetByteField(static_cast<jobject>(robj), rfid);
+                        } else if (rk == 'S') {
+                            v = re->GetShortField(static_cast<jobject>(robj), rfid);
+                        } else {
+                            v = re->GetCharField(static_cast<jobject>(robj), rfid);
+                        }
+                        if (!re->ExceptionCheck()) {
+                            std::printf("[jni] GetObjectField %s -> %d (real)\n",
+                                        fdesc.c_str(), (int)v);
+                            Ret(regs, (std::uint32_t)v);
+                            return;
+                        }
+                        re->ExceptionClear();
+                    }
+                }
+            }
+        }
+#endif
+        std::printf("[jni] LOUD GetObjectField unhandled -- halting\n");
+        stop_step_ = true;
+        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
     }
     default:
