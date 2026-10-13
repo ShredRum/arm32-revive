@@ -4549,11 +4549,14 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
     }
     const bool is_static = fn >= 114;
     const int vtag = (fn == 114 || fn == 34) ? 0 : ((fn == 115 || fn == 35) ? 1 : 2);
-    // Split "static com/a/B.name(sig)" -> cls, name, sig, ret.
+    // Split "[static|field ]com/a/B.name(sig)" -> cls, name, sig, ret.
+    // (Instance methods carry a legacy "field " tag from the mock path.)
     std::string d = mdesc;
-    const std::string pfx = is_static ? "static " : "";
-    if (d.compare(0, pfx.size(), pfx) == 0) {
-        d = d.substr(pfx.size());
+    for (const std::string& pfx : {"static ", "field "}) {
+        if (d.compare(0, pfx.size(), pfx) == 0) {
+            d = d.substr(pfx.size());
+            break;
+        }
     }
     const std::size_t dot = d.rfind('.');
     const std::size_t par = d.find('(');
@@ -4601,8 +4604,8 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         }
     }
     if (!rmid) {
-        rmid = is_static ? re->GetStaticMethodID(rclazz, name.c_str(), sig.substr(par).c_str())
-                         : re->GetMethodID(rclazz, name.c_str(), sig.substr(par).c_str());
+        rmid = is_static ? re->GetStaticMethodID(rclazz, name.c_str(), sig.c_str())
+                         : re->GetMethodID(rclazz, name.c_str(), sig.c_str());
         if (!rmid || re->ExceptionCheck()) {
             re->ExceptionClear();
             return false;
