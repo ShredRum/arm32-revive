@@ -51,6 +51,9 @@ target_include_directories(guest PRIVATE
 # Bring-up harness: loads the real game .so, runs DT_INIT_ARRAY.
 add_executable(harness src/harness.cpp)
 target_link_libraries(harness PRIVATE guest)
+# Always keep debug info (forensics on cores; same -O codegen, no timing change).
+target_compile_options(harness PRIVATE -g)
+target_compile_options(guest PRIVATE -g)
 
 # Product host (Android only): real Java drives guest Java_* under Dynarmic.
 if(ANDROID)
