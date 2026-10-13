@@ -524,6 +524,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
+    // Fail-functor synthesis timing: fire once after the 150th update
+    // (boot + sessions done; workers settled). Forged ctx needs no
+    // session state for clean execution (PC functor1); burst downstream
+    // may want tokens saved (they are by then).
+    setenv("HARNESS_FUNCTORAT", "150", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
