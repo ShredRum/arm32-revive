@@ -411,6 +411,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_RETSUCC", "1", 1);
     setenv("HARNESS_PROBE", "1a410c,fill", 1);
     setenv("HARNESS_PROBE3", "28a3dc", 1);
+    setenv("HARNESS_RDUMP", "1", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
