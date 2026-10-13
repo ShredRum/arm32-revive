@@ -4951,6 +4951,13 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     if (rp == std::string::npos) {
         return false;
     }
+    // Blast-radius guard (2026-10-14): real objects break mock-handle
+    // lookups downstream (GetObjectClass/jni_arrays/jni_strings miss on
+    // wrapped handles -> game diverges -> black after LOADING). Only
+    // AudioOutput goes real until lookups delegate too.
+    if (cls.find("AudioOutput") == std::string::npos) {
+        return false;
+    }
     const std::string argstr = sig.substr(1, rp - 1);
     jclass rclazz = nullptr;
     {
