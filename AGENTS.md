@@ -3191,6 +3191,19 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Recipe stands: fresh seeds -> boot -> soak (sessions/jobs cook)
   -> taps (pump) -> menu. Taps+time, not build luck.
 
+## 105. EPISODE SELECT: PLAY click dispatches (2026-10-14)
+- User tapped PLAY (for fun) -> full episode select: SHOP,
+  PLAYGROUND, SMUGGLERS' DEN (score 871330, stars, progress),
+  locked episodes greyed, Rio/Rio2 tabs, coins 45, gift x3.
+  Pixel-proof (shot_levels). The click path WORKS (press anim +
+  dispatch) - earlier "animates but never fires" was cold-state
+  (menu not settled?) not a dead click.
+- Input hooks were armed for the tap (verdict pending from the
+  background shell). +164/diag state to pull.
+- NEXT: tap SMUGGLERS' DEN (unlocked) -> level select ->
+  GAMEPLAY (physics! audio! real test). Then: ship-candidate
+  thinking (what's scaffold vs shippable).
+
 ## 102. FIRST REAL PIXELS: Rovio logo on device (2026-10-14)
 - Android real-GL backend (shared Handle; caller's context; no EGL
   init): live ctx=0x7ad8c25600 on first try; driver answers real
