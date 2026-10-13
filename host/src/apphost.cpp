@@ -361,6 +361,15 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         // Seed template (PLAY center MOVE) so the pulse fires even with
         // zero real taps. Guest overwrites r1 (app obj) immediately and
         // never uses env on this path (byte-proven); thiz=0 safe here.
+        // Seed on the first update regardless of words shape (splash
+        // calls carry <6 words; updates are the beat domain anyway).
+        if (lastw.empty() && std::strstr(name, "nativeUpdate")) {
+            float dx = 1124.0f, dy = 629.0f;
+            std::uint32_t xb = 0, yb = 0;
+            std::memcpy(&xb, &dx, 4);
+            std::memcpy(&yb, &dy, 4);
+            lastw = {g_rt->JniEnv(), 0, 2, xb, yb, 0};
+        }
         if (lastw.empty() && words.size() >= 6) {
             lastw = words;
             float dx = 1124.0f, dy = 629.0f;
