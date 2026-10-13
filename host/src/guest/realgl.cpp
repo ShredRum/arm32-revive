@@ -1,22 +1,26 @@
 // RealGL implementation. See realgl.h for the design contract.
-#ifndef __ANDROID__
 #include "realgl.h"
 
 #include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+
+#ifndef __ANDROID__
+#include <EGL/eglext.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#endif
 
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "dispatch.h"
 
 namespace abr {
 
+#ifndef __ANDROID__
 bool RealGL::Ensure() {
     if (tried_) {
         return ok_;
@@ -116,6 +120,57 @@ bool RealGL::Ensure() {
     ok_ = true;
     return true;
 }
+#else
+// ---- Android: use the caller's GL context (SingleThread model: updates
+// run on the GL thread with Java's context current). No EGL init, no
+// pbuffer, no share group. Presentation is free (Java swaps its own
+// surface after onDrawFrame). Worker threads (no context) -> fake.
+bool RealGL::Ensure() {
+    if (!std::getenv("HARNESS_REALGL")) {
+        return false;
+    }
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        static int nolog = 0;
+        if (nolog < 3) {
+            nolog++;
+            std::printf("[realgl] android: no current ctx -> fake\n");
+        }
+        return false;
+    }
+    {
+        static int yeslog = 0;
+        if (yeslog < 1) {
+            yeslog++;
+            EGLContext c = eglGetCurrentContext();
+            std::printf("[realgl] android: live ctx=%p\n", (void*)c);
+        }
+    }
+    return true;
+}
+
+bool RealGL::Screenshot(const char* path, int w, int h) {
+    if (w <= 0 || h <= 0 || w > 2048 || h > 2048) {
+        return false;
+    }
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT && !Ensure()) {
+        return false;
+    }
+    std::vector<std::uint8_t> px((std::size_t)w * h * 4);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    FILE* f = std::fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
+    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int y = h - 1; y >= 0; y--) {
+        std::fwrite(px.data() + (std::size_t)y * w * 4, 1, (std::size_t)w * 4, f);
+    }
+    std::fclose(f);
+    std::printf("[realgl] android screenshot -> %s\n", path);
+    return true;
+}
+#endif
+
 
 // Bounded guest C-string (attribute/uniform names).
 static std::string GStr(Runtime* rt, std::uint32_t va) {
@@ -818,6 +873,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     return false;
 }
 
+#ifndef __ANDROID__
 bool RealGL::Screenshot(const char* path, int w, int h) {
     if (!ok_ || w <= 0 || h <= 0 || w > 2048 || h > 2048) {
         return false;
@@ -872,19 +928,7 @@ bool RealGL::Screenshot(const char* path, int w, int h) {
     return true;
 }
 
+#endif  // PC Screenshot
+
+
 }  // namespace abr
-#else
-// Android build: real GLES forwards to the system driver (packaging phase).
-#include "realgl.h"
-namespace abr {
-bool RealGL::Ensure() {
-    return false;
-}
-bool RealGL::Handle(const char*, Regs&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {
-    return false;
-}
-bool RealGL::Screenshot(const char*, int, int) {
-    return false;  // headless-device runs take no screenshots
-}
-}  // namespace abr
-#endif

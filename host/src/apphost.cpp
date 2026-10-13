@@ -529,6 +529,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // session state for clean execution (PC functor1); burst downstream
     // may want tokens saved (they are by then).
     setenv("HARNESS_FUNCTORAT", "150", 1);
+    // Real GLES on device (shared Handle; caller's context, no EGL init).
+    // PC parity verified post-split (54/54, 948). First test: live ctx?
+    // GL errors? survival? (pixels need content+burst; LOADING art first.)
+    setenv("HARNESS_REALGL", "1", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
