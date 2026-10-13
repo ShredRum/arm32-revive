@@ -343,6 +343,57 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &words[i], 4);
     }
     regs[14] = g_mod->halt_va;
+#ifdef __ANDROID__
+    // Synthetic input heartbeat (tapbeat): when no real finger input for
+    // a while, replay the last input words with action forced to MOVE(2)
+    // (no press-flag side effects) ahead of the update, so event-driven
+    // timers/quantums advance without a finger. Pacing-only; game logic
+    // untouched. HARNESS_TAPBEAT=1 enables (test), unset = off.
+    // Stash last real input (words + time) for replay shape.
+    {
+        static std::vector<std::uint32_t> lastw;
+        static long long lastms = 0;
+        static int upd_n = 0;
+        static int beat_on = -1;
+        if (beat_on < 0) {
+            beat_on = std::getenv("HARNESS_TAPBEAT") ? 1 : 0;
+        }
+        auto now_ms = []() -> long long {
+            struct timespec ts {};
+            ::clock_gettime(CLOCK_MONOTONIC, &ts);
+            return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        };
+        if (std::strstr(name, "nativeInput") && words.size() >= 6) {
+            lastw = words;
+            lastms = now_ms();
+        } else if (beat_on && std::strstr(name, "nativeUpdate")) {
+            upd_n++;
+            const long long idle = lastms ? (now_ms() - lastms) : 1000000;
+            // Every 30th update (~1/s at 30fps) and idle >500ms.
+            if (!lastw.empty() && lastw.size() >= 6 && idle > 500 && (upd_n % 30 == 0)) {
+                std::vector<std::uint32_t> w = lastw;
+                w[2] = 2;  // force MOVE (hover-ish, no press/release)
+                auto& br = st->jit->Regs();
+                br.fill(0);
+                for (std::size_t i = 0; i < w.size() && i < 4; i++) {
+                    br[i] = w[i];
+                }
+                for (std::size_t i = 4; i < w.size(); i++) {
+                    std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &w[i],
+                                4);
+                }
+                br[14] = g_mod->halt_va;
+                CallGuest(*st->jit, 0xC23E4u);
+                Dynarmic::HaltReason bhr = st->jit->Run();
+                std::printf("[tapbeat] #%d idle=%lldms hr=%d r0=%08x\n", upd_n, idle,
+                            (int)bhr, br[0]);
+                if (bhr != Dynarmic::HaltReason::UserDefined1) {
+                    Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
+                }
+            }
+        }
+    }
+#endif
     CallGuest(*st->jit, va);
     const Dynarmic::HaltReason hr = st->jit->Run();
 #ifdef __ANDROID__
@@ -540,6 +591,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
+    // Synthetic input heartbeat (self-drive test): MOVE pulse when
+    // idle. See AppHost_CallImpl. Test-only; unset = off.
+    setenv("HARNESS_TAPBEAT", "1", 1);
     // Fail-functor synthesis timing: DISABLED (2026-10-14). Correlation:
     // boots WITH functor fire (14932 died, 35844 black-after-loading)
     // vs boot WITHOUT (15265 menu). Suspect: forged login-failed state
