@@ -3204,6 +3204,37 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   GAMEPLAY (physics! audio! real test). Then: ship-candidate
   thinking (what's scaffold vs shippable).
 
+## 106. Level select: Smugglers' Den 1-13 open (2026-10-14)
+- Pixel-proof (shot_smug): levels 1-12 three stars, 13 zero
+  stars, 14+ locked, powerup row (30/50/70, feather/cage/
+  pineapple w/ coin prices), back, gift x3, coins 45. Save/
+  progress persistence READS correctly (stars from prior play!).
+- Input trace decoded live: finger = DOWN + MOVE x4-5 + UP
+  (acts 0/2/1) with coords; full stream reaches guest
+  (MyInputHandler hook, call-through). `input tap` shells do NOT
+  arrive (virtual source filtered) - finger only.
+- NEXT: tap level 1 -> GAMEPLAY (slingshot/physics/birds/audio
+  = the real engine test).
+
+## 107. Input quantum mapped: synchronous fan-out, no wake (2026-10-14)
+- SUBAGENT (PROVEN bytes): nativeInput 0xC23E4 = jump table
+  (began/moved/ended/hover only; actions 3,5,6,8,9 -> bail). Each
+  action: vtable on 0x672E98 + DefaultEventProcessor emit
+  (0xC5F04/0xC69B8) -> SYNCHRONOUS handler fan-out on the GL
+  thread. No pipe/cond/Lua/task-queue anywhere in the path.
+  TOUCH_BEGAN sets press-flag 0x39 (via 0xBE71C/0xBE6D0);
+  TOUCH_ENDED checks it -> release actions. Full down/up handled
+  inline (matches live act=0/2/1 trace).
+- Java: MyInputHandler.handleEvents drains ArrayList per doUpdate;
+  doUpdate <- onFrame <- onDrawFrame (GL thread). Budget =
+  drain-all. Stall = empty timer list + no UPDATE work; each tap
+  fans out + schedules timers -> next UPDATE runs a quantum ->
+  stall again. NOT a wall timer (TIMEWARP refuted independently);
+  audio-clock weakened (event-scheduled timers suffice).
+- Upshot: taps are the engine's event pump by CONSTRUCTION
+  (single-threaded direct dispatch). No background thread to wake;
+  nothing to "unpause" - just feed events.
+
 ## 102. FIRST REAL PIXELS: Rovio logo on device (2026-10-14)
 - Android real-GL backend (shared Handle; caller's context; no EGL
   init): live ctx=0x7ad8c25600 on first try; driver answers real
