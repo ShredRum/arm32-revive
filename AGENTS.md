@@ -2323,6 +2323,24 @@ Do NOT treat as fact; verify per item before building on it.
   harness-only) -> binary (advance? where?). Then downstream
   (personality/handler/pad) or terminate-accept.
 
+## 79. R7 recon from archive: stale CONFIRMED; LR slot is [R7+8]
+   (2026-10-13, retfailbuild.log, no new run)
+- 4 spiral halts (2 threads x2): R7=heap (12d27da8/1339eb90/...),
+  SP=R7-0x20, LR=0x45AF67, pc=0x45A778 unanimous. Words: [-12]/[-4]=
+  heap-frame-ish, [-8]/[+0]=heap, [+4]=0x45AAFB CONSTANT all 4
+  (real saved ret into step/getcontext region — frame PARTIALLY live!),
+  [+8]=heap garbage (1f2350c0/1f285470/...). Expected LR 0x457FE7
+  (BL @0x457FE2 ret into __cxa_throw) NOWHERE. STALE CONFIRMED 4/4.
+- SLOT CORRECTION (pop semantics over subagent): compact 0xAC pops
+  {r4-r8,lr} from vsp=R7-12: r4=[R7-12] r5=[R7-8] r6=[R7-4] r7=[R7+0]
+  r8=[R7+4] lr=[R7+8]. LR comes from [R7+8], NOT [R7-12] — recipe
+  location fixed (bytes over decomp-reading).
+- WRITE-TEST (built: HARNESS_R7POKE=1, first 3 pc==0x45A778 queries,
+  heap-R7 + writable check, logs old->new): poke LR slot [R7+8] with
+  0x457FE7. Binary: walk advances past frame #1 (next exidxlog pcs =
+  game frames 0x457FE6...0x28AE70...?) vs stands. If advances ->
+  root-hunt the clobberer + downstream; if stands -> loop elsewhere.
+
 ## 75. APK-scope correction + headless-device middle path (2026-10-13)
 - CORRECTION (my "predictable LOADING" OVERSTATED — user challenged,
   correctly): split three ways. (a) CERTAIN harness-only (mocks, caps,

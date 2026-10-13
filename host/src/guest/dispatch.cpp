@@ -1869,6 +1869,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (std::getenv("HARNESS_EXIDXLOG")) {
             std::printf("[exidxlog] pc=%08x -> entry=%08x\n", a0, FindExidx(a0));
         }
+        // HARNESS_R7POKE=1: flip-test (§79): the raise driver's frame #1
+        // has a stale saved-LR ([R7+8] reads heap, never 0x457FE7), so
+        // pop re-presents pc=0x45A778 forever. Poke the LR slot with the
+        // true return (BL @0x457FE2 -> 0x457FE6|1) on the first queries
+        // and watch whether the walk advances past frame #1.
+        // Harness-only diag, never ships.
+        if (std::getenv("HARNESS_R7POKE")) {
+            static int poke_n = 0;
+            const std::uint32_t r7v = regs[7];
+            if (poke_n < 3 && a0 == 0x45A778u && r7v != 0 && r7v != 0xFFFFFFFFu &&
+                CheckRange(r7v + 8, 4, true)) {
+                std::uint32_t old = 0;
+                std::memcpy(&old, H<const std::uint8_t>(r7v + 8), 4);
+                const std::uint32_t fix = 0x457FE7u;
+                std::memcpy(H(r7v + 8), &fix, 4);
+                std::printf("[r7poke] #%d R7=%08x [R7+8] %08x -> %08x\n", poke_n, r7v,
+                            old, fix);
+                poke_n++;
+            }
+        }
         Ret(regs, FindExidx(a0));
         return;
     }
