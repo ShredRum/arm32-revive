@@ -2278,6 +2278,22 @@ Do NOT treat as fact; verify per item before building on it.
   build. No more trigger runs until R7 moves — all trigger shapes are
   measured.
 
+## 82. Context compare: coherent march, same pc (2026-10-13, ctxcmp1)
+- 1026 queries, ALL pc=0x45A778: R7 descends 0x48/iter, SP=R7-0x20
+  always, LR=0x45AF67 constant. Coherent pairs marching together —
+  NOT random garbage: driver re-presents the same frame in a fresh
+  (-72B) context per iteration. Pop never transfers (R7 would jump to
+  heap values). Poke verdict stands (78k identical, no advance).
+- DIVERGENCE excluded: success runs also query (109x, same pc+answer)
+  and move on — same query+answer, different outcome => divergence is
+  DOWNSTREAM of FindExidx (personality/context/resume), bridge OUT.
+- NEXT (static, subagent queued): decode entry 0x5BA760 fully +
+  LSDA + what personality MUST return for this frame + what SHOULD
+  advance it. Outcomes: (A) must-be-HANDLER + misread word -> one-poke
+  fix; (B) must-CONTINUE + broken step slot -> forge or accept;
+  (C) correctly-handlerless -> close catch-branch as impossible,
+  pivot to success-branch/device-APK. No harness runs meanwhile.
+
 ## 77. Exidx bridge EXONERATED; loop is driver-side (2026-10-13)
 - TABLE SORTED (PROVEN, exact C++ replication in python): 0 inversions
   across 18184 entries; binary search returns 0x5BA760 for pc=0x45A778
