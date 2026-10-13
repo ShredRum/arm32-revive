@@ -618,9 +618,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
-    // Synthetic input heartbeat (self-drive test): MOVE pulse when
-    // idle. See AppHost_CallImpl. Test-only; unset = off.
-    setenv("HARNESS_TAPBEAT", "1", 1);
+    // Synthetic input heartbeat: DISABLED (2026-10-14). Broke manual
+    // taps (synthetic MOVEs interleave with finger DOWN/UP -> gesture
+    // state chaos, taps die at FOX) and changed nothing by itself.
+    // setenv("HARNESS_TAPBEAT", "1", 1);
     // Fail-functor synthesis timing: DISABLED (2026-10-14). Correlation:
     // boots WITH functor fire (14932 died, 35844 black-after-loading)
     // vs boot WITHOUT (15265 menu). Suspect: forged login-failed state
