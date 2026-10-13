@@ -1281,6 +1281,10 @@ int main(int argc, char** argv) {
                                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
                                         .count());
                         if (glthis && rt.IsCodeAddress(0x250AB8u)) {
+                            // Device burst shape: 6 rects alternating colors
+                            // (0x101929 / 0x7F000000) in ~100ms. Same XY.
+                            const std::uint32_t cols[2] = {0x101929u, 0x7F000000u};
+                            for (int bi = 0; bi < 6; bi++) {
                             auto& rgs = jit.Regs();
                             rgs.fill(0);
                             rgs[13] = abr::kStackTop - 0x200;
@@ -1309,17 +1313,18 @@ int main(int argc, char** argv) {
                             }
                             rgs[14] = mod.halt_va;
                             rgs[0] = glthis;
-                            rgs[1] = 0x101929u;
+                            rgs[1] = cols[bi];
                             rgs[2] = 0;
                             rgs[3] = 0;
                             CallGuest(jit, 0x250AB8u);
-                            std::printf("[builder] calling @000250ab8 live ... ");
+                            std::printf("[builder] calling @000250ab8 live #%d ... ", bi);
                             std::fflush(stdout);
                             alarm(60);
                             Dynarmic::HaltReason hr2 = jit.Run();
                             alarm(0);
                             std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
                             jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                            }  // burst x6
                         }
                     }
                     if (((std::getenv("HARNESS_BUILDERFORGE") && bthis) ||

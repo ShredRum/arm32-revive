@@ -2355,6 +2355,20 @@ Do NOT treat as fact; verify per item before building on it.
   forge valid rect+count -> BLIVE rerun -> binary (body->writer->
   flip/content?) vs fault (requirement).
 
+## 90. Gate passes, writer fires, flip transient (2026-10-13, builderxy1)
+- RECIPE PROVEN LIVE: direct BL 0x250AB8(live GL_Context 0x10002CD8,
+  r1=0x101929, r2=r3=0, stack X=488,Y=44) -> gate passes -> body runs
+  -> writer 0x283A3C(mgr,1) FIRES (probe #23 r0=mgr r1=1 lr=0x250DB4,
+  exact builder5 site) with NO fault (live this fixes builder5's
+  writer-fault!). +164 flipped 2->1 once, then loading re-asserted
+  (->2); film LOADING (white window missed or never).
+- NOT YET: nodes (scene188 stays 1 loading node; builders don't
+  append — only loop-MISS does, and it never fires naturally).
+  Content needs NODES, not just flips.
+- NEXT: (a) 6x burst alternating colors (device shape) on PC (cheap,
+  binary: nodes/flip-hold/film?); (b) APK synthesis with live graph
+  (real attach target — PC void by construction).
+
 ## 88. Product hits the unwinder wall (2026-10-13, device APK)
 - FILES ALIAS WORKED (no unmapped lines; seeds open). Config BAD gone
   (no BAD @config). First update: hr=UD2 r0=0x45A778 = THROW+spiral
