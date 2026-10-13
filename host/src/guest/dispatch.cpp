@@ -4383,7 +4383,8 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         t_tid = tid;
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
-        cfg.optimizations = Dynarmic::no_optimizations;
+        cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
+                                                            : Dynarmic::no_optimizations;
         static Dynarmic::ExclusiveMonitor shared_mon(8);
         cfg.global_monitor = &shared_mon;
         static std::atomic<unsigned> next_cpu{1};

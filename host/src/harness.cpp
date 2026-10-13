@@ -606,7 +606,11 @@ int main(int argc, char** argv) {
     abr::GuestCallbacks callbacks(&rt);
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = &callbacks;
-    cfg.optimizations = Dynarmic::no_optimizations;
+    // A/B: HARNESS_SAFEOPTS=1 -> all_safe_optimizations (default lib
+    // mode); unset -> no_optimizations (bring-up mode). MCSM ships fast;
+    // we kept bring-up mode for debuggability. Compare baselines first.
+    cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
+                                                        : Dynarmic::no_optimizations;
     Dynarmic::ExclusiveMonitor monitor(1);
     cfg.global_monitor = &monitor;
     Dynarmic::A32::Jit jit(cfg);

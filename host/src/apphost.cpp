@@ -189,7 +189,8 @@ std::shared_ptr<HostThread> Enter() {
     st->stack = g_rt->GuestMalloc(0x200000u);
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = g_cb;
-    cfg.optimizations = Dynarmic::no_optimizations;
+    cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
+                                                        : Dynarmic::no_optimizations;
     static Dynarmic::ExclusiveMonitor shared_mon(8);
     cfg.global_monitor = &shared_mon;
     st->jit = new Dynarmic::A32::Jit(cfg);

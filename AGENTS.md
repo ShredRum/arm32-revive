@@ -3036,3 +3036,13 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - NEXT MEASUREMENT: relaunch + Frida-from-birth (UpdateThread.run/a/
   doUpdate entry-exit-returns + starts) -> name the stopper. THEN
   fastmem (user-approved after analysis).
+
+## 95. SAFEOPTS A/B: identical, ~20% faster on short combo (2026-10-13, PC)
+- A (no_opt): 5.85s; B (all_safe_optimizations): 4.67s. Identical:
+  54/54, svc=948, halts=53, updates/render r0=1 clean, same call
+  shapes; heap-top delta 0x2A0 = known run drift, not signal.
+- NOTE: short combo dominated by translation + PACEMS sleeps; steady-
+  state gain larger. x64 only — A64+opts untested (A64 backend already
+  bit us once, §80). Default stays no_opt; SAFEOPTS opt-in.
+- NEXT: fastmem design (page-table 1:1 + sighandler + fallback), then
+  A64 validation on device (opts+fastmem) withupdate-rate metric.
