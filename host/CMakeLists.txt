@@ -52,6 +52,12 @@ target_include_directories(guest PRIVATE
 add_executable(harness src/harness.cpp)
 target_link_libraries(harness PRIVATE guest)
 
+# Product host (Android only): real Java drives guest Java_* under Dynarmic.
+if(ANDROID)
+    add_library(abhost SHARED src/apphost.cpp)
+    target_link_libraries(abhost PRIVATE guest log)
+endif()
+
 # Harness-only real-GLES compile check (PC GPU validation of game shaders).
 if(NOT ANDROID)
     add_executable(gltest src/gltest.cpp)

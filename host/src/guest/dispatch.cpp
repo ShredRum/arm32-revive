@@ -4257,6 +4257,11 @@ std::uint32_t Runtime::GuestTid() {
     return t_tid ? t_tid : 1;
 }
 
+void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
+    t_active_jit = jit;
+    t_tid = tid;
+}
+
 std::uint32_t Runtime::ErrnoSlot() {
     const std::uint32_t tid = GuestTid();
     if (tid == 1) {

@@ -2278,6 +2278,27 @@ Do NOT treat as fact; verify per item before building on it.
   build. No more trigger runs until R7 moves — all trigger shapes are
   measured.
 
+## 84. Online-APK packaging kickoff (2026-10-13, user-steered)
+- DECISION (standing): online-first (real Java gives triggers free, no
+  catch needed); offline (R7) after as upgrade. Packaging now, menu
+  path via success branch.
+- P0 DONE: work/apk_prod = apktool decode of original (58MB APK).
+- P1 DONE: loader keeps defined-symbols map (GuestLookup for Java_*).
+- P2/P3 DONE: host/tools/gen_apphost.py -> 63 JNI forwarders,
+  verified 63/63 vs exports, no overloads; returns from smali
+  (V/I/Z/B/J/F/L), AAPCS incl. jlong-align + stack spill, runtime walk
+  via va_list (J raw, F via double promotion, I ints, L pointers).
+- P2 host lib DONE: abhost.so (arm64, JNI_OnLoad + 63 + OnLoad):
+  mini-zip STORED extract of guest from own base.apk, per-thread Jit
+  + 2MB stack + real AttachCurrentThread, REAL JNIEnv* passthrough
+  (indices match NDK order), files->app dir, logs to files/apphost.log
+  (+logcat), init_array minus parked 0x5885C, guest OnLoad run.
+  Android fixes along the way: fmt include, narrowing cast,
+  Screenshot stub, ThreadEnter accessor (anon-namespace locals).
+- NEXT P5: APK assembly (Gen.library_name -> "abhost"; guest .so ->
+  assets/guestlib STORED; drop adcolony; host -> lib/arm64-v8a;
+  build+sign; install) -> logcat milestone boot->logo ONLINE.
+
 ## 82. Context compare: coherent march, same pc (2026-10-13, ctxcmp1)
 - 1026 queries, ALL pc=0x45A778: R7 descends 0x48/iter, SP=R7-0x20
   always, LR=0x45AF67 constant. Coherent pairs marching together —
