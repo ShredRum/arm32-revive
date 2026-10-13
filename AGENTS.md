@@ -3090,6 +3090,16 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Frida attach now times out on live process (frida-helper sync
   fail; fastmem sighandler suspect or boot storm). Retry as needed.
 
+## 98. +164=2 on device: logically LOADING PROVEN (2026-10-14)
+- DIAG164 live (2fd8962 build): obj=10402ff8, +164=2, +1187=0,
+  +168=scene, +172/+176=0, +216=1, scene188=1 entry, vec0 node
+  vtable 0x669710 +16=1.0f (single loading node, PC-identical
+  layout §55). 1:1 match with PC nopoke1 shape (flag/succ/+164=2).
+- "Logically LOADING" is now MEASURED, not inferred. Remaining
+  unobserved on device (all GL faked): pixels, splash advancement,
+  builders. Next: completion channel (epilogue/drain subagents
+  running) -> loginFinished -> burst; then real GLES for pixels.
+
 ## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
 - 4 days on the desktop harness past LOADING with zero menu progress
   (login ladder, builders, loop, manager, unwinder — all mapped, none
