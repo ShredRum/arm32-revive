@@ -5482,7 +5482,7 @@ void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_
 }
 bool g_succ_done_hack = false;
 
-void GuestCallbacks::DumpR9(std::uint64_t r9) {
+void GuestCallbacks::DumpR9(std::uint64_t r9, std::uint64_t, std::uint64_t) {
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -5519,7 +5519,7 @@ void GuestCallbacks::DumpR9(std::uint64_t r9) {
 static std::uint32_t s_eventpost_pi1 = 0;
 static std::uint32_t s_eventpost_arr = 0;
 
-void GuestCallbacks::EventDecide(std::uint64_t r0pi) {
+void GuestCallbacks::EventDecide(std::uint64_t r0pi, std::uint64_t, std::uint64_t) {
     // HARNESS_EVENTPOST=1: at 0xC465C the walk has r0=r6=natural pi (mov ran).
     // Refresh pi#1: mirror the natural pi when usable, else synthetic content.
     // The baked SetRegister(r6, pi#1) right after this call steers the walk.
@@ -5583,7 +5583,7 @@ void GuestCallbacks::EventDecide(std::uint64_t r0pi) {
     }
 }
 
-void GuestCallbacks::LastThis(std::uint64_t r0obj) {
+void GuestCallbacks::LastThis(std::uint64_t r0obj, std::uint64_t, std::uint64_t) {
     // HARNESS_LASTTHIS=1: record the loading-builder r0 (scene object) at
     // PROBE4 for HARNESS_BUILDER (never hardcoded, drifts per run).
     if (!std::getenv("HARNESS_LASTTHIS")) {
@@ -5653,7 +5653,7 @@ void GuestCallbacks::WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t l
         }
     }
 }
-void GuestCallbacks::WatchSP(std::uint64_t sp) {
+void GuestCallbacks::WatchSP(std::uint64_t sp, std::uint64_t, std::uint64_t) {
     // Part 2/2: stack code-pointer backtrace for the seq from WatchPC.
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
@@ -5684,7 +5684,7 @@ void GuestCallbacks::WatchSP(std::uint64_t sp) {
     std::printf("\n");
 }
 
-void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
+void GuestCallbacks::EventEntry(std::uint64_t r1slot, std::uint64_t, std::uint64_t) {
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, r1 = event slot),
     // fake a nonzero subscriber count while the natural one is 0 so the walk
     // reaches the pi acquisition (BL 0xC4654) where the pi is acquired (may be NULL).
@@ -5764,7 +5764,7 @@ void GuestCallbacks::EventEntry(std::uint64_t r1slot) {
     }
 }
 
-void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
+void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj, std::uint64_t, std::uint64_t) {
     // HARNESS_POKE164=1: [loading-manager+164]=0 (menu branch at 0x283C34).
     // Gated on HARNESS_RETSUCC success (a flag flip before content exists
     // just whites the screen: loading must build first, menu after).
@@ -5901,7 +5901,7 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj) {
         }
     }
 }
-void GuestCallbacks::PokeShadowState(std::uint64_t r4obj) {
+void GuestCallbacks::PokeShadowState(std::uint64_t r4obj, std::uint64_t, std::uint64_t) {
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -5937,7 +5937,7 @@ void GuestCallbacks::PokeShadowState(std::uint64_t r4obj) {
         }
     }
 }
-void GuestCallbacks::PokeGateByte(std::uint64_t r7slot) {
+void GuestCallbacks::PokeGateByte(std::uint64_t r7slot, std::uint64_t, std::uint64_t) {
     GuestCallbacks* cb = g_probe_cb;
     if (!cb) {
         return;
@@ -6108,7 +6108,7 @@ void GuestCallbacks::RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64
         shown++;
     }
 }
-void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr) {
+void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_t) {
     // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser (0x28A3DC)
     // entry for the .../time endpoint only. Fills the response struct
     // (status 200 + JSON body string) and resumes at the caller, skipping
@@ -6685,7 +6685,7 @@ void Runtime::ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t f
 }
 static std::uint32_t g_unw_lastti = 0;
 
-void GuestCallbacks::ResumeTrap(std::uint64_t r0) {
+void GuestCallbacks::ResumeTrap(std::uint64_t r0, std::uint64_t, std::uint64_t) {
     // A cleanup pad called _Unwind_Resume (would spiral: our unwinder can't
     // continue it). Recompute the live walk and park the next untried pad.
     // The stack never really unwound, so frames/ti are still valid.
@@ -7535,7 +7535,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         if (std::getenv("HARNESS_POKE1187") && pc == 0xC2144u) {
             ir.CallHostFunction(
                 &PokeGateByte,
-                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))));
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))),
+                ir.Imm64(0), ir.Imm64(0));
         }
         // HARNESS_BUILDERGATE=1: force the menu-builder frustum gate open
         // (set r0=1 right before `cmp r0,#1` at 0x250C80; menu content is
@@ -7552,7 +7553,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         if (std::getenv("HARNESS_POKE180") && pc == 0x263300u) {
             ir.CallHostFunction(
                 &PokeShadowState,
-                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                ir.Imm64(0), ir.Imm64(0));
         }
         // HARNESS_POKE164=1: loading-manager flag at 0x283B5C entry (r10=r0
         // there per prologue r10=r0). Forces the menu branch at 0x283C34.
@@ -7561,7 +7563,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             pc == 0x283B5Cu) {
             ir.CallHostFunction(
                 &PokeManagerFlag,
-                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                ir.Imm64(0), ir.Imm64(0));
         }
         // HARNESS_WATCHPC=<hexpc>: regs + backtrace at pc (no slot).
         {
@@ -7582,9 +7585,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))),
                                     ir.ZeroExtendWordToLong(
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
-                ir.CallHostFunction(&WatchSP, ir.ZeroExtendWordToLong(
-                                                   ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                       13))));
+                ir.CallHostFunction(&WatchSP, ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))), ir.Imm64(0), ir.Imm64(0));
             }
         }
         // HARNESS_DUMPR9=1: log session object at a probe slot
@@ -7592,7 +7593,8 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         if (std::getenv("HARNESS_DUMPR9") && pc == probe_pc2 && probe_pc2) {
             ir.CallHostFunction(
                 &DumpR9,
-                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))));
+                ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
+                ir.Imm64(0), ir.Imm64(0));
         }
         // HARNESS_PCTRACE=start,len[,cap]: pc-only trace of basic-block
         // entries in range (path forensics without register dumps; much
@@ -7684,18 +7686,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             // ending in resume would spiral in our broken unwinder; instead
             // continue the walk (next untried pad) via shared UnwNext.
             if (std::getenv("HARNESS_TTUNW") && pc == probe_pc4 && probe_pc4) {
-                ir.CallHostFunction(&ResumeTrap, ir.ZeroExtendWordToLong(
-                                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                         0))));
+                ir.CallHostFunction(&ResumeTrap, ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))), ir.Imm64(0), ir.Imm64(0));
             }
             // HARNESS_EVENTPOST=1: at PROBE4 (0xC465C, right after the walk's
             // mov r6,r0) decide the pi (mirror natural into pi#1, else synthetic)
             // then steer the walk: r6 <= pi#1 (baked; pi#1 built at entry, which
             // always executes first, so the bake is sound; same addrs forever).
             if (std::getenv("HARNESS_EVENTPOST") && !std::getenv("HARNESS_LASTTHIS") && pc == probe_pc4 && probe_pc4) {
-                ir.CallHostFunction(&EventDecide, ir.ZeroExtendWordToLong(
-                                                      ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                          0))));
+                ir.CallHostFunction(&EventDecide, ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))), ir.Imm64(0), ir.Imm64(0));
                 {
                     using Reg = Dynarmic::A32::Reg;
                     ir.SetRegister(static_cast<Reg>(6), ir.Imm32(s_eventpost_pi1));
@@ -7704,25 +7702,22 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             // HARNESS_LASTTHIS=1: record loading-builder r0 at PROBE4
             // (mutually exclusive with EVENTPOST on this slot).
             if (std::getenv("HARNESS_LASTTHIS") && !std::getenv("HARNESS_EVENTPOST") && pc == probe_pc4 && probe_pc4) {
-                ir.CallHostFunction(&LastThis, ir.ZeroExtendWordToLong(
-                                                   ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                       0))));
+                ir.CallHostFunction(&LastThis, ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))), ir.Imm64(0), ir.Imm64(0));
             }
             // HARNESS_RETSUCC=1: success synthesis at raiser entry (PROBE3).
             // HARNESS_EVENTPOST=1: fake the subscriber count at walk entry
             // (PROBE5 = 0xC45FC, r1 = event slot) so the walk reaches the pi
             // acquisition where the pi is acquired (may be NULL).
             if (std::getenv("HARNESS_EVENTPOST") && pc == probe_pc5 && probe_pc5) {
-                ir.CallHostFunction(&EventEntry, ir.ZeroExtendWordToLong(
-                                                     ir.GetRegister(static_cast<Dynarmic::A32::Reg>(
-                                                         1))));
+                ir.CallHostFunction(&EventEntry, ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(1))), ir.Imm64(0), ir.Imm64(0));
             }
             if (std::getenv("HARNESS_RETSUCC") && pc == probe_pc3) {
                 ir.CallHostFunction(&SuccInject,
                                     ir.ZeroExtendWordToLong(
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
                                     ir.ZeroExtendWordToLong(
-                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))));
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(14))),
+                                    ir.Imm64(0));
             }
             // HARNESS_RDUMP=1: deep raiser-entry ABI dump (PROBE3 slot).
             if (std::getenv("HARNESS_RDUMP") && pc == probe_pc3) {

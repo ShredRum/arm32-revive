@@ -356,39 +356,39 @@ public:
     // Per-frame unwinder step (throw probe + resume trap share it).
     static void UnwNext(std::uint32_t thrown_ti);
     // _Unwind_Resume trap: continue the pad walk instead of spiraling.
-    static void ResumeTrap(std::uint64_t r0);
+    static void ResumeTrap(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_RDUMP=1: deep dump of the HTTP raiser entry ABI (PROBE3).
     static void RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2);
     static void RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp);
     // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser entry
     // (PROBE3) for the .../time endpoint (canned timestamp + test sig).
-    static void SuccInject(std::uint64_t r0, std::uint64_t lr);
+    static void SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_t);
     // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
-    static void PokeGateByte(std::uint64_t r7slot);
+    static void PokeGateByte(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_POKE180=1: loading render-state advance. At 0x263338
     // (ldr r0,[r4,#180] in ShadowingSurfaceData draw), if [r4+180]==3 write 4
     // (flips the 0x263340 bne + switch mode). r4 is live — no hardcode.
-    static void PokeShadowState(std::uint64_t r4obj);
+    static void PokeShadowState(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_POKE164=1: [loading-manager+164]=0 at 0x283B5C entry (forces
     // the state-1/menu branch at the 0x283C34 fork).
-    static void PokeManagerFlag(std::uint64_t r10obj);
+    static void PokeManagerFlag(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_EVENTPOST=1: at 0xC465C (PROBE4 slot, right after the walk's
     // mov r6,r0), decide the pi the walk will use: mirror the natural one
     // into pi#1 when usable, else synthetic content. Then r6<=pi#1 (baked).
-    static void EventDecide(std::uint64_t r0pi);
+    static void EventDecide(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, PROBE5 slot), fake a
     // nonzero subscriber count while natural is 0 (see EventDecide).
-    static void EventEntry(std::uint64_t r1slot);
+    static void EventEntry(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_LASTTHIS=1: record loading-builder r0 (scene object) at PROBE4.
-    static void LastThis(std::uint64_t r0obj);
+    static void LastThis(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_WATCHPC=<hexpc>: regs + stack code-pointer backtrace at pc
     // (ladder forensics: who calls with null-derived args). Capped, no slot.
     static void WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
-    static void WatchSP(std::uint64_t sp);
+    static void WatchSP(std::uint64_t, std::uint64_t, std::uint64_t);
     // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
     // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
     // must observe for the sessions->menu handoff.
-    static void DumpR9(std::uint64_t r9);
+    static void DumpR9(std::uint64_t, std::uint64_t, std::uint64_t);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;
