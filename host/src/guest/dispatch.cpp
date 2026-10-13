@@ -1,5 +1,9 @@
 #include "dispatch.h"
 
+#ifdef __ANDROID__
+#include <jni.h>  // real-Java delegation (product host only)
+#endif
+
 #include "realgl.h"
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
@@ -4592,6 +4596,17 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_strings_.find(a1);
         if (it == jni_strings_.end()) {
+#ifdef __ANDROID__
+            // Product host: real ART string (unknown to mocks) -> delegate.
+            if (GuestCallbacks::g_real_env_hook) {
+                if (JNIEnv* re =
+                        static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())) {
+                    Ret(regs, static_cast<std::uint32_t>(re->GetStringUTFLength(
+                                   reinterpret_cast<jstring>(a1))));
+                    return;
+                }
+            }
+#endif
             std::printf("[jni] LOUD GetStringUTFLength unknown str %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -4603,6 +4618,30 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 169: {  // GetStringUTFChars(env, str, isCopy) -> const char*
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (jni_strings_.find(a1) == jni_strings_.end()) {
+#ifdef __ANDROID__
+            // Product host: copy real ART bytes into guest heap (guest-safe
+            // 32-bit pointer; free is a no-op so Release stays trivial).
+            if (GuestCallbacks::g_real_env_hook) {
+                if (JNIEnv* re =
+                        static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())) {
+                    const char* p = re->GetStringUTFChars(reinterpret_cast<jstring>(a1),
+                                                           nullptr);
+                    if (p) {
+                        const std::uint32_t n = static_cast<std::uint32_t>(std::strlen(p));
+                        const std::uint32_t g = GuestMalloc(n + 1);
+                        if (g) {
+                            std::memcpy(H(g), p, n + 1);
+                            if (a2 && CheckRange(a2, 4, true)) {
+                                const std::uint32_t one = 1;
+                                std::memcpy(H(a2), &one, 4);
+                            }
+                            Ret(regs, g);
+                            return;
+                        }
+                    }
+                }
+            }
+#endif
             std::printf("[jni] LOUD GetStringUTFChars unknown str %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -5398,6 +5437,7 @@ std::uint16_t GuestCallbacks::MemoryRead16(VAddr a) { return Read<std::uint16_t>
 std::uint32_t GuestCallbacks::MemoryRead32(VAddr a) { return Read<std::uint32_t>(a, false); }
 std::uint64_t GuestCallbacks::MemoryRead64(VAddr a) { return Read<std::uint64_t>(a, false); }
 GuestCallbacks* GuestCallbacks::g_probe_cb = nullptr;
+void* (*GuestCallbacks::g_real_env_hook)() = nullptr;
 std::uint32_t GuestCallbacks::g_probe_pc = 0;
 void GuestCallbacks::ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp) {
     std::printf("[probe] r2=%08x r3=%08x sp=%08x\n", (std::uint32_t)r2, (std::uint32_t)r3,

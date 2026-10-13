@@ -373,8 +373,20 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     return rv;
 }
 
+namespace {
+// Real-Java delegation for JNI thunks (product host): the calling host
+// thread's real JNIEnv*, or null (harness has none -> mocks stay).
+void* RealEnvForThread() {
+    const pid_t me = gettid();
+    std::lock_guard<std::mutex> l(g_tmu);
+    const auto it = g_threads.find(me);
+    return it != g_threads.end() ? static_cast<void*>(it->second->env) : nullptr;
+}
+}  // namespace
+
 extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_vm = vm;
+    GuestCallbacks::g_real_env_hook = RealEnvForThread;
     // Logs to app files dir (pullable); stdout unbuffered.
     g_files = "/data/data/com.rovio.angrybirdsrio/files";
     std::error_code ec;
@@ -456,10 +468,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             regs.fill(0);
             regs[13] = st->stack + 0x200000u - 8;
             regs[14] = g_mod->halt_va;
-            // Real JavaVM* is not a guest pointer; guest OnLoad uses
-            // GetEnv/Attach (fn 6/4, real-backed). Pass the env it runs on.
-            JNIEnv* env = st->env;
-            regs[0] = (std::uint32_t)(std::uintptr_t)env;
+            // Guest OnLoad expects a JavaVM* (mock handle; real pointers
+            // are 64-bit and must never enter 32-bit guest regs). Our JVM
+            // trampolines (fn 6/4) serve GetEnv/Attach off it.
+            regs[0] = g_rt->Jvm();
             regs[1] = 0;
             CallGuest(*st->jit, it->second);
             const Dynarmic::HaltReason hr = st->jit->Run();

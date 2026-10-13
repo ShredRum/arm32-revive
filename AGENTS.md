@@ -2299,6 +2299,23 @@ Do NOT treat as fact; verify per item before building on it.
   assets/guestlib STORED; drop adcolony; host -> lib/arm64-v8a;
   build+sign; install) -> logcat milestone boot->logo ONLINE.
 
+## 85. First product APK boot: host lives, JavaVM bug found (2026-10-13)
+- BOOT (PROVEN logcat/file): extract 6759156B ✓, inits 54/54 ✓,
+  guest OnLoad ✓, Java drives config/init/update (screen rotates!).
+  Product pipeline works end-to-end (pack/sign/install/launch).
+- BUG (PROVEN): passed real JNIEnv* (64-bit) as JavaVM* to guest
+  OnLoad -> slot init reads ART garbage -> BAD read @0x2FA344 (same
+  site as PC §5, different garbage) + updates end UD2 (r0=8), black
+  screen. FIX: mock-VM handle (rt.Jvm()) for guest OnLoad (32-bit
+  safe); real env enters only via per-call delegation.
+- DESIGN (standing): guest keeps OUR 32-bit JNI table; thunks delegate
+  to real env with guest-side copies (strings/arrays) or cookies
+  (classes/methods/refs); RegisterNatives goes REAL (dynamic pump
+  must bind!); tuned mocks shrink to era-needs (API21 etc. only if
+  real breaks). Implemented now: g_real_env_hook + 168/169 delegate
+  (Android-gated; PC identical by preprocessor).
+- NEXT: repack + reinstall + launch -> config BAD gone? updates clean?
+
 ## 82. Context compare: coherent march, same pc (2026-10-13, ctxcmp1)
 - 1026 queries, ALL pc=0x45A778: R7 descends 0x48/iter, SP=R7-0x20
   always, LR=0x45AF67 constant. Coherent pairs marching together —

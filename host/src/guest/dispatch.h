@@ -351,6 +351,10 @@ public:
     // harness uses one Runtime per process for the main thread's Jit; worker
     // Jits share the same callbacks object... see ActiveJit routing).
     static GuestCallbacks* g_probe_cb;
+    // Product host (apphost): real-Java delegation hook. Returns the calling
+    // host thread's real JNIEnv*, or null (harness: always null -> mocks).
+    // Set once by apphost at OnLoad; never in harness builds.
+    static void* (*g_real_env_hook)();
     static std::uint32_t g_probe_pc;  // pc being probed (fill gates on it)
     static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
