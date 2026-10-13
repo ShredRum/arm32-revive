@@ -410,7 +410,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // The harness RETSUCC machinery (PROBE3 raiser hook) does the work.
     setenv("HARNESS_RETSUCC", "1", 1);
     setenv("HARNESS_PROBE", "1a410c,fill", 1);
+    setenv("HARNESS_PROBE2", "457f90", 1);
     setenv("HARNESS_PROBE3", "28a3dc", 1);
+    setenv("HARNESS_PROBE_N", "500", 1);
     setenv("HARNESS_RDUMP", "1", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
