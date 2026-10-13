@@ -403,6 +403,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::freopen(logpath.c_str(), "a", stderr);
     setvbuf(stdout, nullptr, _IONBF, 0);
     Log("OnLoad: product host starting");
+    Log("build marker %s %s", __DATE__, __TIME__);
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");
