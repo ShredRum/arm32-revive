@@ -383,6 +383,9 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
                                 4);
                 }
                 br[14] = g_mod->halt_va;
+                br[13] = spbase;  // (was 0 from fill -> guest stack underflow
+                // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
+                // synthetic one forgot. Caught live 2026-10-14.)
                 CallGuest(*st->jit, 0xC23E4u);
                 Dynarmic::HaltReason bhr = st->jit->Run();
                 std::printf("[tapbeat] #%d idle=%lldms hr=%d r0=%08x\n", upd_n, idle,
