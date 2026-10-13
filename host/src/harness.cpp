@@ -1285,8 +1285,26 @@ int main(int argc, char** argv) {
                             rgs.fill(0);
                             rgs[13] = abr::kStackTop - 0x200;
                             rgs[13] -= 16;
+                            // HARNESS_BUILDERXY="X,Y" (ints, vcvt->float): the
+                            // only forged rect inputs ([sp+0]=X, [sp+4]=Y);
+                            // rest derives from live this (this+228 floats,
+                            // [this]/[this+8] widths). Device candidates:
+                            // 488,44 (d1b) or 400,240 (viewport center).
+                            std::uint32_t xy[2] = {0, 0};
+                            if (const char* xye = std::getenv("HARNESS_BUILDERXY")) {
+                                std::string xs(xye);
+                                const auto cm = xs.find(',');
+                                if (cm != std::string::npos) {
+                                    xy[0] = static_cast<std::uint32_t>(
+                                        std::strtoul(xs.substr(0, cm).c_str(), nullptr, 0));
+                                    xy[1] = static_cast<std::uint32_t>(
+                                        std::strtoul(xs.substr(cm + 1).c_str(), nullptr, 0));
+                                }
+                            }
+                            std::memcpy(mem.host(rgs[13] + 0), &xy[0], 4);
+                            std::memcpy(mem.host(rgs[13] + 4), &xy[1], 4);
                             const std::uint32_t zw = 0;
-                            for (int k = 0; k < 4; k++) {
+                            for (int k = 2; k < 4; k++) {
                                 std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
                             }
                             rgs[14] = mod.halt_va;
