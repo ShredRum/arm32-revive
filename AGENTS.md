@@ -2323,6 +2323,30 @@ Do NOT treat as fact; verify per item before building on it.
   harness-only) -> binary (advance? where?). Then downstream
   (personality/handler/pad) or terminate-accept.
 
+## 80. A64 abort: OUR Void-args; fixed + proven on device (2026-10-13)
+- ROOT (read-only static subagent, PROVEN code): 1-arg CallHostFunction
+  fills trailing slots with Void (ir_emitter 2874-76); arm64
+  PrepareForCall routes Void -> LoadCopyInto -> GetImmediateAsU64
+  assert (reg_alloc.cpp:515). x64 HostCall SKIPS Voids
+  (reg_alloc.cpp:459) — hence PC-immune. Injector: POKE164/DIAG164 at
+  0x283B5C entry (same block as killing pcs — translation units are
+  blocks, not pcs). Same latent bug in ALL 1-/2-arg emissions.
+- FIX (port-side, no thirdparty fork): 10 callbacks widened to
+  (u64,u64,u64) (PokeGateByte/ShadowState/ManagerFlag, WatchSP,
+  DumpR9, ResumeTrap, EventDecide, LastThis, EventEntry, SuccInject
+  2->3) + emissions padded with ir.Imm64(0). PC smoke identical
+  (54/54, 948, 0 LOUD). All future CallHostFunction MUST use 3-arg
+  form (rule; x64 silently forgives, A64 aborts).
+- PROVEN ON DEVICE: deep run (full combo + DIAG164 + functor probes +
+  notify watch, RETSUCC) clean end, heap top printed. Same shape as
+  PC (notify fires, functors 0, Login failed 0). Device deep runs
+  UNBLOCKED. (This run was success-config by mistake for the unwinder
+  question — throw needs fail shape; next.)
+- NEXT: device FAIL shape (DNSALLOW, NO RETSUCC, throw-type probe +
+  functor probes + WATCHPC=5d2f0 loginFinished) -> binary: spiral
+  with real bionic (R7 reproduces -> fix here) vs catch/functors
+  (wall was harness artifact -> APK road open).
+
 ## 79. R7 recon from archive: stale CONFIRMED; LR slot is [R7+8]
    (2026-10-13, retfailbuild.log, no new run)
 - 4 spiral halts (2 threads x2): R7=heap (12d27da8/1339eb90/...),
