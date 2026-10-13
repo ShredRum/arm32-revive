@@ -5010,11 +5010,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         const auto it = jni_strings_.find(a1);
         if (it == jni_strings_.end()) {
 #ifdef __ANDROID__
-            // Product host: real ART string (unknown to mocks) -> delegate.
-            if (GuestCallbacks::g_real_env_hook) {
+            // Product host: entry-wrapped real ART string -> UNWRAP FIRST
+            // (passing the mock handle to ART aborts: invalid jobject).
+            if (void* real = UnwrapObject(a1)) {
                 if (JNIEnv* re = RealEnv()) {
                     Ret(regs, static_cast<std::uint32_t>(re->GetStringUTFLength(
-                                   reinterpret_cast<jstring>(a1))));
+                                   static_cast<jstring>(real))));
                     return;
                 }
             }
@@ -5031,11 +5032,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (jni_strings_.find(a1) == jni_strings_.end()) {
 #ifdef __ANDROID__
-            // Product host: copy real ART bytes into guest heap (guest-safe
-            // 32-bit pointer; free is a no-op so Release stays trivial).
-            if (GuestCallbacks::g_real_env_hook) {
+            // Product host: entry-wrapped real ART string -> UNWRAP FIRST,
+            // then copy bytes into guest heap (guest-safe 32-bit pointer;
+            // free is a no-op so Release stays trivial).
+            if (void* real = UnwrapObject(a1)) {
                 if (JNIEnv* re = RealEnv()) {
-                    const char* p = re->GetStringUTFChars(reinterpret_cast<jstring>(a1),
+                    const char* p = re->GetStringUTFChars(static_cast<jstring>(real),
                                                            nullptr);
                     if (p) {
                         const std::uint32_t n = static_cast<std::uint32_t>(std::strlen(p));
