@@ -4525,6 +4525,29 @@ std::uint32_t Runtime::WrapObject(void* real) {
         return 0;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+#ifdef __ANDROID__
+    // Product host: incoming refs are usually call-local (stale after the
+    // JNI call returns; proven by stale-Local abort on reuse). Promote to
+    // a global ref so the mock stays valid across calls. Identity is kept
+    // by IsSameObject-scan over live globals (both sides valid — safe).
+    if (JNIEnv* re = RealEnv()) {
+        jobject g = re->NewGlobalRef(static_cast<jobject>(real));
+        if (g) {
+            for (const auto& kv : obj_rev_) {
+                if (re->IsSameObject(static_cast<jobject>(kv.second), g)) {
+                    re->DeleteGlobalRef(g);
+                    return kv.first;
+                }
+            }
+            const std::uint32_t h = next_obj_;
+            next_obj_ += 4;
+            obj_fwd_[g] = h;
+            obj_rev_[h] = g;
+            return h;
+        }
+        // NewGlobalRef failed: fall through to raw (mock path will cope).
+    }
+#endif
     const auto it = obj_fwd_.find(real);
     if (it != obj_fwd_.end()) {
         return it->second;
