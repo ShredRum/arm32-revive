@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "guest_memory.h"
@@ -40,6 +41,7 @@ struct LoadedModule {
     std::uint32_t jvm_tramp_base = 0;  // 8 `svc` trampolines: swi = kSwiJniBase+0x100+i
     std::uint32_t exidx_va = 0;        // .ARM.exidx guest VA (0 if absent)
     std::uint32_t exidx_count = 0;     // number of 8-byte entries
+    std::unordered_map<std::string, std::uint32_t> defined;  // DEFINED sym name -> st_value (for apphost Java_* lookup)
 };
 
 class ElfLoader {

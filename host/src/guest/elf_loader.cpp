@@ -274,6 +274,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
             }
         }
     }
+    out.defined = std::move(defined);
 
     // Trampoline page: map writable, emit, then protect RX.
     if (!mem_.Map(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE)) {
