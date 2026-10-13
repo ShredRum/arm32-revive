@@ -1313,7 +1313,7 @@ int main(int argc, char** argv) {
                             }
                             rgs[14] = mod.halt_va;
                             rgs[0] = glthis;
-                            rgs[1] = cols[bi];
+                            rgs[1] = cols[bi & 1];
                             rgs[2] = 0;
                             rgs[3] = 0;
                             CallGuest(jit, 0x250AB8u);
