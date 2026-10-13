@@ -220,6 +220,44 @@ std::shared_ptr<HostThread> Enter() {
 
 std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, void* thiz, va_list ap) {
     auto st = Enter();
+    // HARNESS_FUNCTORAT=N: after the Nth nativeUpdate, forge a login-
+    // functor ctx (PC RAWBUILD recipe: vtable 0x65E650 + zeroed
+    // account block) and BL the fail functor 0x5FE70 once, then
+    // continue normally. Binary: clean return? "Login failed"?
+    // burst (+164? builders? menu)? PC proved clean+log (functor1).
+    {
+        static int un = 0, fired = 0;
+        static int at = -1;
+        if (at < 0) {
+            at = 0;
+            if (const char* e = std::getenv("HARNESS_FUNCTORAT")) {
+                at = std::atoi(e);
+            }
+        }
+        if (at > 0 && !fired && std::strstr(name, "nativeUpdate")) {
+            if (++un >= at) {
+                fired = 1;
+                const std::uint32_t zb = g_rt->GuestCalloc(1, 0x2C);
+                const std::uint32_t cx = g_rt->GuestCalloc(1, 0x20);
+                if (zb && cx) {
+                    const std::uint32_t fv = 0x65E650u;
+                    std::memcpy(g_rt->H(cx), &fv, 4);
+                    std::memcpy(g_rt->H(cx + 4), &zb, 4);
+                    Log("[functor] forged ctx=%08x acct=%08x, calling 0x5FE70", cx, zb);
+                    auto& fr = st->jit->Regs();
+                    fr.fill(0);
+                    fr[13] = st->stack + 0x200000u - 0x100u;
+                    fr[14] = g_mod->halt_va;
+                    fr[0] = cx;
+                    CallGuest(*st->jit, 0x5FE70u);
+                    Dynarmic::HaltReason fhr = st->jit->Run();
+                    Log("[functor] hr=%d r0=%08x", (int)fhr, fr[0]);
+                } else {
+                    Log("[functor] alloc failed");
+                }
+            }
+        }
+    }
     static std::unordered_map<std::string, std::uint32_t> vacache;
     std::uint32_t va = 0;
     {
