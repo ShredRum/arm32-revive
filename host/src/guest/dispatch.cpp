@@ -595,6 +595,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             goto bad_ptr;
         }
         // TEMP-DIAG (font wall): log len-3 compares to catch the PVR one.
+        // Silenced on Android (logd IPC per line taxes the slow JIT loop).
+#ifndef __ANDROID__
         if (a2 == 3) {
             const std::uint8_t* p0 = H<const std::uint8_t>(a0);
             const std::uint8_t* p1 = H<const std::uint8_t>(a1);
@@ -602,6 +604,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         a0, p0[0], p0[1], p0[2], a1, p1[0], p1[1], p1[2],
                         std::memcmp(p0, p1, 3));
         }
+#endif
         Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
         return;
     }
@@ -3694,7 +3697,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[gltex] %s tgt=%04x lvl=%u ifmt=%04x %ux%u fmt=%04x typ=%04x data=%08x\n",
                             n.c_str(), a0, a1, a2, a3, stk[0], stk[2], stk[3], stk[4]);
             }
+#ifndef __ANDROID__
             std::printf("[gl] %s accepted (fake)\n", n.c_str());
+#endif
             Ret(regs, 0);
             return;
         }
