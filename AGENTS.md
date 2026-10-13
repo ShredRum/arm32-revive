@@ -2332,6 +2332,29 @@ Do NOT treat as fact; verify per item before building on it.
 - NEXT: repack/reinstall/launch -> update#1 passes? config BAD persists
   (then: Call*-delegation for real Activity)?
 
+## 89. Live-this builder: clean no-op; gate needs real rect (2026-10-13)
+- BLIVE (PROVEN): live GL_Context this=0x10002CD8 (heap scan, == surf
+  landmark) + device args (r1=0x101929, r2=r3=0, stack zeros) ->
+  hr=UD1 CLEAN r0=0, +164=2 always, film LOADING (white 0.043). NO
+  writer fault (unlike forged) — but also no content: frustum gate
+  SKIPS on zero rect (consistent with builder3/4 PCTRACE).
+- ABORT SIDE-FIND (builderlive1/2, PROVEN twice, baselines 0):
+  worker abort() (r0=heap, lr=0x38F38C pool) AFTER cond-timeout in
+  DNS/URL worker, BEFORE builder call (line 8763 << 15557). NOT the
+  heap scan (bound 0.0s rerun still aborts) and NOT the builder call.
+  Correlates with BUILDER* env presence... or flake (2/2 vs 0/N).
+  OPEN, low priority (builder verdict unaffected: call ran clean after).
+- GATE STATICS (myself, PROVEN bytes): gate fn @0x250704 (not 0x25070C);
+  one gate-BL per builder (0x2505B0 in 0x250200, 0x250C7C in 0x250AB8,
+  0x251158 in 0x250E00). In-builder: rect=sp+100 (stores s6/s0/r0/
+  s14/s2/r0 at +124..144 adjacent), count=r1, `cmp r0,#1; bne SKIP`.
+  Gate body: VFP clamp loop (pool consts + per-item [r0-4]/[r0],
+  stride 12, r1 iters) + final `-1.0f` check. r1-at-call + rect layout
+  + return-1 condition = queued static (subagent).
+- NEXT: subagent decodes builder r0/r1 at gate + return semantics ->
+  forge valid rect+count -> BLIVE rerun -> binary (body->writer->
+  flip/content?) vs fault (requirement).
+
 ## 88. Product hits the unwinder wall (2026-10-13, device APK)
 - FILES ALIAS WORKED (no unmapped lines; seeds open). Config BAD gone
   (no BAD @config). First update: hr=UD2 r0=0x45A778 = THROW+spiral

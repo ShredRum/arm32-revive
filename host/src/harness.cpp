@@ -1249,6 +1249,61 @@ int main(int argc, char** argv) {
                             std::printf("[builder] forged this=%08x\n", bthis);
                         }
                     }
+                    // HARNESS_BUILDERGL=N: same direct builder call but with a
+                    // LIVE GL_Context this (heap scan for vtable VA 0x669404,
+                    // device-proven [this]; our surf object qualifies) and no
+                    // forge/borrow. Device arg shape (r1=color, r2=r3=0).
+                    // Harness-only diag. Binary: clean+content (film!) vs
+                    // fault (pc+addr = requirement).
+                    if (std::getenv("HARNESS_BUILDERGL")) {
+                        std::uint32_t glthis = 0;
+                        const std::uint32_t want = 0x669404u;
+                        // Bound: GL_Context allocates at nativeInit (low heap).
+                        // Full-heap scan stalls the single core for seconds and
+                        // trips pool watchdogs (FATAL abort); keep it under ~0.2s.
+                        const std::uint32_t scan_end =
+                            rt.HeapTop() < 0x11000000u ? rt.HeapTop() : 0x11000000u;
+                        const auto t0 = std::chrono::steady_clock::now();
+                        for (std::uint32_t a = 0x10000000u; a + 4 <= scan_end; a += 4) {
+                            if (!rt.CheckRange(a, 4, false)) {
+                                a = (a + 0xFFFu) & ~0xFFFu;
+                                a -= 1;
+                                continue;
+                            }
+                            std::uint32_t w = 0;
+                            std::memcpy(&w, rt.H(a), 4);
+                            if (w == want) {
+                                glthis = a;
+                                break;
+                            }
+                        }
+                        std::printf("[builder] live GL_Context this=%08x scan=%.1fs\n", glthis,
+                                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                                        .count());
+                        if (glthis && rt.IsCodeAddress(0x250AB8u)) {
+                            auto& rgs = jit.Regs();
+                            rgs.fill(0);
+                            rgs[13] = abr::kStackTop - 0x200;
+                            rgs[13] -= 16;
+                            const std::uint32_t zw = 0;
+                            for (int k = 0; k < 4; k++) {
+                                std::memcpy(mem.host(rgs[13] + k * 4), &zw, 4);
+                            }
+                            rgs[14] = mod.halt_va;
+                            rgs[0] = glthis;
+                            rgs[1] = 0x101929u;
+                            rgs[2] = 0;
+                            rgs[3] = 0;
+                            CallGuest(jit, 0x250AB8u);
+                            std::printf("[builder] calling @000250ab8 live ... ");
+                            std::fflush(stdout);
+                            alarm(60);
+                            Dynarmic::HaltReason hr2 = jit.Run();
+                            alarm(0);
+                            std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
+                            jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                        }
+                    }
                     if (((std::getenv("HARNESS_BUILDERFORGE") && bthis) ||
                          (tgrad && vt == 0x669620u)) &&
                         rt.IsCodeAddress(0x250AB8u)) {
