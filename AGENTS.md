@@ -3100,6 +3100,49 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   builders. Next: completion channel (epilogue/drain subagents
   running) -> loginFinished -> burst; then real GLES for pixels.
 
+## 99. Epilogue verdict: completion link structurally absent (2026-10-14, static)
+- SUBAGENT (PROVEN bytes): worker entries 0x38C048/0x189338 =
+  fetch -> BLX job -> vt-cleanup -> operator_delete -> return (6-7
+  BLs each, zero to queue/notify/login). Runner 0xD5DA4 = gate
+  [job+60] -> slot+28 BLX -> 0x6141C + new + Identity append
+  0x1A96EC (lock + if(+0x10==0) + unlock) -> vt-cleanup -> return.
+  Process 0x28DAF4 = new-job dispatch only; reader 0x28E328 =
+  pipe-drain only; [+12] = unconditional compaction moves (the
+  selective branch is [+8] in 0x28E548: 0 -> 0x28E918 success
+  vs else 0x28EB18 error, both ending in generic vtable+0x18).
+  Functors 0x5EBA4/0x5FE70 -> BL loginFinished(1/0); loginFinished
+  17 BLs, none to queue. D6C78's ~100 BLs: zero to functors,
+  login, or queue. Decomp grep: functors have NO BL caller
+  anywhere; 0xD5DA4 only assigned (job construction).
+- VERDICT: no static completion path job->main/functors EXISTS
+  (zeros as zeros). Only unresolved-BLX maybes remain.
+- Awaiting drain subagent (Identity array readers). If drain is
+  also absent -> completion must be DYNAMIC (unwinder catch pads
+  for fail; ??? for success) -> back to R7 with device-grounded
+  need, or direct-functor synthesis as ship (REDIR proved the
+  call runs clean on PC).
+
+## 100. Drain verdict: nobody drains; fail path is the menu door (2026-10-14)
+- SUBAGENT (PROVEN bytes): Identity array S=outer+0x2C (vtable,
+  mutex+4, Event+8, flag+10, queue+18); append 0x1A96EC = lock +
+  flag-check + inner + unlock (mutex-only, no wake/counter/pipe;
+  21 BL callers incl. all session/account flows). Drains
+  (0x384678/0x384788/0x384000/0x1AA2AC) have 0 live callers;
+  subscriber manager 0 callers; event walk 0xC45FC walks a
+  DIFFERENT array; update body / login poll / account handlers all
+  proven absent. Enqueue needs *(S+0x10)==0; callers gate on
+  outer+0x3C.
+- SYNTHESIS (mine): original reaches menu via FAIL (D1 timeline:
+  loginFinished(0) x2 -> burst -> menu), never via sessions-200.
+  So the needed completion is throw -> catch -> fail functor
+  0x5FE70 -> loginFinished(0) -> burst. Static catch pads all
+  rethrow; the catch itself needs R7 (or bypass).
+- NEXT (device): direct fail-functor synthesis (REDIR machinery:
+  redirect sessions-job throw -> 0x5FE70 with live record, or
+  direct BL) -> binary: logcat "Login failed"? burst? menu?
+  (PC REDIR proved the call runs + logs.) Unwinder R7 stays the
+  "real" fix; synthesis is cheaper per rung.
+
 ## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
 - 4 days on the desktop harness past LOADING with zero menu progress
   (login ladder, builders, loop, manager, unwinder — all mapped, none
