@@ -1874,16 +1874,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
                         FindExidx(a0), regs[7], regs[13], regs[14]);
         }
-        // HARNESS_SKIPFRAME=1: flip-test (§87): the walk sticks at frame
-        // 0x45A758 (queried as pc=0x45A778, mid-function entry skips its
-        // prologue so vsp never anchors). Answer as if asked about its true
-        // caller 0x457FE7 (BL @0x457FE2 ret into __cxa_throw): entry 0x5BA430.
-        // No guest state touched (bridge answer only). Binary: walk advances
-        // past frame #1 (new pcs/handlers?) vs same loop. Harness-only.
+        // HARNESS_SKIPFRAME=1: flip-test (§87, refined §89): the walk sticks
+        // at frame 0x45A758 (queried as pc=0x45A778) but live R7 is getInfo's
+        // frame (SP=R7-0x20 + [R7+4]=0x45AAFB constant PROVES it) — pc and R7
+        // come from DIFFERENT frames, so descriptors pop the wrong words.
+        // Answer for the LIVE frame instead (lr&~1 = 0x45AF66, getInfo body):
+        // descriptors then match live R7 and the walk should advance through
+        // real frames (0x45AAFB -> 0x45AAC0 -> ...). No guest state touched.
+        // Binary: new pcs/handlers/terminate vs same loop. Harness-only.
         std::uint32_t ask_pc = a0;
         if (std::getenv("HARNESS_SKIPFRAME") && a0 == 0x45A778u) {
-            ask_pc = 0x457FE7u;
-            std::printf("[skipframe] pc=0045a778 -> answering for 00457fe7\n");
+            ask_pc = regs[14] & ~std::uint32_t(1);
+            std::printf("[skipframe] pc=0045a778 live-lr=%08x -> answering for %08x\n",
+                        regs[14], ask_pc);
             // Caller hunt: the re-invoker leaves return addrs on stack.
             // Dump first code-range words in [sp,sp+512) (outer frames).
             static int skdump = 0;

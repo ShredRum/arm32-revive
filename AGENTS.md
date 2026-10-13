@@ -2345,6 +2345,21 @@ Do NOT treat as fact; verify per item before building on it.
 - NEXT: resume R7 root cause (LSDA verdict pending; mid-function entry
   / prologue emulation / caller hunt).
 
+## 89. LSDA verdict: frame confusion; live-frame answer test (2026-10-13)
+- SUBAGENT (PROVEN bytes): entry 0x5BA760 = compact Su16 short (pr0),
+  descriptors 97/42/AC + Finish, LSDA ABSENT (no pads/actions).
+  Personality MUST return CONTINUE (never HANDLER). Advance SHOULD pop
+  LR=0x457FE7 from [R7_45A758+8] -> __cxa_throw -> game frames.
+- FRAME CONFUSION (PROVEN live values): SP=R7-0x20 + [R7+4]=0x45AAFB
+  constant proves live R7 is GETINFO's frame, not 0x45A758's. pc
+  (0x45A778, stale getcontext save) and R7 (current getInfo frame)
+  come from different frames -> descriptors pop wrong words -> LR
+  garbage -> re-present. My R7POKE/[R7-12]/0x457FE7 recipe was aimed
+  at the wrong frame (all misses explained).
+- FIX (built): answer for the LIVE frame (lr&~1): descriptors match
+  live R7 -> coherent unwind through real frames. No guest touched.
+  Binary next: new pcs/handlers/terminate vs same loop.
+
 ## 87. Pointer-width airtight + Call delegation (2026-10-13)
 - BUG CLASS (PROVEN maps): ART lives high (0x7x-dominant) — raw 64-bit
   pointers must NEVER enter 32-bit guest regs/fields. Design: guest
