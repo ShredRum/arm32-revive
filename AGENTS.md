@@ -3013,3 +3013,26 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - NEXT: /session/ verdict (completion? KeyNotFound key? loginFinished?
   burst?) -> then apdrive path + real-GLES passthrough (share-group
   design) for pixels.
+
+## 94. Update driver stops after 34 updates in 1s; zombie verdict (2026-10-13)
+- PROVEN (logcat timestamps + file count): 34 nativeUpdates ALL inside
+  23:00:25.9-26.x (first boot second), then ZERO for 7+ min. Count 34 <
+  40 (call# cap) -> genuine stop, not log truncation.
+- PROVEN (task list, 21 tasks): no UpdateThread, no guest workers (all
+  done retval=0 / parked in poll). Main 8305 alive+sleeping; 7
+  GraphicsThreads + 2 RenderThreads alive; 8333 caught Running (black
+  frames, likely unthrottled swaps with no content).
+- PROVEN (Frida live): state b=RENDER_READY (not EXITING); no tombstone;
+  no logcat exception; screen Awake; App resumed.
+- PROVEN (smali): doUpdate-nonzero does NOT exit (access$200 -> loop).
+  Silent Java death would log; none logged -> "34-in-1s then stop"
+  reads as FINITE init burst, not loop death (INFERRED, needs the
+  birth-hook run to settle).
+- Last main-thread guest acts: settings/bi_data saves + Flurry onEvent
+  (real delegation OK). Workers done; GL spins black.
+- LESSON: updates<<40 => file count == truth; logcat timestamps beat
+  file logs for rate; task-comm list beats utime aggregates (cumulative
+  utime falsely suggested all-spin; states showed 1 R + 17 S).
+- NEXT MEASUREMENT: relaunch + Frida-from-birth (UpdateThread.run/a/
+  doUpdate entry-exit-returns + starts) -> name the stopper. THEN
+  fastmem (user-approved after analysis).
