@@ -3668,6 +3668,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                 std::string(s, L > 200 ? 200 : L).c_str());
                     // TEMP-DIAG (real-GLES prep): stash full source for
                     // offline compile tests (host FS, harness-only).
+#ifndef __ANDROID__
                     if (L > 16 && L <= 65536) {
                         std::filesystem::create_directories("work/shaders");
                         char fn[64];
@@ -3678,6 +3679,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             std::fclose(f);
                         }
                     }
+#endif
                 }
             }
             if ((n == "glTexImage2D" || n == "glCompressedTexImage2D") && a1 <= 8) {
