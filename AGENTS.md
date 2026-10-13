@@ -2977,3 +2977,39 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   1:1. Subagent CAN do the static half anytime (expected-truth table per
   method from AOSP/JNI docs + pre-diff our mocks vs docs for definite bugs);
   device capture + diffing stays manual (live timing).
+
+## 93. Device night run: seeds→global-fix→shader-gate→RENDER_READY→/session/ frontier (2026-10-13)
+- SEEDS (PROVEN): device files dir had ONLY guest.so+log. Missing
+  highscores.lua threw io::IOException on main thread (update#1, no
+  workers). Pushed harness seeds (highscores/settings/bi_data/cacert +
+  empty registry, u0_a46:u0_a46) -> throw GONE, boot proceeds.
+- STALE-LOCAL (PROVEN tombstone): Context.getAssets() on cached Activity
+  -> ART abort "stale Local 0x100005" (CallObjectMethodA via
+  RealCallObject@dispatch.cpp:5320, addr2line-verified). FIX (f297bae):
+  WrapObject promotes to NewGlobalRef on Android + IsSameObject
+  identity scan. PC untouched.
+- SHADER-DUMP ABORT (PROVEN tombstone): game reached menu-shader compile
+  (2d-sprite-alpha-masked, pp.fx) -> harness-only work/shaders stash ->
+  create_directories("work") on CWD=/ -> filesystem_error SIGABRT.
+  FIX (345d18c): #ifndef __ANDROID__ gate. Audit: only throwing
+  create_directories (others take ec); screenshots live in PC-only realgl.
+- RENDER GATE (PROVEN Frida, FULL server, no gadget): state b=
+  RENDER_READY; SingleThreadWrapper mIsLandscape=true,
+  readyToRender()=true; onDrawFrame 299x/15s (GL thread alive). Black
+  screen = our faked gl* (nothing reaches the driver), NOT Java gates.
+  (MultiThreadWrapper has no instance; frida-server-16 matches .venv
+  16.7.19, -17 mismatches; process name "Angry Birds"; tunnel -p 8022.)
+- FRONTIER (PROVEN log): sessions-succ (plural) completes, tokens saved
+  to device registry, game builds SINGULAR /session/1/apps/... request
+  (authenticated, stored offline-test token) -> unmatched by RETSUCC
+  gates -> real TLS (CF 13.32.x.x:443, CHello 0301/0301) -> stall.
+  FIX (30e8d67): /session/ branch with sessions schema; iterate via
+  KeyNotFound. SECONDARY GAP (noted, untouched): apdrive reads
+  /tmp/opencode/fakeserv/variantconfig.bin (absent on device).
+- LESSONS: "ended" logs only on hr!=UD1 (clean = silent); call# logged
+  only for first 40 (renders invisible after); "recommended" contains
+  "ended" (grep carefully); &&-chain committed broken code once (grep
+  -c error matches -> chain continued; amend fixed, tree green).
+- NEXT: /session/ verdict (completion? KeyNotFound key? loginFinished?
+  burst?) -> then apdrive path + real-GLES passthrough (share-group
+  design) for pixels.
