@@ -1989,6 +1989,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 !files_hostbase_.empty()) {
                 return files_hostbase_ + g.substr(files_prefix_.size());
             }
+            // Same app dir via the /data/user/<N> alias (real getFilesDir on
+            // device returns /data/user/0/... while our prefix is /data/data).
+            // Match on the package tail so both spellings land in files/.
+            {
+                const std::string tail = "/com.rovio.angrybirdsrio/files";
+                const std::size_t at = g.find(tail);
+                if (at != std::string::npos && !files_hostbase_.empty()) {
+                    return files_hostbase_ + g.substr(at + tail.size());
+                }
+            }
             // Bare relative names (no leading '/'): the game opens seeds like
             // "highscores.lua" CWD-relative (original CWD = files dir). Route
             // to the files dir (fopen fails gracefully if missing — same as
