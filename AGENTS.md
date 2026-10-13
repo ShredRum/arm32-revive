@@ -3216,6 +3216,17 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - NEXT: tap level 1 -> GAMEPLAY (slingshot/physics/birds/audio
   = the real engine test).
 
+## 108. Menu x3, incl. master without functor (2026-10-14)
+- Third menu (fresh boot 1312, master 5e94d7d): baseline w/o taps
+  (sessions 4x+time 2x, +164=2, parked) -> taps -> MENU (+164
+  1<->2, pixel-proof menu3). Recipe holds across builds.
+- Functor settled: menu arrives with it firing (gold) and without
+  (master, disabled) -> functor is NOT load-bearing for menu.
+  Neither blocker nor key; stays a tool.
+- Open: level-13 tap parks everything (utime ~0, draws continue,
+  no crash). Next: name the wait (thread dump), then audio
+  (mixdata heartbeat) for self-drive.
+
 ## 107. Input quantum mapped: synchronous fan-out, no wake (2026-10-14)
 - SUBAGENT (PROVEN bytes): nativeInput 0xC23E4 = jump table
   (began/moved/ended/hover only; actions 3,5,6,8,9 -> bail). Each
