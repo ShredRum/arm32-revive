@@ -483,6 +483,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
     // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
     setenv("HARNESS_PROBE4", "c52ac", 1);
+    // +164 ground truth on device (read-only manager-pass entry dump;
+    // closes "logically LOADING" -> proven or not).
+    setenv("HARNESS_DIAG164", "1", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
