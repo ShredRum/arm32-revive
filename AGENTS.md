@@ -2316,6 +2316,22 @@ Do NOT treat as fact; verify per item before building on it.
   (Android-gated; PC identical by preprocessor).
 - NEXT: repack + reinstall + launch -> config BAD gone? updates clean?
 
+## 86. First APK boot forensics: JavaVM fixed, files gap found (2026-10-13)
+- BOOT (PROVEN): extract/inits/OnLoad/Java-drive all live on device;
+  screen rotates (GLSurfaceView up). Black screen: updates end UD2.
+- FAULTS (PROVEN log): (1) config BAD read @ART (0xDEE36180) pc=0xC1598
+  (ran further than PC §5 site — slot init fixed, next wall is
+  getActivity-mock vs real use); (2) update#1 HALT on bare
+  "highscores.lua" (files bridge had no CWD-relative mapping; cascade
+  kills all later updates at 0x39B1E8 NULL writes). DeviceID mock
+  fired fine; Attach on 2 threads fine (tid 1000/1001).
+- FIX (this commit): bare relative non-data names -> files dir
+  (fopen-fails-graceful like device; data/* untouched — PC proves
+  asset API serves it). Strictly more permissive; PC inert unless a
+  run relied on the halt (none observed).
+- NEXT: repack/reinstall/launch -> update#1 passes? config BAD persists
+  (then: Call*-delegation for real Activity)?
+
 ## 82. Context compare: coherent march, same pc (2026-10-13, ctxcmp1)
 - 1026 queries, ALL pc=0x45A778: R7 descends 0x48/iter, SP=R7-0x20
   always, LR=0x45AF67 constant. Coherent pairs marching together —

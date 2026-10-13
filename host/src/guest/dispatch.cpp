@@ -1958,6 +1958,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 !files_hostbase_.empty()) {
                 return files_hostbase_ + g.substr(files_prefix_.size());
             }
+            // Bare relative names (no leading '/'): the game opens seeds like
+            // "highscores.lua" CWD-relative (original CWD = files dir). Route
+            // to the files dir (fopen fails gracefully if missing — same as
+            // device semantics). "data/*" stays unmapped (asset API serves it;
+            // PC runs prove the game never fopens data/* directly).
+            if (!g.empty() && g[0] != '/' && g.compare(0, 5, "data/") != 0 &&
+                !files_hostbase_.empty()) {
+                return files_hostbase_ + "/" + g;
+            }
             static std::uint64_t unmapped_hits = 0;
             if (++unmapped_hits <= 5) {
                 std::printf("[files] unmapped guest path \"%s\"%s\n", g.c_str(),
