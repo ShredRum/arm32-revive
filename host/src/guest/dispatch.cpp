@@ -1867,7 +1867,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         // HARNESS_EXIDXLOG=1: temp-diag (unwinder spiral): log every lookup.
         if (std::getenv("HARNESS_EXIDXLOG")) {
-            std::printf("[exidxlog] pc=%08x -> entry=%08x\n", a0, FindExidx(a0));
+            std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
+                        FindExidx(a0), regs[7], regs[13], regs[14]);
         }
         // HARNESS_R7POKE=1: flip-test (§79): the raise driver's frame #1
         // has a stale saved-LR ([R7+8] reads heap, never 0x457FE7), so
