@@ -3158,6 +3158,19 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   or fire at login-retry timing; (c) success functor 0x5EBA4 with
   live session (sessions-succ state exists!) as the sibling test.
 
+## 102. FIRST REAL PIXELS: Rovio logo on device (2026-10-14)
+- Android real-GL backend (shared Handle; caller's context; no EGL
+  init): live ctx=0x7ad8c25600 on first try; driver answers real
+  strings (Samsung/ANGLE/Xclipse/Vulkan). No crash, boot proceeds.
+- USER SAW ROVIO + pixel-proof: screencap 2248x1080 = white field
+  + Rovio red (224,1,36). Guest draws -> Dynarmic -> real driver
+  -> Java surface -> screen. Render pipeline END-TO-END on device.
+- PC parity held through the split (54/54, 948). Fake shim stays
+  fallback (worker threads w/o context). glGetError watch ongoing.
+- NEXT: ride this boot (Fox? BlueSky? LOADING with REAL art?);
+  taps if splashes stall (early-taps-only hygiene); then menu via
+  completion/functor work with VISIBLE film.
+
 ## 96. History anchor (user-recounted 2026-10-13, keep for orientation)
 - 4 days on the desktop harness past LOADING with zero menu progress
   (login ladder, builders, loop, manager, unwinder — all mapped, none
