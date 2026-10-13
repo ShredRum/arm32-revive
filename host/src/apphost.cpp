@@ -345,6 +345,22 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     regs[14] = g_mod->halt_va;
     CallGuest(*st->jit, va);
     const Dynarmic::HaltReason hr = st->jit->Run();
+#ifdef __ANDROID__
+    // Input-stream forensics (PLAY button animates but never fires):
+    // log every nativeInput action + coords (capped). words[2]=action,
+    // [3]=x-bits, [4]=y-bits (IJNI: env,thiz,action,x,y,?).
+    if (std::strstr(name, "nativeInput") && words.size() >= 5) {
+        static int in_n = 0;
+        if (in_n < 60) {
+            float xf = 0, yf = 0;
+            std::uint32_t xw = words[3], yw = words[4];
+            std::memcpy(&xf, &xw, 4);
+            std::memcpy(&yf, &yw, 4);
+            Log("[input] act=%u x=%.0f y=%.0f r0=%08x", words[2], xf, yf, regs[0]);
+        }
+        in_n++;
+    }
+#endif
     if (hr != Dynarmic::HaltReason::UserDefined1) {
         Log("%s ended hr=%d r0=%08x", name, (int)hr, regs[0]);
     }
