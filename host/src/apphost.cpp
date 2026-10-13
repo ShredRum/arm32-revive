@@ -429,6 +429,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
     // Metric = updates/min + same-behavior verdicts (sessions/rdump).
     setenv("HARNESS_FASTMEM", "1", 1);
+    // Gate-writer capture (0x74168, sole static path to +1187 setter):
+    // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
+    setenv("HARNESS_WATCHPC", "74168", 1);
     Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
