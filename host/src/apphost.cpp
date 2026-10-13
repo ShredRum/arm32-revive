@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <mutex>
 #include <random>
+#include <stdlib.h>
 #include <string>
 #include <sys/types.h>
 #include <unistd.h>
@@ -404,6 +405,13 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
+    // Ship strategy (user-approved): canned sessions success (dead 2026
+    // servers can't answer; success path throws nothing, needs no catch).
+    // The harness RETSUCC machinery (PROBE3 raiser hook) does the work.
+    setenv("HARNESS_RETSUCC", "1", 1);
+    setenv("HARNESS_PROBE", "1a410c,fill", 1);
+    setenv("HARNESS_PROBE3", "28a3dc", 1);
+    Log("RETSUCC-as-ship armed");
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");

@@ -2382,6 +2382,19 @@ Do NOT treat as fact; verify per item before building on it.
 - NEXT: resume R7 root cause (LSDA verdict pending; mid-function entry
   / prologue emulation / caller hunt).
 
+## 91. RETSUCC-as-ship in APK (2026-10-13)
+- PIVOT (decisive reasoning): unwinder catch is necessary for FAIL but
+  the SUCCESS path throws nothing. Dead 2026 servers fail every real
+  POST anyway -> canned sessions-200 (user-approved ship strategy)
+  avoids the spiral entirely. Success continuation (functors/channel)
+  with REAL Java callbacks is UNTESTED territory (harness starves it;
+  device may supply it) — cheaper to test than fixing R7.
+- BUILT: apphost setenv RETSUCC=1 + PROBE fill/raiser in OnLoad.
+- NEXT: repack/reinstall/launch -> update#1 clean (r0=1)? sessions
+  complete (flag?) -> Java callbacks arrive? -> burst/menu?? Binary
+  per rung. If success stalls like harness (no burst) -> back to R7
+  (fail path) with no regrets: both doors tried.
+
 ## 89. LSDA verdict: frame confusion; live-frame answer test (2026-10-13)
 - SUBAGENT (PROVEN bytes): entry 0x5BA760 = compact Su16 short (pr0),
   descriptors 97/42/AC + Finish, LSDA ABSENT (no pads/actions).
