@@ -674,6 +674,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
     // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
     setenv("HARNESS_PROBE4", "c52ac", 1);
+    // POSIX-truth (2026-10-14, proven by worker abort): untimed
+    // cond_wait must never fail with ETIMEDOUT (game aborts on 110:
+    // audio loader died this way). Cap cycles as SPURIOUS success (0)
+    // so predicates re-check; true deadlocks stay visible in census.
+    setenv("HARNESS_SPURWAKE", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
