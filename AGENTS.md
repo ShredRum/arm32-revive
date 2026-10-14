@@ -3302,3 +3302,41 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   white-frac 0.93 = bright LOADING art, not whiteout). Fastmem reaches
   the same stages as bring-up mode. A/B parity HOLDS long. Control
   (fmboot0, same combo no-fastmem) running to confirm.
+
+## 110. Tap-freeze triage: dt=0 PROVEN, pump alive (2026-10-14)
+- SYMPTOM (user, 100%): picture/logic static unless tapped; each tap
+  = 1+ frames (video-player-next-frame feel); loading anim advances
+  per tap; early taps -> black/menu-without-UI; level entry parks
+  (one blink, then frozen chapter frame).
+- H1 (pump dead) REFUTED by RATE telemetry (timestamped entries,
+  commit 3c14ad0): nativeUpdate 33.9/s (fastmem) / 20.7/s (no-fastmem)
+  hands-off, single tid, r0=1 always, 0 abnormal ends. Java
+  nativeRender NEVER called => SingleThreadWrapper mode (render
+  inside update via realGL). MCSM .apks is NOT a reference port
+  (official episode splits + widescreen mod) - lead dead, skip.
+- 0x672E98 is g_App POINTER slot (not a flag): 1 write at init
+  (0xC1B30, worker, value=heap obj), then 3 reads/update, never
+  rewritten. No static writers (no literal/movt refs) - set via
+  register path in nativeInit factory (BL 0x696BC at 0xC1B2C).
+- Update-body gate #1 (vcall@0xC2090, bne@0xC2098->0xC224C) PASSES
+  every frame (WATCHPC@C209C fires, r0=1). Gate #2 = +1187==1 ->
+  exit path (0xC2154+, ends mov r8,#0 -> r0=0 -> Java EXITING ->
+  deinit->SIGKILL); +1187=quit CONFIRMED by epilogue (skips return
+  r8=1). §109 STANDS.
+- dt=0 PROVEN: tick slot 0x672EA0 (last_tick u64, +8 of g_App) gets
+  IDENTICAL value 0xA343F400 for 1425 straight updates (WPA,
+  no-fastmem). dt=tick-last=0 => all dt-scaled motion x0. Taps work
+  via discrete input path (nativeInput skip), not via time.
+- No libc-time (clock_gettime/gettimeofday) and no JNI-time
+  (uptime/nano/currentTimeMillis) calls in 86s of logs. Tick source
+  = internal 0x38CA38 (freq arg 10^6; scales ns->us via umull) fed
+  from an in-memory counter. NEXT: THREADLOG=1 run (worker calls
+  were main-only-hidden) to name the raw source.
+- FLAKE (1x): one WATCHPC run died at 4s via abnormal-hr update
+  (r0=0 -> orderly suicide, NOT +1187 path). Rerun same build:
+  alive, 0 abnormal. Verdict: one-off JIT halt, not the probe.
+  WatchSP is UNCAPPED (prints every execution after WatchPC cap) -
+  log-noise trap, cap it when convenient.
+- Post-gold diff (20 commits, 754 ins): behavior delta ~ FUNCTORAT
+  off + probes/telemetry only; tap-freeze predates gold. No revert
+  needed for this bug.
