@@ -98,6 +98,13 @@ void Watchdog() {
             g_upd_entry_n.load(), stuck_ms, entry);
         g_rt->ThreadCensus();
         g_rt->MutexOwnersDump();
+        const std::uint32_t plo = g_rt->pend_lock_obj_.load();
+        const std::uint32_t plt = g_rt->pend_lock_tid_.load();
+        if (plo) {
+            Log("STUCK pending-lock obj=%08x tid=%u", plo, plt);
+        } else {
+            Log("STUCK pending-lock: none (not inside mutex_lock)");
+        }
         const std::uint32_t si = g_rt->last_svc_idx_.load();
         const std::uint32_t st = g_rt->last_svc_tid_.load();
         const char* nm = "?";
@@ -793,6 +800,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Stuck-update forensics (2026-10-14): per-thread last import is
     // always tracked now (watchdog resolves the name at dump time).
     setenv("HARNESS_LASTSVC", "1", 1);
+    // Worker import traffic for the tid=11 death forensics (one
+    // diagnostic run; THREADLOG is capped at 5/import so log stays sane).
+    setenv("HARNESS_THREADLOG", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);

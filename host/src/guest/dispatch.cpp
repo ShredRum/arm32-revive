@@ -3999,7 +3999,11 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         m = it->second;
     }  // guard released: blocking lock/unlock below must not hold mutex_.
     if (n == "pthread_mutex_lock") {
+        pend_lock_obj_ = obj;
+        pend_lock_tid_ = GuestTid();
         const int r = pthread_mutex_lock(m);
+        pend_lock_obj_ = 0;
+        pend_lock_tid_ = 0;
         if (r == 0) {
             MutexNoteLocked(obj, GuestTid());
         }

@@ -167,6 +167,10 @@ public:
     // (no strings here - index resolved against mod_.imports at dump time).
     std::atomic<std::uint32_t> last_svc_idx_{0xFFFFFFFFu};
     std::atomic<std::uint32_t> last_svc_tid_{0};
+    // Pending (blocked-in) mutex lock: obj+tid set BEFORE the host lock
+    // call, cleared after. Names WHAT a stuck thread wants.
+    std::atomic<std::uint32_t> pend_lock_obj_{0};
+    std::atomic<std::uint32_t> pend_lock_tid_{0};
     std::atomic<std::uint64_t> halt_count{0};
     std::atomic<std::uint64_t> bad_count{0};
 
