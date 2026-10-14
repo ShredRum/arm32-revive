@@ -831,6 +831,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Worker import traffic for the tid=11 death forensics (one
     // diagnostic run; THREADLOG is capped at 5/import so log stays sane).
     setenv("HARNESS_THREADLOG", "1", 1);
+    // Victim-object provenance for the Fox BAD death (logging only,
+    // capped; zero behavior change): first mallocs with caller lr,
+    // match the crashed r4 against them from the log.
+    setenv("HARNESS_MALLOCLOG", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
