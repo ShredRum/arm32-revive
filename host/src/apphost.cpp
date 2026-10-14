@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <mutex>
+#include <unordered_set>
 #include <random>
 #include <stdlib.h>
 #include <string>
@@ -553,6 +554,16 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     va_start(ap, thiz);
     static int calln = 0;
 #ifdef __ANDROID__
+    // Lifecycle inventory: log every DISTINCT native once (uncapped by
+    // design; ~63 max). Answers "which Java->native traffic exists".
+    {
+        static std::unordered_set<std::string> seen;
+        static std::mutex smu;
+        std::lock_guard<std::mutex> l(smu);
+        if (seen.insert(name).second) {
+            Log("uniqcall %s", name);
+        }
+    }
     if (calln < 400) {  // device runs long; 40 hid continuation (§94)
 #else
     if (calln < 40) {
