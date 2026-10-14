@@ -3470,4 +3470,13 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Trigger UNRESOLVED: heap exhaustion (1GB leak-only + per-frame
   guest allocs?) vs wild-size new (corrupt length). Fix needs the
   datum: GuestMalloc LOUD OOM committed (8b69ee4), deploy on next
-  restart (session untouched). Fresh heap restarted meanwhile."
+  restart (session untouched). Fresh heap restarted meanwhile.
+
+## 120. bad_alloc x2, same site (2026-10-14)
+- Loading crash again: St9bad_alloc @0x43B81F -> updates die ->
+  deinit -> teardown canary/BAD chaos. Killer #1 (wedge is rarer).
+  White flashes on loading = suspect texture-alloc pressure.
+- OOM build deployed (8b69ee4 in tree): next crash prints
+  `[heap] OOM size= brk= lr=` (killer size + caller). Then decide:
+  exhaustion => heap growth/leak hunt; wild-size => corrupt length
+  source (canary cascade?)."
