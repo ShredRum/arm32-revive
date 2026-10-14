@@ -628,16 +628,14 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // DIAG 2026-10-14: fastmem OFF for the flag-writer hunt (fastmem may
     // bypass mem callbacks -> WPA blind). Revert after.
     // setenv("HARNESS_FASTMEM", "1", 1);
-    // Flag-writer hunt (2026-10-14): nativeUpdate bails iff *(0x672E98)==0
-    // (init 0, no reloc; PROVEN by bytes+distv). Who writes it, if anyone?
-    setenv("HARNESS_WPA", "672e98", 1);
-    // Gate-writer capture (0x74168, sole static path to +1187 setter):
-    // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
-    // TRIAGE 2026-10-14: tick-lo capture 0xC2038 (mov r4,r0 just after
-    // the tick BL: r0=tick-lo, r1=tick-hi). Binary: r0 advances across
-    // updates => guest clock alive; constant => dt=0 => frozen logic.
-    // (Body-gate PROVEN open: body runs every update, r0=1.)
-    setenv("HARNESS_WATCHPC", "c2038", 1);
+    // TRIAGE 2026-10-14: tick-slot watch (last_tick u64 @0x672EA0,
+    // written by update each frame, read next frame; dt=tick-last).
+    // Uncapped WPA reads show per-update values: frozen => dt=0 PROVEN.
+    // (Flag 0x672E98 settled: 1 write at init, stable.)
+    // Gate-writer capture: WATCHPC probe parked on cold builders 0x250AB8
+    // (pure observe; avoids WatchSP spam on hot paths).
+    setenv("HARNESS_WATCHPC", "250ab8", 1);
+    setenv("HARNESS_WPA", "672ea0", 1);
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
     // Gate opens naturally only when content is ready; forcing it kills.
