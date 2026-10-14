@@ -4976,6 +4976,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
         re->DeleteLocalRef(lc);
         if (!rclazz) {
+            std::printf("[realnew] NewGlobalRef FAILED\n");
             return false;
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -4992,6 +4993,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     if (!rmid) {
         rmid = re->GetMethodID(rclazz, "<init>", sig.c_str());
         if (!rmid || re->ExceptionCheck()) {
+            std::printf("[realnew] GetMethodID <init>%s FAILED\n", sig.c_str());
             re->ExceptionClear();
             return false;
         }
@@ -5115,6 +5117,29 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     }
     jobject ro = re->NewObjectA(rclazz, rmid, jv);
     if (re->ExceptionCheck() || !ro) {
+        // Name the exception (audio ctor diagnosis).
+        jthrowable ex = re->ExceptionOccurred();
+        if (ex) {
+            jclass ecl = re->GetObjectClass(ex);
+            jmethodID tn = ecl ? re->GetMethodID(ecl, "toString", "()Ljava/lang/String;")
+                               : nullptr;
+            jstring js = (ecl && tn) ? static_cast<jstring>(re->CallObjectMethod(ex, tn))
+                                     : nullptr;
+            if (js && !re->ExceptionCheck()) {
+                const char* c = re->GetStringUTFChars(js, nullptr);
+                if (c) {
+                    std::printf("[realnew] NewObjectA THREW %s\n", c);
+                    re->ReleaseStringUTFChars(js, c);
+                }
+                re->DeleteLocalRef(js);
+            }
+            if (ecl) {
+                re->DeleteLocalRef(ecl);
+            }
+            re->DeleteLocalRef(ex);
+        } else {
+            std::printf("[realnew] NewObjectA returned null\n");
+        }
         re->ExceptionClear();
         return false;
     }
