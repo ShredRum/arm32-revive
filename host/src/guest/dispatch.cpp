@@ -3902,6 +3902,78 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(o));
         return;
     }
+    if (n == "srand48" || n == "srand" || n == "srandom" || n == "rand" || n == "random" ||
+        n == "lrand48" || n == "mrand48" || n == "drand48" || n == "erand48" ||
+        n == "jrand48" || n == "nrand48") {
+        // Real 48-bit LCG (was stub->0: EVERY lrand48() returned 0, so all
+        // per-bird animation phases / blink thresholds / interval picks
+        // collapsed to one value -> synchronous jumps + every-frame blinks).
+        // Same constants as Bionic/glibc (a=0x5DEECE66D, c=0xB), so sequences
+        // match the device for the same seed. Own state (no platform
+        // srand48_r dependence: NDK availability varies); guarded by mutex_
+        // (workers call concurrently). Guest long = 32-bit.
+        static std::uint64_t rng_x = 0x1234ABCD330Eull;  // default seed state
+        static bool rng_seeded = false;
+        const std::uint64_t rng_a = 0x5DEECE66Dull, rng_c = 0xBull;
+        const std::uint64_t rng_m = (1ull << 48) - 1;
+        auto rng_next = [&]() -> std::uint64_t {
+            rng_x = (rng_a * rng_x + rng_c) & rng_m;
+            return rng_x;
+        };
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "srand48" || n == "srand" || n == "srandom") {
+            rng_x = ((std::uint64_t)(a0 & 0xFFFFFFFFu) << 16) | 0x330Eull;
+            rng_seeded = true;
+            (void)rng_seeded;
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "drand48") {
+            const double d = (double)rng_next() / (double)(1ull << 48);
+            std::uint64_t u = 0;
+            std::memcpy(&u, &d, 8);
+            Ret(regs, static_cast<std::uint32_t>(u & 0xFFFFFFFFu),
+                static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
+            return;
+        }
+        if (n == "erand48" || n == "jrand48" || n == "nrand48") {
+            // xsubi = 3x u16 in guest memory (in/out).
+            std::uint16_t xs[3] = {0x330E, 0xABCD, 0x1234};
+            if (CheckRange(a0, 6, false)) {
+                std::memcpy(xs, H(a0), 6);
+            }
+            std::uint64_t x = ((std::uint64_t)xs[2] << 32) | ((std::uint64_t)xs[1] << 16) |
+                              (std::uint64_t)xs[0];
+            x = (rng_a * x + rng_c) & rng_m;
+            xs[0] = (std::uint16_t)(x & 0xFFFFu);
+            xs[1] = (std::uint16_t)((x >> 16) & 0xFFFFu);
+            xs[2] = (std::uint16_t)((x >> 32) & 0xFFFFu);
+            if (CheckRange(a0, 6, true)) {
+                std::memcpy(H(a0), xs, 6);
+            }
+            if (n == "erand48") {
+                const double d = (double)x / (double)(1ull << 48);
+                std::uint64_t u = 0;
+                std::memcpy(&u, &d, 8);
+                Ret(regs, static_cast<std::uint32_t>(u & 0xFFFFFFFFu),
+                    static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
+                return;
+            }
+            if (n == "jrand48") {
+                Ret(regs, static_cast<std::uint32_t>((std::int32_t)(x >> 16)));
+                return;
+            }
+            Ret(regs, static_cast<std::uint32_t>((x >> 17) & 0x7FFFFFFFu));  // nrand48: [0,2^31)
+            return;
+        }
+        if (n == "mrand48") {
+            Ret(regs, static_cast<std::uint32_t>((std::int32_t)(rng_next() >> 16)));
+            return;
+        }
+        // rand/random/lrand48: [0,2^31) (RAND_MAX on both Bionic and glibc).
+        Ret(regs, static_cast<std::uint32_t>((rng_next() >> 17) & 0x7FFFFFFFu));
+        return;
+    }
     {
         // Locked: worker threads share stub_hits_ with main.
         std::lock_guard<std::recursive_mutex> lock(mutex_);

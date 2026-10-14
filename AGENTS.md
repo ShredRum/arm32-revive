@@ -3493,3 +3493,37 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   a known reason (completion delivery missing); removing it needs
   the catch/unwinder work first, not stub removal.
 - TAPBEAT also off (3c1bf18) for the pure-clock test.
+
+## 126. Base reset to tag + real RNG (2026-10-14, master=e8ba88a)
+- STATE: master reset to works-2026-10-14 (e8ba88a). Post-tag work
+  (freelist, LUACATCH, MALLOCLOG/luamsg) preserved in branch
+  archive/luacatch-posttag (=f2181cb). Tree clean (only pre-existing
+  untracked files). Numbering continues past archived §§122-125 to
+  avoid collision. Device runs TAG apk; sandbox currently holds the
+  ORIGINAL apk (user compares bird animations) - no deploy yet.
+- USER OBSERVATION (load-bearing): waiting birds jump synchronously,
+  caged birds blink fast constantly. Hypothesized single collapsed
+  variance source. Five read-only subagent audits (time/rand/dt/driver/
+  math, context-spared) + jev_noul scoring.
+- RNG ROOT (PROVEN, fixed): lrand48/srand48 had zero host thunks
+  (verified empty at tag AND master) -> generic stub->0. Every
+  lrand48()=0. Fix (dispatch.cpp): real 48-bit LCG, Bionic/glibc
+  constants (a=0x5DEECE66D, c=0xB); covers srand/srand48/srandom/rand/
+  random/lrand48/mrand48/drand48/erand48/jrand48/nrand48, mutex-held,
+  own state (host-global rand is thread-unsafe; NDK _r varies).
+  Parity PROVEN: python LCG == host glibc 5/5 (seed 12345).
+  NOT a crutch (user-agreed): documented algorithm, bit-identical
+  output to native; pure functions get real implementations.
+- VERIFIED: native harness + android abhost build clean; PC smoke
+  identical to historic baselines (inits 54/54 svc=948 halts=53,
+  orientations r0=10, 0 LOUD/BAD). Live guest RNG values untested
+  (no guest-facing probe) - device bird-desync is the binary test.
+- HONEST GAPS: rand->bird-phase link INFERRED (jev 0.58; 4 PLT sites
+  located, none symbol-named bird-phase); rand->blink jev 0.15;
+  dt/math/Lua deprioritized by jev (0.07/0.06/0.03). Fox BAD
+  ('cmax' garbage, WRITTEN not zero) does NOT look like rand=0.
+  Freelist OOM fix stays in archive: tag has leak-only 1GB bump -
+  if bad_alloc returns on long runs, cherry-pick from archive.
+- NEXT: deploy when user reinstalls port (sandbox has original now)
+  -> matrix boots -> binary: birds desync? blinks normalize?
+  crash/hang rate vs tag?
