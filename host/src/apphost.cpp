@@ -404,8 +404,14 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         } else if (beat_on && std::strstr(name, "nativeUpdate")) {
             upd_n++;
             const long long idle = lastms ? (now_ms() - lastms) : 1000000;
+            // Governor (2026-10-14, user-corrected): while the loading
+            // manager shows +164==2, NO beats at all (any tap skips
+            // loading early -> void; jobs cook on their own). Splashes
+            // (unseen) and menu (!=2) beat every 30th update.
+            const int every = (g_rt->last_mgr164_ == 2) ? 0 : 30;
             // Every 30th update (~1/s at 30fps) and idle >500ms.
-            if (!lastw.empty() && lastw.size() >= 6 && idle > 500 && (upd_n % 30 == 0)) {
+            if (every && !lastw.empty() && lastw.size() >= 6 && idle > 500 &&
+                (upd_n % every == 0)) {
                 // Full synthetic tap: DOWN(0) then UP(1). MOVE-only never
                 // sets the press-flag / skip logic (splashes need began/
                 // ended; tick jumped only on real taps). Solo, no finger
@@ -631,16 +637,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_RDUMP", "1", 1);
     // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
     // Metric = updates/min + same-behavior verdicts (sessions/rdump).
-    // DIAG 2026-10-14: fastmem OFF for the flag-writer hunt (fastmem may
-    // bypass mem callbacks -> WPA blind). Revert after.
-    // setenv("HARNESS_FASTMEM", "1", 1);
-    // TRIAGE 2026-10-14: tick-slot watch again (last_tick u64 @0x672EA0;
-    // frozen hands-off PROVEN; next: does a TAP advance it?).
-    // GOT[0] was a wrong target (linker-reserved, 10M reads/50s noise).
-    // Gate-writer capture: WATCHPC probe parked on cold builders 0x250AB8
-    // (pure observe; avoids WatchSP spam on hot paths).
+    // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
+    // ~10x slower). WPA tick PROVEN, off (log bloat).
+    setenv("HARNESS_FASTMEM", "1", 1);
+    // TRIAGE stash stays (governor reads last_mgr164_).
     setenv("HARNESS_WATCHPC", "250ab8", 1);
-    setenv("HARNESS_WPA", "672ea0", 1);
+    // setenv("HARNESS_WPA", "672ea0", 1);  // tick PROVEN, off
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
     // Gate opens naturally only when content is ready; forcing it kills.
