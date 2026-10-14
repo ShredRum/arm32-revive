@@ -423,37 +423,47 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             const bool splash_win = (upd_n <= 400);
             const bool soaked = (now_ms() - t0 >= delay_ms);
             const int every = (splash_win || soaked) ? 30 : 0;
+            // Synthetic nativeInput driver: DOWN(0)/UP(1) must land in
+            // SEPARATE updates (finger: began -> updates -> ended; the
+            // press-flag/skip arms between). Back-to-back in one beat =
+            // strobe flash, no skip (observed live).
+            auto fire = [&](int act) {
+                std::vector<std::uint32_t> w = lastw;
+                w[2] = (std::uint32_t)act;
+                auto& br = st->jit->Regs();
+                br.fill(0);
+                for (std::size_t i = 0; i < w.size() && i < 4; i++) {
+                    br[i] = w[i];
+                }
+                for (std::size_t i = 4; i < w.size(); i++) {
+                    std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &w[i],
+                                4);
+                }
+                br[14] = g_mod->halt_va;
+                br[13] = spbase;  // (was 0 from fill -> guest stack underflow
+                // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
+                // synthetic one forgot. Caught live 2026-10-14.)
+                CallGuest(*st->jit, 0xC23E4u);
+                Dynarmic::HaltReason bhr = st->jit->Run();
+                std::printf("[tapbeat] #%d act=%d idle=%lldms hr=%d r0=%08x\n", upd_n, act,
+                            idle, (int)bhr, br[0]);
+                if (bhr != Dynarmic::HaltReason::UserDefined1) {
+                    Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
+                }
+            };
+            static int pend_up = 0;
+            if (pend_up && !lastw.empty() && lastw.size() >= 6) {
+                pend_up = 0;  // release lands on the update right after press
+                fire(1);
+            }
             // Every 30th update (~1/s at 30fps) and idle >500ms.
             if (every && !lastw.empty() && lastw.size() >= 6 && idle > 500 &&
                 (upd_n % every == 0)) {
-                // Full synthetic tap: DOWN(0) then UP(1). MOVE-only never
-                // sets the press-flag / skip logic (splashes need began/
-                // ended; tick jumped only on real taps). Solo, no finger
-                // => no interleave hazard (the old TAPBEAT killer).
-                for (int act = 0; act <= 1; act++) {
-                    std::vector<std::uint32_t> w = lastw;
-                    w[2] = (std::uint32_t)act;
-                    auto& br = st->jit->Regs();
-                    br.fill(0);
-                    for (std::size_t i = 0; i < w.size() && i < 4; i++) {
-                        br[i] = w[i];
-                    }
-                    for (std::size_t i = 4; i < w.size(); i++) {
-                        std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4),
-                                    &w[i], 4);
-                    }
-                    br[14] = g_mod->halt_va;
-                    br[13] = spbase;  // (was 0 from fill -> guest stack underflow
-                    // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
-                    // synthetic one forgot. Caught live 2026-10-14.)
-                    CallGuest(*st->jit, 0xC23E4u);
-                    Dynarmic::HaltReason bhr = st->jit->Run();
-                    std::printf("[tapbeat] #%d act=%d idle=%lldms hr=%d r0=%08x\n", upd_n,
-                                act, idle, (int)bhr, br[0]);
-                    if (bhr != Dynarmic::HaltReason::UserDefined1) {
-                        Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
-                    }
-                }
+                // Full synthetic tap: DOWN(0) now, UP(1) on next update.
+                // MOVE-only never sets the press-flag / skip logic.
+                // Solo, no finger => no interleave hazard.
+                fire(0);
+                pend_up = 1;
             }
         }
     }
