@@ -4936,6 +4936,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
                      ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
                      : nullptr;
     if (!re) {
+        std::printf("[realnew] no real env\n");
         return false;
     }
     const int vtag = (fn == 28) ? 0 : ((fn == 29) ? 1 : 2);
@@ -4970,6 +4971,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     if (!rclazz) {
         jclass lc = re->FindClass(cls.c_str());
         if (!lc || re->ExceptionCheck()) {
+            std::printf("[realnew] FindClass %s FAILED\n", cls.c_str());
             re->ExceptionClear();
             return false;
         }
