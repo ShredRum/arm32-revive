@@ -6803,6 +6803,7 @@ void GuestCallbacks::PokeManagerFlag(std::uint64_t r10obj, std::uint64_t, std::u
     cb->rt_->last_mgr_ = o;  // HARNESS_SCENEAT reads the manager from here.
     std::uint32_t v = 0;
     std::memcpy(&v, cb->rt_->H(o + 164), 4);
+    cb->rt_->last_mgr164_ = v;  // TAPBEAT governor (2=loading: hold beats).
     // TEMP-DIAG (always on when hooked): identify the loading-manager object
     // and its +164/+1187 over time. The FLIP below stays POKE164-gated.
     {

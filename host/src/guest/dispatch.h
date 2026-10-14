@@ -355,6 +355,9 @@ private:
     // Loading-manager object last seen by the render hook (PokeManagerFlag);
     // HARNESS_SCENEAT reads it from here (never hardcoded). Guest VA.
     std::uint32_t last_mgr_ = 0;
+    // Its +164 at last sight (2=loading per DIAG164). TAPBEAT governor
+    // reads it (slow beat while loading cooks). 0xFFFFFFFF = unseen.
+    std::uint32_t last_mgr164_ = 0xFFFFFFFFu;
     // Scene object last seen by the loading-builder hook (HARNESS_LASTTHIS);
     // HARNESS_BUILDER calls the menu builder with it. Guest VA.
     std::uint32_t last_this_ = 0;
