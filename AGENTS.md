@@ -3367,3 +3367,13 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   DIAG164 hook (baf9ef6); governor + fastmem-on + WPA-off (4056c03).
 - Fastmem back: proven neutral, ~10x boot speed needed for iteration.
   WPA-tick PROVEN done, off (bloat).
+
+## 113. Governor v2/v3: phase-hold dead, hybrid wins (2026-10-14)
+- v2 (+164==2 hold) SELF-STRANGLED: +164==2 from boot (manager
+  default, proven by 2 diag164 hits during stuck-Rovio, 0 beats).
+  +164 useless as phase (splash manager state == loading state:
+  same obj/+168/scene/node 0x669710).
+- User correction 2: splashes want taps ASAP, ONLY loading soaks.
+  v3 (98d0b22): beat first 400 updates (splash window) + hold until
+  300s wall (jobs) + beat after (menu). Finger tap mid-run confirmed
+  live skip (logo changed) - engine responsive, no interleave now.
