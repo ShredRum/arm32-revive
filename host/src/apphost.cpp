@@ -221,6 +221,16 @@ std::shared_ptr<HostThread> Enter() {
 
 std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, void* thiz, va_list ap) {
     auto st = Enter();
+    // RATE telemetry (2026-10-14, tap-freeze triage): uncapped entry stamp
+    // for the 3 frame-path methods. Answers pump-alive vs pump-dead without
+    // taps. Observe-only (no guest state touched).
+    if (std::strstr(name, "nativeUpdate") || std::strstr(name, "nativeRender") ||
+        std::strstr(name, "nativeInput")) {
+        struct timespec rts {};
+        ::clock_gettime(CLOCK_MONOTONIC, &rts);
+        const long long rms = (long long)rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
+        std::printf("[rate] %s t=%lld tid=%d\n", name, rms, (int)gettid());
+    }
     // HARNESS_FUNCTORAT=N: after the Nth nativeUpdate, forge a login-
     // functor ctx (PC RAWBUILD recipe: vtable 0x65E650 + zeroed
     // account block) and BL the fail functor 0x5FE70 once, then
