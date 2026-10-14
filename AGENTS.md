@@ -3434,4 +3434,20 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Taps advance tick via the event part of tick math (mechanism
   secondary now). NEXT: hands-off screenshots in the 300s pre-beat
   window: smooth progress => root fixed; 1Hz steps => second
-  mechanism."
+  mechanism.
+
+## 117. GL wedged on a guest mutex (SIGQUIT proof, 2026-10-14)
+- Alarm-build run: pump DEAD (77 updates, last 5min stale), BlueSky
+  static, finger delivery zero (no onDrawFrame => no drain).
+  SIGQUIT -> /data/anr/traces.txt: GraphicsThread
+  onDrawFrame->onFrame->doUpdate->nativeUpdate->OnSvc->CallImport->
+  PthreadMutex (blocked in host mutex_lock). Workers alive in polls.
+- Forensics: 4 canary-UD3 in run (chronic sites); worker tid=11
+  died via io::IOException (unwinder spiral, retval 45A778) after
+  fopen files/c ENOENT + DNS activity. Mutex owner unidentified
+  (logs lack addrs) => built forensics, not guesses.
+- FIX (c86817e): mutex owner map (obj->tid/depth, io_mutex_,
+  maintained on lock/unlock/trylock/destroy) + last-svc atomics
+  (always-on, resolved at dump) + HARNESS_LASTSVC=1 + detached
+  watchdog (update>30s => STUCK + ThreadCensus + owners +
+  last-svc). Restart + reproduce => read answer from log."
