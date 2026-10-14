@@ -3398,3 +3398,16 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   NEXT: tapbeat-off finger run to discriminate.
 - BLACK-while-playing (level 13 known park): UI/HUD alive, playfield
   black. NEXT: repro with log correlation (which update dies).
+
+## 115. Genuine thiz fixes synthetic DOWN (2026-10-14)
+- Synthetic DOWN with thiz=0 THREW in guest (unwind LR=0045AF67,
+  UD2 halt, r0=45A778) => no press-flag, no skip, strobe. UP clean
+  always. Self-drive success explained: lastw carried the REAL mock
+  thiz from the user's earlier finger tap, not the seed.
+- FIX (f9e69b9): resolve MyInputHandler once via real
+  NativeApplication.f (GetObjectClass+GetFieldID+GetObjectField,
+  global refs, exception hygiene) => handler mock=f110000c.
+  Result: act=0+1 ALL clean, logos self-skip, menu renders.
+- Coexistence (f73eec0): quiet 15s after any live input (500ms let
+  beats steal finger presses => dead menu). Center-seed still dumb
+  (hits PLAY/popup); positional play script is the ship path.
