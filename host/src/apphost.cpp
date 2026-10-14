@@ -404,11 +404,25 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         } else if (beat_on && std::strstr(name, "nativeUpdate")) {
             upd_n++;
             const long long idle = lastms ? (now_ms() - lastms) : 1000000;
-            // Governor (2026-10-14, user-corrected): while the loading
-            // manager shows +164==2, NO beats at all (any tap skips
-            // loading early -> void; jobs cook on their own). Splashes
-            // (unseen) and menu (!=2) beat every 30th update.
-            const int every = (g_rt->last_mgr164_ == 2) ? 0 : 30;
+            // Governor v3 (2026-10-14, user-corrected twice): splashes
+            // want taps ASAP, loading wants ~3min untapped (jobs cook),
+            // menu wants taps. +164==2 from boot (useless as phase).
+            // Hybrid: beat during the first K updates (splash window),
+            // hold until wall-delay (loading cooks), beat after (menu).
+            static long long t0 = 0;
+            if (!t0) {
+                t0 = now_ms();
+            }
+            static long long delay_ms = -1;
+            if (delay_ms < 0) {
+                delay_ms = 300000;
+                if (const char* e = std::getenv("HARNESS_TAPBEAT_DELAY")) {
+                    delay_ms = (long long)std::atoi(e) * 1000;
+                }
+            }
+            const bool splash_win = (upd_n <= 400);
+            const bool soaked = (now_ms() - t0 >= delay_ms);
+            const int every = (splash_win || soaked) ? 30 : 0;
             // Every 30th update (~1/s at 30fps) and idle >500ms.
             if (every && !lastw.empty() && lastw.size() >= 6 && idle > 500 &&
                 (upd_n % every == 0)) {
