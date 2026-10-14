@@ -3527,3 +3527,10 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - NEXT: deploy when user reinstalls port (sandbox has original now)
   -> matrix boots -> binary: birds desync? blinks normalize?
   crash/hang rate vs tag?
+
+## 127. RNG verdict: BIRDS NORMAL (2026-10-14, user-tested on device)
+- Binary test PASSED: with real 48-bit RNG, waiting birds behave
+  normally (desynced), caged-bird blinking normal. Stub->0 was the
+  collapsed-variance source. Tag: works-2026-10-14-rng (=f19763a).
+- Save restored from work/prod_backup/prodfiles.tgz (1664B progress
+  + healthy 320B registry, u0_a51) - levels 2+ open for verification.
