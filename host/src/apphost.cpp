@@ -14,7 +14,9 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <filesystem>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 #include <random>
 #include <stdlib.h>
@@ -59,6 +61,51 @@ void Log(const char* fmt, ...) {
     va_end(ap);
     std::printf("[apphost] %s\n", buf);
     __android_log_print(ANDROID_LOG_INFO, "AngryBirdsRio", "[apphost] %s", buf);
+}
+
+// Stuck-update watchdog (2026-10-14): a guest-mutex deadlock wedged the
+// GL thread inside nativeUpdate with zero witnesses (BlueSky freeze).
+// Tracks update entry/return; a detached thread dumps ThreadCensus +
+// mutex owners + last import when an update exceeds 30s. Observe-only.
+std::atomic<long long> g_upd_entry_ms{0};
+std::atomic<long long> g_upd_done_ms{0};
+std::atomic<int> g_upd_entry_n{0};
+
+long long WallMs() {
+    struct timespec ts {};
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+void Watchdog() {
+    long long reported = 0;
+    while (true) {
+        sleep(10);
+        if (!g_rt) {
+            continue;
+        }
+        const long long entry = g_upd_entry_ms.load();
+        const long long done = g_upd_done_ms.load();
+        if (!entry || done >= entry) {
+            continue;
+        }
+        const long long stuck_ms = WallMs() - entry;
+        if (stuck_ms < 30000 || WallMs() - reported < 30000) {
+            continue;
+        }
+        reported = WallMs();
+        Log("STUCK update #%d entered %lldms ago (entry=%lld)",
+            g_upd_entry_n.load(), stuck_ms, entry);
+        g_rt->ThreadCensus();
+        g_rt->MutexOwnersDump();
+        const std::uint32_t si = g_rt->last_svc_idx_.load();
+        const std::uint32_t st = g_rt->last_svc_tid_.load();
+        const char* nm = "?";
+        if (g_mod && si < g_mod->imports.size()) {
+            nm = g_mod->imports[si].name.c_str();
+        }
+        Log("STUCK last-svc idx=%u tid=%u %s", si, st, nm);
+    }
 }
 
 void CallGuest(Dynarmic::A32::Jit& jit, std::uint32_t target) {
@@ -230,6 +277,13 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         ::clock_gettime(CLOCK_MONOTONIC, &rts);
         const long long rms = (long long)rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
         std::printf("[rate] %s t=%lld tid=%d\n", name, rms, (int)gettid());
+    }
+    // Watchdog entry stamp (nativeUpdate only).
+    static int upd_seq = 0;
+    const bool is_update = std::strstr(name, "nativeUpdate") != nullptr;
+    if (is_update) {
+        g_upd_entry_n = ++upd_seq;
+        g_upd_entry_ms = WallMs();
     }
     // HARNESS_FUNCTORAT=N: after the Nth nativeUpdate, forge a login-
     // functor ctx (PC RAWBUILD recipe: vtable 0x65E650 + zeroed
@@ -524,6 +578,9 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
 #endif
     CallGuest(*st->jit, va);
     const Dynarmic::HaltReason hr = st->jit->Run();
+    if (is_update) {
+        g_upd_done_ms = WallMs();
+    }
 #ifdef __ANDROID__
     // Input-stream forensics (PLAY button animates but never fires):
     // log every nativeInput action + coords (capped). words[2]=action,
@@ -733,6 +790,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // audio loader died this way). Cap cycles as SPURIOUS success (0)
     // so predicates re-check; true deadlocks stay visible in census.
     setenv("HARNESS_SPURWAKE", "1", 1);
+    // Stuck-update forensics (2026-10-14): per-thread last import is
+    // always tracked now (watchdog resolves the name at dump time).
+    setenv("HARNESS_LASTSVC", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
@@ -837,6 +897,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         }
     }
     Log("OnLoad done, product live");
+    static bool wdog_once = false;
+    if (!wdog_once) {
+        wdog_once = true;
+        std::thread(Watchdog).detach();
+        Log("watchdog armed (30s stuck-update dumps)");
+    }
     return JNI_VERSION_1_6;
 }
 

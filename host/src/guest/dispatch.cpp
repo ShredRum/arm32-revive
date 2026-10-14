@@ -431,6 +431,8 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
         // HARNESS_LASTSVC=1: remember each worker's current import (parked-
         // SVC triage for stuck workers; read by ThreadCensus).
         {
+            last_svc_idx_ = idx;
+            last_svc_tid_ = GuestTid();
             static int lsen = -1;
             if (lsen < 0) {
                 lsen = std::getenv("HARNESS_LASTSVC") ? 1 : 0;
@@ -3975,6 +3977,10 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
                 pthread_mutex_destroy(m);
                 delete m;
             }
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                mutex_owner_.erase(obj);
+            }
             return 0;
         }
     auto it = mutex_map_.find(obj);
@@ -3993,13 +3999,25 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         m = it->second;
     }  // guard released: blocking lock/unlock below must not hold mutex_.
     if (n == "pthread_mutex_lock") {
-        return static_cast<std::uint32_t>(pthread_mutex_lock(m));
+        const int r = pthread_mutex_lock(m);
+        if (r == 0) {
+            MutexNoteLocked(obj, GuestTid());
+        }
+        return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_mutex_unlock") {
-        return static_cast<std::uint32_t>(pthread_mutex_unlock(m));
+        const int r = pthread_mutex_unlock(m);
+        if (r == 0) {
+            MutexNoteUnlocked(obj, GuestTid());
+        }
+        return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_mutex_trylock") {
-        return static_cast<std::uint32_t>(pthread_mutex_trylock(m));
+        const int r = pthread_mutex_trylock(m);
+        if (r == 0) {
+            MutexNoteLocked(obj, GuestTid());
+        }
+        return static_cast<std::uint32_t>(r);
     }
     return 22;
 }

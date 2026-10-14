@@ -163,6 +163,10 @@ public:
     void set_callbacks(Dynarmic::A32::UserCallbacks* cb) { cb_ = cb; }
 
     std::atomic<std::uint64_t> svc_count{0};
+    // Last import entered (any thread): stuck-update watchdog reads these
+    // (no strings here - index resolved against mod_.imports at dump time).
+    std::atomic<std::uint32_t> last_svc_idx_{0xFFFFFFFFu};
+    std::atomic<std::uint32_t> last_svc_tid_{0};
     std::atomic<std::uint64_t> halt_count{0};
     std::atomic<std::uint64_t> bad_count{0};
 
@@ -331,6 +335,47 @@ private:
     // every other thread; 2026-10-10). No nesting: never call GuestMalloc
     // or other mutex_-taking code while holding it.
     std::mutex io_mutex_;
+    // Guest-mutex owner tracking (deadlock triage): obj -> (holder
+    // guest-tid, recursion depth). Maintained on successful lock/unlock
+    // under io_mutex_ (never across the host lock call). Dumped by
+    // MutexOwnersDump() when the stuck-update watchdog fires.
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, int>> mutex_owner_;
+    void MutexNoteLocked(std::uint32_t obj, std::uint32_t tid) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        auto& e = mutex_owner_[obj];
+        if (e.second > 0 && e.first != tid) {
+            std::printf("[mutex] OWNER-CHANGE obj=%08x %u->%u (was depth %d)\n", obj, e.first,
+                        tid, e.second);
+        }
+        e.first = tid;
+        e.second++;
+    }
+    void MutexNoteUnlocked(std::uint32_t obj, std::uint32_t tid) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        auto it = mutex_owner_.find(obj);
+        if (it == mutex_owner_.end()) {
+            return;
+        }
+        if (it->second.first != tid) {
+            std::printf("[mutex] UNLOCK-FOREIGN obj=%08x by=%u owner=%u\n", obj, tid,
+                        it->second.first);
+            return;
+        }
+        if (--(it->second.second) <= 0) {
+            mutex_owner_.erase(it);
+        }
+    }
+    void MutexOwnersDump() {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        if (mutex_owner_.empty()) {
+            std::printf("[mutex] owners: none held\n");
+            return;
+        }
+        for (const auto& kv : mutex_owner_) {
+            std::printf("[mutex] obj=%08x holder=%u depth=%d\n", kv.first, kv.second.first,
+                        kv.second.second);
+        }
+    }
     struct HostDir {
         DIR* d = nullptr;
     };
