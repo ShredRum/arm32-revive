@@ -3479,4 +3479,9 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - OOM build deployed (8b69ee4 in tree): next crash prints
   `[heap] OOM size= brk= lr=` (killer size + caller). Then decide:
   exhaustion => heap growth/leak hunt; wild-size => corrupt length
-  source (canary cascade?)."
+  source (canary cascade?).
+- UPDATE (wedge run 7556): pending-lock NONE (GL not in mutex!),
+  sole held mutex 0x673A08 by dead tid=11. So this wedge = SPIN or
+  non-mutex block, not the mutex hang. Process later died/replaced
+  (8290). Subagents now USELESS (bottleneck is live data, not
+  analysis width) - user-agreed."
