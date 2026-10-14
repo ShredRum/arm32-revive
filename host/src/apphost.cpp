@@ -625,7 +625,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_RDUMP", "1", 1);
     // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
     // Metric = updates/min + same-behavior verdicts (sessions/rdump).
-    setenv("HARNESS_FASTMEM", "1", 1);
+    // DIAG 2026-10-14: fastmem OFF for the flag-writer hunt (fastmem may
+    // bypass mem callbacks -> WPA blind). Revert after.
+    // setenv("HARNESS_FASTMEM", "1", 1);
+    // Flag-writer hunt (2026-10-14): nativeUpdate bails iff *(0x672E98)==0
+    // (init 0, no reloc; PROVEN by bytes+distv). Who writes it, if anyone?
+    setenv("HARNESS_WPA", "672e98", 1);
     // Gate-writer capture (0x74168, sole static path to +1187 setter):
     // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
     // SUPERSEDED: watch BUILDERS (0x250AB8) instead - writer confirmed
