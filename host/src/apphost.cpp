@@ -369,17 +369,60 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         if (beat_on < 0) {
             beat_on = std::getenv("HARNESS_TAPBEAT") ? 1 : 0;
         }
-        // Seed template (PLAY center MOVE) so the pulse fires even with
-        // zero real taps. Guest overwrites r1 (app obj) immediately and
-        // never uses env on this path (byte-proven); thiz=0 safe here.
+        // Seed template (PLAY center) so the pulse fires even with
+        // zero real taps. thiz MUST be the genuine MyInputHandler mock:
+        // synthetic DOWN with thiz=0 throws in guest (unwind LR=45AF67,
+        // UD2 halt) and never sets the press-flag. Resolved once via
+        // the real NativeApplication.f field (no finger needed).
         // Seed on the first update regardless of words shape (splash
         // calls carry <6 words; updates are the beat domain anyway).
+        static void* g_real_app = nullptr;
+        static std::uint32_t g_handler_mock = 0;
         if (lastw.empty() && std::strstr(name, "nativeUpdate")) {
+            if (!g_real_app && thiz &&
+                abr::GuestCallbacks::g_real_env_hook) {
+                JNIEnv* re =
+                    static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
+                if (re && !re->ExceptionCheck()) {
+                    g_real_app = re->NewGlobalRef(static_cast<jobject>(thiz));
+                    if (re->ExceptionCheck() || !g_real_app) {
+                        re->ExceptionClear();
+                        g_real_app = nullptr;
+                    }
+                }
+            }
+            if (!g_handler_mock && g_real_app &&
+                abr::GuestCallbacks::g_real_env_hook) {
+                JNIEnv* re =
+                    static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
+                if (re && !re->ExceptionCheck()) {
+                    jclass acl = re->GetObjectClass(static_cast<jobject>(g_real_app));
+                    jfieldID ff = acl ? re->GetFieldID(
+                        acl, "f", "Lcom/rovio/fusion/MyInputHandler;") : nullptr;
+                    jobject h = (acl && ff && !re->ExceptionCheck())
+                                    ? re->GetObjectField(static_cast<jobject>(g_real_app),
+                                                         ff)
+                                    : nullptr;
+                    if (h && !re->ExceptionCheck()) {
+                        jobject gh = re->NewGlobalRef(h);
+                        if (gh && !re->ExceptionCheck()) {
+                            g_handler_mock = g_rt->WrapObject(gh);
+                            std::printf("[tapbeat] handler mock=%08x\n", g_handler_mock);
+                        }
+                        re->DeleteLocalRef(h);
+                    } else {
+                        re->ExceptionClear();
+                    }
+                    if (acl) {
+                        re->DeleteLocalRef(acl);
+                    }
+                }
+            }
             float dx = 1124.0f, dy = 629.0f;
             std::uint32_t xb = 0, yb = 0;
             std::memcpy(&xb, &dx, 4);
             std::memcpy(&yb, &dy, 4);
-            lastw = {g_rt->JniEnv(), 0, 2, xb, yb, 0};
+            lastw = {g_rt->JniEnv(), g_handler_mock, 2, xb, yb, 0};
         }
         if (lastw.empty() && words.size() >= 6) {
             lastw = words;
@@ -387,7 +430,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             std::uint32_t xb = 0, yb = 0;
             std::memcpy(&xb, &dx, 4);
             std::memcpy(&yb, &dy, 4);
-            lastw[1] = 0;
+            lastw[1] = words[1];  // genuine mock (never 0: DOWN needs thiz)
             lastw[2] = 2;
             lastw[3] = xb;
             lastw[4] = yb;
