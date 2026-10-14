@@ -838,9 +838,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Prior disable was for finger-interleave chaos; solo (no finger)
     // it is the only event source. Tick jumps on taps PROVEN => this
     // should pump quanta hands-off. Binary: tick advances? menu?
-    // Crutch RESTORED (2026-10-14): pure-clock test showed splashes
-    // need taps to skip (blink in place). Clock + beats = working set.
-    setenv("HARNESS_TAPBEAT", "1", 1);
+    // Crutch OFF again (2026-10-14): isolated test tapbeat-off +
+    // RETSUCC-on (last time both were off - confounded). If it
+    // self-drives, taps are unnecessary.
+    // setenv("HARNESS_TAPBEAT", "1", 1);
     // Fail-functor synthesis timing: DISABLED (2026-10-14). Correlation:
     // boots WITH functor fire (14932 died, 35844 black-after-loading)
     // vs boot WITHOUT (15265 menu). Suspect: forged login-failed state
