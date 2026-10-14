@@ -628,14 +628,13 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // DIAG 2026-10-14: fastmem OFF for the flag-writer hunt (fastmem may
     // bypass mem callbacks -> WPA blind). Revert after.
     // setenv("HARNESS_FASTMEM", "1", 1);
-    // TRIAGE 2026-10-14: tick-slot watch (last_tick u64 @0x672EA0,
-    // written by update each frame, read next frame; dt=tick-last).
-    // Uncapped WPA reads show per-update values: frozen => dt=0 PROVEN.
-    // (Flag 0x672E98 settled: 1 write at init, stable.)
+    // TRIAGE 2026-10-14: raw-counter watch (u32 @0x6703CC, read by
+    // tick-fn 0x38C8FC per update; tick frozen => is the counter dead
+    // or the math broken?). Tick slot 0x672EA0 settled: frozen PROVEN.
     // Gate-writer capture: WATCHPC probe parked on cold builders 0x250AB8
     // (pure observe; avoids WatchSP spam on hot paths).
     setenv("HARNESS_WATCHPC", "250ab8", 1);
-    setenv("HARNESS_WPA", "672ea0", 1);
+    setenv("HARNESS_WPA", "6703cc", 1);
     // TRIAGE 2026-10-14: worker import traffic (update thread is T2+;
     // [call] logs main-only by default, hiding its clock sources).
     // Observe-only. Revert after.
