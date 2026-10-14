@@ -70,6 +70,9 @@ void Log(const char* fmt, ...) {
 std::atomic<long long> g_upd_entry_ms{0};
 std::atomic<long long> g_upd_done_ms{0};
 std::atomic<int> g_upd_entry_n{0};
+// Update thread's JIT (for stuck-PC reads) + its host tid.
+std::atomic<Dynarmic::A32::Jit*> g_upd_jit{nullptr};
+std::atomic<int> g_upd_tid{0};
 
 long long WallMs() {
     struct timespec ts {};
@@ -112,6 +115,30 @@ void Watchdog() {
             nm = g_mod->imports[si].name.c_str();
         }
         Log("STUCK last-svc idx=%u tid=%u %s", si, st, nm);
+        // Stuck guest PC of the update thread (SVC trampoline => import
+        // name; module => code site; elsewhere => suspect).
+        Dynarmic::A32::Jit* uj = g_upd_jit.load();
+        if (uj && g_mod) {
+            const std::uint32_t pc = uj->Regs()[15];
+            std::string where = "other";
+            std::string what = "";
+            if (pc == g_mod->halt_va) {
+                where = "HALT (returned?)";
+            } else if (pc >= abr::kTrampBase + 4 && pc < g_mod->jni_tramp_base && ((pc - abr::kTrampBase) % 4 == 0)) {
+                const std::size_t ii = (pc - abr::kTrampBase) / 4 - 1;
+                where = "import-svc";
+                if (ii < g_mod->imports.size()) {
+                    what = g_mod->imports[ii].name;
+                }
+            } else if (pc >= g_mod->jni_tramp_base && pc < abr::kTrampBase + abr::kTrampSize) {
+                where = "jni-svc";
+                what = "fn#" + std::to_string((pc - g_mod->jni_tramp_base) / 4);
+            } else if (g_rt->IsCodeAddress(pc & ~std::uint32_t(1))) {
+                where = "guest-code (spin?)";
+            }
+            Log("STUCK upc=%08x tid=%d %s %s", pc, g_upd_tid.load(), where.c_str(),
+                what.c_str());
+        }
     }
 }
 
@@ -291,6 +318,8 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     if (is_update) {
         g_upd_entry_n = ++upd_seq;
         g_upd_entry_ms = WallMs();
+        g_upd_jit = st->jit;
+        g_upd_tid = (int)gettid();
     }
     // HARNESS_FUNCTORAT=N: after the Nth nativeUpdate, forge a login-
     // functor ctx (PC RAWBUILD recipe: vtable 0x65E650 + zeroed
