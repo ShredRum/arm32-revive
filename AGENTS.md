@@ -3227,6 +3227,25 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   no crash). Next: name the wait (thread dump), then audio
   (mixdata heartbeat) for self-drive.
 
+## 109. Writer hunt CLOSED: 0x74168 = requestExit, quit path (2026-10-14)
+- SUBAGENT (PROVEN): wrapper 0x74168 (LDR [r0,#0x5C] -> B 0xBE704)
+  has 0 ARM callers; decomp puts &LAB_00084168 (=0x74168) as the
+  "requestExit" Lua callback (registered via 0x28EBFC). No +0x5C
+  writer in App/Base/Factory/JavaEntries/LuaSetup ranges (all
+  encodings, PROVEN zeros). Gate needs wrapper->setter; wrapper
+  is exit-event dispatched (computed call, hence zero edges).
+- CORRECTION (load-bearing, closes a workstream): +1187 is the
+  QUIT flag (requestExit machinery), NOT a boot gate. Forcing it
+  (POKE) runs the body's wind-down -> r0=0 -> suicide. Menu
+  builds with +1187=0 (all menu boots). STOP hunting the writer;
+  STOP poking +1187. The self-drive gap is dead SUBSYSTEMS
+  (audio heartbeat, completion delivery, timer arming), never
+  the gate.
+- ALSO: original-observation reconciled (fail 403 in 1s ->
+  catch -> menu+popup, live audio track, live pool). Ours lacks
+  catch+audio+pool-persistence. Next: audio ctor-J + completion,
+  then timers.
+
 ## 107. Input quantum mapped: synchronous fan-out, no wake (2026-10-14)
 - SUBAGENT (PROVEN bytes): nativeInput 0xC23E4 = jump table
   (began/moved/ended/hover only; actions 3,5,6,8,9 -> bail). Each
