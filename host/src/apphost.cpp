@@ -406,27 +406,33 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             const long long idle = lastms ? (now_ms() - lastms) : 1000000;
             // Every 30th update (~1/s at 30fps) and idle >500ms.
             if (!lastw.empty() && lastw.size() >= 6 && idle > 500 && (upd_n % 30 == 0)) {
-                std::vector<std::uint32_t> w = lastw;
-                w[2] = 2;  // force MOVE (hover-ish, no press/release)
-                auto& br = st->jit->Regs();
-                br.fill(0);
-                for (std::size_t i = 0; i < w.size() && i < 4; i++) {
-                    br[i] = w[i];
-                }
-                for (std::size_t i = 4; i < w.size(); i++) {
-                    std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &w[i],
-                                4);
-                }
-                br[14] = g_mod->halt_va;
-                br[13] = spbase;  // (was 0 from fill -> guest stack underflow
-                // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
-                // synthetic one forgot. Caught live 2026-10-14.)
-                CallGuest(*st->jit, 0xC23E4u);
-                Dynarmic::HaltReason bhr = st->jit->Run();
-                std::printf("[tapbeat] #%d idle=%lldms hr=%d r0=%08x\n", upd_n, idle,
-                            (int)bhr, br[0]);
-                if (bhr != Dynarmic::HaltReason::UserDefined1) {
-                    Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
+                // Full synthetic tap: DOWN(0) then UP(1). MOVE-only never
+                // sets the press-flag / skip logic (splashes need began/
+                // ended; tick jumped only on real taps). Solo, no finger
+                // => no interleave hazard (the old TAPBEAT killer).
+                for (int act = 0; act <= 1; act++) {
+                    std::vector<std::uint32_t> w = lastw;
+                    w[2] = (std::uint32_t)act;
+                    auto& br = st->jit->Regs();
+                    br.fill(0);
+                    for (std::size_t i = 0; i < w.size() && i < 4; i++) {
+                        br[i] = w[i];
+                    }
+                    for (std::size_t i = 4; i < w.size(); i++) {
+                        std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4),
+                                    &w[i], 4);
+                    }
+                    br[14] = g_mod->halt_va;
+                    br[13] = spbase;  // (was 0 from fill -> guest stack underflow
+                    // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
+                    // synthetic one forgot. Caught live 2026-10-14.)
+                    CallGuest(*st->jit, 0xC23E4u);
+                    Dynarmic::HaltReason bhr = st->jit->Run();
+                    std::printf("[tapbeat] #%d act=%d idle=%lldms hr=%d r0=%08x\n", upd_n,
+                                act, idle, (int)bhr, br[0]);
+                    if (bhr != Dynarmic::HaltReason::UserDefined1) {
+                        Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
+                    }
                 }
             }
         }
