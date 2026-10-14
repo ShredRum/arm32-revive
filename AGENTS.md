@@ -3357,3 +3357,13 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   (no finger => no interleave). NEXT: hands-off boot->menu attempt.
 - GOT[0] mistarget lesson: 0x6703CC = .got start (linker-reserved),
   10M reads/50s noise (549MB log!). WPA only on proven slots.
+
+## 112. Governor: no beats while +164==2 (user-corrected 2026-10-14)
+- PIXEL PROOF: RIO LOADING art hands-off (synthetic only) - self-drive
+  to loading WORKS. But LOADING text skipped (beat tapped through) +
+  void after (sessions uncooked). User correction: loading must SOAK
+  untapped (jobs cook alone); taps only after. So: +164==2 => ZERO
+  beats; unseen/other => every 30th. Stash last_mgr164_ in the
+  DIAG164 hook (baf9ef6); governor + fastmem-on + WPA-off (4056c03).
+- Fastmem back: proven neutral, ~10x boot speed needed for iteration.
+  WPA-tick PROVEN done, off (bloat).
