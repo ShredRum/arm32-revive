@@ -499,8 +499,19 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
                 pend_up = 0;  // release lands on the update right after press
                 fire(1);
             }
-            // Every 30th update (~1/s at 30fps) and idle >500ms.
-            if (every && !lastw.empty() && lastw.size() >= 6 && idle > 500 &&
+            // Coexistence (2026-10-14): a live finger OWNS the game.
+            // After any real input hold beats for QUIET_MS (synthetic
+            // press-flag steals finger taps otherwise: menu goes dead
+            // while beats interleave). 15s stillness => gentle pump.
+            static long long quiet_ms = -1;
+            if (quiet_ms < 0) {
+                quiet_ms = 15000;
+                if (const char* e = std::getenv("HARNESS_TAPBEAT_QUIET")) {
+                    quiet_ms = (long long)std::atoi(e) * 1000;
+                }
+            }
+            // Every 30th update (~1/s at 30fps) and quiet.
+            if (every && !lastw.empty() && lastw.size() >= 6 && idle > quiet_ms &&
                 (upd_n % every == 0)) {
                 // Full synthetic tap: DOWN(0) now, UP(1) on next update.
                 // MOVE-only never sets the press-flag / skip logic.
