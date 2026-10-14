@@ -3534,3 +3534,37 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   collapsed-variance source. Tag: works-2026-10-14-rng (=f19763a).
 - Save restored from work/prod_backup/prodfiles.tgz (1664B progress
   + healthy 320B registry, u0_a51) - levels 2+ open for verification.
+
+## 128. Phase A verdict: signature catalog (2026-10-15, 6-agent log wave)
+- Method: counts only (grep -a -c), quotes <=100ch. PC logs only;
+  device logs (current apphost.log + prodfiles 3.5MB) NOT yet mined.
+- S1 lua-spiral (l1.log, 731k lines): 497x P11lua_longjmp, lr
+  00396b40 497/497; 536x nesting-513 halts; 221x canary ends
+  (lr 002622f8). Deterministic, level-1-only. CORRECTION to §125:
+  1x BAD @00654000 present (same benign fused-fwrite line as L2).
+- S2 c-wedge (full.log, chain with line numbers): fopen files/c
+  ->NULL(2) @2413 -> glog @2442 -> IOException lr=002c86dc @2472
+  -> 513-nesting @2528 -> tid11 death retval=0045a778 @2530 ->
+  STUCK #114 + mutex 0x673A08 holder=11 @3596-3610. Complete kill
+  chain, single-char filename. "c"-only-in-bad-runs VERIFIED
+  (aph9.log: 0 hits for ENOENT/"c"/cmax).
+- S3 chronic-canary (lr 002622f8, r0=1e99b203): fires in GOOD runs
+  too (aph9: 31x, each followed by resume+continue). Halt-and-
+  continue, NOT fatal per se. Crash runs show second site
+  lr=000c2714 (aph8/al3) - different flavor, watch it.
+- S4 BAD @73344545 (pc 001a1cec): recurs aph6+aph8+aph5 (same
+  addr+pc 3x = one bug). aph6 SURVIVED it (transient) - fatality
+  conditional, not automatic.
+- S5 worker-abort lr=0038f38c: 6/8 small logs, but GOOD runs
+  continue healthy to EOF (render err=0000). EXONERATED as direct
+  killer (euthanasia of stuck workers, likely).
+- S6 BAD-exec @11e6ef60 (aph7, lone) + S7 BAD @00654000 (L1+L2,
+  benign fused line).
+- GOOD fingerprint (aph9, 3775 updates): 32x canary-with-resume +
+  0 throws + sessions-200 x1 (blen 265) + 0 time/apdrive-succ +
+  registry rb/wb pairs + ends-mid-update (timeout kill, no exit).
+- Cluster: ~7 distinct primaries; loading-randomness suspects now
+  S2 (proven chain) + S4 (random, sometimes fatal). S5 exonerated.
+  Level-1 blink = S1 alone (deterministic, no BAD).
+- NEXT: A2 mine device logs (current + prodfiles apphost.log);
+  then B (DIAG build + boot matrix) / C (LUACATCH retest on tag+RNG).
