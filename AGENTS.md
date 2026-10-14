@@ -3460,4 +3460,14 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   (alarm DONE); crutch stays scaffolding only.
 - Pending-lock witness + THREADLOG diagnostic (790bc7d): deploy,
   hands-off repro expected (~update #77), read wanted-mutex +
-  tid=11's last calls, then fix the death (fopen "c"? throw?)."
+  tid=11's last calls, then fix the death (fopen "c"? throw?).
+
+## 119. bad_alloc crash, not wedge (2026-10-14)
+- Blink-then-crash run: `St9bad_alloc` thrown (lr=0043B81F) ->
+  unwind spiral -> stack smash (writes @0x0FFFFFF8) -> updates die
+  r0=0 -> orderly deinit -> teardown canary/BAD chaos -> gone.
+  No tombstone (Java-level suicide chain, same as ever).
+- Trigger UNRESOLVED: heap exhaustion (1GB leak-only + per-frame
+  guest allocs?) vs wild-size new (corrupt length). Fix needs the
+  datum: GuestMalloc LOUD OOM committed (8b69ee4), deploy on next
+  restart (session untouched). Fresh heap restarted meanwhile."
