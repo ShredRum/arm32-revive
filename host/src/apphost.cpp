@@ -633,9 +633,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_WPA", "672e98", 1);
     // Gate-writer capture (0x74168, sole static path to +1187 setter):
     // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
-    // SUPERSEDED: watch BUILDERS (0x250AB8) instead - writer confirmed
-    // requestExit/quit-path (§109), builders are the menu-content signal.
-    setenv("HARNESS_WATCHPC", "250ab8", 1);
+    // TRIAGE 2026-10-14: update-body entry 0xC209C (first insn past the
+    // vcall gate bne@0xC2098). Binary: fires ~update-rate => body runs,
+    // gate deeper; silent => vcall gate closed. (Builders 0x250AB8 later.)
+    setenv("HARNESS_WATCHPC", "c209c", 1);
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
     // Gate opens naturally only when content is ready; forcing it kills.
