@@ -797,14 +797,15 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
-    // Ship strategy (user-approved): canned sessions success (dead 2026
-    // servers can't answer; success path throws nothing, needs no catch).
-    // The harness RETSUCC machinery (PROBE3 raiser hook) does the work.
-    setenv("HARNESS_RETSUCC", "1", 1);
-    setenv("HARNESS_PROBE", "1a410c,fill", 1);
-    setenv("HARNESS_PROBE2", "457f90", 1);
-    setenv("HARNESS_PROBE3", "28a3dc", 1);
-    setenv("HARNESS_PROBE_N", "500", 1);
+    // Cleanliness test (2026-10-14, user-ordered): canned sessions
+    // success OFF. Dead 2026 servers answer 403/empty; the question is
+    // whether the real fail path (catch -> menu, like original in 10s)
+    // works. Re-enable to restore.
+    // setenv("HARNESS_RETSUCC", "1", 1);
+    // setenv("HARNESS_PROBE", "1a410c,fill", 1);
+    // setenv("HARNESS_PROBE2", "457f90", 1);
+    // setenv("HARNESS_PROBE3", "28a3dc", 1);
+    // setenv("HARNESS_PROBE_N", "500", 1);
     setenv("HARNESS_RDUMP", "1", 1);
     // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
     // Metric = updates/min + same-behavior verdicts (sessions/rdump).
@@ -851,7 +852,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // PC parity verified post-split (54/54, 948). First test: live ctx?
     // GL errors? survival? (pixels need content+burst; LOADING art first.)
     setenv("HARNESS_REALGL", "1", 1);
-    Log("RETSUCC-as-ship armed");
+    Log("clean-run: RETSUCC off, real network path");
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");
