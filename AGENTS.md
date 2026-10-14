@@ -3485,3 +3485,11 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   non-mutex block, not the mutex hang. Process later died/replaced
   (8290). Subagents now USELESS (bottleneck is live data, not
   analysis width) - user-agreed."
+
+## 121. RETSUCC-off test: real fail path stalls (2026-10-14)
+- Disabled canned sessions success (6146007): Fox logo blinks (clock
+  alive) but boot goes no further - no catch/delivery without the
+  fake. REVERTED (29286e8). RETSUCC stays a load-bearing crutch with
+  a known reason (completion delivery missing); removing it needs
+  the catch/unwinder work first, not stub removal.
+- TAPBEAT also off (3c1bf18) for the pure-clock test.
