@@ -3568,3 +3568,25 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   Level-1 blink = S1 alone (deterministic, no BAD).
 - NEXT: A2 mine device logs (current + prodfiles apphost.log);
   then B (DIAG build + boot matrix) / C (LUACATCH retest on tag+RNG).
+
+## 128. Conditional stability + readdir Fox-BAD fix (2026-10-15)
+- VERDICT (user-tested): crash no longer forcible (early-tap forcing
+  100% -> 0%); boot rate ~50% like RNG tag; loading slower hands-off
+  (job soak, expected) + ring overhead. Declared conditionally stable.
+- ROOT (proven in code+log): readdir_r wrote 280B bionic dirent into the
+  game's 24B cpu-topology buffer (faithful Bionic reproduction of a game
+  bug). Heap neighbor at buf+24 got entry-name bytes ("kernel_max" ->
+  Fox BAD 0x78616D63; other entry -> crash3 0x73344545). Window: 21 log
+  lines birth->death, only readdir_r writes. Same mechanism both deaths.
+- FIX (this commit): cpu-topo dirs serve dots/cpuN only (game's own
+  filter accepts nothing else; kernel-without-long-nodes equivalent) +
+  bounded 19+len write; other dirs unchanged + LONG tripwire. SMALLBUF
+  loud on too-small kept buffers.
+- WEDGE fixes (same commit): watchdog dumps via try_lock + lock-free
+  lines first; pend witness on unlock; DESTROY-HELD guard (leak, not
+  dangling futex); join wait-log. Forcing stand: early taps.
+- DIAG (same commit, shippable-off later): 200k malloc/free RAM ring
+  (zero steady-state I/O), dumped on BAD/OOM/FATAL/STUCK.
+- LUACATCH lab (delivery proven, level parks after) + freelist stay in
+  stash (freelist excluded: 20/20 regression). Level-1 work resumes
+  from stash after stability holds.

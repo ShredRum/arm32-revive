@@ -147,26 +147,27 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
             }
             std::printf("[heap] OOM #%d size=%u brk=%08x lr=%08x\n", oomn, size, heap_brk_,
                         lr);
+            if (oomn == 1) {
+                DumpEventRing();
+            }
         }
         return 0;
     }
     const std::uint32_t out = heap_brk_;
     heap_brk_ += size + pad;
     heap_sizes_[out] = size;
-    // HARNESS_MALLOCLOG=1: log (addr,size,caller-lr), capped (who-allocates
-    // forensics: exception/message object provenance).
+    // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
+    // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
     if (std::getenv("HARNESS_MALLOCLOG")) {
-        static int mlogn = 0;
-        if (++mlogn <= 3000) {
-            // ActiveJit (thread-local): worker mallocs get the worker lr.
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::printf("[malloc] %08x size=%u lr=%08x%s\n", out, size, lr,
-                        mlogn == 3000 ? " (quiet henceforth)" : "");
+        // ActiveJit (thread-local): worker mallocs get the worker lr.
+        std::uint32_t lr = 0;
+        Dynarmic::A32::Jit* aj = ActiveJit();
+        if (aj) {
+            lr = aj->Regs()[14];
         }
+        char tmp[64];
+        std::snprintf(tmp, sizeof(tmp), "[malloc] %08x size=%u lr=%08x", out, size, lr);
+        RingPush(tmp);
     }
     // TEMP-DIAG (wall4 overlap): log mallocs landing in the suspect window.
     if (out >= 0x11654000u && out < 0x11656000u) {
@@ -223,8 +224,30 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     return out;
 }
 
-void Runtime::GuestFree(std::uint32_t /*addr*/) {
-    // Bump allocator: intentionally a no-op for bring-up.
+void Runtime::GuestFree(std::uint32_t addr) {
+    // Bump allocator: intentionally a no-op for bring-up. But record it in
+    // the MALLOCLOG ring (victim free-history forensics + double-free
+    // detection: size 0xFFFFFFFF = free of unknown). Zero steady-state I/O.
+    if (addr && std::getenv("HARNESS_MALLOCLOG")) {
+        std::uint32_t lr = 0;
+        Dynarmic::A32::Jit* aj = ActiveJit();
+        if (aj) {
+            lr = aj->Regs()[14];
+        }
+        std::uint32_t size = 0;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto it = heap_sizes_.find(addr);
+            if (it != heap_sizes_.end()) {
+                size = it->second;
+            } else {
+                size = 0xFFFFFFFFu;
+            }
+        }
+        char tmp[64];
+        std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, size, lr);
+        RingPush(tmp);
+    }
 }
 
 std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int /*flags*/,
@@ -1524,6 +1547,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "abort" || n == "__stack_chk_fail" || n == "__assert2" || n == "exit" || n == "_exit") {
         std::printf("[svc] FATAL %s() called (r0=%08x) pc=%08x lr=%08x -- halting\n", n.c_str(), a0,
                     regs[15] - 4, regs[14]);
+        DumpEventRing();
         stop_step_ = true;
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined3);
         return;
@@ -3288,7 +3312,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
-                dir_map_[h] = HostDir{d};
+                HostDir hd;
+                hd.d = d;
+                hd.path = hp;
+                hd.cpu_topo = (hp == "/sys/devices/system/cpu");
+                dir_map_[h] = hd;
             }
             Ret(regs, h);
             return;
@@ -3306,28 +3334,115 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 dd = it->second.d;
             }
-            if (!CheckRange(a1, 280, true) || !CheckRange(a2, 4, true)) {
+            // Pre-check is minimal on purpose (guest buffers can be smaller
+            // than a full 280B dirent, e.g. the 24B cpu-topology buffer):
+            // the sized check happens at the bounded write below.
+            if (!CheckRange(a1, 19, true) || !CheckRange(a2, 4, true)) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
             errno = 0;
             struct dirent* de = ::readdir(dd);
+            bool cpu_topo = false;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto dit = dir_map_.find(a0);
+                if (dit != dir_map_.end()) {
+                    cpu_topo = dit->second.cpu_topo;
+                }
+            }
+            if (cpu_topo) {
+                // Skip entries the game's own filter rejects AND that don't
+                // fit its 24B buffer (18B header + name + NUL): dots + cpuN
+                // pass (game skips dots itself via strcmp, keeps cpuN).
+                // Bounded write below (19+len <= 24) can never touch buf+24.
+                static int skiplog = 0;
+                for (;;) {
+                    if (!de) {
+                        break;
+                    }
+                    const char* nm = de->d_name;
+                    bool keep = false;
+                    if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0))) {
+                        keep = true;
+                    } else if (nm[0] == 'c' && nm[1] == 'p' && nm[2] == 'u') {
+                        int nd = 0;
+                        keep = true;
+                        for (int i = 3; nm[i]; i++) {
+                            if (nm[i] < '0' || nm[i] > '9' || ++nd > 2) {
+                                keep = false;
+                                break;
+                            }
+                        }
+                        if (nd < 1) {
+                            keep = false;
+                        }
+                    }
+                    if (keep) {
+                        break;
+                    }
+                    if (skiplog < 5) {
+                        skiplog++;
+                        std::printf("[files]%s readdir skip \"%s\" (cpu topo, long/non-cpu)%s\n",
+                                    GuestTid() == 1 ? "" : "(T2+)", nm,
+                                    skiplog == 5 ? " (quiet henceforth)" : "");
+                    }
+                    errno = 0;
+                    de = ::readdir(dd);
+                }
+            } else {
+                // Tripwire for future victims: names far beyond any sane
+                // dirent consumer get LOUD-logged (behavior unchanged).
+                if (de && std::strlen(de->d_name) > 64) {
+                    static int longlog = 0;
+                    if (longlog < 5) {
+                        longlog++;
+                        std::printf("[files]%s readdir LONG \"%s\" (%zu)%s\n",
+                                    GuestTid() == 1 ? "" : "(T2+)", de->d_name,
+                                    std::strlen(de->d_name),
+                                    longlog == 5 ? " (quiet henceforth)" : "");
+                    }
+                }
+            }
             if (!de) {
                 std::uint32_t z = 0;
                 std::memcpy(H(a2), &z, 4);
                 Ret(regs, errno ? errno : 0);
                 return;
             }
+            // Bounded write: cpu-topo entries fit 19+len (<=24, the game's
+            // buffer); other dirs keep the faithful 280B struct.
+            const std::size_t nm_len = std::strlen(de->d_name);
+            const std::size_t wn = cpu_topo ? (19 + nm_len) : 280;
+            if (!CheckRange(a1, wn, true)) {
+                // Capped loud (a too-small buffer for a kept entry would
+                // previously corrupt neighbors silently).
+                static int smalllog = 0;
+                if (smalllog < 5) {
+                    smalllog++;
+                    std::printf("[files]%s readdir SMALLBUF need=%zu%s\n",
+                                GuestTid() == 1 ? "" : "(T2+)", wn,
+                                smalllog == 5 ? " (quiet henceforth)" : "");
+                }
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
             std::uint8_t* p = H<std::uint8_t>(a1);
-            std::memset(p, 0, 280);
+            std::memset(p, 0, wn);
             std::uint64_t ino = de->d_ino;
             std::memcpy(p, &ino, 8);
             std::int64_t off = de->d_off;
             std::memcpy(p + 8, &off, 8);
-            std::uint16_t rl = de->d_reclen;
-            std::memcpy(p + 16, &rl, 2);
+            if (cpu_topo) {
+                const std::uint16_t rl = static_cast<std::uint16_t>(wn);
+                std::memcpy(p + 16, &rl, 2);
+            } else {
+                std::uint16_t rl = de->d_reclen;
+                std::memcpy(p + 16, &rl, 2);
+            }
             p[17] = de->d_type;
-            std::strncpy(reinterpret_cast<char*>(p + 18), de->d_name, 255);
+            std::strncpy(reinterpret_cast<char*>(p + 18), de->d_name,
+                         cpu_topo ? (nm_len + 1) : 255);
             std::memcpy(H(a2), &a1, 4);
             Ret(regs, 0);
             return;
@@ -4054,16 +4169,31 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         if (n == "pthread_mutex_destroy") {
             auto it = mutex_map_.find(obj);
             if (it != mutex_map_.end()) {
+                // Destroy-guard: never free a host mutex still held (dangling
+                // futex = eternal wedge in the next locker, e.g. teardown
+                // racing in-flight workers on early-tap skips). Leak instead.
+                bool held = false;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    auto oit = mutex_owner_.find(obj);
+                    held = (oit != mutex_owner_.end() && oit->second.second > 0);
+                    if (held) {
+                        std::printf("[mutex] DESTROY-HELD obj=%08x holder=%u depth=%d "
+                                    "-- skipped (leak)\n",
+                                    obj, oit->second.first, oit->second.second);
+                    } else {
+                        mutex_owner_.erase(obj);
+                    }
+                }
+                if (held) {
+                    return 0;
+                }
                 m = it->second;
                 mutex_map_.erase(it);
             }
             if (m) {
                 pthread_mutex_destroy(m);
                 delete m;
-            }
-            {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                mutex_owner_.erase(obj);
             }
             return 0;
         }
@@ -4094,7 +4224,13 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_mutex_unlock") {
+        // Pending-lock witness covers unlock too (main wedged INSIDE unlock
+        // with pending-lock:none is a distinct shape worth naming).
+        pend_lock_obj_ = obj;
+        pend_lock_tid_ = GuestTid();
         const int r = pthread_mutex_unlock(m);
+        pend_lock_obj_ = 0;
+        pend_lock_tid_ = 0;
         if (r == 0) {
             MutexNoteUnlocked(obj, GuestTid());
         }
@@ -4724,7 +4860,12 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
 // End-of-run census (see dispatch.h): detached workers can't be joined, so
 // report tid/done/retval here instead of losing them to _exit.
 void Runtime::ThreadCensus() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // Watchdog robustness: never block here (see MutexOwnersDump).
+    std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        std::printf("[census] SKIPPED (map guard contested)\n");
+        return;
+    }
     for (const auto& kv : threads_) {
         bool done = false;
         std::uint32_t rv = 0;
@@ -4754,6 +4895,14 @@ std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) 
         st->joined = true;
     }
     {
+        // Join-visibility (a join on a never-done parked worker hangs the
+        // joiner forever and freezes st->m for census: name it if it happens;
+        // joins are rare, cap generously).
+        static int jn = 0;
+        if (jn < 20) {
+            jn++;
+            std::printf("[thread] join tid=%u waiting (done=%d)\n", tid, (int)st->done);
+        }
         std::unique_lock<std::mutex> lock(st->m);
         st->cv.wait(lock, [&] { return st->done; });
     }
@@ -6582,6 +6731,7 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
                     std::printf("\n");
                 }
             }
+            rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -6640,6 +6790,7 @@ void GuestCallbacks::Write(VAddr addr, T v) {
         if (rt_->NoteBad()) {
             std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,
                         sizeof(T), rt_->ActiveJit()->Regs()[15]);
+            rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -9064,6 +9215,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
 std::optional<std::uint32_t> GuestCallbacks::MemoryReadCode(VAddr a) {    if (!rt_->CheckAccess(a & ~std::uint32_t(3), 4, false, true)) {
         if (rt_->NoteBad()) {
             std::printf("[mem] BAD exec @ %08x -- halting\n", a);
+            rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);

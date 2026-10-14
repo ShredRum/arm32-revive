@@ -99,8 +99,8 @@ void Watchdog() {
         reported = WallMs();
         Log("STUCK update #%d entered %lldms ago (entry=%lld)",
             g_upd_entry_n.load(), stuck_ms, entry);
-        g_rt->ThreadCensus();
-        g_rt->MutexOwnersDump();
+        // Lock-free first (atomics + JIT regs): these always print, even if
+        // the map dumps below wedge on a leaked guard.
         const std::uint32_t plo = g_rt->pend_lock_obj_.load();
         const std::uint32_t plt = g_rt->pend_lock_tid_.load();
         if (plo) {
@@ -139,6 +139,12 @@ void Watchdog() {
             Log("STUCK upc=%08x tid=%d %s %s", pc, g_upd_tid.load(), where.c_str(),
                 what.c_str());
         }
+        // Hang forensics: recent malloc/free history around the wedge.
+        g_rt->DumpEventRing();
+        // Map dumps last: they try_lock and skip on contention (a leaked
+        // guard must not wedge the watchdog itself).
+        g_rt->ThreadCensus();
+        g_rt->MutexOwnersDump();
     }
 }
 

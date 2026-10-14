@@ -185,6 +185,44 @@ public:
         return bad_count <= 10;
     }
 
+    // Event ring (HARNESS_MALLOCLOG=1): last 200k malloc/free lines in RAM,
+    // zero steady-state I/O; DumpEventRing() prints them on demand at
+    // crash/hang sites. Own leaf mutex (never nested, never across calls).
+    static constexpr std::uint32_t kRingN = 200000;
+    char* ring_buf_ = nullptr;
+    std::uint32_t ring_head_ = 0;
+    std::uint64_t ring_total_ = 0;
+    std::mutex ring_mu_;
+    void RingPush(const char* line) {
+        std::lock_guard<std::mutex> l(ring_mu_);
+        if (!ring_buf_) {
+            ring_buf_ = new (std::nothrow) char[(std::size_t)kRingN * 64];
+            if (!ring_buf_) {
+                return;
+            }
+        }
+        char* slot = ring_buf_ + (std::size_t)(ring_head_ % kRingN) * 64;
+        std::strncpy(slot, line, 63);
+        slot[63] = 0;
+        ring_head_++;
+        ring_total_++;
+    }
+    void DumpEventRing() {
+        std::lock_guard<std::mutex> l(ring_mu_);
+        if (!ring_buf_ || ring_total_ == 0) {
+            return;
+        }
+        const std::uint32_t n =
+            ring_total_ > kRingN ? kRingN : (std::uint32_t)ring_total_;
+        std::printf("[ring] dump %llu events (last %u kept)\n",
+                    (unsigned long long)ring_total_, n);
+        const std::uint32_t start = ring_head_ - n;
+        for (std::uint32_t i = 0; i < n; i++) {
+            std::printf("%s\n", ring_buf_ + (std::size_t)((start + i) % kRingN) * 64);
+        }
+        std::printf("[ring] end\n");
+    }
+
 private:
     using Regs = std::array<std::uint32_t, 16>;
     void CallImport(std::uint32_t idx, Regs& regs);
@@ -370,7 +408,13 @@ private:
         }
     }
     void MutexOwnersDump() {
-        std::lock_guard<std::mutex> io(io_mutex_);
+        // Watchdog robustness: never block here (a leaked guard would wedge
+        // the watchdog itself, hiding the very deadlock it reports).
+        std::unique_lock<std::mutex> io(io_mutex_, std::try_to_lock);
+        if (!io.owns_lock()) {
+            std::printf("[mutex] owners: SKIPPED (io guard contested)\n");
+            return;
+        }
         if (mutex_owner_.empty()) {
             std::printf("[mutex] owners: none held\n");
             return;
@@ -382,6 +426,15 @@ private:
     }
     struct HostDir {
         DIR* d = nullptr;
+        // CPU-topology listing (/sys/devices/system/cpu): the game's only
+        // consumer filters cpuN itself, but Bionic readdir_r writes a 280B
+        // struct dirent while the guest passes a 24B buffer (game bug,
+        // faithfully reproduced = heap corruption of neighbors: Fox BAD
+        // 0x78616D63 + crash3 0x73344545, both entry-name bytes at buf+24).
+        // Mitigation: serve only short cpuN/dot entries (a kernel without
+        // long nodes; the game's own filter accepts nothing else).
+        bool cpu_topo = false;
+        std::string path;
     };
     std::unordered_map<std::uint32_t, HostDir> dir_map_;  // guest DIR* -> host
 
