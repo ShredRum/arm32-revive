@@ -3450,4 +3450,14 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   maintained on lock/unlock/trylock/destroy) + last-svc atomics
   (always-on, resolved at dump) + HARNESS_LASTSVC=1 + detached
   watchdog (update>30s => STUCK + ThreadCensus + owners +
-  last-svc). Restart + reproduce => read answer from log."
+  last-svc). Restart + reproduce => read answer from log.
+
+## 118. Unlucky-tap hangs = same wedge (user-called, 2026-10-14)
+- User: hangs on unlucky crutch-taps probably the same mutex wedge
+  (tap shifts timing -> worker dies holding -> GL blocks later).
+  VERDICT: one root (worker death + leaked hold), not two bugs.
+- True path (user-mandated): kill worker deaths + real clock
+  (alarm DONE); crutch stays scaffolding only.
+- Pending-lock witness + THREADLOG diagnostic (790bc7d): deploy,
+  hands-off repro expected (~update #77), read wanted-mutex +
+  tid=11's last calls, then fix the death (fopen "c"? throw?)."
