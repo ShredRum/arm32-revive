@@ -3340,3 +3340,20 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Post-gold diff (20 commits, 754 ins): behavior delta ~ FUNCTORAT
   off + probes/telemetry only; tap-freeze predates gold. No revert
   needed for this bug.
+
+## 111. Tick advances ONLY on input (tap test 2026-10-14)
+- WPA-tick (0x672EA0) + 5 slow finger taps mid-run: 5 NEW tick
+  values right after the taps (5f571704x3, 17206900, 1e3834c0;
+  34 input events = 5 taps x down/moves/up). Hands-off: 1000+
+  identical. INFERRED: tick = f(last input event); engine runs one
+  quantum per event (§107 input-quantum CONFIRMED live).
+- Tick-fn 0x38CA38 callers: update 0xC2034 + init 0xC1B58 only
+  (static BL scan). Its clock_gettime (PLT#331, clockid 7=BOOTTIME)
+  + open/ioctl/guard feeds exist but per-frame path unresolved;
+  worker [call] capped at 5 (THREADLOG useless for rates, off).
+- TAPBEAT flaw found: MOVE(2)-only never sets press-flag/skip
+  logic (splashes need began/ended) => "changed nothing" explained.
+  REDESIGN (ec0555d): full synthetic DOWN(0)+UP(1) per beat, solo
+  (no finger => no interleave). NEXT: hands-off boot->menu attempt.
+- GOT[0] mistarget lesson: 0x6703CC = .got start (linker-reserved),
+  10M reads/50s noise (549MB log!). WPA only on proven slots.
