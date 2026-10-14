@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dynarmic/interface/A32/a32.h"
@@ -73,7 +74,7 @@ public:
     // Real rwlock map (MCSM-compare gap: guest imports 5 rwlock symbols).
     std::uint32_t PthreadRwlock(const std::string& n, std::uint32_t obj);
     std::uint32_t PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
-                              std::uint32_t arg2);
+                              std::uint32_t arg2, bool monotonic = false);
     std::uint32_t PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t destr);
     std::uint32_t PthreadGetSpecific(std::uint32_t key);
     std::uint32_t PthreadSetSpecific(std::uint32_t key, std::uint32_t value);
@@ -308,6 +309,22 @@ private:
     std::unordered_map<std::uint32_t, HostFile> file_map_;  // guest FILE* -> host
     std::unordered_map<std::uint32_t, int> fd_map_;         // guest fd -> host fd
     std::uint32_t next_guest_fd_ = 100;
+    // Guest fds opened on /dev/alarm (mapped to /dev/null host-side):
+    // their ioctls are served from host clocks (tick source!). Same
+    // leaf-lock discipline as fd_map_.
+    std::unordered_set<std::uint32_t> alarm_fds_;
+    void NoteAlarmFd(std::uint32_t g) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        alarm_fds_.insert(g);
+    }
+    bool IsAlarmFd(std::uint32_t g) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        return alarm_fds_.count(g) != 0;
+    }
+    void ForgetAlarmFd(std::uint32_t g) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        alarm_fds_.erase(g);
+    }
     // Leaf lock for the three maps above (+next_guest_fd_): brief scoped
     // holds around lookups/inserts/erases ONLY — never across syscalls
     // (a worker blocked in ::read under the old whole-bridge mutex_ froze

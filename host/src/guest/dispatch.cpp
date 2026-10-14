@@ -1360,6 +1360,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (n == "time") {
             t += (time_t)TimeWarp();
         }
+        if (n == "time" && a0 != 0 && CheckRange(a0, 4, true)) {
+            const std::uint32_t w = static_cast<std::uint32_t>(t & 0xFFFFFFFFu);
+            std::memcpy(H(a0), &w, 4);
+        }
         Ret(regs, static_cast<std::uint32_t>(t & 0xFFFFFFFFu),
             static_cast<std::uint32_t>(((std::uint64_t)t >> 32) & 0xFFFFFFFFu));
         return;
@@ -1526,7 +1530,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         n == "pthread_cond_broadcast" || n == "pthread_cond_wait" ||
         n == "pthread_cond_timedwait" || n == "pthread_cond_timedwait_monotonic") {
         std::string base = (n == "pthread_cond_timedwait_monotonic") ? "pthread_cond_timedwait" : n;
-        Ret(regs, PthreadCond(base, a0, a1, a2));
+        const bool mono = (n == "pthread_cond_timedwait_monotonic");
+        Ret(regs, PthreadCond(base, a0, a1, a2, mono));
         return;
     }
     if (n == "pthread_key_create") {
@@ -2390,12 +2395,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             const std::uint32_t g = alloc_guest_fd(fd);
+            if (std::strcmp(GuestStr(a0), "/dev/alarm") == 0) {
+                NoteAlarmFd(g);
+                std::printf("[files][t%u] alarm fd %u (clocks served, not null)\n", GuestTid(),
+                            g);
+            }
             std::printf("[files][t%u] open(\"%s\",%o) -> fd %u\n", GuestTid(), hp.c_str(), a1, g);
             Ret(regs, g);
             return;
         }
         if (n == "close" || n == "fsync") {
             const int hfd = (n == "close") ? erase_guest_fd(a0) : host_fd_of(a0);
+            if (n == "close") {
+                ForgetAlarmFd(a0);
+            }
             if (hfd < 0) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
@@ -3089,6 +3102,75 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
+        if (n == "ioctl" && IsAlarmFd(a0)) {
+            // Android alarm driver: the game's TICK source
+            // (tick-fn opens /dev/alarm, GET_TIME per init; observed live:
+            // cmd 0x40086134 = GET_TIME(ELAPSED_REALTIME)). Served from
+            // host clocks; previously stub->0 with unwritten buffer =
+            // frozen tick = dt 0. Non-alarm ioctls fall through to the
+            // legacy stub below (behavior unchanged).
+            const std::uint32_t cmd = a1;
+            if (((cmd >> 8) & 0xFFu) == (std::uint32_t)'a') {
+                const unsigned op = cmd & 0xFu;
+                const unsigned type = (cmd >> 4) & 0xFu;
+                if (op == 4) {  // ANDROID_ALARM_GET_TIME(type)
+                    clockid_t cid = CLOCK_BOOTTIME;
+                    if (type <= 1) {
+                        cid = CLOCK_REALTIME;  // RTC_WAKEUP / RTC
+                    } else if (type == 4) {
+                        cid = CLOCK_MONOTONIC;  // SYSTEMTIME
+                    }  // else ELAPSED_REALTIME* -> BOOTTIME
+                    struct timespec ts {};
+                    if (::clock_gettime(cid, &ts) == 0 && CheckRange(a2, 8, true)) {
+                        const std::uint32_t s = static_cast<std::uint32_t>(ts.tv_sec);
+                        const std::uint32_t ns = static_cast<std::uint32_t>(ts.tv_nsec);
+                        std::memcpy(H(a2), &s, 4);
+                        std::memcpy(H(a2 + 4), &ns, 4);
+                        static int alog = 0;
+                        if (alog < 3) {
+                            alog++;
+                            std::printf("[alarm] GET_TIME type=%u -> %u.%09u\n", type, s,
+                                        ns);
+                        }
+                        Ret(regs, 0);
+                        return;
+                    }
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (op == 0 || op == 2) {  // CLEAR / SET
+                    Ret(regs, 0);
+                    return;
+                }
+                if (op == 3) {  // SET_AND_WAIT: sleep till target, capped
+                    std::uint32_t gsec = 0, gnsec = 0;
+                    if (CheckRange(a2, 8, false)) {
+                        std::memcpy(&gsec, H(a2), 4);
+                        std::memcpy(&gnsec, H(a2 + 4), 4);
+                    }
+                    clockid_t cid = (type <= 1) ? CLOCK_REALTIME : CLOCK_BOOTTIME;
+                    struct timespec now {};
+                    ::clock_gettime(cid, &now);
+                    const std::int64_t want =
+                        std::int64_t(gsec) * 1000000000 + std::int64_t(gnsec);
+                    const std::int64_t have =
+                        std::int64_t(now.tv_sec) * 1000000000 + std::int64_t(now.tv_nsec);
+                    std::uint64_t us = 0;
+                    if (want > have) {
+                        us = (std::uint64_t)(want - have) / 1000u;
+                    }
+                    if (us > 5000u) {
+                        us = 5000u;  // same cap policy as nanosleep
+                    }
+                    if (us > 0) {
+                        usleep(static_cast<useconds_t>(us));
+                    }
+                    Ret(regs, 0);
+                    return;
+                }
+            }
+        }
         if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
             n == "inet_ntop") {
             InetThunk(regs, n, a0, a1, a2, a3);
@@ -3736,6 +3818,76 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         // Unknown key: legacy empty behavior (length 0).
     }
+    if (n == "mktime" || n == "difftime" || n == "strftime") {
+        // Real time-lib thunks (were stub->0: frozen daily/session timers).
+        // Guest Bionic struct tm (44B): 9x int + long gmtoff + char* zone.
+        if (n == "mktime") {
+            std::int32_t f[9] = {};
+            if (CheckRange(a0, 36, false)) {
+                for (int i = 0; i < 9; i++) {
+                    std::memcpy(&f[i], H(a0 + (std::uint32_t)(i * 4)), 4);
+                }
+            }
+            struct tm ht = {};
+            ht.tm_sec = f[0];
+            ht.tm_min = f[1];
+            ht.tm_hour = f[2];
+            ht.tm_mday = f[3];
+            ht.tm_mon = f[4];
+            ht.tm_year = f[5];
+            ht.tm_wday = f[6];
+            ht.tm_yday = f[7];
+            ht.tm_isdst = f[8];
+            const std::time_t r = std::mktime(&ht);
+            if (CheckRange(a0, 36, true)) {
+                const std::int32_t o[9] = {ht.tm_sec, ht.tm_min, ht.tm_hour, ht.tm_mday,
+                                           ht.tm_mon, ht.tm_year, ht.tm_wday, ht.tm_yday,
+                                           ht.tm_isdst};
+                for (int i = 0; i < 9; i++) {
+                    std::memcpy(H(a0 + (std::uint32_t)(i * 4)), &o[i], 4);
+                }
+            }
+            Ret(regs, static_cast<std::uint32_t>(r & 0xFFFFFFFFu));
+            return;
+        }
+        if (n == "difftime") {
+            const double d = std::difftime((std::time_t)(std::int32_t)a0,
+                                           (std::time_t)(std::int32_t)a1);
+            std::uint64_t u = 0;
+            std::memcpy(&u, &d, 8);
+            Ret(regs, static_cast<std::uint32_t>(u & 0xFFFFFFFFu),
+                static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
+            return;
+        }
+        // strftime(a0=buf, a1=max, a2=fmt, a3=tm*): bounded.
+        std::uint32_t cap = a1 > 256u ? 256u : a1;
+        std::int32_t f[9] = {};
+        if (CheckRange(a3, 36, false)) {
+            for (int i = 0; i < 9; i++) {
+                std::memcpy(&f[i], H(a3 + (std::uint32_t)(i * 4)), 4);
+            }
+        }
+        struct tm ht = {};
+        ht.tm_sec = f[0];
+        ht.tm_min = f[1];
+        ht.tm_hour = f[2];
+        ht.tm_mday = f[3];
+        ht.tm_mon = f[4];
+        ht.tm_year = f[5];
+        ht.tm_wday = f[6];
+        ht.tm_yday = f[7];
+        ht.tm_isdst = f[8];
+        char tmp[256] = {};
+        const std::size_t o =
+            std::strftime(tmp, sizeof(tmp), GuestStr(a2), &ht);
+        if (o == 0 || o + 1 > cap || !CheckRange(a0, o + 1, true)) {
+            Ret(regs, 0);
+            return;
+        }
+        std::memcpy(H(a0), tmp, o + 1);
+        Ret(regs, static_cast<std::uint32_t>(o));
+        return;
+    }
     {
         // Locked: worker threads share stub_hits_ with main.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -3904,7 +4056,7 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
 }
 
 std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
-                                   std::uint32_t arg2) {
+                                   std::uint32_t arg2, bool monotonic) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy") {
         if (n == "pthread_cond_init") {
@@ -4024,11 +4176,21 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_cond_timedwait") {
+        // Guest ABI: absolute timeout as 2x u32 (sec, nsec) at arg2 --
+        // NOT a 16B host timespec (over-read misparsed tv_sec/nsec and
+        // fired the absurd-cap spuriously).
+        std::uint32_t gsec = 0, gnsec = 0;
+        if (CheckRange(arg2, 8, false)) {
+            std::memcpy(&gsec, H(arg2), 4);
+            std::memcpy(&gnsec, H(arg2 + 4), 4);
+        }
         struct timespec ts {};
-        std::memcpy(&ts, H(arg2), sizeof(ts));
+        ts.tv_sec = (time_t)gsec;
+        ts.tv_nsec = (long)gnsec;
         // Cap absurd waits so missing signals surface instead of hanging forever.
+        // Compare against the MATCHING clock (monotonic timeouts are not realtime).
         struct timespec now {};
-        clock_gettime(CLOCK_REALTIME, &now);
+        clock_gettime(monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &now);
         const std::uint64_t want =
             std::uint64_t(ts.tv_sec) * 1000000000u + std::uint64_t(ts.tv_nsec);
         const std::uint64_t have =
