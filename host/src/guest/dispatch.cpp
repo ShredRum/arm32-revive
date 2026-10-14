@@ -136,6 +136,18 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         size = 8;
     }
     if (heap_brk_ + size + pad > kHeapBase + kHeapSize) {
+        // LOUD OOM (2026-10-14): silent 0 -> guest bad_alloc -> unwind
+        // spiral -> stack smash -> death. Capped (sustained-OOM spam).
+        static int oomn = 0;
+        if (++oomn <= 10) {
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] OOM #%d size=%u brk=%08x lr=%08x\n", oomn, size, heap_brk_,
+                        lr);
+        }
         return 0;
     }
     const std::uint32_t out = heap_brk_;
