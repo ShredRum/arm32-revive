@@ -3377,3 +3377,24 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   v3 (98d0b22): beat first 400 updates (splash window) + hold until
   300s wall (jobs) + beat after (menu). Finger tap mid-run confirmed
   live skip (logo changed) - engine responsive, no interleave now.
+
+## 114. Self-drive to EPISODES + gameplay limps (2026-10-14)
+- PIXEL PROOFS: episode select fully built hands-off (Shop,
+  Playground*, Smugglers 871330, locks, 45 coins); locked-tap ->
+  correct "Episode Locked" dialog; LEVEL renders (Smugglers den,
+  slingshot+Chuck, cages, crates, HUD). Strobe fixed by DOWN/UP
+  split across updates (9acdb51); r0=0 both paths.
+- Soak theory REVISED: fastmem cooks fast, no hang without waiting.
+  Governor v3 mostly untested-in-full (runaway success).
+- WORKER ABORT (low-level, user-challenged audit): audio loader
+  tid=9 died on OUR cond cap (`wait: ... 110` -> abort()).
+  Timer/signal-drop REFUTED (no such imports); opens benign;
+  clock thunk code-correct. FIX: SPURWAKE=1 (231b880) - spurious
+  success instead of ETIMEDOUT for untimed waits.
+- CANARY sites (chronic, game limps): __stack_chk_fail @0xC2714 x26
+  + @0x2622F8 x5, from BOOT (line 2104). Counts ~= tapbeats(26) /
+  DOWNs(5) - synthetic-vs-inherent OPEN. Each halt eats the update's
+  remainder (stale-hr? r0=garbage-nonzero -> Java continues).
+  NEXT: tapbeat-off finger run to discriminate.
+- BLACK-while-playing (level 13 known park): UI/HUD alive, playfield
+  black. NEXT: repro with log correlation (which update dies).
