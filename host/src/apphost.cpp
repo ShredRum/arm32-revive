@@ -618,7 +618,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_FASTMEM", "1", 1);
     // Gate-writer capture (0x74168, sole static path to +1187 setter):
     // WATCHPC execution probe (own cap, regs+bt, no slot). Pure observe.
-    setenv("HARNESS_WATCHPC", "74168", 1);
+    // SUPERSEDED: watch BUILDERS (0x250AB8) instead - writer confirmed
+    // requestExit/quit-path (§109), builders are the menu-content signal.
+    setenv("HARNESS_WATCHPC", "250ab8", 1);
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
     // Gate opens naturally only when content is ready; forcing it kills.
