@@ -636,6 +636,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // (pure observe; avoids WatchSP spam on hot paths).
     setenv("HARNESS_WATCHPC", "250ab8", 1);
     setenv("HARNESS_WPA", "672ea0", 1);
+    // TRIAGE 2026-10-14: worker import traffic (update thread is T2+;
+    // [call] logs main-only by default, hiding its clock sources).
+    // Observe-only. Revert after.
+    setenv("HARNESS_THREADLOG", "1", 1);
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
     // Gate opens naturally only when content is ready; forcing it kills.
