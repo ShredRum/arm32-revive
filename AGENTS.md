@@ -3411,3 +3411,27 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - Coexistence (f73eec0): quiet 15s after any live input (500ms let
   beats steal finger presses => dead menu). Center-seed still dumb
   (hits PLAY/popup); positional play script is the ship path.
+
+## 116. ROOT: alarm-clock stub froze the tick (2026-10-14)
+- CHAIN (all PROVEN): update dt comes from tick-fn 0x38CA38, which
+  opens /dev/alarm (live: `open(005d6997..) lr=0038c95c`; string
+  /dev/alarm @0x5D6997) and ioctls cmd 0x40086134 =
+  _IOR('a',52,8) = ANDROID_ALARM_GET_TIME(ELAPSED_REALTIME) (live,
+  8x/run, guarded-once). Our bridge mapped alarm->/dev/null +
+  ioctl stub->0 with UNWRITTEN buffer => constant tick => dt=0.
+- FIX (83199da): alarm-fd tracking (Note/Is/ForgetAlarmFd) +
+  GET_TIME served from host clocks (RTC->REALTIME, ELAPSED* ->
+  BOOTTIME, SYSTEMTIME->MONOTONIC) + CLEAR/SET 0 + SET_AND_WAIT
+  capped-sleep. Non-alarm ioctl unchanged (legacy stub).
+- Adjacent real bugs fixed same commit: mktime/difftime/strftime
+  were stub->0 (7/6/3 live callers: session/daily timers!) now real;
+  time(&x) out-param now written; timedwait read 16B host struct
+  from 8B guest buf (spurious caps) now 2xu32 + matching clock
+  (monotonic was compared vs REALTIME).
+- Dead theories closed: POSIX timers/signals (no such imports);
+  CallLong->0 (zero invocations live); getauxval (zero callers);
+  audio-clock (no Java-side coupling per smali).
+- Taps advance tick via the event part of tick math (mechanism
+  secondary now). NEXT: hands-off screenshots in the 300s pre-beat
+  window: smooth progress => root fixed; 1Hz steps => second
+  mechanism."
