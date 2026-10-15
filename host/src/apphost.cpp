@@ -9,6 +9,8 @@
 #include <android/log.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <exception>
+#include <typeinfo>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -178,6 +180,36 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
     signal(sig, SIG_DFL);
     raise(sig);
 }
+// Uncaught-exception witness (Bionic's default terminate is logcat-only,
+// invisible here): write the exception type to apphost.log, then die as
+// before. Answers whether silent SIGABRTs are escaping host exceptions.
+static void TerminateWitness() {
+    const char* name = "?";
+    if (auto t = std::current_exception()) {
+        try {
+            std::rethrow_exception(t);
+        } catch (const std::exception& e) {
+            name = e.what();
+        } catch (...) {
+            name = "non-std";
+        }
+    } else {
+        name = "no-exception (terminate without active)";
+    }
+    char buf[256];
+    char* p = buf;
+    const char* t = "TERMINATE type=";
+    while (*t) {
+        *p++ = *t++;
+    }
+    while (*name && (p - buf) < 240) {
+        *p++ = *name++;
+    }
+    *p++ = '\n';
+    (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
+    abort();
+}
+
 static void InstallDeathWitness(const std::string& dir) {
     const std::string p = dir + "/death.log";
     g_death_fd = open(p.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -976,6 +1008,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::freopen(logpath.c_str(), "a", stderr);
     setvbuf(stdout, nullptr, _IONBF, 0);
     InstallDeathWitness(g_files);  // SIGSEGV/SIGABRT/SIGBUS witness (debuggerd is SELinux-muted here)
+    std::set_terminate(TerminateWitness);  // name escaping host exceptions instead of silent abort
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
     // Cleanliness test FAILED (2026-10-14): real fail path stalls on
