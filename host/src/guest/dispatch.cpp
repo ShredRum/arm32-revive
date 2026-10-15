@@ -413,17 +413,14 @@ void Runtime::GuestFree(std::uint32_t addr) {
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (const auto& q : quarantine_) {
-        if (q.addr == addr) {
+    if (quarantine_set_.count(addr)) {
             std::uint32_t lr = 0;
             Dynarmic::A32::Jit* aj = ActiveJit();
             if (aj) {
                 lr = aj->Regs()[14];
             }
-            std::printf("[heap] LOUD double free of quarantined %08x size=%u lr=%08x\n", addr,
-                        q.size, lr);
+            std::printf("[heap] LOUD double free of quarantined %08x lr=%08x\n", addr, lr);
             return;
-        }
     }
     auto it = heap_sizes_.find(addr);
     if (it == heap_sizes_.end()) {
@@ -457,6 +454,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
                     size);
     }
     quarantine_.push_back({addr, size});
+    quarantine_set_.insert(addr);
     if (EnvOn("HARNESS_MALLOCLOG")) {
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
@@ -478,6 +476,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // fired in any session, while poisoned stale reads proved fatal).
     while (quarantine_.size() > kQuarantineCap) {
         const QEnt q0 = quarantine_.front();
+        quarantine_set_.erase(q0.addr);
         if (heap_ms_) {
             mspace_free(heap_ms_, H(q0.addr));
         }

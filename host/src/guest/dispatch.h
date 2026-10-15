@@ -285,6 +285,7 @@ private:
         std::uint32_t size = 0;
     };
     std::vector<QEnt> quarantine_;
+    std::unordered_set<std::uint32_t> quarantine_set_;  // O(1) double-free check (vector scan was O(n^2))
     std::uint32_t mmap_next_ = 0x70000000u;
     std::recursive_mutex mutex_;
     std::unordered_map<std::string, std::uint64_t> stub_hits_;
