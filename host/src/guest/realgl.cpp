@@ -291,13 +291,13 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     // 2014 Mali/Adreno accepted them, strict compilers need newlines) ---
     if (n == "glCreateShader") {
         GLuint s = glCreateShader((GLenum)a0);
-        std::printf("%s(%04x) -> %u\n", tag, a0, s);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x) -> %u\n", tag, a0, s);
         r->Ret(regs, s);
         return true;
     }
     if (n == "glCreateProgram") {
         GLuint p = glCreateProgram();
-        std::printf("%s -> %u\n", tag, p);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s -> %u\n", tag, p);
         r->Ret(regs, p);
         return true;
     }
@@ -389,7 +389,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             glGetProgramInfoLog((GLuint)a0, sizeof(log), nullptr, log);
             std::printf("%s(%u) FAIL: %s\n", tag, a0, log);
         } else {
-            std::printf("%s(%u) ok\n", tag, a0);
+            if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) ok\n", tag, a0);
         }
         r->Ret(regs, 0);
         return true;
@@ -420,7 +420,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             std::uint32_t w = (std::uint32_t)v;
             std::memcpy(r->H(a2), &w, 4);
         }
-        std::printf("%s(%u,%04x) -> %d\n", tag, a0, a1, v);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,%04x) -> %d\n", tag, a0, a1, v);
         r->Ret(regs, 0);
         return true;
     }
@@ -437,21 +437,21 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             }
             std::memcpy(r->H(a2), &lenptr, 4);
         }
-        std::printf("%s(%u) len=%u\n", tag, a0, lenptr);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) len=%u\n", tag, a0, lenptr);
         r->Ret(regs, 0);
         return true;
     }
     if (n == "glGetAttribLocation") {
         std::string s = GStr(r, a1);
         GLint loc = glGetAttribLocation((GLuint)a0, s.c_str());
-        std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
     if (n == "glGetUniformLocation") {
         std::string s = GStr(r, a1);
         GLint loc = glGetUniformLocation((GLuint)a0, s.c_str());
-        std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
@@ -477,7 +477,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         if (typep && r->CheckRange(typep, 4, true)) {
             std::memcpy(r->H(typep), &type, 4);
         }
-        std::printf("%s(%u,%u) -> \"%s\"\n", tag, a0, a1, nm ? nm : "?");
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,%u) -> \"%s\"\n", tag, a0, a1, nm ? nm : "?");
         r->Ret(regs, 0);
         return true;
     }
@@ -509,7 +509,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
         }
-        std::printf("%s(%u) ok\n", tag, a0);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) ok\n", tag, a0);
         r->Ret(regs, 0);
         return true;
     }
