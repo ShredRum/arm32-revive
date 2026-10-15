@@ -5107,19 +5107,31 @@ std::uint32_t Runtime::GuestTid() {
 
 extern "C" void AbrHeapCorruptionHook(void) {
     g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
-    char buf[64];
+    char buf[96];
     char* p = buf;
     const char* t = "HEAPCORRUPT pc=";
     while (*t) {
         *p++ = *t++;
     }
-    std::uint32_t pc = 0;
+    std::uint32_t pc = 0, r0 = 0, r1 = 0;
     Dynarmic::A32::Jit* aj = t_active_jit ? t_active_jit : nullptr;
     if (aj) {
         pc = aj->Regs()[15];
+        r0 = aj->Regs()[0];
+        r1 = aj->Regs()[1];
     }
     g_heap_corrupt_pc.store(pc, std::memory_order_relaxed);
     DeathHex2(p, pc);
+    const char* t0 = " r0=";
+    while (*t0) {
+        *p++ = *t0++;
+    }
+    DeathHex2(p, r0);
+    const char* t1 = " r1=";
+    while (*t1) {
+        *p++ = *t1++;
+    }
+    DeathHex2(p, r1);
     const char* t2 = " free=";
     while (*t2) {
         *p++ = *t2++;
