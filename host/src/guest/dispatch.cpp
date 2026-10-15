@@ -1304,6 +1304,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::uint32_t dp = suppress ? 0 : next_ptr();
             int maxw = width > 0 ? width : 1000000;
+            // Overflow firewall: clamp the field to the remaining heap
+            // allocation at dp (mapping checks pass arena-wide; without this
+            // %s/%[/%c smash chunk neighbors -> silent dlmalloc death).
+            // Non-heap dp (stack/module) keeps legacy boundless behavior.
+            // %c writes no NUL; %s/%[ need room for it.
+            if (dp && !suppress) {
+                std::lock_guard<std::recursive_mutex> flock(mutex_);
+                bool in_heap = false;
+                std::uint64_t rem = 0;
+                auto fit = heap_sizes_.find(dp);
+                if (fit != heap_sizes_.end()) {
+                    in_heap = true;
+                    rem = fit->second;
+                } else {
+                    auto jt = heap_sizes_.upper_bound(dp);
+                    if (jt != heap_sizes_.begin()) {
+                        --jt;
+                        if ((std::uint64_t)dp - jt->first < jt->second) {
+                            in_heap = true;
+                            rem = (std::uint64_t)jt->first + jt->second - dp;
+                        }
+                    }
+                }
+                if (in_heap) {
+                    if (conv == 'c') {
+                        // No NUL appended: cap chars at remaining bytes.
+                        if ((std::uint64_t)maxw > rem) {
+                            maxw = (int)rem;
+                        }
+                    } else if (rem == 0) {
+                        maxw = 0;  // no room even for NUL: convert nothing
+                    } else if ((std::uint64_t)maxw + 1 > rem) {
+                        // Chars + NUL must fit rem.
+                        maxw = (int)(rem - 1);
+                    }
+                }
+            }
             if (conv == 'c') {
                 int want = (width > 0) ? width : 1;
                 int k = 0;
