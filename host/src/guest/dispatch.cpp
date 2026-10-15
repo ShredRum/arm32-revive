@@ -5355,7 +5355,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         return 0xFFFFFFFFu;
     }
     // 2MB guest stack from the heap (bump; leak accepted in bring-up).
-    const std::uint32_t stack = GuestMalloc(0x200000u);
+    const std::uint32_t stack = GuestMalloc(0x800000u);  // 8MB: stack-overflow smash guard (triage 2026-10-16)
     if (!stack) {
         return 12;  // ENOMEM
     }
@@ -5413,7 +5413,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         auto& regs = jit.Regs();
         regs.fill(0);
-        regs[13] = stack + 0x200000u - 8;  // 8-aligned top
+        regs[13] = stack + 0x800000u - 8;  // 8-aligned top
         regs[14] = mod_.halt_va;           // routine return ends the thread
         regs[0] = arg;
         if (start & 1u) {
