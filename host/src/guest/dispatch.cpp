@@ -122,8 +122,31 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
 
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
     const std::uint64_t end = std::uint64_t(addr) + size;
+    // Last-hit cache (perf): string/scan loops probe per byte, each probe a
+    // linear walk over mappings_. Mappings only ever grow (AddMapping push;
+    // GuestMunmap never erases), so a cached by-value extent stays valid
+    // forever; thread_local needs no locking. Early-true only: on miss fall
+    // through to the full scan (mappings may overlap).
+    thread_local std::uint32_t hit_s = 1, hit_e = 0;
+    thread_local int hit_p = 0;
+    if (addr >= hit_s && end <= hit_e) {
+        if (exec) {
+            if (hit_p & PROT_EXEC) {
+                return true;
+            }
+        } else if (write) {
+            if (hit_p & PROT_WRITE) {
+                return true;
+            }
+        } else if (hit_p & PROT_READ) {
+            return true;
+        }
+    }
     for (const auto& m : mappings_) {
         if (addr >= m.start && end <= m.end) {
+            hit_s = m.start;
+            hit_e = m.end;
+            hit_p = m.prot;
             if (exec) {
                 return (m.prot & PROT_EXEC) != 0;
             }
