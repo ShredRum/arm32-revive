@@ -185,10 +185,20 @@ long long WallMs() {
 
 void Watchdog() {
     long long reported = 0;
+    unsigned last_corrupt = 0;
     while (true) {
         sleep(10);
         if (!g_rt) {
             continue;
+        }
+        // dlmalloc corruption tripwire (replaces abort): report transitions
+        // with the guest pc captured at the trip. The game limps on past
+        // dropped chunks, so this names WHEN headers break, not just death.
+        const unsigned cn = g_rt->HeapCorruptionCount();
+        if (cn != last_corrupt) {
+            last_corrupt = cn;
+            Log("HEAPCORRUPT #%u pc=%08x (dlmalloc dropped poisoned chunks, limping on)", cn,
+                g_rt->HeapCorruptionPc());
         }
         const long long entry = g_upd_entry_ms.load();
         const long long done = g_upd_done_ms.load();

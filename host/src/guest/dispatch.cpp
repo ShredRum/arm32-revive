@@ -41,6 +41,7 @@ void* mspace_realloc(dl_mspace, void*, size_t);
 void* mspace_calloc(dl_mspace, size_t, size_t);
 }  // extern "C"
 
+
 // Quarantine depth: freed blocks held out of reuse (UAF oracle).
 static constexpr std::uint32_t kQuarantineCap = 64;
 static constexpr std::uint8_t kQuarantinePoison = 0xABu;
@@ -142,6 +143,18 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
     mappings_.push_back({start, start + size, prot});
 }
 
+// dlmalloc corruption tripwire (see abr_heap_hook.h): runs INSTEAD of a bare
+// abort() when dlmalloc detects heap corruption. Async-safe: atomics, TLS
+// read, raw write(2) only (stderr is freopen'd to apphost.log). The macro
+// aborts right after, so this line is the corruption's own testimony.
+static std::atomic<unsigned> g_heap_corrupt_n{0};
+static std::atomic<std::uint32_t> g_heap_corrupt_pc{0};
+static void DeathHex2(char*& p, std::uint32_t v) {
+    static const char* Hx = "0123456789abcdef";
+    for (int i = 7; i >= 0; i--) {
+        *p++ = Hx[(v >> (i * 4)) & 0xFu];
+    }
+}
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto it = heap_sizes_.find(dst);
@@ -256,7 +269,7 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         }
         return 0;
     }
-    heap_sizes_[out] = size;
+    heap_sizes_[out] = size < 16 ? 16 : size;  // usable (min-chunk slack legal)
     heap_used_ += size;
     // TRIAGE (dlmalloc era): zero-fill every fresh block. Bump handed out
     // virgin mmap zeros; dlmalloc recycles stale (or our 0xAB poison). If the
@@ -300,7 +313,7 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
-    heap_sizes_[out] = (std::uint32_t)total;
+    heap_sizes_[out] = total < 16 ? 16 : (std::uint32_t)total;
     heap_used_ += total;
     return out;
 }
@@ -319,8 +332,8 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     // (wild addr = host SIGSEGV inside the reservation). Fail loud instead.
     std::uint32_t old = 0;
     bool known = false;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = heap_sizes_.find(addr);
         if (it != heap_sizes_.end()) {
             old = it->second;
@@ -339,6 +352,7 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     }
     // dlmalloc copies min(old,new) itself; migrate our size map + used
     // counter. Also drop any audio-pool reference: the block may move.
+    // Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
     void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), size) : nullptr;
     if (!hp) {
         return 0;  // old block stays valid (realloc contract), LOUD via OOM path next
@@ -346,16 +360,18 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     const std::uint64_t off =
         (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
     if (off + size > kHeapSize) {
-        // Escaped the arena: leak it back is impossible cleanly (realloc
-        // already consumed old); fail LOUD. Should not happen (no backend).
+        // Escaped the arena (should not happen: no backend). Erase the stale
+        // entry so a later free can't double-free into dlmalloc; quarantine
+        // the VA so reuse is still delayed.
         std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
+        heap_sizes_.erase(addr);
+        quarantine_.push_back({addr, old});
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
         heap_sizes_.erase(addr);
-        heap_sizes_[out] = size;
+        heap_sizes_[out] = size < 16 ? 16 : size;
         heap_used_ += (std::uint64_t)size > old ? (std::uint64_t)size - old : 0;
         if ((std::uint64_t)old > size) {
             heap_used_ -= (std::uint64_t)old - size;
@@ -418,9 +434,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // Poison only a validated range: a wild (but map-hit, e.g. post-move
     // stale) addr must never take a host memset/SIGSEGV with it.
     const bool range_ok = size > 0 && size < 0x10000000u && CheckRange(addr, size, true);
-    if (range_ok) {
-        std::memset(H(addr), kQuarantinePoison, size);
-    } else if (size > 0) {
+    if (!range_ok && size > 0) {
         std::printf("[heap] LOUD free with bad range %08x size=%u -- skipped poison\\n", addr,
                     size);
     }
@@ -442,28 +456,10 @@ void Runtime::GuestFree(std::uint32_t addr) {
     if (EnvOn("HARNESS_NORELEASE")) {
         return;
     }
+    // Delay-only quarantine (no poison, no verify: the tripwire never
+    // fired in any session, while poisoned stale reads proved fatal).
     while (quarantine_.size() > kQuarantineCap) {
         const QEnt q0 = quarantine_.front();
-        bool clobbered = false;
-        if (q0.size && CheckRange(q0.addr, q0.size, false)) {
-            const std::uint8_t* bp = H<const std::uint8_t>(q0.addr);
-            for (std::uint32_t i = 0; i < q0.size; i++) {
-                if (bp[i] != kQuarantinePoison) {
-                    clobbered = true;
-                    break;
-                }
-            }
-        }
-        if (clobbered) {
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::printf("[heap] LOUD quarantine write (UAF) %08x size=%u lr=%08x\n", q0.addr,
-                        q0.size, lr);
-            DumpEventRing();
-        }
         if (heap_ms_) {
             mspace_free(heap_ms_, H(q0.addr));
         }
@@ -935,7 +931,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (slen == 0xFFFFFFFFu || !CheckRange(a0 + dlen, slen + 1, true)) {
                 goto bad_ptr;
             }
-            if (n == "strcpy") {
+            // Overflow firewall (same class as memcpy): clamp to the mapped
+            // allocation; force NUL on truncation so downstream stays bounded.
+            const std::uint32_t wlen = ClampHeapWrite(a0 + dlen, slen + 1, n.c_str());
+            if (wlen <= slen) {
+                if (wlen > 0) {
+                    std::memcpy(H(a0 + dlen), H<const void>(a1), wlen - 1);
+                    *H<char>(a0 + dlen + wlen - 1) = '\0';
+                }
+            } else if (n == "strcpy") {
                 std::strcpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1));
             } else {
                 std::strcat(reinterpret_cast<char*>(H(a0)), GuestStr(a1));
@@ -945,10 +949,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 !CheckRange(a1, a2, false)) {
                 goto bad_ptr;
             }
+            const std::uint32_t wlen = ClampHeapWrite(a0, a2 + (n == "strncpy" ? 0 : 1),
+                                                      n.c_str());
             if (n == "strncpy") {
-                std::strncpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1), a2);
+                std::strncpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1),
+                             wlen < a2 ? wlen : a2);
             } else {
-                std::strncat(reinterpret_cast<char*>(H(a0)), GuestStr(a1), a2);
+                std::strncat(reinterpret_cast<char*>(H(a0)), GuestStr(a1),
+                             wlen < a2 + 1 ? (wlen ? wlen - 1 : 0) : a2);
             }
         }
         Ret(regs, a0);
@@ -5074,6 +5082,33 @@ Dynarmic::A32::Jit* Runtime::ActiveJit() {
 
 std::uint32_t Runtime::GuestTid() {
     return t_tid ? t_tid : 1;
+}
+
+extern "C" void AbrHeapCorruptionHook(void) {
+    g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
+    char buf[64];
+    char* p = buf;
+    const char* t = "HEAPCORRUPT pc=";
+    while (*t) {
+        *p++ = *t++;
+    }
+    std::uint32_t pc = 0;
+    Dynarmic::A32::Jit* aj = t_active_jit ? t_active_jit : nullptr;
+    if (aj) {
+        pc = aj->Regs()[15];
+    }
+    g_heap_corrupt_pc.store(pc, std::memory_order_relaxed);
+    DeathHex2(p, pc);
+    *p++ = '\n';
+    (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
+}
+
+unsigned Runtime::HeapCorruptionCount() {
+    return g_heap_corrupt_n.load(std::memory_order_relaxed);
+}
+
+std::uint32_t Runtime::HeapCorruptionPc() {
+    return g_heap_corrupt_pc.load(std::memory_order_relaxed);
 }
 
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {

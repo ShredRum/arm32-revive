@@ -63,6 +63,10 @@ public:
 
     const char* GuestStr(std::uint32_t guest);
 
+    // dlmalloc corruption tripwire count + guest pc at first trip (see
+    // AbrHeapCorruptionHook). Polled by the watchdog.
+    unsigned HeapCorruptionCount();
+    std::uint32_t HeapCorruptionPc();
     // Overflow firewall (dlmalloc era): bulk writes past a live chunk smash
     // dlmalloc headers -> host SIGSEGV with no witness. Exact-base writes
     // are clamped to the mapped size + LOUD (capped); interior-pointer
