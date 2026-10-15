@@ -6947,14 +6947,16 @@ void GuestCallbacks::Write(VAddr addr, T v) {
                         rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[4],
                         rt_->ActiveJit()->Regs()[5], rt_->ActiveJit()->Regs()[6],
                         rt_->ActiveJit()->Regs()[7]);
-            // Fox-hunt: identify the gray object at r7 (64B header dump names
-            // the type: table/stack/closure). Capped by NoteBad.
+            // Fox-hunt: identify the gray object at r7 (header dump names the
+            // type: table/stack/closure) + find the garbage slot nearby (the
+            // deterministic heap makes its address stable across boots ->
+            // range-watch it next run to catch the writer). Capped by NoteBad.
             {
                 const std::uint32_t o7 = rt_->ActiveJit()->Regs()[7];
-                if (rt_->CheckRange(o7 - 16, 64, false)) {
+                if (rt_->CheckRange(o7 - 16, 512, false)) {
                     const std::uint8_t* p = rt_->H<const std::uint8_t>(o7 - 16);
                     std::printf("[mem] BAD r7obj:");
-                    for (int j = 0; j < 64; j++) {
+                    for (int j = 0; j < 512; j++) {
                         std::printf(" %02x", p[j]);
                     }
                     std::printf("\n");
