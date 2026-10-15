@@ -140,10 +140,20 @@ void Watchdog() {
         }
         Log("STUCK last-svc idx=%u tid=%u %s", si, st, nm);
         // Stuck guest PC of the update thread (SVC trampoline => import
-        // name; module => code site; elsewhere => suspect).
+        // name; module => code site; elsewhere => suspect). Sampled 3x with
+        // 100ms gaps: async reg reads can tear, so only a STABLE pc proves a
+        // parked thread (resume-loop or SVC-entry wedge); a wandering pc =
+        // stale sample + guest spin.
         Dynarmic::A32::Jit* uj = g_upd_jit.load();
         if (uj && g_mod) {
-            const std::uint32_t pc = uj->Regs()[15];
+            std::uint32_t pcs[3] = {0, 0, 0};
+            for (int k = 0; k < 3; k++) {
+                pcs[k] = uj->Regs()[15];
+                if (k < 2) {
+                    usleep(100000);
+                }
+            }
+            const std::uint32_t pc = pcs[2];
             std::string where = "other";
             std::string what = "";
             if (pc == g_mod->halt_va) {
@@ -160,8 +170,9 @@ void Watchdog() {
             } else if (g_rt->IsCodeAddress(pc & ~std::uint32_t(1))) {
                 where = "guest-code (spin?)";
             }
-            Log("STUCK upc=%08x tid=%d %s %s", pc, g_upd_tid.load(), where.c_str(),
-                what.c_str());
+            const bool stable = (pcs[0] == pcs[1] && pcs[1] == pcs[2]);
+            Log("STUCK upc=%08x tid=%d %s %s %s", pc, g_upd_tid.load(), where.c_str(),
+                what.c_str(), stable ? "STABLE" : "wandering");
         }
         // Hang forensics: recent malloc/free history around the wedge.
         g_rt->DumpEventRing();
