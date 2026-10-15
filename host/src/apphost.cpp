@@ -48,10 +48,34 @@ struct HostThread {
     std::uint32_t stack = 0;  // 2MB guest stack base
     std::uint32_t tid = 0;    // bridge tid (errno/TLS routing)
     JNIEnv* env = nullptr;    // real, attached
+    // Re-entrancy guard: a nested JNI entry on the same thread while its
+    // Jit runs trips Dynarmic's is_executing assert (tombstone). Drop the
+    // nested frame LOUD instead (names the re-entrant path); e.g. a dropped
+    // audio-priming buffer is inaudible, a tombstone is not.
+    std::atomic<int> in_guest{0};
+    const char* in_name = "?";
 };
 std::mutex g_tmu;
 std::unordered_map<pid_t, std::shared_ptr<HostThread>> g_threads;
 std::uint32_t g_next_tid = 1000;
+
+// Re-entrancy guard body (see HostThread): nested entry drops LOUD.
+struct GuestRunGuard {
+    HostThread* st;
+    bool ok = false;
+    GuestRunGuard(HostThread* s, const char* n) : st(s) {
+        int e = 0;
+        if (st->in_guest.compare_exchange_strong(e, 1)) {
+            st->in_name = n;
+            ok = true;
+        }
+    }
+    ~GuestRunGuard() {
+        if (ok) {
+            st->in_guest = 0;
+        }
+    }
+};
 
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -308,6 +332,10 @@ std::shared_ptr<HostThread> Enter() {
 
 std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, void* thiz, va_list ap) {
     auto st = Enter();
+    if (st->in_guest.load()) {
+        Log("REENTER %s while %s active -- dropping frame", name, st->in_name);
+        return 1;
+    }
     // RATE telemetry (2026-10-14, tap-freeze triage): uncapped entry stamp
     // for the 3 frame-path methods. Answers pump-alive vs pump-dead without
     // taps. Observe-only (no guest state touched).
@@ -357,7 +385,11 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
                     fr[14] = g_mod->halt_va;
                     fr[0] = cx;
                     CallGuest(*st->jit, 0x5FE70u);
-                    Dynarmic::HaltReason fhr = st->jit->Run();
+                    Dynarmic::HaltReason fhr;
+                    {
+                        GuestRunGuard gg(st.get(), name);
+                        fhr = st->jit->Run();
+                    }
                     Log("[functor] hr=%d r0=%08x", (int)fhr, fr[0]);
                 } else {
                     Log("[functor] alloc failed");
@@ -583,7 +615,11 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
                 // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
                 // synthetic one forgot. Caught live 2026-10-14.)
                 CallGuest(*st->jit, 0xC23E4u);
-                Dynarmic::HaltReason bhr = st->jit->Run();
+                Dynarmic::HaltReason bhr;
+                {
+                    GuestRunGuard gg(st.get(), name);
+                    bhr = st->jit->Run();
+                }
                 std::printf("[tapbeat] #%d act=%d idle=%lldms hr=%d r0=%08x\n", upd_n, act,
                             idle, (int)bhr, br[0]);
                 if (bhr != Dynarmic::HaltReason::UserDefined1) {
@@ -619,7 +655,11 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
 #endif
     CallGuest(*st->jit, va);
-    const Dynarmic::HaltReason hr = st->jit->Run();
+    Dynarmic::HaltReason hr;
+    {
+        GuestRunGuard gg(st.get(), name);
+        hr = st->jit->Run();
+    }
     if (is_update) {
         g_upd_done_ms = WallMs();
     }

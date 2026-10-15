@@ -5162,6 +5162,16 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             } else {
                 if (vtag == 0 && ((word_idx) & 1u)) {
                     next_word();  // AAPCS align
+                } else if (vtag == 1) {
+                    // AAPCS va_arg: 8-byte reads align the ADDRESS up. The
+                    // compiler inserts a pad word when the va base is
+                    // 4-mod-8 (proven live: AudioOutput.<init>(JIIII)V reads
+                    // sane rate/ch/bits only past it). Absolute-address rule:
+                    // correct whether or not a pad exists.
+                    const std::uint32_t at = a3 + (word_idx - 3u) * 4u;
+                    if (at & 7u) {
+                        next_va();
+                    }
                 }
                 const std::uint32_t lo = (vtag == 0) ? next_word() : next_va();
                 const std::uint32_t hi = (vtag == 0) ? next_word() : next_va();
@@ -5491,6 +5501,14 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         }
         const char k = full[0];
         if (k == 'J' || k == 'D') {
+            if (vtag == 1) {
+                // Same AAPCS va_arg align-up as RealCallObject (pad word when
+                // the va base is 4-mod-8).
+                const std::uint32_t at = a3 + (word_idx - 3u) * 4u;
+                if (at & 7u) {
+                    next_w();
+                }
+            }
             const std::uint32_t lo = next_w();
             const std::uint32_t hi = next_w();
             if (k == 'J') {
@@ -5564,6 +5582,27 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     }
     const std::uint32_t h = WrapObject(ro);
     re->DeleteLocalRef(ro);
+    // Track obj -> class for GetObjectClass (fn#31), exactly like the mock
+    // NewObject path does: without this, real objects get a fabricated
+    // java/lang/Object and every downstream real lookup misses (e.g. the
+    // AudioOutput startOutput chain stays mock -> total silence).
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::uint32_t ch = 0;
+        for (const auto& kv : jni_classes_) {
+            if (kv.second == cls) {
+                ch = kv.first;
+                break;
+            }
+        }
+        if (!ch) {
+            jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
+            ch = jni_obj_next_;
+            jni_obj_next_ += 4;
+            jni_classes_[ch] = cls;
+        }
+        jni_objclass_[h] = ch;
+    }
     Ret(regs, h);
     return true;
 }
