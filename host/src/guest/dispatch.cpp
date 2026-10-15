@@ -4918,7 +4918,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (cb_slots_.empty()) {
-            cb_slots_.resize(2);
+            cb_slots_.resize(8);
         }
         for (std::size_t i = 0; i < cb_slots_.size(); i++) {
             if (!cb_slots_[i].busy) {
@@ -4944,12 +4944,22 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             }
             static Dynarmic::ExclusiveMonitor cb_mon(8);
             cfg.global_monitor = &cb_mon;
-            cfg.processor_id = 4 + (unsigned)(slot_idx & 3);
+            cfg.processor_id = (unsigned)(slot_idx & 7);
             slot->jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
         }
     }
     if (!slot) {
-        cb_last_hr_ = -3;  // pool exhausted
+        cb_last_hr_ = -3;  // pool exhausted: who holds slots?
+        {
+            unsigned mask = 0;
+            for (std::size_t b = 0; b < cb_slots_.size(); b++) {
+                if (cb_slots_[b].busy) {
+                    mask |= 1u << b;
+                }
+            }
+            std::printf("[qsort] pool exhausted: busy mask=%02x of %u (t=%u)\n", mask,
+                        (unsigned)cb_slots_.size(), GuestTid());
+        }
         return false;  // nested comparator storm: caller aborts LOUD
     }
     Dynarmic::A32::Jit* jit = slot->jit.get();
