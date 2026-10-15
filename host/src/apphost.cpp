@@ -868,6 +868,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
+    // PROBE (Fox layout, 2026-10-15): 256B slack per allocation. If the Fox
+    // family (GC-link/tag corruption) vanishes/moves, the root is dense
+    // bump packing vs Bionic dlmalloc spacing (game overflows routinely:
+    // wall4, readdir class). Short runs only (eats heap faster). Revert after
+    // the verdict either way.
+    setenv("HARNESS_MALLOCPAD", "256", 1);
     // TRIAGE stash stays (governor reads last_mgr164_).
     setenv("HARNESS_WATCHPC", "250ab8", 1);
     // setenv("HARNESS_WPA", "672ea0", 1);  // tick PROVEN, off
