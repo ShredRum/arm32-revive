@@ -229,6 +229,12 @@ static void InstallDeathWitness(const std::string& dir) {
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
+    // Silent-death expansion: SIGILL (bad JIT emit), SIGFPE, SIGTRAP, SIGSYS
+    // (seccomp) all die without a word here; the witness names them.
+    sigaction(SIGILL, &sa, nullptr);
+    sigaction(SIGFPE, &sa, nullptr);
+    sigaction(SIGTRAP, &sa, nullptr);
+    sigaction(SIGSYS, &sa, nullptr);
 }
 
 // Stuck-update watchdog (2026-10-14): a guest-mutex deadlock wedged the
