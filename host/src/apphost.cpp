@@ -1060,6 +1060,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     }
     Log("guest: %zu imports %zu init halt=%08x", g_mod->imports.size(), g_mod->init_array.size(),
         g_mod->halt_va);
+    // Trampoline map (first 48): lets any future death-pc name its import
+    // offline (slot = (pc-kTrampBase)/4, swi = slot, idx = swi-1).
+    for (std::size_t ti = 0; ti < g_mod->imports.size() && ti < 48; ti++) {
+        Log("tramp #%02zu va=%08x %s", ti, g_mod->imports[ti].tramp_va,
+            g_mod->imports[ti].name.c_str());
+    }
     g_rt = new Runtime(*g_mem, *g_mod);
     for (const auto& seg : g_mod->segments) {
         g_rt->AddMapping(seg.start, seg.size, seg.prot);
