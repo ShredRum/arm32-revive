@@ -142,6 +142,26 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
     mappings_.push_back({start, start + size, prot});
 }
 
+std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = heap_sizes_.find(dst);
+    if (it != heap_sizes_.end() && len > it->second) {
+        static int ocn = 0;
+        if (ocn < 10) {
+            ocn++;
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] LOUD %s overflow dst=%08x len=%u size=%u lr=%08x\n", n, dst, len,
+                        it->second, lr);
+        }
+        return it->second;
+    }
+    return len;
+}
+
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
     const std::uint64_t end = std::uint64_t(addr) + size;
     // Last-hit cache (perf): string/scan loops probe per byte, each probe a
@@ -782,8 +802,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
         }
-        std::memmove(H(a0), H<const void>(a1), a2);
-        ScanWP(this, a0, a2, n.c_str());
+        const std::uint32_t wlen = ClampHeapWrite(a0, a2, n.c_str());
+        std::memmove(H(a0), H<const void>(a1), wlen);
+        ScanWP(this, a0, wlen, n.c_str());
         Ret(regs, a0);
         return;
     }
@@ -792,8 +813,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
         }
-        std::memmove(H(a0), H<const void>(a1), a2);
-        ScanWP(this, a0, a2, n.c_str());
+        const std::uint32_t wlen = ClampHeapWrite(a0, a2, n.c_str());
+        std::memmove(H(a0), H<const void>(a1), wlen);
+        ScanWP(this, a0, wlen, n.c_str());
         Ret(regs, a0);
         return;
     }
@@ -821,8 +843,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             fill & 0xFF, lr);
             }
         }
-        std::memset(H(a0), fill, len);
-        ScanWP(this, a0, len, n.c_str());
+        const std::uint32_t wlen = ClampHeapWrite(a0, len, n.c_str());
+        std::memset(H(a0), fill, wlen);
+        ScanWP(this, a0, wlen, n.c_str());
         Ret(regs, a0);
         return;
     }

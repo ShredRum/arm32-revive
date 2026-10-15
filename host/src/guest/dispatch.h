@@ -63,6 +63,11 @@ public:
 
     const char* GuestStr(std::uint32_t guest);
 
+    // Overflow firewall (dlmalloc era): bulk writes past a live chunk smash
+    // dlmalloc headers -> host SIGSEGV with no witness. Exact-base writes
+    // are clamped to the mapped size + LOUD (capped); interior-pointer
+    // overflows stay visible (future work).
+    std::uint32_t ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n);
     // Validates a guest range before host-side bulk access.
     bool CheckRange(std::uint32_t guest, std::size_t size, bool write);
     // Valid code addresses: module RX segments, trampoline page, HALT slot.
