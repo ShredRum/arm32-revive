@@ -149,6 +149,8 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
 // aborts right after, so this line is the corruption's own testimony.
 static std::atomic<unsigned> g_heap_corrupt_n{0};
 static std::atomic<std::uint32_t> g_heap_corrupt_pc{0};
+static std::uint32_t g_last_free_addr = 0;
+static std::uint32_t g_last_free_size = 0;
 static void DeathHex2(char*& p, std::uint32_t v) {
     static const char* Hx = "0123456789abcdef";
     for (int i = 7; i >= 0; i--) {
@@ -476,6 +478,8 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // fired in any session, while poisoned stale reads proved fatal).
     while (quarantine_.size() > kQuarantineCap) {
         const QEnt q0 = quarantine_.front();
+        g_last_free_addr = q0.addr;
+        g_last_free_size = q0.size;
         quarantine_set_.erase(q0.addr);
         if (heap_ms_) {
             mspace_free(heap_ms_, H(q0.addr));
@@ -5116,6 +5120,16 @@ extern "C" void AbrHeapCorruptionHook(void) {
     }
     g_heap_corrupt_pc.store(pc, std::memory_order_relaxed);
     DeathHex2(p, pc);
+    const char* t2 = " free=";
+    while (*t2) {
+        *p++ = *t2++;
+    }
+    DeathHex2(p, g_last_free_addr);
+    const char* t3 = " sz=";
+    while (*t3) {
+        *p++ = *t3++;
+    }
+    DeathHex2(p, g_last_free_size);
     *p++ = '\n';
     (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
 }
