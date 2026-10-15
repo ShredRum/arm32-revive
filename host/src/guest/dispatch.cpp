@@ -4872,7 +4872,13 @@ void Runtime::ThreadCensus() {
         std::string ls = "?";
         std::string hist;
         {
-            std::lock_guard<std::mutex> l(kv.second->m);
+            // Never block census on a worker mutex (a stuck join/worker must
+            // not freeze the watchdog's only witness).
+            std::unique_lock<std::mutex> l(kv.second->m, std::try_to_lock);
+            if (!l.owns_lock()) {
+                std::printf("[census] tid=%u SKIPPED (worker mutex contested)\n", kv.first);
+                continue;
+            }
             done = kv.second->done;
             rv = kv.second->retval;
             ls = kv.second->last_svc;
@@ -4897,14 +4903,21 @@ std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) 
     {
         // Join-visibility (a join on a never-done parked worker hangs the
         // joiner forever and freezes st->m for census: name it if it happens;
-        // joins are rare, cap generously).
+        // joins are rare, cap generously). Chunked 30s waits: still POSIX
+        // blocking, but each chunk names the stuck worker (tid/last_svc)
+        // instead of hanging silent. Observe-only (no guest semantics changed).
         static int jn = 0;
         if (jn < 20) {
             jn++;
             std::printf("[thread] join tid=%u waiting (done=%d)\n", tid, (int)st->done);
         }
         std::unique_lock<std::mutex> lock(st->m);
-        st->cv.wait(lock, [&] { return st->done; });
+        int chunks = 0;
+        while (!st->cv.wait_for(lock, std::chrono::seconds(30),
+                                [&] { return st->done; })) {
+            std::printf("[thread] join tid=%u STILL waiting chunk=%d last=%s\n", tid,
+                        ++chunks, st->last_svc.c_str());
+        }
     }
     if (retval_out) {
         if (!CheckRange(retval_out, 4, true)) {
