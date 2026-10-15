@@ -26,4 +26,13 @@ void AbrHeapCorruptionHook(void);
         abort();                 \
     } while (0)
 
+// Route ALL dlmalloc aborts (including DEBUG assert() below, which expands
+// to bare ABORT and would otherwise die mute) through the hook. Guarded
+// #ifndef in dlmalloc.c, so this definition wins via -include.
+#define ABORT                    \
+    do {                         \
+        AbrHeapCorruptionHook();  \
+        abort();                 \
+    } while (0)
+
 #endif  // ABR_HEAP_HOOK_H

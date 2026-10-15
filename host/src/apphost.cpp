@@ -184,26 +184,32 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
 // invisible here): write the exception type to apphost.log, then die as
 // before. Answers whether silent SIGABRTs are escaping host exceptions.
 static void TerminateWitness() {
-    const char* name = "?";
-    if (auto t = std::current_exception()) {
-        try {
-            std::rethrow_exception(t);
-        } catch (const std::exception& e) {
-            name = e.what();
-        } catch (...) {
-            name = "non-std";
-        }
-    } else {
-        name = "no-exception (terminate without active)";
-    }
     char buf[256];
     char* p = buf;
     const char* t = "TERMINATE type=";
     while (*t) {
         *p++ = *t++;
     }
-    while (*name && (p - buf) < 240) {
-        *p++ = *name++;
+    // Copy what() INSIDE the catch (the pointer dangles after it).
+    if (auto ex = std::current_exception()) {
+        try {
+            std::rethrow_exception(ex);
+        } catch (const std::exception& e) {
+            const char* w = e.what();
+            while (w && *w && (p - buf) < 240) {
+                *p++ = *w++;
+            }
+        } catch (...) {
+            const char* w = "non-std";
+            while (*w) {
+                *p++ = *w++;
+            }
+        }
+    } else {
+        const char* w = "no-exception (terminate without active)";
+        while (*w) {
+            *p++ = *w++;
+        }
     }
     *p++ = '\n';
     (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));

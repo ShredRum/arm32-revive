@@ -298,7 +298,15 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         }
         return 0;
     }
-    heap_sizes_[out] = size < 16 ? 16 : size;  // usable (min-chunk slack legal)
+    try {
+        heap_sizes_[out] = size < 16 ? 16 : size;  // usable (min-chunk slack legal)
+    } catch (...) {
+        // Host-side OOM on bookkeeping (not guest OOM): hand the block back,
+        // fail like OOM. Otherwise a std::bad_alloc would escape through the
+        // thunk into terminate -> silent SIGABRT.
+        mspace_free(heap_ms_, hp);
+        return 0;
+    }
     heap_used_ += size;
     // NOTE (2026-10-16): blanket zero-fill REMOVED (was memset here) -- a full
     // memset per malloc incl. multi-MB textures cost 1fps + audio lag. If
