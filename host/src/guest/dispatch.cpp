@@ -157,8 +157,28 @@ static void DeathHex2(char*& p, std::uint32_t v) {
 }
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const auto it = heap_sizes_.find(dst);
-    if (it != heap_sizes_.end() && len > it->second) {
+    // Exact base hit first (common case).
+    auto it = heap_sizes_.find(dst);
+    std::uint32_t base = dst, size = 0;
+    if (it != heap_sizes_.end()) {
+        size = it->second;
+    } else {
+        // Interior pointer: containing allocation via ordered upper bound.
+        // (heap_sizes_ is std::map precisely for this.)
+        auto jt = heap_sizes_.upper_bound(dst);
+        if (jt == heap_sizes_.begin()) {
+            return len;
+        }
+        --jt;
+        base = jt->first;
+        size = jt->second;
+        if ((std::uint64_t)dst - base >= size) {
+            return len;  // gap/quarantine, not ours
+        }
+    }
+    const std::uint64_t end = (std::uint64_t)dst + len;
+    const std::uint64_t lim = (std::uint64_t)base + size;
+    if (end > lim) {
         static int ocn = 0;
         if (ocn < 10) {
             ocn++;
@@ -167,10 +187,10 @@ std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, cons
             if (aj) {
                 lr = aj->Regs()[14];
             }
-            std::printf("[heap] LOUD %s overflow dst=%08x len=%u size=%u lr=%08x\n", n, dst, len,
-                        it->second, lr);
+            std::printf("[heap] LOUD %s overflow dst=%08x len=%u base=%08x size=%u lr=%08x\n", n,
+                        dst, len, base, size, lr);
         }
-        return it->second;
+        return (std::uint32_t)(lim > dst ? lim - dst : 0);
     }
     return len;
 }

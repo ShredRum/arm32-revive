@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <dirent.h>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <mutex>
@@ -295,7 +296,9 @@ private:
     std::unordered_map<std::uint32_t, pthread_key_t> key_map_;
     std::uint32_t next_key_ = 1;
     std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value
-    std::unordered_map<std::uint32_t, std::uint32_t> heap_sizes_;  // guest addr -> size
+    // Live heap blocks (base -> usable bytes). ORDERED map: the overflow
+    // firewall needs interval containment for interior pointers (upper_bound).
+    std::map<std::uint32_t, std::uint32_t> heap_sizes_;  // guest addr -> size
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {
