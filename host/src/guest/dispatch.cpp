@@ -271,12 +271,10 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     }
     heap_sizes_[out] = size < 16 ? 16 : size;  // usable (min-chunk slack legal)
     heap_used_ += size;
-    // TRIAGE (dlmalloc era): zero-fill every fresh block. Bump handed out
-    // virgin mmap zeros; dlmalloc recycles stale (or our 0xAB poison). If the
-    // game reads uninit memory expecting zeros, recycled garbage = wild
-    // pointers = silent death anywhere. If this stabilizes, zero-fill stays
-    // as Bionic-fresh-page fidelity (fresh sbrk pages are zero there too).
-    std::memset(H(out), 0, size);
+    // NOTE (2026-10-16): blanket zero-fill REMOVED (was memset here) -- a full
+    // memset per malloc incl. multi-MB textures cost 1fps + audio lag. If
+    // silent deaths return without it, uninit-read dependence is confirmed and
+    // we zero selectively (small objs) instead.
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
     if (EnvOn("HARNESS_MALLOCLOG")) {
