@@ -39,7 +39,7 @@ add_library(guest STATIC
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
 # Bionic-era ARM32, external locking via our bridge mutex).
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
-    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;DEBUG=1")
+    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;DEBUG=1;FOOTERS=1")
 # Corruption hook header (replaces dlmalloc's abort() with an atomic tripwire).
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_OPTIONS
     "-include;${CMAKE_CURRENT_SOURCE_DIR}/src/guest/abr_heap_hook.h")
