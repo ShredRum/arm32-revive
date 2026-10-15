@@ -684,7 +684,8 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
 #ifdef __ANDROID__
     // r0-polarity forensics: log EVERY nativeUpdate return (clean ones
-    // are silent above). Java quits on r0=1; need per-update 0/1.
+    // are silent above). Java quits on r0=0 (smali: if-nez v0 skips EXITING,
+    // so nonzero = continue); need per-update 0/1.
     // Capped (updates are ~30/s idle).
     else if (std::strstr(name, "nativeUpdate")) {
         static int un = 0;
