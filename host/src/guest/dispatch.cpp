@@ -159,27 +159,34 @@ static void DeathHex2(char*& p, std::uint32_t v) {
 }
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // Exact base hit first (common case).
+    // Find the containing live allocation: exact hit, else predecessor
+    // interval, else successor head (dst in a gap returns len unclamped).
+    std::uint32_t base = 0, size = 0;
     auto it = heap_sizes_.find(dst);
-    std::uint32_t base = dst, size = 0;
     if (it != heap_sizes_.end()) {
+        base = dst;
         size = it->second;
     } else {
-        // Interior pointer: containing allocation via ordered upper bound.
-        // (heap_sizes_ is std::map precisely for this.)
         auto jt = heap_sizes_.upper_bound(dst);
-        if (jt == heap_sizes_.begin()) {
-            return len;
+        if (jt != heap_sizes_.begin()) {
+            auto pt = jt;
+            --pt;
+            if ((std::uint64_t)dst - pt->first < pt->second) {
+                base = pt->first;
+                size = pt->second;
+            }
         }
-        --jt;
-        base = jt->first;
-        size = jt->second;
-        if ((std::uint64_t)dst - base >= size) {
-            return len;  // gap/quarantine, not ours
+        if (!size && jt != heap_sizes_.end() && dst >= jt->first &&
+            (std::uint64_t)dst - jt->first < jt->second) {
+            base = jt->first;
+            size = jt->second;
+        }
+        if (!size) {
+            return len;  // gap/quarantine/module: not ours
         }
     }
-    const std::uint64_t end = (std::uint64_t)dst + len;
     const std::uint64_t lim = (std::uint64_t)base + size;
+    const std::uint64_t end = (std::uint64_t)dst + len;
     if (end > lim) {
         static int ocn = 0;
         if (ocn < 10) {
@@ -333,7 +340,8 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
-    heap_sizes_[out] = total < 16 ? 16 : (std::uint32_t)total;
+    const std::uint32_t aligned = (std::uint32_t)(((std::uint64_t)total + 7) & ~std::uint64_t(7));
+    heap_sizes_[out] = aligned < 16 ? 16 : aligned;  // usable, malloc-consistent
     heap_used_ += total;
     return out;
 }
@@ -381,11 +389,10 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
     if (off + size > kHeapSize) {
         // Escaped the arena (should not happen: no backend). Erase the stale
-        // entry so a later free can't double-free into dlmalloc; quarantine
-        // the VA so reuse is still delayed.
+        // entry and LEAK deliberately: the old block is already consumed, and
+        // quarantining it would later mspace_free a moved chunk (double-free).
         std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
         heap_sizes_.erase(addr);
-        quarantine_.push_back({addr, old});
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
@@ -959,6 +966,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 if (wlen > 0) {
                     std::memcpy(H(a0 + dlen), H<const void>(a1), wlen - 1);
                     *H<char>(a0 + dlen + wlen - 1) = '\0';
+                } else if (CheckRange(a0 + dlen, 1, true)) {
+                    *H<char>(a0 + dlen) = '\0';  // zero room: empty string, still terminated
                 }
             } else if (n == "strcpy") {
                 std::strcpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1));
@@ -973,11 +982,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::uint32_t wlen = ClampHeapWrite(a0, a2 + (n == "strncpy" ? 0 : 1),
                                                       n.c_str());
             if (n == "strncpy") {
-                std::strncpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1),
-                             wlen < a2 ? wlen : a2);
+                const std::uint32_t wn = wlen < a2 ? wlen : a2;
+                std::strncpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1), wn);
+                if (wn < a2 && wn > 0) {
+                    H(a0)[wn - 1] = 0;  // truncated: terminate (strncpy wouldn't)
+                }
             } else {
+                if (wlen == 0) {
+                    Ret(regs, a0);  // zero room: skip (strncat would write NUL past end)
+                    return;
+                }
                 std::strncat(reinterpret_cast<char*>(H(a0)), GuestStr(a1),
-                             wlen < a2 + 1 ? (wlen ? wlen - 1 : 0) : a2);
+                             wlen < a2 + 1 ? wlen - 1 : a2);
             }
         }
         Ret(regs, a0);
@@ -1283,7 +1299,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             char conv = fmt[fi++];
             if (conv == 'n') {
                 std::uint32_t dp = suppress ? 0 : next_ptr();
-                if (dp && CheckRange(dp, 4, true)) {
+                // %n writes 4B: route through the firewall (interior dp near
+                // an allocation end would smash neighbor headers).
+                if (dp && ClampHeapWrite(dp, 4, "sscanf-%n") >= 4 && CheckRange(dp, 4, true)) {
                     std::int32_t c = (std::int32_t)ii;
                     std::memcpy(H(dp), &c, 4);
                 }
@@ -1497,49 +1515,49 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         if (len == 4 || (len == 3)) {
                             // guest long = 32-bit: narrow.
                             std::int32_t w32 = is_signed ? (std::int32_t)sv : (std::int32_t)uv;
-                            if (dp && CheckRange(dp, 4, true)) {
+                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &w32, 4);
-                            }
+                                }
                         } else if (len == 1) {
                             std::int8_t w8 =
                                 is_signed ? (std::int8_t)sv : (std::int8_t)(std::uint8_t)uv;
-                            if (dp && CheckRange(dp, 1, true)) {
+                            if (dp && ClampHeapWrite(dp, 1, "sscanf-num") >= 1 && CheckRange(dp, 1, true)) {
                                 std::memcpy(H(dp), &w8, 1);
-                            }
+                                }
                         } else if (len == 2) {
                             std::int16_t w16 =
                                 is_signed ? (std::int16_t)sv : (std::int16_t)(std::uint16_t)uv;
-                            if (dp && CheckRange(dp, 2, true)) {
+                            if (dp && ClampHeapWrite(dp, 2, "sscanf-num") >= 2 && CheckRange(dp, 2, true)) {
                                 std::memcpy(H(dp), &w16, 2);
-                            }
+                                }
                         } else if (len == 0 && !is_signed && conv == 'p') {
                             std::int32_t w32 = (std::int32_t)uv;
-                            if (dp && CheckRange(dp, 4, true)) {
+                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &w32, 4);
-                            }
+                                }
                         } else if (len == 0) {
                             if (is_signed) {
                                 std::int32_t w32 = (std::int32_t)sv;
-                                if (dp && CheckRange(dp, 4, true)) {
+                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &w32, 4);
-                                }
+                                    }
                             } else {
                                 std::uint32_t wu = (std::uint32_t)uv;
-                                if (dp && CheckRange(dp, 4, true)) {
+                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &wu, 4);
-                                }
+                                    }
                             }
                         } else {  // 64-bit (ll/j/z/t): same size both ABIs.
                             if (is_signed) {
                                 long long w64 = sv;
-                                if (dp && CheckRange(dp, 8, true)) {
+                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
-                                }
+                                    }
                             } else {
                                 unsigned long long w64 = uv;
-                                if (dp && CheckRange(dp, 8, true)) {
+                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
-                                }
+                                    }
                             }
                         }
                         assigned++;
@@ -1576,14 +1594,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     if (!suppress) {
                         if (len == 3 || len == 4 || len == 5) {
                             // %lf (guest long double == double, 8B).
-                            if (dp && CheckRange(dp, 8, true)) {
+                            if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
                                 std::memcpy(H(dp), &dv, 8);
-                            }
+                                }
                         } else {
                             float fv = (float)dv;
-                            if (dp && CheckRange(dp, 4, true)) {
+                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &fv, 4);
-                            }
+                                }
                         }
                         assigned++;
                     }
@@ -2564,9 +2582,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // CheckRange above passes short game buffers; clamp the item
             // count to the mapped allocation so ::fread can't smash chunk
             // neighbors (silent host SIGSEGV in dlmalloc metadata).
-            const std::uint32_t wbytes = ClampHeapWrite(a0, (std::uint32_t)a1 * a2, "fread");
+            const std::uint64_t want64 = (std::uint64_t)a1 * a2;
+            const std::uint32_t wbytes =
+                ClampHeapWrite(a0, want64 > 0xFFFFFFFFu ? 0xFFFFFFFFu : (std::uint32_t)want64,
+                               "fread");
             const std::uint32_t wn = a1 ? wbytes / a1 : 0;
             std::size_t got = std::fread(H(a0), a1, wn, f);
+            if (wn < a2) {
+                static int frc = 0;
+                if (frc < 10) {
+                    frc++;
+                    std::printf("[heap] LOUD fread short items=%u want=%u\n", wn, a2);
+                }
+            }
             // TEMP-DIAG (registry ParseError): dump exact bytes read.
             bool regdump = false;
             {
@@ -6961,7 +6989,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     {
                         std::lock_guard<std::recursive_mutex> lock(mutex_);
                         for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-                            if (it->second == (std::uint32_t)len) {
+                            if (it->second == (std::uint32_t)len &&
+                                heap_sizes_.count(it->first)) {
                                 gb = it->first;
                                 array_pool_.erase(it);
                                 break;
