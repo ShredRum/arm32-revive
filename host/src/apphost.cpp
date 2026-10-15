@@ -840,7 +840,8 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Victim-object provenance for the Fox BAD death (logging only,
     // capped; zero behavior change): first mallocs with caller lr,
     // match the crashed r4 against them from the log.
-    setenv("HARNESS_MALLOCLOG", "1", 1);
+    // PERF VARIANT (uncommitted test): MALLOCLOG off for feel comparison.
+    // setenv("HARNESS_MALLOCLOG", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
     setenv("HARNESS_DIAG164", "1", 1);
@@ -872,6 +873,25 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     if (!ZipExtractStored(g_apk, "assets/guestlib/armeabi-v7a/libAngryBirdsRio.so", guest_path)) {
         Log("FATAL: guest extract failed");
         return 0;
+    }
+    // First-launch seeds (root-free fresh installs): extract only what is
+    // missing, never overwrite user state (registry keeps tokens/progress).
+    {
+        const char* seeds[] = {"highscores.lua", "settings.lua", "bi_data.lua", "cacert.pem",
+                               "fusion.registry"};
+        for (const char* s : seeds) {
+            const std::string dst = g_files + "/" + s;
+            FILE* probe = std::fopen(dst.c_str(), "rb");
+            if (probe) {
+                std::fclose(probe);
+                continue;
+            }
+            if (ZipExtractStored(g_apk, std::string("assets/seeds/") + s, dst)) {
+                Log("seeded %s", s);
+            } else {
+                Log("seed MISSING from apk: %s", s);
+            }
+        }
     }
     g_mem = new GuestMemory();
     if (!g_mem->ok()) {

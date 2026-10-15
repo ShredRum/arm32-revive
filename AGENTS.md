@@ -3590,3 +3590,15 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - LUACATCH lab (delivery proven, level parks after) + freelist stay in
   stash (freelist excluded: 20/20 regression). Level-1 work resumes
   from stash after stability holds.
+
+## 129. Self-seeding + perf variant (2026-10-15)
+- Fresh installs died on update#1 (missing highscores.lua -> IOException
+  throw -> spiral -> smash loop, black screen; proven on main device:
+  update#6 r0=45A778 then r0=8 forever). Original survives via real
+  unwinder catch; ours has none.
+- FIX (this commit): APK bundles seeds (assets/seeds/*, STORED) +
+  host extracts missing ones on first launch (never overwrites).
+  Root-free fresh installs now boot. Proven: main device menu reached.
+- PERF VARIANT: MALLOCLOG off (ring dormant). Debug costs ~seconds/boot;
+  ship/user builds run quiet. Stash lab (LUACATCH/diag/luamsg, no
+  freelist) re-applied after tagging for level-1 work.
