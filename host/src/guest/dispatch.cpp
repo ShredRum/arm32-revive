@@ -4171,6 +4171,99 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>((rng_next() >> 17) & 0x7FFFFFFFu));
         return;
     }
+    if (n == "qsort") {
+        // Real sort (was silent no-op stub): host stable_sort over indices,
+        // guest comparator via callback JIT (PvZ re-enter pattern: separate
+        // Jit, lr=halt slot). Atomic commit: guest memory written only on
+        // full success; any comparator/run failure leaves the array untouched.
+        const std::uint32_t base = a0, cnt = a1, sz = a2, compar = a3;
+        if (cnt <= 1 || sz == 0) {
+            Ret(regs, 0);
+            return;
+        }
+        const std::uint64_t total = (std::uint64_t)cnt * sz;
+        if (!base || !compar || total == 0 || total > 0x4000000u ||
+            !CheckRange(base, (std::size_t)total, false)) {
+            goto bad_ptr;
+        }
+        std::vector<std::uint8_t> buf((std::size_t)total);
+        std::memcpy(buf.data(), H(base), (std::size_t)total);
+        std::vector<std::uint32_t> idx((std::size_t)cnt);
+        for (std::uint32_t i = 0; i < cnt; i++) {
+            idx[i] = i;
+        }
+        bool ok = true;
+        std::stable_sort(idx.begin(), idx.end(), [&](std::uint32_t x, std::uint32_t y) {
+            if (!ok) {
+                return false;
+            }
+            std::int32_t r = 0;
+            if (!RunComparator(compar, base + x * sz, base + y * sz, r)) {
+                ok = false;
+                return false;
+            }
+            return r < 0;
+        });
+        if (!ok) {
+            std::printf("[qsort] LOUD comparator failed (%08x n=%u) -- array untouched\n", compar,
+                        cnt);
+            Ret(regs, 0);
+            return;
+        }
+        std::vector<std::uint8_t> out((std::size_t)total);
+        for (std::uint32_t i = 0; i < cnt; i++) {
+            std::memcpy(out.data() + (std::size_t)i * sz, buf.data() + (std::size_t)idx[i] * sz,
+                        sz);
+        }
+        if (!CheckRange(base, (std::size_t)total, true)) {
+            goto bad_ptr;
+        }
+        std::memcpy(H(base), out.data(), (std::size_t)total);
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "bsearch") {
+        // Real binary search (was always-NULL stub): key=a0, base=a1,
+        // nmemb=a2, size=a3, compar on guest stack. Returns element VA or 0.
+        const std::uint32_t key = a0, base = a1, cnt = a2, sz = a3;
+        std::uint32_t compar = 0;
+        if (!CheckRange(regs[13], 4, false)) {
+            goto bad_ptr;
+        }
+        std::memcpy(&compar, H(regs[13]), 4);
+        if (cnt == 0 || sz == 0 || !compar) {
+            Ret(regs, 0);
+            return;
+        }
+        const std::uint64_t total = (std::uint64_t)cnt * sz;
+        if (!base || !key || total == 0 || total > 0x4000000u ||
+            !CheckRange(key, sz, false) || !CheckRange(base, (std::size_t)total, false)) {
+            goto bad_ptr;
+        }
+        std::uint32_t lo = 0, hi = cnt, found = 0;
+        bool ok = true;
+        while (lo < hi && ok) {
+            const std::uint32_t mid = lo + (hi - lo) / 2;
+            std::int32_t r = 0;
+            if (!RunComparator(compar, key, base + mid * sz, r)) {
+                ok = false;
+                break;
+            }
+            if (r < 0) {
+                hi = mid;
+            } else if (r > 0) {
+                lo = mid + 1;
+            } else {
+                found = base + mid * sz;
+                break;
+            }
+        }
+        if (!ok) {
+            std::printf("[qsort] LOUD bsearch comparator failed (%08x) -- NULL\n", compar);
+        }
+        Ret(regs, found);
+        return;
+    }
     {
         // Locked: worker threads share stub_hits_ with main.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -4810,6 +4903,89 @@ std::uint32_t Runtime::GuestTid() {
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
     t_active_jit = jit;
     t_tid = tid;
+}
+
+bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb,
+                            std::int32_t& out) {
+    // Cheap validation first (wild compar = guest bug, not a callback).
+    if (!compar || !IsCodeAddress(compar & ~std::uint32_t(1))) {
+        return false;
+    }
+    CbSlot* slot = nullptr;
+    std::size_t slot_idx = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (cb_slots_.empty()) {
+            cb_slots_.resize(2);
+        }
+        for (std::size_t i = 0; i < cb_slots_.size(); i++) {
+            if (!cb_slots_[i].busy) {
+                slot = &cb_slots_[i];
+                slot_idx = i;
+                slot->busy = true;
+                break;
+            }
+        }
+        if (slot && !slot->jit) {
+            slot->stack = GuestMalloc(0x200000u);
+            if (!slot->stack) {
+                slot->busy = false;
+                return false;
+            }
+            Dynarmic::A32::UserConfig cfg;
+            cfg.callbacks = cb_;
+            cfg.optimizations =
+                std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
+                                                : Dynarmic::no_optimizations;
+            if (std::getenv("HARNESS_FASTMEM")) {
+                cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
+            }
+            static Dynarmic::ExclusiveMonitor cb_mon(8);
+            cfg.global_monitor = &cb_mon;
+            cfg.processor_id = 4 + (unsigned)(slot_idx & 3);
+            slot->jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
+        }
+    }
+    if (!slot) {
+        return false;  // nested comparator storm: caller aborts LOUD
+    }
+    Dynarmic::A32::Jit* jit = slot->jit.get();
+    jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
+    auto& regs = jit->Regs();
+    regs.fill(0);
+    regs[13] = slot->stack + 0x200000u - 8;
+    regs[14] = mod_.halt_va;
+    regs[0] = pa;
+    regs[1] = pb;
+    if (compar & 1u) {
+        std::uint32_t cpsr = jit->Cpsr();
+        jit->SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
+                     std::uint32_t(0x20));
+        regs[15] = compar & ~std::uint32_t(1);
+    } else {
+        std::uint32_t cpsr = jit->Cpsr();
+        jit->SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10));
+        regs[15] = compar;
+    }
+    // Swap ActiveJit so nested thunks route to THIS jit (regs/Ret/cpsr);
+    // restore before returning to the outer Run.
+    Dynarmic::A32::Jit* outer = t_active_jit;
+    t_active_jit = jit;
+    Dynarmic::HaltReason hr = jit->Run();
+    int redirs = 0;
+    while (hr == Dynarmic::HaltReason::UserDefined1 && redirs++ < 4 && ApplyRedirect()) {
+        hr = jit->Run();
+    }
+    t_active_jit = outer;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        slot->busy = false;
+    }
+    if (hr != Dynarmic::HaltReason::UserDefined1) {
+        return false;
+    }
+    out = static_cast<std::int32_t>(regs[0]);
+    return true;
 }
 
 std::uint32_t Runtime::ErrnoSlot() {
@@ -6474,7 +6650,23 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             if (re && rarr) {
                 jsize len = re->GetArrayLength(static_cast<jarray>(rarr));
                 if (!re->ExceptionCheck() && len > 0 && len < 10000000) {
-                    const std::uint32_t gb = GuestMalloc((std::uint32_t)len);
+                    // Pool first (exact len): kills the per-callback orphan
+                    // leak without changing copy semantics (fresh bytes are
+                    // always memcpied in below).
+                    std::uint32_t gb = 0;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
+                            if (it->second == (std::uint32_t)len) {
+                                gb = it->first;
+                                array_pool_.erase(it);
+                                break;
+                            }
+                        }
+                    }
+                    if (!gb) {
+                        gb = GuestMalloc((std::uint32_t)len);
+                    }
                     jbyte* hp = gb ? re->GetByteArrayElements(static_cast<jbyteArray>(rarr),
                                                               nullptr)
                                    : nullptr;
@@ -6564,6 +6756,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                                                  (jint)a3);
                     if (re->ExceptionCheck()) {
                         re->ExceptionClear();
+                    }
+                }
+                // Recycle the guest copy (cap 8; overflow leaks as before).
+                // Only properly-Released buffers: the guest cannot hold them
+                // (it must Release before the next Get on the same array).
+                if (pin.guest_buf && pin.len) {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    if (array_pool_.size() < 8) {
+                        array_pool_.push_back({pin.guest_buf, pin.len});
                     }
                 }
                 Ret(regs, 0);

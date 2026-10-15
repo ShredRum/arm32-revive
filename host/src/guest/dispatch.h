@@ -292,6 +292,21 @@ private:
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<ThreadState>> threads_;
     std::uint32_t next_tid_ = 2;
+    // Callback-JIT pool (PvZ re-enter pattern): host thunks run inside the
+    // outer Jit's Run(), where nested Run() asserts. Guest callbacks (qsort
+    // comparators) run on SEPARATE Jit instances (own stack, lr=halt slot,
+    // loop till halt) with t_active_jit swapped for the duration. 2 slots;
+    // exhaustion (pathological nesting) fails the sort LOUD, array untouched.
+    struct CbSlot {
+        std::unique_ptr<Dynarmic::A32::Jit> jit;
+        std::uint32_t stack = 0;
+        bool busy = false;
+    };
+    std::vector<CbSlot> cb_slots_;
+    // Runs guest compar(pa,pb)->int32 on a callback JIT. Atomic from the
+    // caller's view: false = do not commit anything.
+    bool RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb,
+                       std::int32_t& out);
     std::unordered_map<std::uint32_t, std::uint32_t> errno_slots_;  // tid -> guest slot
     std::uint32_t next_errno_slot_ = 0;  // bump from kGuestDataBase+0x104
 
@@ -334,6 +349,11 @@ private:
         std::uint32_t len = 0;
     };
     std::unordered_map<std::uint32_t, ArrayPin> array_pins_;
+    // Recycled guest copy-buffers (addr,len), exact-len match only. Caps the
+    // per-callback 32KB orphan leak (audio pump): Released buffers return
+    // here instead of leaking; double-pinned overwrites still leak as before
+    // (guest may hold the old pointer -> never reuse unreleased buffers).
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> array_pool_;
 #endif
     std::uint32_t jni_str_next_ = 0;  // bump pointer for interned UTF-8 bytes
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
