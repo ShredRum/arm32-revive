@@ -2476,7 +2476,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            std::size_t got = std::fread(H(a0), a1, a2, f);
+            // Overflow firewall (same class as memcpy): the arena-wide
+            // CheckRange above passes short game buffers; clamp the item
+            // count to the mapped allocation so ::fread can't smash chunk
+            // neighbors (silent host SIGSEGV in dlmalloc metadata).
+            const std::uint32_t wbytes = ClampHeapWrite(a0, (std::uint32_t)a1 * a2, "fread");
+            const std::uint32_t wn = a1 ? wbytes / a1 : 0;
+            std::size_t got = std::fread(H(a0), a1, wn, f);
             // TEMP-DIAG (registry ParseError): dump exact bytes read.
             bool regdump = false;
             {
@@ -2573,7 +2579,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)a1, f);
+                // Same overflow firewall as fread (short line buffer).
+                const std::uint32_t wlen = ClampHeapWrite(a0, a1, "fgets");
+                if (wlen == 0) {
+                    Ret(regs, 0);
+                    return;
+                }
+                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)wlen, f);
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
