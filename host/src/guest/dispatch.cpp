@@ -381,8 +381,13 @@ void Runtime::GuestFree(std::uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const auto& q : quarantine_) {
         if (q.addr == addr) {
-            std::printf("[heap] LOUD double free of quarantined %08x size=%u\n", addr,
-                        q.size);
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] LOUD double free of quarantined %08x size=%u lr=%08x\n", addr,
+                        q.size, lr);
             return;
         }
     }

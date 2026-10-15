@@ -7,6 +7,8 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -85,6 +87,83 @@ void Log(const char* fmt, ...) {
     va_end(ap);
     std::printf("[apphost] %s\n", buf);
     __android_log_print(ANDROID_LOG_INFO, "AngryBirdsRio", "[apphost] %s", buf);
+}
+
+// Death witness (debuggerd is SELinux-muted on this device: native crashes
+// leave no tombstone). Pre-opened fd + alt stack + async-safe-only handler:
+// fault addr + guest regs into files/death.log, then re-raise to die as before.
+static int g_death_fd = -1;
+static void DeathHex(char*& p, std::uint64_t v, int digits) {
+    static const char* H = "0123456789abcdef";
+    for (int i = digits - 1; i >= 0; i--) {
+        *p++ = H[(v >> (i * 4)) & 0xFu];
+    }
+}
+static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
+    char buf[256];
+    char* p = buf;
+    const char* t = "DEATH sig=";
+    while (*t) {
+        *p++ = *t++;
+    }
+    DeathHex(p, (std::uint64_t)sig, 2);
+    const char* t2 = " addr=";
+    while (*t2) {
+        *p++ = *t2++;
+    }
+    DeathHex(p, (std::uint64_t)(info ? info->si_addr : nullptr), 16);
+    if (g_rt) {
+        Dynarmic::A32::Jit* aj = g_rt->ActiveJit();
+        if (aj) {
+            auto& r = aj->Regs();
+            const char* t3 = " pc=";
+            while (*t3) {
+                *p++ = *t3++;
+            }
+            DeathHex(p, r[15], 8);
+            const char* t4 = " lr=";
+            while (*t4) {
+                *p++ = *t4++;
+            }
+            DeathHex(p, r[14], 8);
+            const char* t5 = " sp=";
+            while (*t5) {
+                *p++ = *t5++;
+            }
+            DeathHex(p, r[13], 8);
+            const char* t6 = " r0=";
+            while (*t6) {
+                *p++ = *t6++;
+            }
+            DeathHex(p, r[0], 8);
+        }
+    }
+    *p++ = '\n';
+    if (g_death_fd >= 0) {
+        (void)write(g_death_fd, buf, (std::size_t)(p - buf));
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void InstallDeathWitness(const std::string& dir) {
+    const std::string p = dir + "/death.log";
+    g_death_fd = open(p.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (g_death_fd < 0) {
+        return;
+    }
+    static std::uint8_t altstack[32768];
+    stack_t ss{};
+    ss.ss_sp = altstack;
+    ss.ss_size = sizeof(altstack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, nullptr);
+    struct sigaction sa {};
+    sa.sa_sigaction = DeathHandler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
 }
 
 // Stuck-update watchdog (2026-10-14): a guest-mutex deadlock wedged the
@@ -853,6 +932,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::freopen(logpath.c_str(), "w", stdout);
     std::freopen(logpath.c_str(), "a", stderr);
     setvbuf(stdout, nullptr, _IONBF, 0);
+    InstallDeathWitness(g_files);  // SIGSEGV/SIGABRT/SIGBUS witness (debuggerd is SELinux-muted here)
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
     // Cleanliness test FAILED (2026-10-14): real fail path stalls on
