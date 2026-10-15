@@ -45,6 +45,23 @@ static std::int64_t TimeWarp() {
     return w;
 }
 
+// Cached env flag (perf): getenv() is a linear environ scan; per-malloc /
+// per-free / per-cond-wait calls must not pay it. All HARNESS_* setenv happen
+// once in the boot block before any guest runs (apphost.cpp) and nothing ever
+// unsets them, so read-once caching is semantics-preserving.
+static bool EnvOn(const char* name) {
+    static std::mutex m;
+    static std::unordered_map<std::string, char> cache;
+    std::lock_guard<std::mutex> lock(m);
+    const auto it = cache.find(name);
+    if (it != cache.end()) {
+        return it->second != 0;
+    }
+    const bool v = std::getenv(name) != nullptr;
+    cache.emplace(name, (char)v);
+    return v;
+}
+
 // Real GLES backend instance (created on first gl* import).
 RealGL* Runtime::RealGLBackend() {
     if (!realgl_) {
@@ -124,13 +141,18 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
     // disease test for wall4: game memsets 255B into 144B objects; dense bump
     // packing puts live neighbors in the blast radius, dlmalloc may not).
-    std::uint32_t pad = 0;
-    if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
-        pad = static_cast<std::uint32_t>(std::strtoul(pe, nullptr, 0));
-        if (pad > 4096) {
-            pad = 4096;
+    // Parsed once (getenv per malloc = linear environ scan on the hot path).
+    static std::int64_t mallocpad = -1;
+    if (mallocpad < 0) {
+        mallocpad = 0;
+        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
+            mallocpad = (std::int64_t)std::strtoul(pe, nullptr, 0);
+            if (mallocpad > 4096) {
+                mallocpad = 4096;
+            }
         }
     }
+    const std::uint32_t pad = (std::uint32_t)mallocpad;
     size = (size + 7) & ~std::uint32_t(7);
     if (size == 0) {
         size = 8;
@@ -158,7 +180,7 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     heap_sizes_[out] = size;
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
-    if (std::getenv("HARNESS_MALLOCLOG")) {
+    if (EnvOn("HARNESS_MALLOCLOG")) {
         // ActiveJit (thread-local): worker mallocs get the worker lr.
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
@@ -228,7 +250,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // Bump allocator: intentionally a no-op for bring-up. But record it in
     // the MALLOCLOG ring (victim free-history forensics + double-free
     // detection: size 0xFFFFFFFF = free of unknown). Zero steady-state I/O.
-    if (addr && std::getenv("HARNESS_MALLOCLOG")) {
+    if (addr && EnvOn("HARNESS_MALLOCLOG")) {
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
@@ -1599,7 +1621,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // Joins will hang if reached; the font wall dies long before.
         // NOTE: any value (even empty) counts as set; use env -u to run real
         // worker threads.
-        if (std::getenv("HARNESS_NOWORKER")) {
+        if (EnvOn("HARNESS_NOWORKER")) {
             std::printf("[thread] NOWORKER: skip create start=%08x\n", a2);
             if (a0 && CheckRange(a0, 4, true)) {
                 std::uint32_t zero = 0;
@@ -1916,7 +1938,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         // HARNESS_EXIDXLOG=1: temp-diag (unwinder spiral): log every lookup.
-        if (std::getenv("HARNESS_EXIDXLOG")) {
+        if (EnvOn("HARNESS_EXIDXLOG")) {
             std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
                         FindExidx(a0), regs[7], regs[13], regs[14]);
         }
@@ -1929,7 +1951,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // real frames (0x45AAFB -> 0x45AAC0 -> ...). No guest state touched.
         // Binary: new pcs/handlers/terminate vs same loop. Harness-only.
         std::uint32_t ask_pc = a0;
-        if (std::getenv("HARNESS_SKIPFRAME") && a0 == 0x45A778u) {
+        if (EnvOn("HARNESS_SKIPFRAME") && a0 == 0x45A778u) {
             ask_pc = regs[14] & ~std::uint32_t(1);
             std::printf("[skipframe] pc=0045a778 live-lr=%08x -> answering for %08x\n",
                         regs[14], ask_pc);
@@ -1960,7 +1982,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // true return (BL @0x457FE2 -> 0x457FE6|1) on the first queries
         // and watch whether the walk advances past frame #1.
         // Harness-only diag, never ships.
-        if (std::getenv("HARNESS_R7POKE")) {
+        if (EnvOn("HARNESS_R7POKE")) {
             static int poke_n = 0;
             const std::uint32_t r7v = regs[7];
             if (poke_n < 3 && a0 == 0x45A778u && r7v != 0 && r7v != 0xFFFFFFFFu &&
@@ -2011,7 +2033,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return g;
             }
             if (g == "/etc/hosts") {
-                if (std::getenv("HARNESS_HOSTSHACK")) {
+                if (EnvOn("HARNESS_HOSTSHACK")) {
                     // Synthetic hosts for DNS-hack experiments (no system
                     // change: only this guest path is virtualized).
                     static std::string hackpath;
@@ -2506,7 +2528,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // HARNESS_NONET=1: airplane-faithful — writes to sockets fail
             // (ENETUNREACH); pipes/files are unaffected (local IPC works
             // offline). The TLS stack writes via write(), not send().
-            if (n == "write" && std::getenv("HARNESS_NONET")) {
+            if (n == "write" && EnvOn("HARNESS_NONET")) {
                 struct stat fw {};
                 if (::fstat(hfd, &fw) == 0 && S_ISSOCK(fw.st_mode)) {
                     set_guest_errno(ENETUNREACH);
@@ -2535,7 +2557,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // TLS ClientHello version bump for write() path (the in-module
             // TLS stack uses plain write, not send — same fix as send()).
             // Pattern first (cheap), fstat only on match (not per-write).
-            if (n == "write" && !std::getenv("HARNESS_NOTLSFIX") && a2 >= 11 &&
+            if (n == "write" && !EnvOn("HARNESS_NOTLSFIX") && a2 >= 11 &&
                 CheckRange(a1, 11, true)) {
                 std::uint8_t* q = H(a1);
                 if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
@@ -2647,7 +2669,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // itself SUCCEEDS on device — no network needed to create one;
             // connect()/send()/recv() fail below). Failing socket() outright
             // sent the game down a never-tested path (BAD read @0x1A343C).
-            if (std::getenv("HARNESS_NONET")) {
+            if (EnvOn("HARNESS_NONET")) {
                 std::printf("[netsock]%s NONET: socket layer down (connect/recv will fail)\n",
                             GuestTid() == 1 ? "" : "(T2+)");
             }
@@ -2690,7 +2712,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // HARNESS_PORTMAP=1: rewrite TCP dst port 443 -> 8443 (lets a
             // non-root fake origin serve the game's https:// URLs; the game
             // itself always dials 443).
-            if (std::getenv("HARNESS_PORTMAP") && a2 >= 4 && CheckRange(a1, 4, true)) {
+            if (EnvOn("HARNESS_PORTMAP") && a2 >= 4 && CheckRange(a1, 4, true)) {
                 std::uint8_t* q = H(a1);
                 if (q[0] == 2 /*AF_INET*/ && q[1] == 0 && q[2] == 0x01 && q[3] == 0xBB) {
                     q[2] = 0x20;
@@ -2714,7 +2736,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                 port, cl == 12 ? " (quiet henceforth)" : "");
                 }
             }
-            if (std::getenv("HARNESS_NONET")) {
+            if (EnvOn("HARNESS_NONET")) {
                 // Airplane-faithful: UDP connect() SUCCEEDS on Linux (no
                 // packets sent; only sets the default remote). Only TCP
                 // connect fails (ENETUNREACH). Failing UDP connect sent the
@@ -2881,7 +2903,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // the HOST uplink even under NONET (unfaithful).
             // HARNESS_DNSALLOW=1: punch UDP/53 past NONET (real 8.8.8.8
             // replies for the custom resolver; ordinary userspace traffic).
-            if (std::getenv("HARNESS_NONET")) {
+            if (EnvOn("HARNESS_NONET")) {
                 bool dns53 = false;
                 {
                     int st = 0;
@@ -2905,12 +2927,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 // Queries are swallowed (fake full send, nothing leaves), no
                 // reply ever arrives -> resolver times out instead of taking
                 // the immediate-ENETUNREACH silent-park branch.
-                if (dns53 && std::getenv("HARNESS_DNSHUSH")) {
+                if (dns53 && EnvOn("HARNESS_DNSHUSH")) {
                     std::printf("[netsock] dnshush swallowed %uB [t%u]\n", a2, GuestTid());
                     Ret(regs, a2);
                     return;
                 }
-                bool dnsout = dns53 && std::getenv("HARNESS_DNSALLOW");
+                bool dnsout = dns53 && EnvOn("HARNESS_DNSALLOW");
                 if (!dnsout) {
                     set_guest_errno(ENETUNREACH);
                     Ret(regs, static_cast<std::uint32_t>(-1));
@@ -2924,7 +2946,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // 0301. HARNESS_NOTLSFIX=1 disables (parity experiments).
             // NOTE: needs a server whose policy still allows TLS 1.0;
             // modern CloudFront usually does for old distributions.
-            if (!std::getenv("HARNESS_NOTLSFIX") && a2 >= 11 && CheckRange(a1, 11, true)) {
+            if (!EnvOn("HARNESS_NOTLSFIX") && a2 >= 11 && CheckRange(a1, 11, true)) {
                 std::uint8_t* q = H(a1);
                 if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
                     std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
@@ -3002,13 +3024,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                  addr ? &sl : nullptr);
             if (r < 0) {
                 set_guest_errno(errno);
-                if (std::getenv("HARNESS_POLLDBG")) {
+                if (EnvOn("HARNESS_POLLDBG")) {
                     std::printf("[recv-dbg] %s(gfd %u) r=-1 errno=%d\n", n.c_str(), a0, errno);
                 }
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (r == 0 && std::getenv("HARNESS_POLLDBG")) {
+            if (r == 0 && EnvOn("HARNESS_POLLDBG")) {
                 std::printf("[recv-dbg] %s(gfd %u) r=0 (EOF)\n", n.c_str(), a0);
             }
             // TEMP-DIAG (network bring-up): inbound bytes are the signal
@@ -4387,7 +4409,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         // deadlock on a never-signaled cond (seen at loading: worker waits
         // for main's processing, main polls for worker's message) hangs
         // forever; spurious wakeups let predicates re-check instead.
-        if (!std::getenv("HARNESS_NOCAPWAIT")) {
+        if (!EnvOn("HARNESS_NOCAPWAIT")) {
             struct timespec ts {};
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_sec += 5;
@@ -4406,7 +4428,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             // TEMP-EXP (HARNESS_SPURWAKE=1): report spurious success instead
             // of ETIMEDOUT (POSIX-legal; predicates re-check). Probes whether
             // the waiter proceeds (predicate already true) or re-waits.
-            if (r != 0 && std::getenv("HARNESS_SPURWAKE")) {
+            if (r != 0 && EnvOn("HARNESS_SPURWAKE")) {
                 std::printf("[cond] spurwake c=%08x t=%u (was %d)\n", cond, GuestTid(), r);
                 return 0;
             }
