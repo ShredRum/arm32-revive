@@ -868,6 +868,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
+    // TRIAGE (dlmalloc era): hold quarantine forever (leak like bump, keep
+    // dlmalloc layout). If the silent fclose/free death vanishes, the killer
+    // is mspace_free on pre-smashed headers. Dial back after the verdict.
+    setenv("HARNESS_NORELEASE", "1", 1);
     // PROBE verdict (Fox layout test, 2026-10-16): pad CONFIRMED the cost
     // model, not the theory — fresh-boot OOM at brk=top via
     // __cxa_eh_globals alloc failure (pad 256B x ~4M boot allocs). Fox

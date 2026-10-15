@@ -424,6 +424,13 @@ void Runtime::GuestFree(std::uint32_t addr) {
         std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, size, lr);
         RingPush(tmp);
     }
+    // HARNESS_NORELEASE=1: hold everything in quarantine forever (leak like
+    // bump, keep dlmalloc layout). Triage switch: if the silent death at
+    // fclose/free vanishes with it, the killer is mspace_free detonating
+    // pre-smashed headers (writer hunt continues, game runs meanwhile).
+    if (EnvOn("HARNESS_NORELEASE")) {
+        return;
+    }
     while (quarantine_.size() > kQuarantineCap) {
         const QEnt q0 = quarantine_.front();
         bool clobbered = false;
