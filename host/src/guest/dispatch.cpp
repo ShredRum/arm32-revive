@@ -384,8 +384,14 @@ void Runtime::GuestFree(std::uint32_t addr) {
             break;
         }
     }
-    if (size && CheckRange(addr, size, true)) {
+    // Poison only a validated range: a wild (but map-hit, e.g. post-move
+    // stale) addr must never take a host memset/SIGSEGV with it.
+    const bool range_ok = size > 0 && size < 0x10000000u && CheckRange(addr, size, true);
+    if (range_ok) {
         std::memset(H(addr), kQuarantinePoison, size);
+    } else if (size > 0) {
+        std::printf("[heap] LOUD free with bad range %08x size=%u -- skipped poison\\n", addr,
+                    size);
     }
     quarantine_.push_back({addr, size});
     if (EnvOn("HARNESS_MALLOCLOG")) {
