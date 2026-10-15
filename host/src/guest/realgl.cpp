@@ -757,15 +757,38 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glGetIntegerv" || n == "glGetFloatv" || n == "glGetBooleanv") {
-        // (pname, params): forward; count 4 words max (covers viewport dims).
-        GLint v[4] = {0};
+        // (pname, params): forward with the SPEC count per pname (a 24B-dirent
+        // lesson: the guest passes exact-size buffers; the old always-16B
+        // write smashed neighbors, e.g. the 0x26219C canary slot via a 4B
+        // local_2c at glGetIntegerv(0x8B4D) -> 198 identical deaths).
+        GLint v[16] = {0};
+        int cnt = 1;
+        switch (a0) {
+            case 0x0D3A: cnt = 2; break;  // MAX_VIEWPORT_DIMS
+            case 0x0B70: cnt = 2; break;  // DEPTH_RANGE
+            case 0x846D: cnt = 2; break;  // ALIASED_POINT_SIZE_RANGE
+            case 0x846E: cnt = 2; break;  // ALIASED_LINE_WIDTH_RANGE
+            case 0x0C10: cnt = 4; break;  // SCISSOR_BOX
+            case 0x0BA2: cnt = 4; break;  // VIEWPORT
+            case 0x0C22: cnt = 4; break;  // COLOR_CLEAR_VALUE
+            case 0x0C23: cnt = 4; break;  // COLOR_WRITEMASK
+            default: break;               // scalars: 1 (unknown -> 1 + LOUD)
+        }
         if (n == "glGetIntegerv") {
+            if (a0 == 0x86A3) {
+                // COMPRESSED_TEXTURE_FORMATS: variable count; ask first.
+                GLint nn = 0;
+                glGetIntegerv(0x86A2, &nn);
+                cnt = nn > 0 && nn < 16 ? nn : 0;
+            }
             glGetIntegerv((GLenum)a0, v);
-            if (r->CheckRange(a1, 16, true)) {
-                for (int i = 0; i < 4; i++) {
+            if (r->CheckRange(a1, (std::uint32_t)(cnt * 4), true)) {
+                for (int i = 0; i < cnt; i++) {
                     std::uint32_t w = (std::uint32_t)v[i];
                     std::memcpy(r->H(a1 + (std::uint32_t)(i * 4)), &w, 4);
                 }
+            } else if (cnt > 0) {
+                std::printf("%s(%04x) SMALLBUF need=%d\n", tag, a0, cnt * 4);
             }
             std::printf("%s(%04x) -> %d,%d,%d,%d\n", tag, a0, v[0], v[1], v[2], v[3]);
         } else {
