@@ -6499,7 +6499,23 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     }
                     re->ExceptionClear();
                 } else {
+                    static int glr = 0;
+                    if (glr < 10) {
+                        glr++;
+                        std::printf("[jni] GetElem len/exc refused a1=%08x exc=%d len=%d\n", a1,
+                                    (int)re->ExceptionCheck(), (int)len);
+                    }
                     re->ExceptionClear();
+                }
+            } else {
+                // Real-path refusal reason (was silent fallthrough -> mock
+                // miss -> LOUD halt with no cause). Capped: fires per call
+                // only while triaging (first 10), then silent fallthrough.
+                static int grr = 0;
+                if (grr < 10) {
+                    grr++;
+                    std::printf("[jni] GetElem real-path refused a1=%08x re=%p rarr=%p\n", a1,
+                                (void*)re, rarr);
                 }
             }
         }
