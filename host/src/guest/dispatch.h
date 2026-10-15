@@ -303,6 +303,8 @@ private:
         bool busy = false;
     };
     std::vector<CbSlot> cb_slots_;
+    // Last nested-run halt reason (diagnoses comparator failures).
+    int cb_last_hr_ = -1;
     // Runs guest compar(pa,pb)->int32 on a callback JIT. Atomic from the
     // caller's view: false = do not commit anything.
     bool RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb,

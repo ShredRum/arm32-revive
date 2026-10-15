@@ -4205,8 +4205,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return r < 0;
         });
         if (!ok) {
-            std::printf("[qsort] LOUD comparator failed (%08x n=%u) -- array untouched\n", compar,
-                        cnt);
+            std::printf("[qsort] LOUD comparator failed (%08x n=%u hr=%d) -- array untouched\n",
+                        compar, cnt, cb_last_hr_);
             Ret(regs, 0);
             return;
         }
@@ -4259,7 +4259,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         if (!ok) {
-            std::printf("[qsort] LOUD bsearch comparator failed (%08x) -- NULL\n", compar);
+            std::printf("[qsort] LOUD bsearch comparator failed (%08x hr=%d) -- NULL\n", compar,
+                        cb_last_hr_);
         }
         Ret(regs, found);
         return;
@@ -4909,6 +4910,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
                             std::int32_t& out) {
     // Cheap validation first (wild compar = guest bug, not a callback).
     if (!compar || !IsCodeAddress(compar & ~std::uint32_t(1))) {
+        cb_last_hr_ = -2;  // rejected before first Run
         return false;
     }
     CbSlot* slot = nullptr;
@@ -4947,6 +4949,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
         }
     }
     if (!slot) {
+        cb_last_hr_ = -3;  // pool exhausted
         return false;  // nested comparator storm: caller aborts LOUD
     }
     Dynarmic::A32::Jit* jit = slot->jit.get();
@@ -4981,6 +4984,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         slot->busy = false;
     }
+    cb_last_hr_ = static_cast<int>(hr);
     if (hr != Dynarmic::HaltReason::UserDefined1) {
         return false;
     }
