@@ -197,6 +197,57 @@ static std::uint32_t Stk(Runtime* rt, std::uint32_t sp, int i) {
     return v;
 }
 
+// Bytes per pixel for (format,type); 0 = unknown combo (caller keeps the
+// legacy 1-byte probe then). Packed types are 2B regardless of channels.
+static std::uint64_t PixelBytes(std::uint32_t fmt, std::uint32_t typ) {
+    if (typ == 0x8363u || typ == 0x8034u || typ == 0x8033u) {  // 565/5551/4444
+        return 2;
+    }
+    std::uint64_t ch = 0;
+    switch (fmt) {
+        case 0x1906u:  // ALPHA
+        case 0x1909u:  // LUMINANCE
+            ch = 1;
+            break;
+        case 0x190Au:  // LUMINANCE_ALPHA
+            ch = 2;
+            break;
+        case 0x1907u:  // RGB
+            ch = 3;
+            break;
+        case 0x1908u:  // RGBA
+            ch = 4;
+            break;
+        default:
+            return 0;
+    }
+    switch (typ) {
+        case 0x1401u:  // UNSIGNED_BYTE
+            return ch;
+        case 0x1403u:  // UNSIGNED_SHORT
+            return ch * 2;
+        case 0x1405u:  // UNSIGNED_INT
+        case 0x1406u:  // FLOAT
+            return ch * 4;
+        default:
+            return 0;
+    }
+}
+
+// Index byte size for DrawElements type; 0 = unknown.
+static std::uint64_t IndexSize(std::uint32_t typ) {
+    if (typ == 0x1401u) {
+        return 1;
+    }
+    if (typ == 0x1403u) {
+        return 2;
+    }
+    if (typ == 0x1405u) {
+        return 4;
+    }
+    return 0;
+}
+
 bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std::uint32_t a1,
                     std::uint32_t a2, std::uint32_t a3) {
     if (!Ensure()) {
@@ -492,14 +543,35 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         n == "glGenRenderbuffers" || n == "glDeleteTextures" || n == "glDeleteBuffers" ||
         n == "glDeleteFramebuffers" || n == "glDeleteRenderbuffers") {
         const bool is_del = n[3] == 'D';
-        if (!r->CheckRange(a1, 4 * a0, !is_del)) {
+        // 64-bit multiply (was 32-bit 4*a0: wraps at n~0x40000000 -> 0-byte
+        // check passes -> driver writes past the guest buffer). Cap 1M (game
+        // gens handfuls; wrap/garbage caught) + LOUD instead of smash.
+        const std::uint64_t bytes64 = (std::uint64_t)a0 * 4;
+        if (a0 >= 0x100000u || !r->CheckRange(a1, (std::size_t)bytes64, !is_del)) {
+            if (a0 >= 0x100000u) {
+                std::printf("%s LOUD n=%u rejected\n", tag, a0);
+            }
             r->Ret(regs, 0);
             return true;
         }
-        if (n[5] == 'T') {
+        if (n == "glGenTextures" || n == "glDeleteTextures") {
             is_del ? glDeleteTextures((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenTextures((GLsizei)a0, (GLuint*)r->H(a1));
-        } else if (n[5] == 'B') {
+        } else if (n == "glGenBuffers" || n == "glDeleteBuffers") {
+            // Drop stale duality tracking (else a reused handle makes a later
+            // guest VA read as a VBO offset -> wild pointer/crash).
+            if (is_del) {
+                for (std::uint64_t i = 0; i < a0; i++) {
+                    std::uint32_t hd = 0;
+                    std::memcpy(&hd, r->H(a1 + (std::uint32_t)(i * 4)), 4);
+                    if (hd == array_buf_) {
+                        array_buf_ = 0;
+                    }
+                    if (hd == element_buf_) {
+                        element_buf_ = 0;
+                    }
+                }
+            }
             is_del ? glDeleteBuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (n == "glGenFramebuffers" || n == "glDeleteFramebuffers") {
@@ -534,12 +606,28 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     }
     if (n == "glTexImage2D") {
         // regs: target,level,intfmt,width; stack: height,border,format,type,data.
+        // Bulk range check (was 1 byte: driver reads w*h*bpp past short
+        // buffers -> host SIGSEGV, not a clean guest halt). Short/invalid ->
+        // NULL (black texture) + LOUD instead of death.
         std::uint32_t h = Stk(r, sp, 0), fmt = Stk(r, sp, 2), typ = Stk(r, sp, 3),
                       dat = Stk(r, sp, 4);
-        const void* p = (dat && r->CheckRange(dat, 1, false)) ? (const void*)r->H(dat) : nullptr;
+        const std::uint64_t need = (std::uint64_t)a3 * h * PixelBytes(fmt, typ);
+        const void* p = nullptr;
+        if (dat && need > 0 && need < 0x10000000u &&
+            r->CheckRange(dat, (std::size_t)need, false)) {
+            p = (const void*)r->H(dat);
+        } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
+            p = (const void*)r->H(dat);  // unknown fmt/typ: legacy probe
+        } else if (dat) {
+            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, a3, h, fmt,
+                        typ, (unsigned long long)need);
+        }
         glTexImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLsizei)a3, (GLsizei)h, 0, (GLenum)fmt,
                      (GLenum)typ, p);
-        GLenum e = glGetError();
+        // Don't consume the driver's error queue on the fast path: the game
+        // polls glGetError itself for the ETC->soft-decode fallback, and an
+        // intermediate query eats its signal. Query only for diag.
+        GLenum e = EnvOn("HARNESS_GLDRAWLOG") ? glGetError() : (GLenum)0;
         // TEMP-DIAG: track size by bound texture of active unit.
         if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
             tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
@@ -551,14 +639,27 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     }
     if (n == "glTexSubImage2D") {
         // regs: target,level,xoff,yoff; stack: w,h,format,type,data.
+        // Same bulk-check reasoning as TexImage2D.
         std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2), typ = Stk(r, sp, 3),
                       dat = Stk(r, sp, 4);
-        const void* p = (dat && r->CheckRange(dat, 1, false)) ? (const void*)r->H(dat) : nullptr;
+        const std::uint64_t need = (std::uint64_t)w * h * PixelBytes(fmt, typ);
+        const void* p = nullptr;
+        if (dat && need > 0 && need < 0x10000000u &&
+            r->CheckRange(dat, (std::size_t)need, false)) {
+            p = (const void*)r->H(dat);
+        } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
+            p = (const void*)r->H(dat);
+        } else if (dat) {
+            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, w, h, fmt, typ,
+                        (unsigned long long)need);
+        }
         glTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w, (GLsizei)h,
                         (GLenum)fmt, (GLenum)typ, p);
-        GLenum e = glGetError();
+        // Same error-queue reasoning as TexImage2D (game-owned signal).
+        GLenum e = EnvOn("HARNESS_GLDRAWLOG") ? glGetError() : (GLenum)0;
         // TEMP-DIAG (black frame): checksum the whole upload (capped).
-        {
+        // Gated default-off: per-upload CPU loop + printfs, zero guest effect.
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
             std::uint64_t sum = 0, total = 0;
             if (p && w && h && w < 4096 && h < 4096) {
                 std::uint32_t bpp = (typ == 0x1401u) ? 4 : 2;
@@ -575,7 +676,10 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                         typ, p ? "data" : "NULL", e, (unsigned long long)sum,
                         (unsigned long long)total);
         }
-        std::printf("%s %ux%u fmt=%04x %s err=%04x\n", tag, w, h, fmt, p ? "data" : "NULL", e);
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            std::printf("%s %ux%u fmt=%04x %s err=%04x\n", tag, w, h, fmt, p ? "data" : "NULL",
+                        e);
+        }
         r->Ret(regs, 0);
         return true;
     }
@@ -591,9 +695,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                                                                              : nullptr;
             glCompressedTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLsizei)a3, (GLsizei)h, 0,
                                    (GLsizei)size, p);
-            GLenum e = glGetError();
-            std::printf("%s ifmt=%04x %ux%u %uB %s err=%04x\n", tag, a2, a3, h, size,
-                        p ? "data" : "NULL", e);
+            // Game-owned error signal (ETC fallback); query + print for diag only.
+            if (EnvOn("HARNESS_GLDRAWLOG")) {
+                GLenum e = glGetError();
+                std::printf("%s ifmt=%04x %ux%u %uB %s err=%04x\n", tag, a2, a3, h, size,
+                            p ? "data" : "NULL", e);
+            }
         } else {
             // regs: target,level,xoff,yoff; stack: w,h,format,imageSize,data.
             std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2),
@@ -602,9 +709,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                                                                              : nullptr;
             glCompressedTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w,
                                       (GLsizei)h, (GLenum)fmt, (GLsizei)size, p);
-            GLenum e = glGetError();
-            std::printf("%s %ux%u fmt=%04x %uB %s err=%04x\n", tag, w, h, fmt, size,
-                        p ? "data" : "NULL", e);
+            // Same game-owned-signal reasoning as the Tex branch.
+            if (EnvOn("HARNESS_GLDRAWLOG")) {
+                GLenum e = glGetError();
+                std::printf("%s %ux%u fmt=%04x %uB %s err=%04x\n", tag, w, h, fmt, size,
+                            p ? "data" : "NULL", e);
+            }
         }
         r->Ret(regs, 0);
         return true;
@@ -718,14 +828,28 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             glDrawArrays((GLenum)a0, (GLint)a1, (GLsizei)a2);
         } else {
             // (mode,count,type,indices): all in regs; offset if an element
-            // buffer is bound, guest VA otherwise.
+            // buffer is bound, guest VA otherwise. Bulk index check (was 1
+            // byte: driver reads count*sizeof(type) past short buffers ->
+            // host SIGSEGV). Short -> skip draw + LOUD instead of death.
             const void* p = nullptr;
             if (element_buf_ != 0) {
                 p = (const void*)(std::uintptr_t)a3;
-            } else if (a3 && r->CheckRange(a3, 1, false)) {
-                p = (const void*)r->H(a3);
+            } else if (a3) {
+                const std::uint64_t isz = IndexSize(a2);
+                const std::uint64_t need = (std::uint64_t)(GLsizei)a1 * isz;
+                if (isz > 0 && need < 0x10000000u &&
+                    r->CheckRange(a3, (std::size_t)need, false)) {
+                    p = (const void*)r->H(a3);
+                } else if (isz == 0 && r->CheckRange(a3, 1, false)) {
+                    p = (const void*)r->H(a3);  // unknown type: legacy probe
+                } else {
+                    std::printf("%s SHORTIDX count=%d type=%04x need=%llu\n", tag, (GLsizei)a1,
+                                a2, (unsigned long long)need);
+                }
             }
-            glDrawElements((GLenum)a0, (GLsizei)a1, (GLenum)a2, p);
+            if (p || element_buf_ != 0) {
+                glDrawElements((GLenum)a0, (GLsizei)a1, (GLenum)a2, p);
+            }
         }
         // Per-draw glGetError stalls the GPU pipeline every draw; diag only.
         if (EnvOn("HARNESS_GLDRAWLOG")) {
@@ -737,8 +861,22 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     }
     if (n == "glReadPixels") {
         // (x,y,w,h,format,type,pixels) — x,y,w,h in regs; rest on stack.
+        // Bulk write check (was 1 byte: driver writes w*h*bpp into the guest
+        // buffer -> heap smash past short buffers). Short -> skip (existing
+        // graceful path) + LOUD.
         std::uint32_t fmt = Stk(r, sp, 0), typ = Stk(r, sp, 1), dat = Stk(r, sp, 2);
-        void* p = (dat && r->CheckRange(dat, 1, true)) ? (void*)r->H(dat) : nullptr;
+        const std::uint64_t need =
+            (std::uint64_t)(GLsizei)a2 * (GLsizei)a3 * PixelBytes(fmt, typ);
+        void* p = nullptr;
+        if (dat && need > 0 && need < 0x10000000u &&
+            r->CheckRange(dat, (std::size_t)need, true)) {
+            p = (void*)r->H(dat);
+        } else if (dat && need == 0 && r->CheckRange(dat, 1, true)) {
+            p = (void*)r->H(dat);  // unknown fmt/typ: legacy probe
+        } else if (dat) {
+            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, a2, a3, fmt,
+                        typ, (unsigned long long)need);
+        }
         if (p) {
             glReadPixels((GLint)a0, (GLint)a1, (GLsizei)a2, (GLsizei)a3, (GLenum)fmt, (GLenum)typ,
                           p);
@@ -767,7 +905,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // lesson: the guest passes exact-size buffers; the old always-16B
         // write smashed neighbors, e.g. the 0x26219C canary slot via a 4B
         // local_2c at glGetIntegerv(0x8B4D) -> 198 identical deaths).
-        GLint v[16] = {0};
+        GLint v[64] = {0};
         int cnt = 1;
         switch (a0) {
             case 0x0D3A: cnt = 2; break;  // MAX_VIEWPORT_DIMS
@@ -783,9 +921,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         if (n == "glGetIntegerv") {
             if (a0 == 0x86A3) {
                 // COMPRESSED_TEXTURE_FORMATS: variable count; ask first.
+                // v[] sized 64 with clamped copy (was v[16] with an
+                // unconditional driver query -> host stack smash at nn>16).
                 GLint nn = 0;
                 glGetIntegerv(0x86A2, &nn);
-                cnt = nn > 0 && nn < 16 ? nn : 0;
+                cnt = (nn > 0 && nn < 64) ? nn : 0;
             }
             glGetIntegerv((GLenum)a0, v);
             if (r->CheckRange(a1, (std::uint32_t)(cnt * 4), true)) {
