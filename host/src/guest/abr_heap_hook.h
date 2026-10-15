@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 void AbrHeapCorruptionHook(void);
+void AbrAssertHook(const char* expr, int line);
 
 #ifdef __cplusplus
 }  // extern "C"

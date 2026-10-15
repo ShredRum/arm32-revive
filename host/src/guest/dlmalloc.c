@@ -1452,7 +1452,13 @@ DLMALLOC_EXPORT int mspace_mallopt(int, int);
 #ifdef DEBUG
 #if ABORT_ON_ASSERT_FAILURE
 #undef assert
-#define assert(x) if(!(x)) ABORT
+/* ABR vendor patch: report the failed expression + line through our hook
+   (bare ABORT dies mute). */
+#define assert(x) \
+    if (!(x)) {   \
+        AbrAssertHook(#x, __LINE__); \
+        ABORT;    \
+    }
 #else /* ABORT_ON_ASSERT_FAILURE */
 #include <assert.h>
 #endif /* ABORT_ON_ASSERT_FAILURE */

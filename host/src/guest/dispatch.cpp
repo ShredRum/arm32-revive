@@ -5178,6 +5178,38 @@ std::uint32_t Runtime::GuestTid() {
     return t_tid ? t_tid : 1;
 }
 
+// dlmalloc DEBUG assert reporter: expression + line, async-safe (literals
+// only, raw write). Called from the vendored assert macro, then ABORT.
+extern "C" void AbrAssertHook(const char* expr, int line) {
+    char buf[256];
+    char* p = buf;
+    const char* t = "HEAPASSERT ";
+    while (*t) {
+        *p++ = *t++;
+    }
+    while (expr && *expr && (p - buf) < 200) {
+        *p++ = *expr++;
+    }
+    *p++ = ' ';
+    // line, decimal, no library calls.
+    char nb[12];
+    int nl = 0;
+    int v = line;
+    if (v == 0) {
+        nb[nl++] = '0';
+    } else {
+        while (v > 0 && nl < 11) {
+            nb[nl++] = (char)('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    for (int i = nl - 1; i >= 0; i--) {
+        *p++ = nb[i];
+    }
+    *p++ = '\n';
+    (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
+    g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
+}
 extern "C" void AbrHeapCorruptionHook(void) {
     g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
     char buf[96];
