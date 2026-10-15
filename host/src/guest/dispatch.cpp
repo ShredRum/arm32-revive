@@ -6924,6 +6924,13 @@ void GuestCallbacks::Write(VAddr addr, T v) {
         if (rt_->NoteBad()) {
             std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,
                         sizeof(T), rt_->ActiveJit()->Regs()[15]);
+            // Fox-hunt (2026-10-15): GC mark-store faults need the list owner
+            // (r4), victim object (r6) and marker source (r7) to name the
+            // writer. Capped by NoteBad like the line above.
+            std::printf("[mem] BAD regs lr=%08x r4=%08x r5=%08x r6=%08x r7=%08x\n",
+                        rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[4],
+                        rt_->ActiveJit()->Regs()[5], rt_->ActiveJit()->Regs()[6],
+                        rt_->ActiveJit()->Regs()[7]);
             rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
