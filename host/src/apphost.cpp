@@ -857,7 +857,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
     // TRIAGE stash stays (governor reads last_mgr164_).
-    setenv("HARNESS_WATCHPC", "250ab8", 1);
+    // TEMP-HUNT (Fox writer, 2026-10-15): rank1 static store candidate 0x88650
+    // (str r1,[r0,#688], +3 adj at 0x88640; TLS-adjacent). WatchPC passes
+    // r0=slot base, r1=stored value, lr=caller — exactly the verdict regs.
+    // Revert after the catch.
+    setenv("HARNESS_WATCHPC", "88650", 1);
     // setenv("HARNESS_WPA", "672ea0", 1);  // tick PROVEN, off
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
