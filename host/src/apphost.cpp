@@ -136,6 +136,27 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
                 *p++ = *t6++;
             }
             DeathHex(p, r[0], 8);
+            // Host frame-pointer walk (pure x29-chain reads, async-safe):
+            // names the aborter (dlmalloc vs ART vs terminate) when the
+            // guest pc alone can't. Capped to fit buf.
+            const char* t7 = " host=";
+            while (*t7) {
+                *p++ = *t7++;
+            }
+            {
+                std::uint64_t fp = (std::uint64_t)__builtin_frame_address(0);
+                for (int f = 0; f < 8 && fp >= 0x7000000000ull && (p - buf) < 200; f++) {
+                    const std::uint64_t* fr = (const std::uint64_t*)fp;
+                    std::uint64_t next = fr[0];
+                    std::uint64_t ret = fr[1];
+                    if (next <= fp) {
+                        break;
+                    }
+                    fp = next;
+                    DeathHex(p, ret, 16);
+                    *p++ = ' ';
+                }
+            }
         }
     }
     *p++ = '\n';
