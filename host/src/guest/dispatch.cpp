@@ -32,6 +32,20 @@
 
 namespace abr {
 
+extern "C" {
+typedef void* dl_mspace;
+dl_mspace create_mspace_with_base(void*, size_t, int);
+void* mspace_malloc(dl_mspace, size_t);
+void mspace_free(dl_mspace, void*);
+void* mspace_realloc(dl_mspace, void*, size_t);
+void* mspace_calloc(dl_mspace, size_t, size_t);
+}  // extern "C"
+
+// Quarantine depth: freed blocks held out of reuse (UAF oracle).
+static constexpr std::uint32_t kQuarantineCap = 64;
+static constexpr std::uint8_t kQuarantinePoison = 0xABu;
+
+
 // HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
 // goto bad_ptr initializations inside CallImport).
 static std::int64_t TimeWarp() {
@@ -77,11 +91,11 @@ static int g_regdump_n = 0;
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // HARNESS_HEAPBASE=hex: relocate heap start (address-sensitivity probe).
     if (const char* e = std::getenv("HARNESS_HEAPBASE")) {
-        heap_brk_ = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
+        heap_base_ = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
     }
     // Heap + stacks + trampolines + tables + guest data are all committable.
-    mem_.Map(heap_brk_, kHeapSize, PROT_READ | PROT_WRITE);
-    AddMapping(heap_brk_, kHeapSize, PROT_READ | PROT_WRITE);
+    mem_.Map(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
+    AddMapping(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
     mem_.Map(kStackBase, kStackSize, PROT_READ | PROT_WRITE);
     AddMapping(kStackBase, kStackSize, PROT_READ | PROT_WRITE);
     mem_.Map(kJniTableBase, kJniTableSize, PROT_READ | PROT_WRITE);
@@ -114,6 +128,14 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     jvm_ = kGuestDataBase + 0x2004;
     std::memcpy(H(jvm_), &jvm_table_, 4);
     jni_obj_next_ = kGuestDataBase + 0x3000;  // class/method handle arena
+    // Guest heap: dlmalloc mspace over the fixed arena (no sbrk/mmap escape;
+    // exhaustion returns 0 like before). Bionic-era layout (8B align, chunk
+    // headers, LIFO reuse) instead of dense bump packing.
+    heap_ms_ = create_mspace_with_base(H(heap_base_), kHeapSize, 0);
+    if (!heap_ms_) {
+        std::printf("[heap] LOUD mspace creation failed -- halting\n");
+        stop_step_ = true;
+    }
 }
 
 void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
@@ -180,7 +202,23 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     if (size == 0) {
         size = 8;
     }
-    if (heap_brk_ + size + pad > kHeapBase + kHeapSize) {
+    const std::uint32_t total =
+        size + pad;  // pad kept: MALLOCPAD layout probe stays available
+    void* hp = heap_ms_ ? mspace_malloc(heap_ms_, total) : nullptr;
+    std::uint32_t out = 0;
+    if (hp) {
+        const std::uint64_t off =
+            (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
+        if (off + total <= kHeapSize) {
+            out = heap_base_ + (std::uint32_t)off;
+        } else {
+            // Arena escape (should not happen: no sbrk/mmap backend) --
+            // hand back and fail loud instead of forging a wild VA.
+            mspace_free(heap_ms_, hp);
+            hp = nullptr;
+        }
+    }
+    if (!out) {
         // LOUD OOM (2026-10-14): silent 0 -> guest bad_alloc -> unwind
         // spiral -> stack smash -> death. Capped (sustained-OOM spam).
         static int oomn = 0;
@@ -190,17 +228,16 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
             if (aj) {
                 lr = aj->Regs()[14];
             }
-            std::printf("[heap] OOM #%d size=%u brk=%08x lr=%08x\n", oomn, size, heap_brk_,
-                        lr);
+            std::printf("[heap] OOM #%d size=%u used=%llu lr=%08x\n", oomn, size,
+                        (unsigned long long)heap_used_, lr);
             if (oomn == 1) {
                 DumpEventRing();
             }
         }
         return 0;
     }
-    const std::uint32_t out = heap_brk_;
-    heap_brk_ += size + pad;
     heap_sizes_[out] = size;
+    heap_used_ += size;
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
     if (EnvOn("HARNESS_MALLOCLOG")) {
@@ -214,40 +251,31 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         std::snprintf(tmp, sizeof(tmp), "[malloc] %08x size=%u lr=%08x", out, size, lr);
         RingPush(tmp);
     }
-    // TEMP-DIAG (wall4 overlap): log mallocs landing in the suspect window.
-    if (out >= 0x11654000u && out < 0x11656000u) {
-        std::uint32_t lr = 0;
-        if (jit_) {
-            lr = jit_->Regs()[14];
-        }
-        std::printf("[malloc] %08x size=%u (aligned %u) lr=%08x\n", out, size,
-                    (size + 7) & ~std::uint32_t(7), lr);
-    }
-    // TEMP-DIAG (wall4): exact sizes of the six 0x25E718 objects.
-    if (out == 0x11625A00u || out == 0x1163C640u || out == 0x11655000u || out == 0x1166E020u ||
-        out == 0x11686F20u || out == 0x116A0000u) {
-        std::uint32_t lr = 0, stk0 = 0;
-        if (jit_) {
-            lr = jit_->Regs()[14];
-            std::uint32_t sp = jit_->Regs()[13];
-            if (CheckRange(sp, 4, false)) {
-                std::memcpy(&stk0, H(sp), 4);
-            }
-        }
-        std::printf("[malloc] TARGET %08x size=%u lr=%08x stk0=%08x\n", out, size, lr, stk0);
-    }
     return out;
 }
 
 std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
     const std::uint64_t total = std::uint64_t(n) * size;
-    if (total > 0x10000000u) {
+    if (total == 0 || total > 0x10000000u) {
         return 0;
     }
-    const std::uint32_t out = GuestMalloc(static_cast<std::uint32_t>(total));
-    if (out) {
-        std::memset(H(out), 0, static_cast<std::size_t>(total));
+    // mspace_calloc zeroes itself; keep our size map + telemetry in sync.
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    void* hp = heap_ms_ ? mspace_calloc(heap_ms_, (std::size_t)n, size) : nullptr;
+    if (!hp) {
+        std::printf("[heap] OOM calloc n=%u size=%u used=%llu\n", n, size,
+                    (unsigned long long)heap_used_);
+        return 0;
     }
+    const std::uint64_t off =
+        (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
+    if (off + total > kHeapSize) {
+        mspace_free(heap_ms_, hp);
+        return 0;
+    }
+    const std::uint32_t out = heap_base_ + (std::uint32_t)off;
+    heap_sizes_[out] = (std::uint32_t)total;
+    heap_used_ += total;
     return out;
 }
 
@@ -283,36 +311,124 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         DumpEventRing();
         return 0;
     }
-    const std::uint32_t out = GuestMalloc(size);
-    if (out) {
-        std::memcpy(H(out), H<const void>(addr), old < size ? old : size);
+    // dlmalloc copies min(old,new) itself; migrate our size map + used
+    // counter. Also drop any audio-pool reference: the block may move.
+    void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), size) : nullptr;
+    if (!hp) {
+        return 0;  // old block stays valid (realloc contract), LOUD via OOM path next
+    }
+    const std::uint64_t off =
+        (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
+    if (off + size > kHeapSize) {
+        // Escaped the arena: leak it back is impossible cleanly (realloc
+        // already consumed old); fail LOUD. Should not happen (no backend).
+        std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
+        return 0;
+    }
+    const std::uint32_t out = heap_base_ + (std::uint32_t)off;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        heap_sizes_.erase(addr);
+        heap_sizes_[out] = size;
+        heap_used_ += (std::uint64_t)size > old ? (std::uint64_t)size - old : 0;
+        if ((std::uint64_t)old > size) {
+            heap_used_ -= (std::uint64_t)old - size;
+        }
+        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
+            if (it->first == addr) {
+                array_pool_.erase(it);
+                break;
+            }
+        }
     }
     return out;
 }
 
 void Runtime::GuestFree(std::uint32_t addr) {
-    // Bump allocator: intentionally a no-op for bring-up. But record it in
-    // the MALLOCLOG ring (victim free-history forensics + double-free
-    // detection: size 0xFFFFFFFF = free of unknown). Zero steady-state I/O.
-    if (addr && EnvOn("HARNESS_MALLOCLOG")) {
+    // Real free with quarantine (UAF oracle): the block is poisoned and held
+    // out of reuse for kQuarantineCap frees; on release the poison is
+    // verified -- a clobbered block names a live use-after-free LOUD.
+    // Double-free of a quarantined block is LOUD, not fatal.
+    if (!addr) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const auto& q : quarantine_) {
+        if (q.addr == addr) {
+            std::printf("[heap] LOUD double free of quarantined %08x size=%u\n", addr,
+                        q.size);
+            return;
+        }
+    }
+    auto it = heap_sizes_.find(addr);
+    if (it == heap_sizes_.end()) {
+        if (EnvOn("HARNESS_MALLOCLOG")) {
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            char tmp[64];
+            std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, 0xFFFFFFFFu,
+                          lr);
+            RingPush(tmp);
+        }
+        return;  // free of unknown: ignore (legacy semantics)
+    }
+    const std::uint32_t size = it->second;
+    heap_sizes_.erase(it);
+    // Drop any audio-pool reference (stale reuse would alias).
+    for (auto pit = array_pool_.begin(); pit != array_pool_.end(); ++pit) {
+        if (pit->first == addr) {
+            array_pool_.erase(pit);
+            break;
+        }
+    }
+    if (size && CheckRange(addr, size, true)) {
+        std::memset(H(addr), kQuarantinePoison, size);
+    }
+    quarantine_.push_back({addr, size});
+    if (EnvOn("HARNESS_MALLOCLOG")) {
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
             lr = aj->Regs()[14];
         }
-        std::uint32_t size = 0;
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            auto it = heap_sizes_.find(addr);
-            if (it != heap_sizes_.end()) {
-                size = it->second;
-            } else {
-                size = 0xFFFFFFFFu;
-            }
-        }
         char tmp[64];
         std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, size, lr);
         RingPush(tmp);
+    }
+    while (quarantine_.size() > kQuarantineCap) {
+        const QEnt q0 = quarantine_.front();
+        bool clobbered = false;
+        if (q0.size && CheckRange(q0.addr, q0.size, false)) {
+            const std::uint8_t* bp = H<const std::uint8_t>(q0.addr);
+            for (std::uint32_t i = 0; i < q0.size; i++) {
+                if (bp[i] != kQuarantinePoison) {
+                    clobbered = true;
+                    break;
+                }
+            }
+        }
+        if (clobbered) {
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] LOUD quarantine write (UAF) %08x size=%u lr=%08x\n", q0.addr,
+                        q0.size, lr);
+            DumpEventRing();
+        }
+        if (heap_ms_) {
+            mspace_free(heap_ms_, H(q0.addr));
+        }
+        if (heap_used_ >= q0.size) {
+            heap_used_ -= q0.size;
+        } else {
+            heap_used_ = 0;
+        }
+        quarantine_.erase(quarantine_.begin());
     }
 }
 

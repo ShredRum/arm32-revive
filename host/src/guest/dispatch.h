@@ -43,9 +43,9 @@ public:
     Dynarmic::A32::Jit* jit() { return jit_; }
     void set_jit(Dynarmic::A32::Jit* jit) { jit_ = jit; }
 
-    // Guest heap (bump allocator inside kHeapBase region).
+    // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
-    std::uint32_t HeapTop() { return heap_brk_; }
+    std::uint32_t HeapTop() { return heap_base_ + kHeapSize; }
     std::uint32_t GuestCalloc(std::uint32_t n, std::uint32_t size);
     std::uint32_t GuestRealloc(std::uint32_t addr, std::uint32_t size);
     void GuestFree(std::uint32_t addr);
@@ -264,7 +264,17 @@ private:
     LoadedModule& mod_;
     Dynarmic::A32::Jit* jit_ = nullptr;
     Dynarmic::A32::UserCallbacks* cb_ = nullptr;  // shared callbacks for worker Jits
-    std::uint32_t heap_brk_ = kHeapBase;
+    void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
+    std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
+    std::uint64_t heap_used_ = 0;          // live bytes telemetry (OOM log)
+    // Quarantine: recently-freed blocks held out of reuse (UAF oracle).
+    // Poisoned on free, verified on release to dlmalloc; a clobbered block
+    // names a live use-after-free LOUD instead of corrupting silently.
+    struct QEnt {
+        std::uint32_t addr = 0;
+        std::uint32_t size = 0;
+    };
+    std::vector<QEnt> quarantine_;
     std::uint32_t mmap_next_ = 0x70000000u;
     std::recursive_mutex mutex_;
     std::unordered_map<std::string, std::uint64_t> stub_hits_;
@@ -351,12 +361,11 @@ private:
         std::uint32_t len = 0;
     };
     std::unordered_map<std::uint32_t, ArrayPin> array_pins_;
-    // Recycled guest copy-buffers (addr,len), exact-len match only. Caps the
-    // per-callback 32KB orphan leak (audio pump): Released buffers return
-    // here instead of leaking; double-pinned overwrites still leak as before
-    // (guest may hold the old pointer -> never reuse unreleased buffers).
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> array_pool_;
 #endif
+    // Recycled guest copy-buffers (addr,len), exact-len match only. Declared
+    // outside the ANDROID gate (used by GuestFree/Realloc coherence scans on
+    // all targets; stays empty where real arrays never occur).
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> array_pool_;
     std::uint32_t jni_str_next_ = 0;  // bump pointer for interned UTF-8 bytes
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
     std::uint32_t jvm_ = 0;         // guest VA of JavaVM* (word -> jvm_table_)

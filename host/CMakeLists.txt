@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(AbrHost CXX)
+project(AbrHost C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,12 @@ add_library(guest STATIC
     src/guest/elf_loader.cpp
     src/guest/dispatch.cpp
     src/guest/realgl.cpp
+    src/guest/dlmalloc.c
 )
+# dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
+# Bionic-era ARM32, external locking via our bridge mutex).
+set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
+    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1")
 target_include_directories(guest PUBLIC src)
 target_link_libraries(guest PUBLIC dynarmic z)
 if(NOT ANDROID)
