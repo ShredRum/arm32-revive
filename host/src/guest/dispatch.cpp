@@ -49,7 +49,7 @@ static std::int64_t TimeWarp() {
 // per-free / per-cond-wait calls must not pay it. All HARNESS_* setenv happen
 // once in the boot block before any guest runs (apphost.cpp) and nothing ever
 // unsets them, so read-once caching is semantics-preserving.
-static bool EnvOn(const char* name) {
+bool EnvOn(const char* name) {
     static std::mutex m;
     static std::unordered_map<std::string, char> cache;
     std::lock_guard<std::mutex> lock(m);
@@ -1861,7 +1861,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         // TEMP-DIAG (worker hang): log which fd fires on nonzero returns.
-        if (r > 0) {
+        // Gated default-off (was uncapped: fires on every wake, 100s/boot).
+        if (r > 0 && EnvOn("HARNESS_POLLDBG")) {
             std::string ds;
             for (std::size_t i = 0; i < pfds.size() && i < 8; i++) {
                 std::int32_t gfd = -99;
@@ -1872,7 +1873,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::printf("[poll-event] r=%d %s\n", r, ds.c_str());
         }
-        {
+        // TEMP-DIAG (poll-ret): was an unconditional write(2) per poll —
+        // a raw syscall on the hottest path. Gated default-off.
+        if (EnvOn("HARNESS_POLLDBG")) {
             char b[64];
             int n = std::snprintf(b, sizeof(b), "[poll-ret] %d\n", r);
             (void)write(STDERR_FILENO, b, (std::size_t)(n > 0 ? n : 0));
@@ -3702,9 +3705,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 asset_map_[gbuf] = HostAsset{gbuf, found->usize};
             }
-            std::printf("[asset] open(\"%s\") -> %08x (%llu bytes, %s)\n", want.c_str(), gbuf,
-                        (unsigned long long)found->usize,
-                        found->method == 0 ? "stored" : "deflated");
+            if (EnvOn("HARNESS_FILESLOG")) {
+                std::printf("[asset] open(\"%s\") -> %08x (%llu bytes, %s)\n", want.c_str(),
+                            gbuf, (unsigned long long)found->usize,
+                            found->method == 0 ? "stored" : "deflated");
+            }
             Ret(regs, gbuf);  // handle IS the guest buffer (getBuffer model)
             return;
         }

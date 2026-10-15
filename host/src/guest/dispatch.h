@@ -28,6 +28,11 @@
 
 namespace abr {
 
+// Cached env flag (perf): getenv() is a linear environ scan; hot paths use
+// this instead. Defined in dispatch.cpp; read-once (all HARNESS_* setenv
+// happen once pre-guest, nothing unsets).
+bool EnvOn(const char* name);
+
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);

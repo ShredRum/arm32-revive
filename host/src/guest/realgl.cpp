@@ -659,7 +659,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         glVertexAttribPointer((GLuint)a0, (GLint)a1, (GLenum)a2, (GLboolean)a3, (GLsizei)stride,
                               p);
         // TEMP-DIAG (black frame): dump first vertex for float attribs.
-        if (!array_buf_ && a2 == 0x1406u && p && r->CheckRange(gp, 16, false)) {
+        // Gated default-off (was per-attrib-setup printf).
+        if (!array_buf_ && a2 == 0x1406u && p && EnvOn("HARNESS_GLDRAWLOG") &&
+            r->CheckRange(gp, 16, false)) {
             const float* f = (const float*)p;
             std::printf("%s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", tag, a0, a1,
                         stride, f[0], f[1], f[2], f[3]);
@@ -675,11 +677,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     if (n == "glDrawArrays" || n == "glDrawElements") {
         // TEMP-DIAG (black frame): HARNESS_NOBLEND=1 disables blending to
         // test the alpha-kill hypothesis.
-        if (std::getenv("HARNESS_NOBLEND")) {
+        if (EnvOn("HARNESS_NOBLEND")) {
             glDisable(GL_BLEND);
         }
-        // TEMP-DIAG (black frame): dump real draw state.
-        {
+        // TEMP-DIAG (black frame): dump real draw state. ~10 GL round-trips
+        // + 4 printfs PER DRAW — gated default-off (old investigation).
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
             GLint prog = 0, tex = 0, vp[4] = {0}, blend = 0, scissor = 0, ab0 = 0;
             glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
             glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
@@ -724,8 +727,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             }
             glDrawElements((GLenum)a0, (GLsizei)a1, (GLenum)a2, p);
         }
-        GLenum e = glGetError();
-        std::printf("%s err=%04x\n", tag, e);
+        // Per-draw glGetError stalls the GPU pipeline every draw; diag only.
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            GLenum e = glGetError();
+            std::printf("%s err=%04x\n", tag, e);
+        }
         r->Ret(regs, 0);
         return true;
     }
