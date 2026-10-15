@@ -107,6 +107,18 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
         *p++ = *t++;
     }
     DeathHex(p, (std::uint64_t)sig, 2);
+    // Sender forensics: si_code/si_pid/si_uid tell abort()-in-thread apart
+    // from an external tgkill (SI_TKILL) or ART runtime abort.
+    const char* tc = " code=";
+    while (*tc) {
+        *p++ = *tc++;
+    }
+    DeathHex(p, (std::uint64_t)(info ? info->si_code : 0), 8);
+    const char* tp = " pid=";
+    while (*tp) {
+        *p++ = *tp++;
+    }
+    DeathHex(p, (std::uint64_t)(info ? info->si_pid : 0), 8);
     const char* t2 = " addr=";
     while (*t2) {
         *p++ = *t2++;
