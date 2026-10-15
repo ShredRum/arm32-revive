@@ -259,11 +259,32 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         GuestFree(addr);
         return 0;
     }
-    const std::uint32_t out = GuestMalloc(size);
-    if (out && addr) {
+    // Unknown-addr realloc (heap audit 2026-10-15: all guest callers pass
+    // heap-or-NULL, so a miss degrades to the existing LOUD OOM path, never
+    // silent). Old code copied `size` garbage bytes from an arbitrary address
+    // (wild addr = host SIGSEGV inside the reservation). Fail loud instead.
+    std::uint32_t old = 0;
+    bool known = false;
+    {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        auto it = heap_sizes_.find(addr);
-        std::uint32_t old = (it == heap_sizes_.end()) ? size : it->second;
+        const auto it = heap_sizes_.find(addr);
+        if (it != heap_sizes_.end()) {
+            old = it->second;
+            known = true;
+        }
+    }
+    if (!known) {
+        std::uint32_t lr = 0;
+        Dynarmic::A32::Jit* aj = ActiveJit();
+        if (aj) {
+            lr = aj->Regs()[14];
+        }
+        std::printf("[heap] LOUD realloc unknown addr=%08x size=%u lr=%08x\n", addr, size, lr);
+        DumpEventRing();
+        return 0;
+    }
+    const std::uint32_t out = GuestMalloc(size);
+    if (out) {
         std::memcpy(H(out), H<const void>(addr), old < size ? old : size);
     }
     return out;
@@ -488,29 +509,41 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     // Throttled per import to avoid spam from tight loops. HARNESS_CALLMAX=N:
     // also log the first N *total* import calls (first retry cycle anatomy).
     {
-        // Locked: worker threads share stub_hits_/call_total with main.
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        std::uint64_t& h = stub_hits_["#trace:" + mod_.imports[idx].name];
-        static std::uint64_t callmax = 0;
-        static bool callmax_init = false;
-        if (!callmax_init) {
-            callmax_init = true;
-            if (const char* e = std::getenv("HARNESS_CALLMAX")) {
-                callmax = static_cast<std::uint64_t>(std::strtoul(e, nullptr, 10));
+        // Locked briefly: worker threads share stub_hits_/call_total.
+        // Printf + string formatting happen OUTSIDE the lock (was per-import
+        // global-lock + string alloc + map probe on every call, print itself
+        // only 3x per import).
+        std::uint64_t h = 0, total = 0, cm = 0;
+        bool lineal = false;
+        std::string iname;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            h = ++stub_hits_["#trace:" + mod_.imports[idx].name];
+            static std::uint64_t callmax = 0;
+            static bool callmax_init = false;
+            if (!callmax_init) {
+                callmax_init = true;
+                if (const char* e = std::getenv("HARNESS_CALLMAX")) {
+                    callmax = static_cast<std::uint64_t>(std::strtoul(e, nullptr, 10));
+                }
             }
+            static std::uint64_t call_total = 0;
+            // HARNESS_THREADLOG=1 keeps worker-thread logs; default main only.
+            static bool threadlog = EnvOn("HARNESS_THREADLOG");
+            lineal = (GuestTid() == 1) || threadlog;
+            total = call_total++;
+            cm = callmax;
+            iname = mod_.imports[idx].name;
         }
-        static std::uint64_t call_total = 0;
-        // HARNESS_THREADLOG=1 keeps worker-thread logs; default main only.
-        static bool threadlog = std::getenv("HARNESS_THREADLOG") != nullptr;
-        const bool lineal = (GuestTid() == 1) || threadlog;
-        if ((++h <= 3 || call_total < callmax) && lineal) {
+        if ((h <= 3 || total < cm) && lineal) {
             std::printf("[call][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
-                        GuestTid() == 1 ? "" : "(T2+)", mod_.imports[idx].name.c_str(), regs[0],
-                        regs[1], regs[2], regs[3], regs[14]);
+                        GuestTid() == 1 ? "" : "(T2+)", iname.c_str(), regs[0], regs[1],
+                        regs[2], regs[3], regs[14]);
         }
         // HARNESS_LASTSVC=1: remember each worker's current import (parked-
         // SVC triage for stuck workers; read by ThreadCensus).
         {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
             last_svc_idx_ = idx;
             last_svc_tid_ = GuestTid();
             static int lsen = -1;
@@ -552,7 +585,6 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
                 }
             }
         }
-        call_total++;
     }
     CallImport(idx, regs);
 }
