@@ -407,6 +407,19 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     // dlmalloc copies min(old,new) itself; migrate our size map + used
     // counter. Also drop any audio-pool reference: the block may move.
     // Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
+    // Pre-dump chunk header zone (writers smash here; names the content).
+    {
+        static int rhd = 0;
+        if (rhd < 30 && addr >= 32 && CheckRange(addr - 32, 32, false)) {
+            rhd++;
+            const std::uint8_t* hp = H<const std::uint8_t>(addr - 32);
+            std::printf("[realloc] pre %08x:", addr);
+            for (int i = 0; i < 32; i++) {
+                std::printf(" %02x", hp[i]);
+            }
+            std::printf("\n");
+        }
+    }
     const std::uint32_t rtotal = size + PadGlobal();
     void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), rtotal) : nullptr;
     if (!hp) {
