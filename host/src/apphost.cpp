@@ -1036,6 +1036,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
+    // TRIAGE (2026-10-16): MALLOCPAD=32 (not 256: affordable 32B x N allocs).
+    // Death signature says sub-chunk string garbage in heap metadata
+    // (fault addr holds 'yr' string bytes; Fox links held string pointers).
+    // If small slack stops the deaths, the writer is a few-bytes string OOB
+    // (Lua interning during loading), not a bulk writer.
+    setenv("HARNESS_MALLOCPAD", "32", 1);
     // TRIAGE done (2026-10-16, AFK autopsy): NORELEASE retired -- quarantine
     // releases normally again (delay-only, cap 64). NORELEASE leaked to 947MB
     // -> thread-stack OOM -> wild thread -> SIGSEGV. Silent deaths were never

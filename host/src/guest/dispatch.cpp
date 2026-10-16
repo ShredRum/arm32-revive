@@ -243,6 +243,21 @@ bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool
     return false;
 }
 
+static std::uint32_t PadGlobal() {
+    // Parsed once (getenv per call = linear environ scan on hot paths).
+    static std::int64_t v = -1;
+    if (v < 0) {
+        v = 0;
+        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
+            v = (std::int64_t)std::strtoul(pe, nullptr, 0);
+            if (v > 4096) {
+                v = 4096;
+            }
+        }
+    }
+    return (std::uint32_t)v;
+}
+
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
@@ -299,7 +314,11 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         return 0;
     }
     try {
-        heap_sizes_[out] = size < 16 ? 16 : size;  // usable (min-chunk slack legal)
+        // Map holds size+pad (usable incl. slack): the pad zone must read as
+        // ours or the firewall strangles the very slack MALLOCPAD provides.
+        const std::uint32_t usable = size + pad;
+        heap_sizes_[out] = usable < 16 ? 16 : usable;
+        heap_used_ += total;
     } catch (...) {
         // Host-side OOM on bookkeeping (not guest OOM): hand the block back,
         // fail like OOM. Otherwise a std::bad_alloc would escape through the
@@ -307,7 +326,6 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         mspace_free(heap_ms_, hp);
         return 0;
     }
-    heap_used_ += size;
     // NOTE (2026-10-16): blanket zero-fill REMOVED (was memset here) -- a full
     // memset per malloc incl. multi-MB textures cost 1fps + audio lag. If
     // silent deaths return without it, uninit-read dependence is confirmed and
@@ -389,13 +407,14 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     // dlmalloc copies min(old,new) itself; migrate our size map + used
     // counter. Also drop any audio-pool reference: the block may move.
     // Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
-    void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), size) : nullptr;
+    const std::uint32_t rtotal = size + PadGlobal();
+    void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), rtotal) : nullptr;
     if (!hp) {
         return 0;  // old block stays valid (realloc contract), LOUD via OOM path next
     }
     const std::uint64_t off =
         (std::uint64_t)(static_cast<std::uint8_t*>(hp) - H(heap_base_));
-    if (off + size > kHeapSize) {
+    if (off + rtotal > kHeapSize) {
         // Escaped the arena (should not happen: no backend). Erase the stale
         // entry and LEAK deliberately: the old block is already consumed, and
         // quarantining it would later mspace_free a moved chunk (double-free).
@@ -406,10 +425,10 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
     {
         heap_sizes_.erase(addr);
-        heap_sizes_[out] = size < 16 ? 16 : size;
-        heap_used_ += (std::uint64_t)size > old ? (std::uint64_t)size - old : 0;
-        if ((std::uint64_t)old > size) {
-            heap_used_ -= (std::uint64_t)old - size;
+        heap_sizes_[out] = rtotal < 16 ? 16 : rtotal;
+        heap_used_ += (std::uint64_t)rtotal > old ? (std::uint64_t)rtotal - old : 0;
+        if ((std::uint64_t)old > rtotal) {
+            heap_used_ -= (std::uint64_t)old - rtotal;
         }
         for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
             if (it->first == addr) {
