@@ -852,6 +852,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "strdup" || n == "strndup") {
         const char* s = GuestStr(a0);
+        // Triage (2026-10-16): log WHAT gets strdup'd (names the subsystem:
+        // Lua chunknames start with @, cert names, filenames). Capped 20.
+        {
+            static int sdn = 0;
+            if (sdn < 20) {
+                sdn++;
+                std::printf("[strdup] %08x \"%.48s\"\n", a0, s ? s : "?");
+            }
+        }
         std::size_t len = std::strlen(s);
         if (n == "strndup" && a1 < len) {
             len = a1;
