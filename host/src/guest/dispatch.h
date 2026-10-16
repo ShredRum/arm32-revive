@@ -68,6 +68,10 @@ public:
     // AbrHeapCorruptionHook). Polled by the watchdog.
     unsigned HeapCorruptionCount();
     std::uint32_t HeapCorruptionPc();
+    // HUNT watch (HARNESS_HEAPWATCH): true = write lands outside every live
+    // heap allocation (overflow); quarantined = UAF write. LOUD capped.
+    // Runs on EVERY guest store when fastmem is off: hunt-only cost.
+    bool HeapWatchViolation(std::uint32_t addr, std::size_t size);
     // Overflow firewall (dlmalloc era): bulk writes past a live chunk smash
     // dlmalloc headers -> host SIGSEGV with no witness. Exact-base writes
     // are clamped to the mapped size + LOUD (capped); interior-pointer

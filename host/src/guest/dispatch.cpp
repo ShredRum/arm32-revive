@@ -5283,6 +5283,66 @@ unsigned Runtime::HeapCorruptionCount() {
     return g_heap_corrupt_n.load(std::memory_order_relaxed);
 }
 
+bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
+    // Cheap prefilter (no lock): outside the heap arena entirely.
+    const std::uint64_t a = addr;
+    if (a < heap_base_ || a + size > (std::uint64_t)heap_base_ + kHeapSize) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = heap_sizes_.find(addr);
+    if (it != heap_sizes_.end() && size <= it->second) {
+        return false;
+    }
+    if (it == heap_sizes_.end()) {
+        auto jt = heap_sizes_.upper_bound(addr);
+        bool ok = false;
+        if (jt != heap_sizes_.begin()) {
+            auto pt = jt;
+            --pt;
+            ok = (a - pt->first < pt->second) &&
+                 (a + size <= (std::uint64_t)pt->first + pt->second);
+        }
+        if (!ok && jt != heap_sizes_.end() && a >= jt->first) {
+            ok = (a - jt->first < jt->second) &&
+                 (a + size <= (std::uint64_t)jt->first + jt->second);
+        }
+        if (ok) {
+            return false;
+        }
+    }
+    // Quarantined (freed, held)? Distinct verdict: UAF write.
+    for (const auto& q : quarantine_) {
+        if (a >= q.addr && a + size <= (std::uint64_t)q.addr + q.size) {
+            static int qn = 0;
+            if (qn < 30) {
+                qn++;
+                std::printf("[heapwatch] UAF-WRITE addr=%08x size=%zu q=%08x+%u\n", addr, size,
+                            q.addr, q.size);
+            }
+            return true;
+        }
+    }
+    {
+        static int wn = 0;
+        if (wn < 30) {
+            wn++;
+            std::uint32_t lr = 0;
+            Dynarmic::A32::Jit* aj = ActiveJit();
+            if (aj) {
+                lr = aj->Regs()[14];
+            }
+            std::uint32_t pc = 0;
+            if (aj) {
+                pc = aj->Regs()[15];
+            }
+            std::printf("[heapwatch] WILD-WRITE addr=%08x size=%zu pc=%08x lr=%08x\n", addr, size,
+                        pc, lr);
+        }
+    }
+    return true;
+}
+
 std::uint32_t Runtime::HeapCorruptionPc() {
     return g_heap_corrupt_pc.load(std::memory_order_relaxed);
 }
@@ -7574,6 +7634,17 @@ void GuestCallbacks::Write(VAddr addr, T v) {
     if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
         std::printf("[wpa-w] write to %08x = %08x guest-pc=%08x\n", addr,
                     static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
+    }
+    // HUNT watch: every legal guest store checked against live heap.
+    // Static tristate (no EnvOn mutex on this path: millions of stores).
+    {
+        static int hwen = -1;
+        if (hwen < 0) {
+            hwen = std::getenv("HARNESS_HEAPWATCH") ? 1 : 0;
+        }
+        if (hwen) {
+            rt_->HeapWatchViolation(addr, sizeof(T));
+        }
     }
     if (g_sess_watch != 0 && addr == g_sess_watch) {
         std::printf("[sesswatch-w] t=%u write to %08x = %08x guest-pc=%08x\n", t_tid, addr,

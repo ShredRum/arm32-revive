@@ -1036,6 +1036,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
+    // HUNT (2026-10-16, ONE attempt): fastmem OFF + heap-write watch.
+    // Every guest store goes through callbacks (slow, ~10x); any write into
+    // the heap arena outside a live allocation (or into quarantine) logs LOUD
+    // with pc. This names the direct-store writer in a single session.
+    // setenv("HARNESS_FASTMEM", "1", 1);
+    setenv("HARNESS_HEAPWATCH", "1", 1);
     // TRIAGE (2026-10-16): MALLOCPAD=32 (not 256: affordable 32B x N allocs).
     // Death signature says sub-chunk string garbage in heap metadata
     // (fault addr holds 'yr' string bytes; Fox links held string pointers).
