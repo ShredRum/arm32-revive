@@ -896,7 +896,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                 std::memcpy(r->H(out), s, L + 1);
             }
         }
-        std::printf("%s(%04x) -> \"%s\"\n", tag, a0, s ? s : "(null)");
+        if (DiagOn()) {
+            std::printf("%s(%04x) -> \"%s\"\n", tag, a0, s ? s : "(null)");
+        }
         r->Ret(regs, out);
         return true;
     }
@@ -936,7 +938,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             } else if (cnt > 0) {
                 std::printf("%s(%04x) SMALLBUF need=%d\n", tag, a0, cnt * 4);
             }
-            std::printf("%s(%04x) -> %d,%d,%d,%d\n", tag, a0, v[0], v[1], v[2], v[3]);
+            if (DiagOn()) {
+                std::printf("%s(%04x) -> %d,%d,%d,%d\n", tag, a0, v[0], v[1], v[2], v[3]);
+            }
         } else {
             std::printf("%s UNHANDLED -> fake\n", tag);
             return false;

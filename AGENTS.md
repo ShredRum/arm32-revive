@@ -3678,3 +3678,62 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   one HARNESS_DIAG (default off), firewall off by default (try), fix the
   DEBUG=0 define, leave work/ alone for now. NOTE: RETSUCC and SPURWAKE are
   BEHAVIOR crutches, not diagnostics -- not part of the cleanup.
+
+## 132. Batch A+B: ONE HARNESS_DIAG switch, hot-path log junk gated (2026-10-17)
+- SWITCH: `DiagOn()` (decl dispatch.h:37, def dispatch.cpp:111) is the single
+  runtime gate for the diagnostic layer (pc probes, WATCHPC hook, per-call /
+  per-frame traces, hot-path logs). Explicit truthiness: "", "-", "0", "off",
+  "false" = OFF; anything else ON. `EnvOn()` is orthogonal (presence-based) and
+  was rewritten lock-free/allocation-free: a fixed 64-entry table keyed by the
+  literal POINTER (all 19 call sites pass string literals -- verified).
+- BOOT: `DiagBootWanted()` (apphost.cpp) reads HARNESS_DIAG from the REAL env
+  OR from files/abflags.txt (the abflags overrides are applied AFTER the
+  shipping defaults, so an env-only check would miss them). When on it arms the
+  whole layer (PROBE2/3, PROBE_N, RDUMP, WATCHPC, PROBE4, LASTSVC, THREADLOG,
+  DIAG164) and setenv HARNESS_DIAG=1 so DiagOn() agrees. `flags:` now prints
+  `diag=` and `jitopt=`.
+- **FINDING (behaviour, kept UNCONDITIONAL):** `HARNESS_PROBE=1a410c,fill` is
+  NOT a diagnostic -- `,fill` makes the host write "{}" into the guest's empty
+  JSON SSO slot at 0x1A410C (dispatch.cpp ~8001) so the parser proceeds with
+  defaults instead of throwing Unexpected EOF. It joins RETSUCC/FASTMEM/
+  SPURWAKE/REALGL on the always-on list. Side effect: PROBE_N moved into the
+  diag block, but ProbeDump's default cap is 8 (dispatch.cpp:9756) => quieter.
+- GATED (observe-only; the real work always stays outside the gate): A1 WATCHPC,
+  A2 [rate], A3 [netsock] (per-call socket/connect/inet_*/family trace),
+  A4 [memset] cap, A5 [env]/[stub] fallback, A6 realgl per-call logs incl. the
+  per-frame glGetString/glGetIntegerv, A7 [files] fopen/open/opendir, A8
+  nativeUpdate r0-log, B1 OnSvc "#trace:"+name string+map+mutex, B2 CallJni
+  trace, B5 uniqcall, B7 read/write pipelog (+per-I/O fstat), B11
+  PreCodeTranslationHook getenv -> cached statics, B13 fallback stub; plus
+  [poll] (+per-poll fstat), [prop], [sscanf], TLS ClientHello prints, [thread]
+  / thread-enter, [input], the ~14 [jni] mock prints, [mutex] OWNER-CHANGE (the
+  owner map itself stays maintained -- MutexOwnersDump feeds the watchdog).
+- NOT touched (deliberate): B4/B6/B8/B9 (per-call strstr/mutex/vector outside
+  the diagnostic layer), B10, C/D/E batches. ENV QUIRK: `HARNESS_SAFEOPTS` is
+  still nowhere set => JIT stays no_optimizations (batch C1, next).
+- NATIVE: harness 54/54, svc=948 halts=53 (unchanged).
+- DEVICE (md5 8944570291353735945e317f8b8bb121 local == installed): mid-pass
+  build soak 5.5 min, pid 2833 unchanged, flags `diag=off jitopt=none`,
+  HEAPCORRUPT 0 / HEAPASSERT 0 (grep them SEPARATELY -- Termux grep does not
+  honour `\\|` alternation, so a combined pattern silently returns 0),
+  death.log EMPTY (0 B), no new tombstone (newest 16:41 pre-fix) -- **log
+  11.3 MB -> 117,856 B (~98x)**; final build smoke 3 min: pid 3528 unchanged,
+  87,711 B, same flags, HEAPCORRUPT/HEAPASSERT 0, death.log empty. The 3 `LOUD`
+  lines are `[unwind] nesting 513 deep at pc=0045a778 -- halting`, which also
+  appear in the pre-existing stable logs (work/stab1..3.log: 1 each) => not a
+  regression. SCREENSHOT at the end of the soak shows the real game past the
+  menu: **"LEVEL CLEARED!", 66900 points, "New Highscore!"** => level 1 is
+  completable with the diagnostic layer OFF (the user was playing in parallel).
+- **FINDING (heap, batch D, NOT shipped as a change yet):** `[heap] CHUNKD`
+  (48 lines = 12 dumps, cap 12) is NOT corruption -- it is a FALSE POSITIVE of
+  the quarantine-release header test, `(head & 3) != 3`, at dispatch.cpp:677.
+  This dlmalloc has PINUSE_BIT=1, CINUSE_BIT=2 (dlmalloc.c:2261) and `set_inuse`
+  only ORs CINUSE while PRESERVING PINUSE, so a legitimate in-use chunk whose
+  PREDECESSOR is free has `head & 3 == 2` and trips the test. Verified from the
+  dumps: all 12 have `head & 3 == 2`, `csize % 8 == 0`, `csize == sz + 8`
+  (e.g. sz=32 head=0x2a csize=40) => coherent chunks, no smear; the dump text is
+  live data (`()Landroid/app/Activity;`). Consequence: those blocks are LEAKED
+  (mspace_free skipped) instead of recycled, and CHUNKD cannot be read as a
+  corruption signal. Correct test: `(head & CINUSE_BIT) == 0`. One-line fix,
+  but it is a BEHAVIOUR change (blocks get freed again) => own run; queued as
+  PLAN.md D0.

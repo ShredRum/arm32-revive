@@ -529,7 +529,9 @@ std::shared_ptr<HostThread> Enter() {
         g_threads[me] = st;
     }
     g_rt->ThreadEnter(st->jit, tid);
-    Log("thread enter tid=%u stack=%08x attached=%d", (unsigned)tid, st->stack, env ? 1 : 0);
+    if (DiagOn()) {
+        Log("thread enter tid=%u stack=%08x attached=%d", (unsigned)tid, st->stack, env ? 1 : 0);
+    }
     return st;
 }
 
@@ -541,9 +543,11 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
     // RATE telemetry (2026-10-14, tap-freeze triage): uncapped entry stamp
     // for the 3 frame-path methods. Answers pump-alive vs pump-dead without
-    // taps. Observe-only (no guest state touched).
-    if (std::strstr(name, "nativeUpdate") || std::strstr(name, "nativeRender") ||
-        std::strstr(name, "nativeInput")) {
+    // taps. Observe-only (no guest state touched). Diagnostic layer: only
+    // under HARNESS_DIAG (stdout is unbuffered, so this is a write() syscall
+    // per frame otherwise -- PLAN.md A2).
+    if (DiagOn() && (std::strstr(name, "nativeUpdate") || std::strstr(name, "nativeRender") ||
+                     std::strstr(name, "nativeInput"))) {
         struct timespec rts {};
         ::clock_gettime(CLOCK_MONOTONIC, &rts);
         const long long rms = (long long)rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
@@ -870,7 +874,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     // Input-stream forensics (PLAY button animates but never fires):
     // log every nativeInput action + coords (capped). words[2]=action,
     // [3]=x-bits, [4]=y-bits (IJNI: env,thiz,action,x,y,?).
-    if (std::strstr(name, "nativeInput") && words.size() >= 5) {
+    if (DiagOn() && std::strstr(name, "nativeInput") && words.size() >= 5) {
         static int in_n = 0;
         if (in_n < 60) {
             float xf = 0, yf = 0;
@@ -890,7 +894,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     // are silent above). Java quits on r0=0 (smali: if-nez v0 skips EXITING,
     // so nonzero = continue); need per-update 0/1.
     // Capped (updates are ~30/s idle).
-    else if (std::strstr(name, "nativeUpdate")) {
+    else if (DiagOn() && std::strstr(name, "nativeUpdate")) {
         static int un = 0;
         if (un < 400) {
             Log("%s r0=%08x", name, regs[0]);
@@ -1002,12 +1006,14 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     {
         static std::unordered_set<std::string> seen;
         static std::mutex smu;
-        std::lock_guard<std::mutex> l(smu);
-        if (seen.insert(name).second) {
-            Log("uniqcall %s", name);
+        if (DiagOn()) {
+            std::lock_guard<std::mutex> l(smu);
+            if (seen.insert(name).second) {
+                Log("uniqcall %s", name);
+            }
         }
     }
-    if (calln < 400) {  // device runs long; 40 hid continuation (§94)
+    if (DiagOn() && calln < 400) {  // device runs long; 40 hid continuation (§94)
 #else
     if (calln < 40) {
 #endif
@@ -1034,6 +1040,47 @@ void* RealEnvForThread() {
 }
 }  // namespace
 
+// HARNESS_DIAG is also honoured from files/abflags.txt, which has NOT been
+// parsed yet at this point (shipping defaults are set first, then abflags
+// overrides them). Read just that key directly: one small file read per boot.
+static bool DiagBootWanted(const std::string& files_dir) {
+    if (const char* e = std::getenv("HARNESS_DIAG")) {
+        if (e[0] && std::strcmp(e, "-") != 0 && std::strcmp(e, "0") != 0 &&
+            std::strcmp(e, "off") != 0 && std::strcmp(e, "false") != 0) {
+            return true;
+        }
+    }
+    const std::string fp = files_dir + "/abflags.txt";
+    FILE* ff = std::fopen(fp.c_str(), "r");
+    if (!ff) {
+        return false;
+    }
+    bool on = false;
+    char line[256];
+    while (std::fgets(line, sizeof(line), ff)) {
+        char* nl = std::strchr(line, '\n');
+        if (nl) {
+            *nl = 0;
+        }
+        if (!line[0] || line[0] == '#') {
+            continue;
+        }
+        char* eq = std::strchr(line, '=');
+        if (!eq) {
+            continue;
+        }
+        *eq = 0;
+        const char* v = eq + 1;
+        if (std::strcmp(line, "HARNESS_DIAG") == 0 && v[0] && std::strcmp(v, "-") != 0 &&
+            std::strcmp(v, "0") != 0 && std::strcmp(v, "off") != 0 &&
+            std::strcmp(v, "false") != 0) {
+            on = true;
+        }
+    }
+    std::fclose(ff);
+    return on;
+}
+
 extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_vm = vm;
     GuestCallbacks::g_real_env_hook = RealEnvForThread;
@@ -1052,11 +1099,26 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Cleanliness test FAILED (2026-10-14): real fail path stalls on
     // Fox (no catch/delivery without canned success). RETSUCC re-armed.
     setenv("HARNESS_RETSUCC", "1", 1);
+    // NOT a diagnostic: the ",fill" suffix makes the host write "{}" into the
+    // guest's empty JSON SSO slot at 0x1A410C (dispatch.cpp ~8001), so the
+    // parser proceeds with defaults instead of throwing Unexpected EOF. It is
+    // a behaviour crutch and stays ON, like RETSUCC/FASTMEM/SPURWAKE/REALGL.
     setenv("HARNESS_PROBE", "1a410c,fill", 1);
-    setenv("HARNESS_PROBE2", "457f90", 1);
-    setenv("HARNESS_PROBE3", "28a3dc", 1);
-    setenv("HARNESS_PROBE_N", "500", 1);
-    setenv("HARNESS_RDUMP", "1", 1);
+    // ---- diagnostic layer: ONE switch, OFF for shipping (2026-10-17) -------
+    // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
+    // probes, the WATCHPC hook, the per-call/per-frame tracing and the
+    // hot-path logs; with it off that whole layer is skipped (no logs, no
+    // per-call cost). RETSUCC, PROBE(fill), FASTMEM, SPURWAKE and REALGL are
+    // NOT diagnostics -- they change behaviour -- and stay unconditional.
+    // See PLAN.md, batches A/B.
+    const bool diag = DiagBootWanted(g_files);
+    if (diag) {
+        setenv("HARNESS_DIAG", "1", 1);
+        setenv("HARNESS_PROBE2", "457f90", 1);
+        setenv("HARNESS_PROBE3", "28a3dc", 1);
+        setenv("HARNESS_PROBE_N", "500", 1);
+        setenv("HARNESS_RDUMP", "1", 1);
+    }
     // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
     // Metric = updates/min + same-behavior verdicts (sessions/rdump).
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
@@ -1081,7 +1143,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Pad OFF; layout question moves to the dlmalloc port instead.
     // setenv("HARNESS_MALLOCPAD", "256", 1);
     // TRIAGE stash stays (governor reads last_mgr164_).
-    setenv("HARNESS_WATCHPC", "250ab8", 1);
+    if (diag) setenv("HARNESS_WATCHPC", "250ab8", 1);
     // setenv("HARNESS_WPA", "672ea0", 1);  // tick PROVEN, off
     // Synthesis: DISABLED (POKE forces early body with unbuilt content
     // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
@@ -1089,7 +1151,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // setenv("HARNESS_POKE1187", "1", 1);
     // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
     // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
-    setenv("HARNESS_PROBE4", "c52ac", 1);
+    if (diag) setenv("HARNESS_PROBE4", "c52ac", 1);
     // POSIX-truth (2026-10-14, proven by worker abort): untimed
     // cond_wait must never fail with ETIMEDOUT (game aborts on 110:
     // audio loader died this way). Cap cycles as SPURIOUS success (0)
@@ -1097,10 +1159,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     setenv("HARNESS_SPURWAKE", "1", 1);
     // Stuck-update forensics (2026-10-14): per-thread last import is
     // always tracked now (watchdog resolves the name at dump time).
-    setenv("HARNESS_LASTSVC", "1", 1);
+    if (diag) setenv("HARNESS_LASTSVC", "1", 1);
     // Worker import traffic for the tid=11 death forensics (one
     // diagnostic run; THREADLOG is capped at 5/import so log stays sane).
-    setenv("HARNESS_THREADLOG", "1", 1);
+    if (diag) setenv("HARNESS_THREADLOG", "1", 1);
     // Victim-object provenance for the Fox BAD death (logging only,
     // capped; zero behavior change): first mallocs with caller lr,
     // match the crashed r4 against them from the log.
@@ -1108,7 +1170,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // setenv("HARNESS_MALLOCLOG", "1", 1);
     // +164 ground truth on device (read-only manager-pass entry dump;
     // closes "logically LOADING" -> proven or not).
-    setenv("HARNESS_DIAG164", "1", 1);
+    if (diag) setenv("HARNESS_DIAG164", "1", 1);
     // Synthetic input heartbeat: ENABLED hands-off test (2026-10-14).
     // Prior disable was for finger-interleave chaos; solo (no finger)
     // it is the only event source. Tick jumps on taps PROVEN => this
@@ -1159,12 +1221,14 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             std::fclose(ff);
         }
     }
-    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s",
+    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s diag=%s jitopt=%s",
         std::getenv("HARNESS_FASTMEM") ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
-        std::getenv("HARNESS_NORELEASE") ? "on" : "off");
+        std::getenv("HARNESS_NORELEASE") ? "on" : "off",
+        diag ? "on" : "off",
+        std::getenv("HARNESS_SAFEOPTS") ? "safe" : "none");
     Log("RETSUCC re-armed (real fail path stalls)");
     g_apk = FindApk();
     if (g_apk.empty()) {

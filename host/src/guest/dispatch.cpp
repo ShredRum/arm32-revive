@@ -72,17 +72,55 @@ static std::int64_t TimeWarp() {
 // per-free / per-cond-wait calls must not pay it. All HARNESS_* setenv happen
 // once in the boot block before any guest runs (apphost.cpp) and nothing ever
 // unsets them, so read-once caching is semantics-preserving.
+//
+// Lock-free and allocation-free (2026-10-17, PLAN.md B3): every call site
+// passes a string LITERAL (19 distinct keys today), so the cache is a fixed
+// table keyed by pointer identity -- no mutex, no std::string, no hashing on
+// the hot path. A duplicate write under a race is benign (same key+value).
 bool EnvOn(const char* name) {
-    static std::mutex m;
-    static std::unordered_map<std::string, char> cache;
-    std::lock_guard<std::mutex> lock(m);
-    const auto it = cache.find(name);
-    if (it != cache.end()) {
-        return it->second != 0;
+    struct Entry {
+        const char* key;
+        char val;
+    };
+    static constexpr int kCap = 64;
+    static Entry table[kCap];
+    static std::atomic<int> used{0};
+    if (!name) {
+        return false;
     }
-    const bool v = std::getenv(name) != nullptr;
-    cache.emplace(name, (char)v);
-    return v;
+    const int n = used.load(std::memory_order_acquire);
+    for (int i = 0; i < n; i++) {
+        if (table[i].key == name) {  // pointer identity: literals only
+            return table[i].val != 0;
+        }
+    }
+    const char v = std::getenv(name) != nullptr ? 1 : 0;
+    if (n < kCap) {
+        table[n].key = name;
+        table[n].val = v;
+        used.store(n + 1, std::memory_order_release);
+        return v != 0;
+    }
+    return v != 0;  // safety valve: more than kCap distinct keys
+}
+
+// Explicit truthiness for the ONE diagnostic switch (unlike the presence-based
+// EnvOn above, here "HARNESS_DIAG=0" must really mean off -- a dev writing that
+// expects a quiet run). Read once: the boot block sets the env before any guest
+// code runs, and nothing unsets it later.
+bool DiagOn() {
+    static const bool on = [] {
+        const char* e = std::getenv("HARNESS_DIAG");
+        if (!e || !e[0]) {
+            return false;
+        }
+        if (std::strcmp(e, "-") == 0 || std::strcmp(e, "0") == 0 || std::strcmp(e, "off") == 0 ||
+            std::strcmp(e, "false") == 0) {
+            return false;
+        }
+        return true;
+    }();
+    return on;
 }
 
 // Real GLES backend instance (created on first gl* import).
@@ -866,7 +904,9 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     // Entry trace: identifies the killer call if the thunk itself crashes.
     // Throttled per import to avoid spam from tight loops. HARNESS_CALLMAX=N:
     // also log the first N *total* import calls (first retry cycle anatomy).
-    {
+    // Diagnostic layer (PLAN.md B1): skipped entirely under HARNESS_DIAG=0 --
+    // this is a per-call "#trace:"+name std::string + map probe + mutex.
+    if (DiagOn()) {
         // Locked briefly: worker threads share stub_hits_/call_total.
         // Printf + string formatting happen OUTSIDE the lock (was per-import
         // global-lock + string alloc + map probe on every call, print itself
@@ -952,11 +992,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const std::string& n = imp.name;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
     // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
-    // budgets hide worker calls). Remove after triage.
-    if (n == "socket" || n == "connect" || n == "send" || n == "sendto" || n == "recv" ||
-        n == "recvfrom" || n == "bind" || n == "listen" || n == "accept" || n == "getaddrinfo" ||
-        n == "freeaddrinfo" || n == "gethostbyname" || n == "setsockopt" || n == "shutdown" ||
-        n == "sendmsg" || n == "recvmsg") {
+    // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
+    // DIAG off this also stops paying the ~17 string compares per call.
+    if (DiagOn() &&
+        (n == "socket" || n == "connect" || n == "send" || n == "sendto" || n == "recv" ||
+         n == "recvfrom" || n == "bind" || n == "listen" || n == "accept" ||
+         n == "getaddrinfo" || n == "freeaddrinfo" || n == "gethostbyname" ||
+         n == "setsockopt" || n == "shutdown" || n == "sendmsg" || n == "recvmsg")) {
         std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                     GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
     }
@@ -1059,7 +1101,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             goto bad_ptr;
         }
         // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
-        {
+        // Diagnostic layer (PLAN.md A4): off in shipping.
+        if (DiagOn()) {
             static int mcount = 0;
             if (!is_clr && mcount < 400) {
                 mcount++;
@@ -1386,7 +1429,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         const std::string inp(GuestStr(a0));
         const std::string fmt(GuestStr(a1));
         // TEMP-DIAG (worker jobs): log parsed inputs (URL flows).
-        {
+        if (DiagOn()) {  // PLAN.md A: diagnostic layer
             static int sc = 0;
             if (sc < 30) {
                 sc++;
@@ -2157,8 +2200,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     }
                 }
             }
-            std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
-                        jn.c_str(), surl.c_str());
+            if (DiagOn()) {
+                std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
+                            jn.c_str(), surl.c_str());
+            }
         }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
@@ -2211,7 +2256,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (to < 0 || to > 5000) {
             to = (to < 0) ? 5000 : to;
         }
-        {
+        if (DiagOn()) {  // PLAN.md A3/B: off => no per-poll fstat+snprintf+log
             static std::uint64_t poll_hits = 0;
             if (++poll_hits <= 400) {
                 std::string ds;
@@ -2718,8 +2763,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %08x\n", GuestTid(), hp.c_str(),
-                        mode.c_str(), h);
+            if (DiagOn()) {
+                std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %08x\n", GuestTid(), hp.c_str(),
+                            mode.c_str(), h);
+            }
             // TEMP-DIAG (registry ParseError): track registry handles to dump
             // their exact bytes on fread/fwrite below.
             if (hp.find("registry") != std::string::npos) {
@@ -2970,7 +3017,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[files][t%u] alarm fd %u (clocks served, not null)\n", GuestTid(),
                             g);
             }
-            std::printf("[files][t%u] open(\"%s\",%o) -> fd %u\n", GuestTid(), hp.c_str(), a1, g);
+            if (DiagOn()) {
+                std::printf("[files][t%u] open(\"%s\",%o) -> fd %u\n", GuestTid(), hp.c_str(), a1,
+                            g);
+            }
             Ret(regs, g);
             return;
         }
@@ -3073,13 +3123,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
                     struct stat fst {};
                     if (::fstat(hfd, &fst) == 0 && S_ISSOCK(fst.st_mode)) {
-                        std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
+                        if (DiagOn()) {
+                            std::printf(
+                                "[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> "
+                                "0301/0301 (write path)\n",
+                                GuestTid() == 1 ? "" : "(T2+)", q[1], q[2], q[9], q[10]);
+                        }
                         q[1] = 0x03;
                         q[2] = 0x01;
                         q[9] = 0x03;
                         q[10] = 0x01;
-                        std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301 (write path)\n",
-                                    GuestTid() == 1 ? "" : "(T2+)", ov0, ov1, hv0, hv1);
                     }
                 }
             }
@@ -3087,7 +3140,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped). Skip
             // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
-            if ((n == "write" || n == "read") && r > 0) {
+            // Diagnostic layer (PLAN.md B7): with DIAG off skip the per-I/O
+            // fstat + io_mutex + fd_map probe that only fed this capped log.
+            if (DiagOn() && (n == "write" || n == "read") && r > 0) {
                 static int wlog = 0;
                 bool interesting = false;
                 {
@@ -3195,7 +3250,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // (Leaving sockets nonblocking caused short reads: the TLS stack
             // got 5B of a 115B ServerHello -> fatal alert 47. 2026-10-10.)
             const std::uint32_t g = alloc_guest_fd(hfd);
-            std::printf("[netsock] socket(%u %u %u) -> gfd %u\n", a0, a1, a2, g);
+            if (DiagOn()) {
+                std::printf("[netsock] socket(%u %u %u) -> gfd %u\n", a0, a1, a2, g);
+            }
             Ret(regs, g);
             return;
         }
@@ -3241,9 +3298,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     const std::uint8_t* p = H<const std::uint8_t>(a1);
                     std::uint16_t fam = (std::uint16_t)p[0] | ((std::uint16_t)p[1] << 8);
                     std::uint16_t port = ((std::uint16_t)p[2] << 8) | p[3];
-                    std::printf("[netsock]%s connect(gfd %u) fam=%u %u.%u.%u.%u:%u%s\n",
-                                GuestTid() == 1 ? "" : "(T2+)", a0, fam, p[4], p[5], p[6], p[7],
-                                port, cl == 12 ? " (quiet henceforth)" : "");
+                    if (DiagOn()) {
+                        std::printf("[netsock]%s connect(gfd %u) fam=%u %u.%u.%u.%u:%u%s\n",
+                                    GuestTid() == 1 ? "" : "(T2+)", a0, fam, p[4], p[5], p[6], p[7],
+                                    port, cl == 12 ? " (quiet henceforth)" : "");
+                    }
                 }
             }
             if (EnvOn("HARNESS_NONET")) {
@@ -3293,8 +3352,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 ::setsockopt(hfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 ::setsockopt(hfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             }
-            std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
-                        GuestTid() == 1 ? "" : "(T2+)", a0, r, r != 0 ? errno : 0);
+            if (DiagOn()) {
+                std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
+                            GuestTid() == 1 ? "" : "(T2+)", a0, r, r != 0 ? errno : 0);
+            }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -3459,13 +3520,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!EnvOn("HARNESS_NOTLSFIX") && a2 >= 11 && CheckRange(a1, 11, true)) {
                 std::uint8_t* q = H(a1);
                 if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
-                    std::uint8_t ov0 = q[1], ov1 = q[2], hv0 = q[9], hv1 = q[10];
+                    if (DiagOn()) {
+                        std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301\n",
+                                    GuestTid() == 1 ? "" : "(T2+)", q[1], q[2], q[9], q[10]);
+                    }
                     q[1] = 0x03;
                     q[2] = 0x01;
                     q[9] = 0x03;
                     q[10] = 0x01;
-                    std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301\n",
-                                GuestTid() == 1 ? "" : "(T2+)", ov0, ov1, hv0, hv1);
                 }
             }
             // Blocking I/O with kernel SO_RCVTIMEO/SO_SNDTIMEO (set at
@@ -3825,7 +3887,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // TEMP-DIAG (worker dir scans): which trees does it list?
             {
                 static int odlog = 0;
-                if (odlog < 15) {
+                if (odlog < 15 && DiagOn()) {
                     odlog++;
                     std::printf("[files]%s opendir(\"%s\")%s\n", GuestTid() == 1 ? "" : "(T2+)",
                                 hp.c_str(), odlog == 15 ? " (quiet henceforth)" : "");
@@ -4474,8 +4536,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (!val.empty() && CheckRange(a1, val.size() + 1, true)) {
             std::memcpy(H(a1), val.c_str(), val.size() + 1);
-            std::printf("[prop]%s \"%s\" -> \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
-                        key.c_str(), val.c_str());
+            if (DiagOn()) {  // PLAN.md A5: diagnostic layer
+                std::printf("[prop]%s \"%s\" -> \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
+                            key.c_str(), val.c_str());
+            }
             Ret(regs, static_cast<std::uint32_t>(val.size()));
             return;
         }
@@ -4717,8 +4781,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, found);
         return;
     }
-    {
-        // Locked: worker threads share stub_hits_ with main.
+    if (DiagOn()) {
+        // Locked: worker threads share stub_hits_ with main. Diagnostic layer
+        // (PLAN.md A5/B13): with DIAG off this skips the per-call map probe on
+        // unhandled imports and the [env]/[stub] logs.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
         // Enriched logging for environment queries: names matter.
@@ -5679,7 +5745,10 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         return 0xFFFFFFFFu;
     }
     std::memcpy(H(tid_out), &tid, 4);
-    std::printf("[thread] create tid=%u start=%08x arg=%08x stack=%08x\n", tid, start, arg, stack);
+    if (DiagOn()) {
+        std::printf("[thread] create tid=%u start=%08x arg=%08x stack=%08x\n", tid, start, arg,
+                    stack);
+    }
     st->th = std::thread([this, st, tid, start, arg, stack]() {
         t_tid = tid;
         Dynarmic::A32::UserConfig cfg;
@@ -5746,7 +5815,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
             st->retval = regs[0];
             st->done = true;
         }
-        std::printf("[thread] tid=%u done retval=%08x\n", tid, regs[0]);
+        if (DiagOn()) std::printf("[thread] tid=%u done retval=%08x\n", tid, regs[0]);
         st->cv.notify_all();
         t_active_jit = nullptr;
     });
@@ -5806,14 +5875,16 @@ std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) 
         static int jn = 0;
         if (jn < 20) {
             jn++;
-            std::printf("[thread] join tid=%u waiting (done=%d)\n", tid, (int)st->done);
+            if (DiagOn()) std::printf("[thread] join tid=%u waiting (done=%d)\n", tid, (int)st->done);
         }
         std::unique_lock<std::mutex> lock(st->m);
         int chunks = 0;
         while (!st->cv.wait_for(lock, std::chrono::seconds(30),
                                 [&] { return st->done; })) {
-            std::printf("[thread] join tid=%u STILL waiting chunk=%d last=%s\n", tid,
-                        ++chunks, st->last_svc.c_str());
+            if (DiagOn()) {
+                std::printf("[thread] join tid=%u STILL waiting chunk=%d last=%s\n", tid,
+                            ++chunks, st->last_svc.c_str());
+            }
         }
     }
     if (retval_out) {
@@ -6570,7 +6641,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
     // Locked scope: worker threads share stub_hits_ with main (map insert is
     // UB raced). Scoped (not whole-body): case thunks lock mutex_ themselves.
-    {
+    // Diagnostic layer (PLAN.md B2): under HARNESS_DIAG=0 skip the per-call
+    // std::to_string(fn) + string concat + map probe entirely.
+    if (DiagOn()) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_["#jni:" + std::to_string(fn)];
     // HARNESS_JNIMAX=N: log the first N *total* JNI calls (one full retry cycle
@@ -6835,7 +6908,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 jni_objclass_[a1] = ch;
             }
         }
-        std::printf("[jni] GetObjectClass %08x -> %08x\n", a1, ch);
+        if (DiagOn()) {
+            std::printf("[jni] GetObjectClass %08x -> %08x\n", a1, ch);
+        }
         Ret(regs, ch);
         return;
     }
@@ -6912,7 +6987,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             jni_objclass_[o] = ch;
         }
         const char* vtag = (fn == 28) ? "" : ((fn == 29) ? "V" : "A");
-        std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
+        if (DiagOn()) {
+            std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
+        }
         // TEMP-DIAG (audio): capture the native audio handle. NewObjectV
         // varargs live at the va_list pointer (a3), NOT at sp. Recorded
         // for HARNESS_JLAST/JOVR "J" expansion (mixdata synthesis).
@@ -7007,7 +7084,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
 #endif
         const std::uint32_t rv =
             (mdesc.find("startOutput") != std::string::npos) ? 1 : 0;
-        std::printf("[jni] CallBooleanMethod%s %s -> %u\n", vtag, mdesc.c_str(), rv);
+        if (DiagOn()) {
+            std::printf("[jni] CallBooleanMethod%s %s -> %u\n", vtag, mdesc.c_str(), rv);
+        }
         Ret(regs, rv);
         return;
     }
@@ -7023,7 +7102,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         const char* vtag = (fn == 61) ? "" : ((fn == 62) ? "V" : "A");
-        std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
+        if (DiagOn()) {
+            std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
+        }
         Ret(regs, 0);  // void JNI: zero r0
         return;
     }
@@ -7096,8 +7177,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 }
             }
             const std::uint32_t js = JniNewString(content);
-            std::printf("[jni] Call%sObject%s %s -> str %08x \"%s\"\n", is_static ? "Static" : "",
-                        vtag, mdesc.c_str(), js, content.c_str());
+            if (DiagOn()) {
+                std::printf("[jni] Call%sObject%s %s -> str %08x \"%s\"\n", is_static ? "Static" : "",
+                            vtag, mdesc.c_str(), js, content.c_str());
+            }
             Ret(regs, js);
             return;
         }
@@ -7113,8 +7196,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         std::memcpy(H(o), &o, 4);
         jni_objects_[o] = "obj<" + mdesc + ">";
-        std::printf("[jni] Call%sObject%s %s -> %08x\n", is_static ? "Static" : "", vtag,
-                    mdesc.c_str(), o);
+        if (DiagOn()) {
+            std::printf("[jni] Call%sObject%s %s -> %08x\n", is_static ? "Static" : "", vtag,
+                        mdesc.c_str(), o);
+        }
         Ret(regs, o);
         return;
     }
@@ -7133,7 +7218,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (fdesc.size() >= 18 &&
             fdesc.compare(fdesc.size() - 18, 18, "Ljava/lang/String;") == 0) {
             const std::uint32_t js = JniNewString("");
-            std::printf("[jni] GetStaticObjectField %s -> str %08x\n", fdesc.c_str(), js);
+            if (DiagOn()) {
+                std::printf("[jni] GetStaticObjectField %s -> str %08x\n", fdesc.c_str(), js);
+            }
             Ret(regs, js);
             return;
         }
@@ -7143,7 +7230,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         jni_obj_next_ += 4;
         std::memcpy(H(o), &o, 4);
         jni_objects_[o] = "field<" + fdesc + ">";
-        std::printf("[jni] GetStaticObjectField %s -> %08x\n", fdesc.c_str(), o);
+        if (DiagOn()) {
+            std::printf("[jni] GetStaticObjectField %s -> %08x\n", fdesc.c_str(), o);
+        }
         Ret(regs, o);
         return;
     }
@@ -7163,7 +7252,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         // Offline default: 0/NULL for every static field (logged, tunable per
         // name, e.g. android/location/Criteria.ACCURACY_COARSE).
-        std::printf("[jni] GetStaticField#%u %s -> 0\n", fn, fdesc.c_str());
+        if (DiagOn()) {
+            std::printf("[jni] GetStaticField#%u %s -> 0\n", fn, fdesc.c_str());
+        }
         if (fn == 145) {
             Ret(regs, 0);
         } else if (fn == 151) {
@@ -7226,8 +7317,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 v = 1;
             }
         }
-        std::printf("[jni] CallStaticBooleanMethod%s %s(\"%s\") -> %u\n", vtag, mdesc.c_str(),
-                    farg.c_str(), v);
+        if (DiagOn()) {
+            std::printf("[jni] CallStaticBooleanMethod%s %s(\"%s\") -> %u\n", vtag, mdesc.c_str(),
+                        farg.c_str(), v);
+        }
         Ret(regs, v);
         return;
     }
@@ -7277,7 +7370,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             v = 1;
         }
         const char* vtag = (fn == 129) ? "" : ((fn == 130) ? "V" : "A");
-        std::printf("[jni] CallStaticIntMethod%s %s -> %u\n", vtag, mdesc.c_str(), v);
+        if (DiagOn()) {
+            std::printf("[jni] CallStaticIntMethod%s %s -> %u\n", vtag, mdesc.c_str(), v);
+        }
         Ret(regs, v);
         return;
     }
@@ -7293,7 +7388,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         const char* vtag = (fn == 52) ? "" : ((fn == 53) ? "V" : "A");
-        std::printf("[jni] CallLongMethod%s %s -> 0\n", vtag, mdesc.c_str());
+        if (DiagOn()) {
+            std::printf("[jni] CallLongMethod%s %s -> 0\n", vtag, mdesc.c_str());
+        }
         Ret(regs, 0, 0);  // jlong 0
         return;
     }
@@ -7310,8 +7407,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         // Offline default: 0 (0.0 for double-A, void for 141/142).
         // Tunable per method if a branch needs better.
-        std::printf("[jni] CallStatic%s %s -> 0\n",
-                    fn == 140 ? "DoubleMethodA" : "VoidMethod", mdesc.c_str());
+        if (DiagOn()) {
+            std::printf("[jni] CallStatic%s %s -> 0\n",
+                        fn == 140 ? "DoubleMethodA" : "VoidMethod", mdesc.c_str());
+        }
         Ret(regs, 0, 0);
         return;
     }
@@ -7359,8 +7458,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                             const std::uint32_t t = 1;  // JNI_TRUE: copy
                             std::memcpy(H(a2), &t, 4);
                         }
-                        std::printf("[jni] GetByteArrayElements real len=%d -> %08x\n",
-                                    (int)len, gb);
+                        if (DiagOn()) {
+                            std::printf("[jni] GetByteArrayElements real len=%d -> %08x\n",
+                                        (int)len, gb);
+                        }
                         Ret(regs, gb);
                         return;
                     }
@@ -7512,7 +7613,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         std::memcpy(H(h), &h, 4);  // self-marked handle word
         jni_classes_[h] = name;
-        std::printf("[jni] FindClass \"%s\" -> %08x\n", name.c_str(), h);
+        if (DiagOn()) {
+            std::printf("[jni] FindClass \"%s\" -> %08x\n", name.c_str(), h);
+        }
         Ret(regs, h);
         return;
     }
@@ -7554,8 +7657,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                       : fn == 113 ? std::string("static ")
                                   : std::string("field ")) +
             cname + "." + mname + msig;
-        std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
-                    (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);
+        if (DiagOn()) {
+            std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
+                        (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);
+        }
         Ret(regs, c);
         return;
     }
@@ -10001,6 +10106,17 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             tl = 1;
         }
     }
+    // One-time env snapshot (2026-10-17, PLAN.md B11): these were a std::getenv
+    // per translated basic block -- a linear environ scan during JIT warmup.
+    // Snapshot once (thread-safe magic statics) but keep the individual flags
+    // working standalone (a dev may push one via abflags without HARNESS_DIAG).
+    static const bool fx_fixpvr = std::getenv("HARNESS_FIXPVR") != nullptr;
+    static const bool fx_poke1187 = std::getenv("HARNESS_POKE1187") != nullptr;
+    static const bool fx_buildergate = std::getenv("HARNESS_BUILDERGATE") != nullptr;
+    static const bool fx_poke180 = std::getenv("HARNESS_POKE180") != nullptr;
+    static const bool fx_poke164 = std::getenv("HARNESS_POKE164") != nullptr;
+    static const bool fx_diag164 = std::getenv("HARNESS_DIAG164") != nullptr;
+    static const bool fx_dumpr9 = std::getenv("HARNESS_DUMPR9") != nullptr;
     // HARNESS_PROBE=<hexpc>[,<hexlen>]: emit an execution-time host call at
     // pc that dumps r0/r1 + min(r1,len,256) bytes at [r0]. Used to capture
     // JIT-time (ptr,len) args (e.g. JSON parser input) that heap-drift and
@@ -10040,14 +10156,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             }
         }
         // Standalone IR fixes (independent of probe slots).
-        if (std::getenv("HARNESS_FIXPVR") && pc == 0x2B0C50u) {
+        if (fx_fixpvr && pc == 0x2B0C50u) {
             using Reg = Dynarmic::A32::Reg;
             ir.SetRegister(static_cast<Reg>(0), ir.Imm32(11));
         }
         // HARNESS_POKE1187: the loading gate byte [*(r7)+1187] is
         // re-zeroed by an in-update memset AFTER our pre-call poke, so set it
         // right here at 0xC2144 (ldr r0,[r7] just before the gate BL 0xC2148).
-        if (std::getenv("HARNESS_POKE1187") && pc == 0xC2144u) {
+        if (fx_poke1187 && pc == 0xC2144u) {
             ir.CallHostFunction(
                 &PokeGateByte,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(7))),
@@ -10058,14 +10174,14 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         // on-screen by definition, and forged rects come out NaN). The body
         // then runs with forged this: faults name requirements, clean run
         // tests graph attachment. Harness-only diag.
-        if (std::getenv("HARNESS_BUILDERGATE") && pc == 0x250C80u) {
+        if (fx_buildergate && pc == 0x250C80u) {
             using Reg = Dynarmic::A32::Reg;
             ir.SetRegister(static_cast<Reg>(0), ir.Imm32(1));
         }
         // HARNESS_POKE180=1: render-state advance at 0x263300 (FuncA entry,
         // a block start; r0=this). The 0x263338 site is mid-block (hook never
         // fires there). Sets [this+180] 3->4 when loading-state.
-        if (std::getenv("HARNESS_POKE180") && pc == 0x263300u) {
+        if (fx_poke180 && pc == 0x263300u) {
             ir.CallHostFunction(
                 &PokeShadowState,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
@@ -10074,8 +10190,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         // HARNESS_POKE164=1: loading-manager flag at 0x283B5C entry (r10=r0
         // there per prologue r10=r0). Forces the menu branch at 0x283C34.
         // HARNESS_DIAG164=1: same hook, diag only (no flip).
-        if ((std::getenv("HARNESS_POKE164") || std::getenv("HARNESS_DIAG164")) &&
-            pc == 0x283B5Cu) {
+        if ((fx_poke164 || fx_diag164) && pc == 0x283B5Cu) {
             ir.CallHostFunction(
                 &PokeManagerFlag,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
@@ -10105,7 +10220,7 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
         }
         // HARNESS_DUMPR9=1: log session object at a probe slot
         // (e.g. PROBE2=0xd6c78 entry: r0 = session object, before mov r9,r0).
-        if (std::getenv("HARNESS_DUMPR9") && pc == probe_pc2 && probe_pc2) {
+        if (fx_dumpr9 && pc == probe_pc2 && probe_pc2) {
             ir.CallHostFunction(
                 &DumpR9,
                 ir.ZeroExtendWordToLong(ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),
@@ -10332,7 +10447,7 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
                         std::uint32_t a2, std::uint32_t a3) {
     // TEMP-DIAG (ntop failures): log args, capped (ntop has its own cap;
     // pton spam must not eat it).
-    {
+    if (DiagOn()) {  // PLAN.md A: diagnostic layer
         static int ilog = 0, olog = 0;
         if (n == "inet_ntop" && olog < 12) {
             olog++;

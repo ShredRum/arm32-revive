@@ -73,6 +73,34 @@
 | B12 | `DIAG164`: host-call `PokeManagerFlag` эмитится на каждое исполнение `0x283B5C` | `dispatch.cpp:10077-10083`, `:8273` | INFERRED |
 | B13 | Fallback-стаб: `stub_hits_[n]` (map под mutex) на каждый необработанный импорт + `[env]`-печать | `dispatch.cpp:4720-4736` | INFERRED |
 
+### Батч A+B — СДЕЛАНО в коде (2026-10-17)
+- Единый `DiagOn()` (`dispatch.h`/`dispatch.cpp`) + `DiagBootWanted()` в `apphost.cpp`
+  (читает `HARNESS_DIAG`, в т.ч. из `abflags.txt` — defaults ставятся ДО его применения).
+  Строка `flags:` теперь печатает `diag=` и `jitopt=`.
+- **НАХОДКА (важно):** `HARNESS_PROBE=1a410c,fill` — это НЕ диагностика, а
+  **поведенческий костыль** (пишет `"{}"` в пустой SSO-слот JSON на 0x1A410C, чтобы
+  парсер не падал на Unexpected EOF; `dispatch.cpp:~8001`). Оставлен **безусловным**,
+  рядом с RETSUCC/FASTMEM/SPURWAKE/REALGL. Побочно: `PROBE_N` ушёл в diag-блок, но у
+  `ProbeDump` дефолтный кап = **8** (`dispatch.cpp:9756`) → дамп стал тише (8, не 500).
+- Загейчено (только наблюдательное, поведение не меняется): A1 WATCHPC, A2 `[rate]`,
+  A3 `[netsock]`, A4 `[memset]`, A5 `[env]`/`[stub]`, A6 realgl-печать (включая per-frame
+  `glGetString`/`glGetIntegerv`), A7 `[files]` fopen/open/opendir, A8 `nativeUpdate` r0-лог,
+  B1 OnSvc-trace, B2 CallJni-trace, B5 `uniqcall`, B7 `read`/`write` pipelog(+fstat),
+  B11 `getenv` в `PreCodeTranslationHook` (кэш вместо per-block), B13 fallback-стаб,
+  плюс `[poll]`, `[prop]`, `[sscanf]`, TLS ClientHello-печать, `[thread]`/`thread enter`,
+  `[input]`, `[jni]`-мок-печати.
+- B3 `EnvOn()` переписан: lock-free, без аллокаций (таблица по указателю-литералу); все
+  19 площадок передают литералы (проверено grep-ом).
+- НЕ тронуто (осознанно): B4/B6/B8/B9 (per-call `strstr`/`mutex`/`vector` вне диагностики),
+  B10, B12 (эмиссия снята вместе с DIAG164), батчи C/D/E.
+- **ЗАМЕР:** лог **11.3 МБ → 117 856 Б** (mid-pass, 5.5 мин) и **87 711 Б** (финал, 3 мин);
+  pid стабилен в обоих, `flags: diag=off jitopt=none`, `HEAPCORRUPT`/`HEAPASSERT`=0,
+  `death.log` пуст, новых tombstone нет; скриншот — **«LEVEL CLEARED!»** (уровень 1
+  проходится с выключенной диагностикой). `LOUD`=3 — предсуществующий
+  `[unwind] nesting 513 deep` (есть в `work/stab1..3.log`). Остаток лога — boot-диагностика
+  `[realcall]`/`[realnew]`/`[realgl glTexImage2D]`/`[intl]`/`[regio]`/`[hello]` (~600 строк),
+  НЕ тронут на этом проходе.
+
 ## Батч C — JIT/сборка
 | # | Что | Где | Статус |
 |---|---|---|---|
@@ -86,6 +114,7 @@
 ## Батч D — «firewall»/куча (что именно снимается — см. D1/D2)
 | # | Что | Где | Статус |
 |---|---|---|---|
+| D0 | **БАГ (найден 2026-10-17 при батче A+B):** проверка головы чанка при возврате из карантина `(head & 3) != 3` даёт **ложные срабатывания**. Здесь `PINUSE_BIT=1`, `CINUSE_BIT=2` (`dlmalloc.c:2261`), а `set_inuse` только OR-ит CINUSE, **сохраняя** PINUSE (`dlmalloc.c:3066`): валидный занятый чанк со **свободным** предшественником имеет `head & 3 == 2` и метится как «смазан» ⇒ `skip=true` ⇒ блок **утекает** (не возвращается в dlmalloc), а `CHUNKD` перестаёт быть индикатором порчи. Все 12 дампов прогона: `head & 3 == 2`, `csize % 8 == 0`, `csize == sz + 8` (напр. `sz=32 head=0x2a csize=40`) ⇒ чанки целые. Правильный тест: `(head & CINUSE_BIT) == 0`. Правка в одну строку, НО это поведение (блоки снова освобождаются) ⇒ отдельный прогон | `dispatch.cpp:674-705` | PROVEN |
 | D1 | `ClampHeapWrite` = `recursive_mutex` + `std::map` на каждый memcpy/memmove/memset/strcpy/strcat/fgets/fread/sscanf + JNI-region. Коммиты-родители: `8a81005` «Overflow firewall (dlmalloc era)», `1bcd3b9` «Firewall: clamp fread/fgets…» — пластырь именно той охоты. План: **байпас по умолчанию** (функция и логика остаются, switch) | `dispatch.cpp:181-252`; вызовы `1030,1041,1071,1147,1165,2878,6761,6773` | PROVEN |
 | D2 | `heap_sizes_` (`std::map`, node-alloc) обслуживается на каждом malloc/calloc/realloc/free. **Важно:** в бою у него нет guest-facing потребителя (`malloc_usable_size`/`dlsym` мы не эмулируем; `mspace_usable_size` зовётся только внутри `:390/:451/:527`). Потребители: ClampHeapWrite, sscanf-`%n`, регион-диагностика `alloc=` (кап 8), CHUNKD-верификация, liveness-проверка пула (`:7339`), heapwatch (off). Значит возможен отдельный follow-up: снести дерево целиком + заменить liveness-проверку пула и `%n`-клампы | `dispatch.cpp:394,455,531,520,525,573-589,7339` | PROVEN |
 | D3 | `CheckRange` — линейный скан `mappings_` **без** last-hit кэша (в отличие от `CheckAccess`, `:254-296`); `mappings_` только растёт (`AddMapping` на каждый GuestMmap, никогда не удаляется). **Не снимать** — дать такой же кэш | `dispatch.cpp:746-764`; `:157`; `1122-1132, 1232-1243` | PROVEN |

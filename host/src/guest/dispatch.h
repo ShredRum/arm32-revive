@@ -34,6 +34,12 @@ namespace abr {
 // happen once pre-guest, nothing unsets).
 bool EnvOn(const char* name);
 
+// Master switch for the diagnostic layer: pc probes, the WATCHPC hook, the
+// per-call / per-frame tracing and the hot-path logs. Backed by HARNESS_DIAG,
+// default OFF for shipping (see PLAN.md batch A/B). Explicit values "0",
+// "off", "false", "-" and "" mean OFF; any other value means ON.
+bool DiagOn();
+
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);
@@ -438,7 +444,9 @@ private:
     void MutexNoteLocked(std::uint32_t obj, std::uint32_t tid) {
         std::lock_guard<std::mutex> io(io_mutex_);
         auto& e = mutex_owner_[obj];
-        if (e.second > 0 && e.first != tid) {
+        // Diagnostic layer (PLAN.md A): the owner map itself stays maintained
+        // (MutexOwnersDump needs it for the watchdog); only the print is gated.
+        if (DiagOn() && e.second > 0 && e.first != tid) {
             std::printf("[mutex] OWNER-CHANGE obj=%08x %u->%u (was depth %d)\n", obj, e.first,
                         tid, e.second);
         }
