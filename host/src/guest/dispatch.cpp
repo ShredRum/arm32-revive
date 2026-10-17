@@ -258,6 +258,27 @@ static std::uint32_t PadGlobal() {
     return (std::uint32_t)v;
 }
 
+// Zero-fill policy (bump parity). The bump allocator only ever handed out
+// virgin arena, so a fresh block read as zeros. dlmalloc reuses freed chunks,
+// so a fresh block can contain stale bytes -- and a stale pointer-shaped value
+// read as a pointer is a wild dereference. HARNESS_ZEROFILL=<bytes>|all zeroes
+// every request up to <bytes> ("all" = no limit). Default off (dlmalloc
+// semantics, fastest); parsed once.
+static std::uint32_t ZeroFillLimit() {
+    static std::int64_t v = -2;
+    if (v == -2) {
+        v = 0;
+        if (const char* ze = std::getenv("HARNESS_ZEROFILL")) {
+            if (std::strcmp(ze, "all") == 0) {
+                v = 0xFFFFFFFFLL;
+            } else {
+                v = (std::int64_t)std::strtoul(ze, nullptr, 0);
+            }
+        }
+    }
+    return (std::uint32_t)v;
+}
+
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
@@ -326,10 +347,17 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         mspace_free(heap_ms_, hp);
         return 0;
     }
-    // NOTE (2026-10-16): blanket zero-fill REMOVED (was memset here) -- a full
-    // memset per malloc incl. multi-MB textures cost 1fps + audio lag. If
-    // silent deaths return without it, uninit-read dependence is confirmed and
-    // we zero selectively (small objs) instead.
+    // NOTE (2026-10-16): blanket zero-fill was removed here (a full memset per
+    // malloc incl. multi-MB textures cost 1fps + audio lag). It is back behind
+    // HARNESS_ZEROFILL (see ZeroFillLimit) so the "fresh memory must read as
+    // zeros (bump parity)" hypothesis can be tested without a rebuild; the
+    // shipping default stays off.
+    {
+        const std::uint32_t zl = ZeroFillLimit();
+        if (zl && size <= zl) {
+            std::memset(H(out), 0, size);
+        }
+    }
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
     if (EnvOn("HARNESS_MALLOCLOG")) {
@@ -448,6 +476,15 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
                 array_pool_.erase(it);
                 break;
             }
+        }
+    }
+    // Zero-fill policy: the bytes past the old size are fresh to the guest.
+    // Bump parity says they read as zeros; dlmalloc's copy leaves whatever the
+    // destination chunk held. Zero only the grown tail (never the payload).
+    {
+        const std::uint32_t zl = ZeroFillLimit();
+        if (zl && size <= zl && (std::uint64_t)size > old) {
+            std::memset(H(out) + old, 0, size - old);
         }
     }
     return out;

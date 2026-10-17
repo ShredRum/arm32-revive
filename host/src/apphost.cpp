@@ -1036,18 +1036,13 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
     // ~10x slower). WPA tick PROVEN, off (log bloat).
     setenv("HARNESS_FASTMEM", "1", 1);
-    // HUNT (2026-10-16, ONE attempt): fastmem OFF + heap-write watch.
-    // Every guest store goes through callbacks (slow, ~10x); any write into
-    // the heap arena outside a live allocation (or into quarantine) logs LOUD
-    // with pc. This names the direct-store writer in a single session.
-    // setenv("HARNESS_FASTMEM", "1", 1);
-    setenv("HARNESS_HEAPWATCH", "1", 1);
-    // TRIAGE (2026-10-16): MALLOCPAD=32 (not 256: affordable 32B x N allocs).
-    // Death signature says sub-chunk string garbage in heap metadata
-    // (fault addr holds 'yr' string bytes; Fox links held string pointers).
-    // If small slack stops the deaths, the writer is a few-bytes string OOB
-    // (Lua interning during loading), not a bulk writer.
-    setenv("HARNESS_MALLOCPAD", "32", 1);
+    // 2026-10-16 audit: the "HUNT" block that used to sit here left this
+    // FASTMEM line ON (its own commented copy never took effect), so the
+    // heapwatch "hunt" was blind (no store callbacks under fastmem) and its
+    // verdict was void. MALLOCPAD=32 also survived here against the Pad-OFF
+    // verdict. Both removed. Experiments now go through files/abflags.txt
+    // (applied after these defaults, logged as overrides) => no rebuild, and
+    // the log always states what was actually on.
     // TRIAGE done (2026-10-16, AFK autopsy): NORELEASE retired -- quarantine
     // releases normally again (delay-only, cap 64). NORELEASE leaked to 947MB
     // -> thread-stack OOM -> wild thread -> SIGSEGV. Silent deaths were never
@@ -1105,6 +1100,40 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // PC parity verified post-split (54/54, 948). First test: live ctx?
     // GL errors? survival? (pixels need content+burst; LOADING art first.)
     setenv("HARNESS_REALGL", "1", 1);
+    // Device-side experiment flags: <files>/abflags.txt, one KEY=VALUE per
+    // line ('#' comments ok), applied AFTER the shipping defaults so a pushed
+    // file overrides them without a rebuild. Every override is logged, so a
+    // stale file can never silently change a run (the 2026-10-16 hunt died of
+    // exactly that: an experiment premise that was not in the log).
+    {
+        const std::string fpath = g_files + "/abflags.txt";
+        if (FILE* ff = std::fopen(fpath.c_str(), "r")) {
+            char line[256];
+            while (std::fgets(line, sizeof(line), ff)) {
+                char* nl = std::strchr(line, '\n');
+                if (nl) {
+                    *nl = 0;
+                }
+                if (!line[0] || line[0] == '#') {
+                    continue;
+                }
+                char* eq = std::strchr(line, '=');
+                if (!eq) {
+                    continue;
+                }
+                *eq = 0;
+                setenv(line, eq + 1, 1);
+                Log("override %s=%s", line, eq + 1);
+            }
+            std::fclose(ff);
+        }
+    }
+    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s",
+        std::getenv("HARNESS_FASTMEM") ? "on" : "off",
+        std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
+        std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
+        std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
+        std::getenv("HARNESS_NORELEASE") ? "on" : "off");
     Log("RETSUCC re-armed (real fail path stalls)");
     g_apk = FindApk();
     if (g_apk.empty()) {
