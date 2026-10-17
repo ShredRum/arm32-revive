@@ -6717,8 +6717,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, a1);  // handle IS the UTF-8 buffer
         return;
     }
-    case 221:  // GetStringRegion(env, str, start, len, buf) -> void (jchar units)
-    case 222:  // GetStringUTFRegion(env, str, start, len, buf) -> void (bytes)
+    case 220:  // GetStringRegion(env, str, start, len, buf) -> void (jchar units)
+    case 221:  // GetStringUTFRegion(env, str, start, len, buf) -> void (bytes)
     {
         // 5th arg (buf) rides the guest stack at [sp].
         std::uint32_t buf = 0;
@@ -6744,7 +6744,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
-        if (fn == 221) {
+        if (fn == 220) {
             const std::uint32_t want = a3 * 2;
             if (!CheckRange(buf, want, true)) {
                 std::printf("[jni] region BAD buf %08x -- halting\n", buf);
@@ -6786,10 +6786,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     asz = ita->second;
                 }
                 std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",
-                            fn == 221 ? "U" : "", a1, a2, a3, buf, asz);
+                            fn == 220 ? "U" : "", a1, a2, a3, buf, asz);
             }
         }
         Ret(regs, 0);
+        return;
+    }
+    case 222: {  // GetPrimitiveArrayCritical(env, array, isCopy) -> void*
+        // Our arrays ARE guest buffers (NewByteArray/JniNewArray hand out the
+        // buffer VA), so the critical pointer is the handle itself and isCopy
+        // is JNI_FALSE (0). (Was mis-mapped as GetStringUTFRegion, which read a
+        // non-existent 5th stack arg as a destination -- see the 220/221 shift.)
+        if (a2 != 0 && CheckRange(a2, 1, true)) {
+            *H(a2) = 0;
+        }
+        Ret(regs, a1);
         return;
     }
     case 170: {  // ReleaseStringUTFChars(env, str, chars) -> void
@@ -6830,20 +6841,23 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     }
     case 23:   // DeleteLocalRef(env, obj) -> void: mock handles need no GC
     case 22:   // DeleteGlobalRef(env, obj) -> void (same)
-    case 228:  // DeleteWeakGlobalRef(env, ref) -> void (same)
+    case 227:  // DeleteWeakGlobalRef(env, ref) -> void (same)
         // PROVEN load-bearing: caller @0x267FD0 treats r0!=0 as error and
         // throws "Java method threw an exception". Zero it like Dalvik does.
         Ret(regs, 0);
         return;
     case 25:   // NewLocalRef(env, ref) -> same handle (no GC in mock world)
     case 21:   // NewGlobalRef(env, obj) -> same handle
-    case 227:  // NewWeakGlobalRef(env, obj) -> same handle
+    case 226:  // NewWeakGlobalRef(env, obj) -> same handle
         Ret(regs, a1);
         return;
     case 17:  // ExceptionClear(env) -> void (mock never raises)
         Ret(regs, 0);
         return;
     case 15:  // ExceptionOccurred(env) -> NULL (mock never raises)
+        Ret(regs, 0);
+        return;
+    case 228:  // ExceptionCheck(env) -> jboolean FALSE (mock never raises)
         Ret(regs, 0);
         return;
     case 28:  // NewObject(V/A)(env, class, method, ...) -> fresh mock object
