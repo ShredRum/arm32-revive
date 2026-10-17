@@ -627,7 +627,42 @@ void Runtime::GuestFree(std::uint32_t addr) {
         g_last_free_addr = q0.addr;
         g_last_free_size = q0.size;
         quarantine_set_.erase(q0.addr);
-        if (heap_ms_) {
+        bool skip = false;
+        // HUNT (2026-10-17): verify the chunk head before handing a
+        // quarantined block back to dlmalloc. mspace_free aborted at
+        // dlmalloc.c:5720 (`erroraction: USAGE_ERROR_ACTION` -- ok_inuse /
+        // ok_next failed) on exactly this path. Dump the zone (the smear
+        // content names the writer) and LEAK the block instead of aborting.
+        if (heap_ms_ && q0.addr >= 64) {
+            const std::uint64_t head = *H<std::uint64_t>(q0.addr - 8);
+            const std::uint64_t csize = head & ~std::uint64_t(3);
+            if (((head & 3) != 3) || csize < 24 || csize > (std::uint64_t)(1u << 24)) {
+                skip = true;
+                static int dvn = 0;
+                if (dvn < 12) {
+                    dvn++;
+                    std::printf("[heap] CHUNKD addr=%08x sz=%u head=%016llx csize=%llu\n", q0.addr,
+                                q0.size, (unsigned long long)head, (unsigned long long)csize);
+                    const std::uint8_t* pv = H<const std::uint8_t>(q0.addr - 48);
+                    std::printf("[heap] CHUNKD pre:");
+                    for (int i = 0; i < 48; i++) {
+                        std::printf(" %02x", pv[i]);
+                    }
+                    const std::uint8_t* pa = H<const std::uint8_t>(q0.addr - 16);
+                    std::printf("\n[heap] CHUNKD at :");
+                    for (int i = 0; i < 96; i++) {
+                        std::printf(" %02x", pa[i]);
+                    }
+                    std::printf("\n[heap] CHUNKD asc:");
+                    for (int i = 0; i < 96; i++) {
+                        const unsigned char c = pa[i];
+                        std::printf("%c", (c >= 32 && c < 127) ? (char)c : '.');
+                    }
+                    std::printf("\n");
+                }
+            }
+        }
+        if (heap_ms_ && !skip) {
             mspace_free(heap_ms_, H(q0.addr));
         }
         if (heap_used_ >= q0.size) {
