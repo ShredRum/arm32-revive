@@ -3668,3 +3668,13 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   nativeUpdate t=769874 -> 769890 -> 769908 = 16/18 ms => ~55-60 fps.
   => the 220/221 off-by-one WAS the whole corruption; dlmalloc is stable
   with FOOTERS=0 and NORELEASE off.
+- TAGGED: works-2026-10-17-dlmalloc-stable ("first stable dlmalloc build").
+
+## 131. Perf/cleanup backlog moved to PLAN.md (2026-10-17)
+- The optimization backlog (log junk, per-call infra, JIT no_optimizations,
+  the dlmalloc -DDEBUG=0 trap, the ClampHeapWrite/heap_sizes_ firewall,
+  hygiene/docs) now lives in the repo file PLAN.md -- read that, not this
+  journal, before starting perf work. Decisions taken: all diagnostics behind
+  one HARNESS_DIAG (default off), firewall off by default (try), fix the
+  DEBUG=0 define, leave work/ alone for now. NOTE: RETSUCC and SPURWAKE are
+  BEHAVIOR crutches, not diagnostics -- not part of the cleanup.
