@@ -38,13 +38,19 @@ add_library(guest STATIC
 )
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
 # Bionic-era ARM32, external locking via our bridge mutex).
-# FOOTERS=0/DEBUG=0 for shipping: FOOTERS is a debug layout that (a) stores a
-# host mspace pointer in guest-visible memory at every chunk foot and (b) makes
-# mspace_free dereference that foot first (a smeared foot => wild deref),
-# while DEBUG=1 turns soft invariant failures into aborts. Both were hunt
-# tools (2026-10-16) and must not ship. Re-enable for a hunt build only.
+# FOOTERS=0 for shipping: FOOTERS is a debug layout that (a) stores a host
+# mspace pointer in guest-visible memory at every chunk foot and (b) makes
+# mspace_free dereference that foot first (a smeared foot => wild deref).
+# DEBUG is deliberately LEFT UNDEFINED (2026-10-17, PLAN.md C2): dlmalloc
+# selects its assert variant with `#ifdef DEBUG` (dlmalloc.c:1452), so passing
+# `-DDEBUG=0` DEFINED it and compiled in the abort-on-assert build (real crash
+# risk in shipping). Undefined, the `#else` arm gives `#define assert(x)` and
+# then `#define DEBUG 0`, so every later `#if DEBUG` still evaluates to 0.
+# Real corruption still aborts through dlmalloc's erroraction (RTCHECK/ok_*,
+# C3), so the firewall stays meaningful. Both FOOTERS/DEBUG were hunt tools
+# (2026-10-16).
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
-    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;DEBUG=0;FOOTERS=0")
+    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;FOOTERS=0")
 # Corruption hook header (replaces dlmalloc's abort() with an atomic tripwire).
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_OPTIONS
     "-include;${CMAKE_CURRENT_SOURCE_DIR}/src/guest/abr_heap_hook.h")

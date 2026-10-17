@@ -3780,3 +3780,26 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   ticks over the same 90 s window (noopt baseline ~6.9k => ~-20%), HEAPCORRUPT/
   HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY (0 B), no new tombstone
   (newest 16:41 pre-fix), title screen renders, log 51,847 B.
+
+## 135. C2 DONE: dlmalloc DEBUG no longer defined (2026-10-17)
+- BUG: host/CMakeLists.txt passed `DEBUG=0` in dlmalloc's COMPILE_DEFINITIONS.
+  dlmalloc picks its assert variant with `#ifdef DEBUG` (dlmalloc.c:1454), NOT
+  `#if DEBUG`, so the value is irrelevant -- `-DDEBUG=0` DEFINED the macro and
+  compiled in the abort-on-assert arm (`ABORT_ON_ASSERT_FAILURE`=1 ->
+  AbrAssertHook + ABORT). Every soft invariant check in malloc/free was a live
+  process-abort in the shipping build.
+- FIX: drop DEBUG from the defines (do NOT pass `DEBUG=0`). Undefined, the
+  `#else` arm at dlmalloc.c:1465 gives `#define assert(x)` (a no-op) and then
+  `#define DEBUG 0`, so every later `#if DEBUG` still evaluates to 0 -- i.e.
+  exactly the intended semantics, minus the abort.
+- PROVEN at compile level (not inferred): a verbose rebuild shows the dlmalloc.c
+  command line now carrying `-DFOOTERS=0` and NO `-DDEBUG` (previously it had
+  `-DDEBUG=0`).
+- NOT a loss of protection: genuine corruption still aborts through dlmalloc's
+  erroraction (RTCHECK / ok_inuse / ok_pinuse, still compiled because INSECURE
+  is unset -- see C3). Only the "assert on a soft invariant" abort is gone.
+- VERIFIED: native harness 54/54, svc=948 halts=53. Device: md5
+  d40bd2954680993d52f40056429d0f7e local == installed, 5-min soak pid 4199
+  unchanged, `flags: ... diag=off jitopt=safe`, CPU 5765 ticks/90 s (same band
+  as the C1 build), HEAPCORRUPT/HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY,
+  no new tombstone, title screen renders, log 51,250 B.
