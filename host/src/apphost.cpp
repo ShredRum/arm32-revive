@@ -8,6 +8,7 @@
 
 #include <android/log.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <fcntl.h>
 #include <exception>
 #include <typeinfo>
@@ -95,20 +96,39 @@ void Log(const char* fmt, ...) {
 // leave no tombstone). Pre-opened fd + alt stack + async-safe-only handler:
 // fault addr + guest regs into files/death.log, then re-raise to die as before.
 static int g_death_fd = -1;
+// Load base of this library (set in InstallDeathWitness via dladdr). The
+// handler prints host offsets relative to it so llvm-addr2line can name the
+// exact crashing host function/line of the *deployed* build.
+static std::uintptr_t g_self_base = 0;
 static void DeathHex(char*& p, std::uint64_t v, int digits) {
     static const char* H = "0123456789abcdef";
     for (int i = digits - 1; i >= 0; i--) {
         *p++ = H[(v >> (i * 4)) & 0xFu];
     }
 }
-static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
-    char buf[256];
+static void DeathHandler(int sig, siginfo_t* info, void* ucv) {
+    char buf[512];
     char* p = buf;
     const char* t = "DEATH sig=";
     while (*t) {
         *p++ = *t++;
     }
     DeathHex(p, (std::uint64_t)sig, 2);
+    // Faulting HOST instruction (the real crash site when the host, not the
+    // guest, dereferenced garbage): raw pc + offset from our load base.
+    if (ucv) {
+        const std::uintptr_t hpc = (std::uintptr_t)((ucontext_t*)ucv)->uc_mcontext.pc;
+        const char* th = " hpc=";
+        while (*th) {
+            *p++ = *th++;
+        }
+        DeathHex(p, hpc, 16);
+        const char* tho = " hoff=";
+        while (*tho) {
+            *p++ = *tho++;
+        }
+        DeathHex(p, hpc - g_self_base, 16);
+    }
     // Sender forensics: si_code/si_pid/si_uid tell abort()-in-thread apart
     // from an external tgkill (SI_TKILL) or ART runtime abort.
     const char* tc = " code=";
@@ -159,7 +179,7 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
             }
             {
                 std::uint64_t fp = (std::uint64_t)__builtin_frame_address(0);
-                for (int f = 0; f < 8 && fp >= 0x7000000000ull && (p - buf) < 200; f++) {
+                for (int f = 0; f < 8 && fp >= 0x7000000000ull && (p - buf) < 460; f++) {
                     const std::uint64_t* fr = (const std::uint64_t*)fp;
                     std::uint64_t next = fr[0];
                     std::uint64_t ret = fr[1];
@@ -168,6 +188,8 @@ static void DeathHandler(int sig, siginfo_t* info, void* /*uc*/) {
                     }
                     fp = next;
                     DeathHex(p, ret, 16);
+                    *p++ = '-';
+                    DeathHex(p, ret - g_self_base, 16);  // '<-base' offset
                     *p++ = ' ';
                 }
             }
@@ -221,6 +243,10 @@ static void InstallDeathWitness(const std::string& dir) {
     g_death_fd = open(p.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (g_death_fd < 0) {
         return;
+    }
+    Dl_info di{};
+    if (dladdr(reinterpret_cast<void*>(&DeathHandler), &di) && di.dli_fbase) {
+        g_self_base = reinterpret_cast<std::uintptr_t>(di.dli_fbase);
     }
     static std::uint8_t altstack[32768];
     stack_t ss{};
@@ -1122,6 +1148,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
                     continue;
                 }
                 *eq = 0;
+                if (eq[1] == 0 || std::strcmp(eq + 1, "-") == 0) {
+                    unsetenv(line);  // "KEY=" or "KEY=-": turn a default OFF
+                    Log("override %s=<unset>", line);
+                    continue;
+                }
                 setenv(line, eq + 1, 1);
                 Log("override %s=%s", line, eq + 1);
             }
