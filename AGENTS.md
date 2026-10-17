@@ -3834,3 +3834,24 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   screen renders, log 52,200 B.
 - D8 (lock-free prefilter inside ClampHeapWrite) is now moot: the bypass is
   already before the lock.
+
+## 137. D3 DONE: CheckRange gets the CheckAccess last-hit cache (2026-10-18)
+- WHAT: CheckRange walked `mappings_` linearly on every call (guest pointer
+  validation at SVC boundaries, JNI pointer checks, sscanf guards) while its
+  sibling CheckAccess already had a thread_local last-hit cache. Mappings only
+  ever grow (AddMapping pushes; GuestMunmap revokes host access but never erases
+  an entry), so a cached extent stays valid.
+- CHANGE: same `hit_s/hit_e/hit_p` cache, early return ONLY on a hit that lies
+  inside the cached extent; on a miss the full scan runs and still returns on
+  the FIRST containing mapping (CheckRange semantics preserved). One assumption
+  is inherited from CheckAccess: a later mapping never lies strictly inside an
+  earlier one. The function itself is KEPT -- it is the "wild guest pointer =>
+  clean halt" contract.
+- MEASURED (same 90 s title-screen window): 5732 ticks vs D1's 5648 -> **no
+  measurable delta**. Same lesson as D1: after C1, the remaining D-items do not
+  move the CPU needle on this workload; they are structural cleanups.
+- VERIFIED: native harness 54/54, svc=948. Device: md5
+  329d8bcb9f4fe04070ded550fc0ea882 local == installed, 5-min soak pid 5659
+  unchanged, flags clampwrite=off(+jni bound) jitopt=safe diag=off, HEAPCORRUPT/
+  HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY, no new tombstone, title
+  screen renders, log 54,481 B.

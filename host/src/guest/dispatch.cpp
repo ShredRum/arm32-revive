@@ -808,8 +808,26 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (end > 0x100000000ULL) {
         return false;
     }
+    // D3 (2026-10-17): same last-hit cache as CheckAccess. String/scan loops
+    // and JNI pointer validation probe the same mapping over and over, each
+    // probe a linear walk over mappings_. Mappings only ever grow (AddMapping
+    // pushes, GuestMunmap never erases), so a cached by-value extent stays
+    // valid forever; thread_local needs no locking. Semantics unchanged: an
+    // early hit returns exactly what the scan would (the scan returns on the
+    // FIRST containing mapping, and the cache is only consulted for a range
+    // inside that same mapping) -- the one assumption is that a later mapping
+    // never lies strictly inside an earlier one, which CheckAccess already
+    // assumes for its identical early-true cache. On a miss we fall through to
+    // the full scan.
+    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_p = 0;
+    if (guest >= hit_s && end <= hit_e) {
+        return write ? ((hit_p & PROT_WRITE) != 0) : ((hit_p & PROT_READ) != 0);
+    }
     for (const auto& m : mappings_) {
         if (guest >= m.start && end <= m.end) {
+            hit_s = m.start;
+            hit_e = m.end;
+            hit_p = static_cast<std::uint32_t>(m.prot);
             if (write) {
                 return (m.prot & PROT_WRITE) != 0;
             }
