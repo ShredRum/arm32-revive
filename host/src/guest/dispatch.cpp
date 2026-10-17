@@ -6745,13 +6745,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         if (fn == 221) {
-            if (!CheckRange(buf, a3 * 2, true)) {
+            const std::uint32_t want = a3 * 2;
+            if (!CheckRange(buf, want, true)) {
                 std::printf("[jni] region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            for (std::uint32_t i = 0; i < a3; i++) {
+            // BOUND THE WRITE BY THE DESTINATION ALLOCATION (2026-10-17): the
+            // game sizes `buf` from its own length bookkeeping, so an unchecked
+            // UTF-16 widen overran a 24B block into the next chunk's head --
+            // exactly the metadata smear that detonated in mspace_free
+            // (ok_inuse failed on a head overwritten by wide chars). CheckRange
+            // only proves the mapping is writable (the whole arena is).
+            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion");
+            for (std::uint32_t i = 0; i < a3 && (i + 1) * 2 <= wlen; i++) {
                 const std::uint16_t c = static_cast<std::uint8_t>(s[a2 + i]);  // ASCII widen
                 std::memcpy(H(buf + i * 2), &c, 2);
             }
@@ -6762,7 +6770,24 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            std::memcpy(H(buf), s.data() + a2, a3);
+            const std::uint32_t wlen = ClampHeapWrite(buf, a3, "GetStringUTFRegion");
+            std::memcpy(H(buf), s.data() + a2, wlen);
+        }
+        {
+            // Triage (capped): name the string, the destination and the size we
+            // believe the destination allocation has. alloc=0 = not a heap
+            // block (jni arena / static) -> ClampHeapWrite left it unclamped.
+            static int rn = 0;
+            if (rn < 8) {
+                rn++;
+                std::uint32_t asz = 0;
+                const auto ita = heap_sizes_.find(buf);
+                if (ita != heap_sizes_.end()) {
+                    asz = ita->second;
+                }
+                std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",
+                            fn == 221 ? "U" : "", a1, a2, a3, buf, asz);
+            }
         }
         Ret(regs, 0);
         return;
