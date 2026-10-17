@@ -128,8 +128,13 @@
 | # | Что | Статус |
 |---|---|---|
 | E1 | 5 незаигноренных untracked в корне: `Ghidra_AngryBirdsRio/` 207 МБ, `angrybirdsriodebug.7z` 33.9 МБ, `libAngryBirdsRio.so` 6.5 МБ (тройной дубль), `rio_boot2.log`, пустой `0xd6f60` → в `.gitignore` | PROVEN |
-| E2 | Доки расходятся с кодом: в «shipping junk» 10 флагов, реально активны 14 (нет `SPURWAKE`, `REALGL`, `RETSUCC`); «PORT LEDGER (do NOT ship)» перечисляет то, что ship'ится; строка `flags:` (`apphost.cpp:1162-1167`) показывает только 5 параметров | INFERRED |
-| E3 | `work/ARCH.md` всё ещё описывает bump-аллокатор 1 ГБ / heap `0x10000000–0x50000000` | INFERRED |
+| E2 | ~~Доки расходятся с кодом~~ → **СДЕЛАНО (2026-10-18):** шапка `AGENTS.md` («HANDOFF») переписана: текущий статус (игра работает целиком, проверено пользователем), актуальный ship-конфиг как единственный источник правды (fastmem/mallocpad/zerofill/heapwatch/norelease/**clampwrite/diag/jitopt**), список всегда-включённых поведенческих костылей (RETSUCC/SPURWAKE/REALGL/FASTMEM/`PROBE=1a410c,fill`), правила проверки и явная оговорка «датированные записи журнала — история, а не текущая правда». Исторические записи (в т.ч. «PORT LEDGER») не переписывались — они датированы, и их перекрывают более поздние | `AGENTS.md:3-40` | PROVEN |
+| E3 | ~~`work/ARCH.md` описывает bump-аллокатор~~ → **СДЕЛАНО (2026-10-18):** карта адресов, раздел «Память» и «Открытые вопросы» переписаны под dlmalloc-эру (арена 1 ГБ + `FOOTERS=0`/`DEBUG` не определён/`USE_LOCKS=0`, карантин+`CHUNKD`), снят ярлык «стена» с уровня 1 (работает), добавлены актуальный статус и оговорка про историчность. **Файл в `work/` (gitignored) — правки не версионируются** | `work/ARCH.md` | PROVEN |
+
+## Внеплановые фиксы (по крашам, вне батчей A–E)
+| # | Что | Где | Статус |
+|---|---|---|---|
+| F1 | **`PthreadCreate` тёк стеком 8 МБ на каждый поток** (в коде: «leak accepted in bring-up»; в `ThreadState` стек не сохранялся). Петля `VideoRewards`/time-sync создаёт поток на итерацию ⇒ ~123×8 МБ = **985 МБ** used ⇒ `[heap] OOM` ×10 ⇒ битый free ⇒ `USAGE_ERROR_ACTION` ⇒ SIGABRT. **СДЕЛАНО (2026-10-18):** стек перешёл во владение `ThreadState`, `ReapThreadStack()` освобождает его ровно один раз (выход потока / join / detach, идемпотентно); в OOM-строку добавлены `thr=`/`thrMB=`; под `DiagOn` — `[thread] reap … live=N`. PROVEN по цепочке улик (`ra`→`addr2line`→`mspace_free:5720`; `lr=0x38bb4c` = сразу после `bl pthread_create@plt` в 0x38bb48) | `dispatch.h` (`ThreadState`), `dispatch.cpp` (`ReapThreadStack`, `PthreadCreate`/`Join`/`Detach`, OOM-строка) | PROVEN |
 | E4 | `assets/seeds/highscores.lua` = 0 байт; `cacert.pem` продублирован (`assets/seeds/` ≡ `assets/data/certificates/`, md5 `9d8c2e9a…`), +256 КБ в APK | PROVEN |
 | E5 | Деплой-цепочка — только проза в AGENTS.md; отдельного скрипта с md5-проверкой нет | PROVEN |
 | E6 | `host/gen_apphost.py` зависит от gitignored входов (`work/jni_signatures.txt`, `work/apk_prod/smali`), вывод `apphost_gen.inc` закоммичен | INFERRED |

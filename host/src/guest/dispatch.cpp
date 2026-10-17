@@ -419,8 +419,9 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
             if (aj) {
                 lr = aj->Regs()[14];
             }
-            std::printf("[heap] OOM #%d size=%u used=%llu lr=%08x\n", oomn, size,
-                        (unsigned long long)heap_used_, lr);
+            std::printf("[heap] OOM #%d size=%u used=%llu lr=%08x thr=%u thrMB=%llu\n", oomn, size,
+                        (unsigned long long)heap_used_, lr, thr_stacks_,
+                        (unsigned long long)(thr_stack_bytes_ >> 20));
             if (oomn == 1) {
                 DumpEventRing();
             }
@@ -5762,8 +5763,10 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return 0xFFFFFFFFu;
     }
-    // 2MB guest stack from the heap (bump; leak accepted in bring-up).
-    const std::uint32_t stack = GuestMalloc(0x800000u);  // 8MB: stack-overflow smash guard (triage 2026-10-16)
+    // 8MB guest stack from the heap. Stack-overflow smash guard (triage
+    // 2026-10-16). The block is owned by the ThreadState now and handed back by
+    // ReapThreadStack (2026-10-18: it used to be leaked outright).
+    const std::uint32_t stack = GuestMalloc(0x800000u);
     if (!stack) {
         return 12;  // ENOMEM
     }
@@ -5772,6 +5775,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         tid = next_tid_++;
+        st->stack = stack;
+        thr_stacks_++;
+        thr_stack_bytes_ += 0x800000ull;
         threads_[tid] = st;
     }
     if (!CheckRange(tid_out, 4, true)) {
@@ -5852,6 +5858,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         if (DiagOn()) std::printf("[thread] tid=%u done retval=%08x\n", tid, regs[0]);
         st->cv.notify_all();
+        // Guest code has stopped, so its stack is dead: hand it back now (a
+        // joiner only needs st->retval). Idempotent with join/detach.
+        ReapThreadStack(tid);
         t_active_jit = nullptr;
     });
     st->th.detach();
@@ -5888,6 +5897,32 @@ void Runtime::ThreadCensus() {
         std::printf("[census] tid=%u done=%d retval=%08x last=%s hist=%.320s\n", kv.first,
                     (int)done, rv, ls.c_str(), hist.c_str());
     }
+}
+
+// Free a finished thread's 8MB guest stack exactly once. Before 2026-10-18
+// nothing freed it at all ("leak accepted in bring-up"), which is how the
+// VideoRewards / time-sync retry loop (one pthread_create per iteration, guest
+// site 0x38bb48) drove the heap to 985MB used, then OOM (10x, size=8388608 =
+// this stack), then a bad free -> USAGE_ERROR_ACTION -> SIGABRT. The ThreadState
+// stays in threads_ so a later guest pthread_join still finds tid/retval.
+void Runtime::ReapThreadStack(std::uint32_t tid) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = threads_.find(tid);
+    if (it == threads_.end() || !it->second->stack) {
+        return;
+    }
+    const std::uint32_t s = it->second->stack;
+    it->second->stack = 0;
+    thr_stacks_--;
+    thr_stack_bytes_ -= 0x800000ull;
+    if (DiagOn()) {
+        static int rn = 0;
+        if (rn < 40) {
+            rn++;
+            std::printf("[thread] reap tid=%u stack=%08x live=%u\n", tid, s, thr_stacks_);
+        }
+    }
+    GuestFree(s);
 }
 
 std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) {
@@ -5928,6 +5963,7 @@ std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) 
         }
         std::memcpy(H(retval_out), &st->retval, 4);
     }
+    ReapThreadStack(tid);
     return 0;
 }
 
@@ -5939,6 +5975,7 @@ std::uint32_t Runtime::PthreadDetach(std::uint32_t tid) {
     }
     it->second->detached = true;
     if (it->second->done) {
+        ReapThreadStack(tid);
         threads_.erase(it);
     }
     return 0;

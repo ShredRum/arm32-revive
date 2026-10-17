@@ -339,11 +339,24 @@ private:
         std::uint32_t retval = 0;
         bool detached = false;
         bool joined = false;
+        // Guest stack base (8MB) owned by this thread. Until 2026-10-18 nothing
+        // ever freed it ("leak accepted in bring-up", while free was leak-only
+        // anyway): the VideoRewards/time-sync retry loop creates a thread per
+        // iteration and exhausted the whole 1GB arena (~123 x 8MB = 985MB used
+        // -> OOM -> bad free -> USAGE_ERROR abort). Reaped exactly once by
+        // ReapThreadStack (thread exit, or join/detach, whichever comes first).
+        std::uint32_t stack = 0;
         std::string last_svc = "?";  // HARNESS_LASTSVC triage: parked import
         std::string svc_hist;        // ring of recent imports (path shape)
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<ThreadState>> threads_;
     std::uint32_t next_tid_ = 2;
+    // Live PthreadCreate stacks (counted for the OOM line: thread churn is the
+    // first thing that ever filled the arena, so name it there).
+    unsigned thr_stacks_ = 0;
+    unsigned long long thr_stack_bytes_ = 0;
+    // Hand a finished thread's guest stack back to the heap (idempotent).
+    void ReapThreadStack(std::uint32_t tid);
     // Callback-JIT pool (PvZ re-enter pattern): host thunks run inside the
     // outer Jit's Run(), where nested Run() asserts. Guest callbacks (qsort
     // comparators) run on SEPARATE Jit instances (own stack, lr=halt slot,

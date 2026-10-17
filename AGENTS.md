@@ -1,35 +1,52 @@
 # AGENTS.md — AngryBirdsRio arm64 port (dynarmic). FULL STATE DUMP.
 
-## HANDOFF (read first after any compression; updated 2026-10-13 day)
-- STATUS: boot→RIO LOADING stable (real art, sessions OK flag=1). Menu NOT
-  reached. Tree clean, all code+journal committed. Files dirs: work/files19
-  active (+ clean_registry.bin reset before EVERY run — registry is one-shot).
-- FUNNEL (ranked): (1) login-ladder: initiation BL 0x5CE50 runs clean, needs
-  session-linked +32 (link pattern PROVEN); functors never materialize.
-  Trigger-gates verdict ARRIVED (§58d-recipes below + older §notes): ordered
-  triple tested (loginchain2: holder fix works, r1=1 clean, D5994(r1=2) clean,
-  functors still 0). (2) Node/loop path: loop callable directly (returns fresh
-  node*, +0x18=7), builders need graph+valid rect (gate bypass proven,
-  writer-fault mapped). (3) Manager pass: needs +172/+176 pulse or forge
-  (faults on exclusive@0). (4) Unwinder: CLOSED (R7=0). Time/apdrive: DEAD x3.
-  Calls sterile. UPDATE-subscription absent.
-- FOUR-SUBAGENT WAVE VERDICTS: see §58 (58a lookup / 58b loop invocation /
-  58c delivery-impossibility / 58d appender+recipe). Status HYPOTHESES —
-  nothing ran live. Convergent picture: producers dead at every level,
-  structure fully mapped, delivery proven only synthetically.
-- §59 JOURNALED: loginchain2 (holder kills the fault, sterile), nowait1
-  (wait-cap REFUTED as pool-killer), plus912 (+912 always-NULL, CLOSED).
-  PROBE5 freed for recon targets.
-- NEXT ACTION: ONE live recon run (no new code): standard combo + WATCHPC on
-  reachable sites, dump live values for forge recipes (§58 synthesis). Then
-  fill per W1+W2 recipe (forge outer + populate L1/L2 + BL 0x5F96C), verify
-  binary (functors? events? builders? film?). Backstop: D1 device capture
-  (QUEUED DEVICE WORK; needs live game + gadget reinstall + calm session).
-- DO NOT: drop fill (death@update#1), trust probe-emit/PCTRACE counts
-  (translation≠execution — count [probe]#N), hardcode heap addrs (drift),
-  run parallel device sessions, bulk-edit without backup.
-- DETERMINISM: taskset -c 0, PACEMS=400, 63-call jni_long.txt + JOVR taps
-  (early only), NONET+DNSHUSH+empty-DNS, RETSUCC, POKE1187, REALGL film.
+## HANDOFF (read first after any compression; rewritten 2026-10-18)
+- STATUS (user-verified 2026-10-18): the arm64 port runs the untouched ARM32 game
+  offline, standalone, and **the whole game is in working order as far as the user
+  could check** -- menu, episodes and levels play with sound. This session also saw
+  "LEVEL CLEARED" on device with the diagnostic layer OFF. Tree clean, all code +
+  journal committed.
+- CAVEAT: the dated entries below are a HISTORICAL investigation log, not current
+  truth. Older notes (including some written by an earlier model) can contain
+  claims that were later fixed in code but never cleaned up in the prose -- e.g.
+  "menu NOT reached" or "level 1 parks" survived long after both were resolved.
+  When prose and the running build disagree, THE BUILD WINS; the checks below are
+  what to trust.
+- SHIP CONFIG (the `flags:` line printed at boot is the single source of truth):
+  fastmem=on  mallocpad=0  zerofill=off  heapwatch=off  norelease=off
+  clampwrite=off(+jni bound)  diag=off  jitopt=safe.
+  dlmalloc: FOOTERS=0, DEBUG **undefined** (passing DEBUG=0 DEFINED it and
+  compiled in the abort-assert -- C2), USE_LOCKS=0 so thread safety is entirely
+  the external bridge mutex. JIT: Dynarmic `all_safe_optimizations` by default
+  (C1, measured ~-20% CPU vs no_optimizations); HARNESS_NOOPT=1 restores the old
+  bring-up mode; HARNESS_SAFEOPTS is dead.
+- ALWAYS-ON BEHAVIOUR CRUTCHES (behaviour, NOT diagnostics; do not "clean"):
+  RETSUCC, SPURWAKE, REALGL, FASTMEM, and `HARNESS_PROBE=1a410c,fill` (writes
+  "{}" into the guest JSON SSO slot at 0x1A410C so the parser takes defaults).
+- DIAGNOSTICS: exactly one switch, HARNESS_DIAG (real env OR files/abflags.txt,
+  read at boot; "" / "-" / "0" / "off" / "false" = OFF). It arms the pc probes,
+  the WATCHPC hook, the per-call / per-frame traces and the hot-path logs. OFF
+  in prod (batch A/B took the log from 11.3 MB to ~52 KB per run). abflags.txt is
+  a device-side KEY=VALUE override file applied AFTER the shipping defaults --
+  never leave it on the device.
+- HOW TO VERIFY: native `./host/build-native/harness libAngryBirdsRio.so` =>
+  expect `init done: 54/54 clean, svc=948 halts=53`. Device: deploy -> verify the
+  md5 of the lib extracted from the INSTALLED base.apk (the app dir alternates
+  -1/-2; resolve it with `pm path`) -> run -> grep the markers SEPARATELY (Termux
+  grep does not honour `\|`, so a combined pattern silently returns 0):
+  HEAPCORRUPT, HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD; then check that
+  files/death.log is 0 B and there is no new tombstone; screenshot the state.
+- WHERE THINGS LIVE: PLAN.md = the A-E backlog + the agreed decisions;
+  AGENTS.md = this journal (dated entries are historical records -- later entries
+  supersede earlier ones); work/ARCH.md = the architecture description (partially
+  stale, batch E3).
+- DO NOT: patch the guest .so (read-only, sha256 checked); remove the
+  CheckAccess/CheckRange contract (a wild guest pointer must become a clean halt,
+  never a host SIGSEGV); "clean up" RETSUCC/SPURWAKE (real fail-path crutches);
+  run parallel device sessions; bulk-edit without backup.
+- HISTORY: the level-1 investigation lives in the §58/§59 entries below, and the
+  dlmalloc/D0 investigation in §130-§137. The old "Menu NOT reached" HANDOFF
+  (2026-10-13) is superseded: the menu was reached and level 1 now completes.
 
 ## 0. How to work here (rules learned the hard way)
 - RW ONLY inside this folder (+ /tmp freely). NEVER install anything system-wide.
@@ -3855,3 +3872,47 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   unchanged, flags clampwrite=off(+jni bound) jitopt=safe diag=off, HEAPCORRUPT/
   HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY, no new tombstone, title
   screen renders, log 54,481 B.
+
+## 138. CRASH FIX: PthreadCreate leaked its 8 MB guest stack -> arena exhaustion (2026-10-18)
+- SYMPTOM (user report "the game just crashed" while playing): death.log
+  `DEATH sig=06 ... pc=f0000024`, no new tombstone (crash_dump could not ptrace
+  in the sandbox), log 792 lines.
+- CAUSE, step by step (PROVEN):
+  1. The fatal abort is dlmalloc's `mspace_free` -> `erroraction:` ->
+     `USAGE_ERROR_ACTION` (dlmalloc.c:5720). Resolved by taking the hook's `ra`
+     (0x20ef4c) through `llvm-addr2line -e host/build-android/libabhost.so` on
+     the UNSTRIPPED build: `mspace_free` dlmalloc.c:5720. The hook's
+     `free=/sz=` show the failing free was a 24-byte block near the arena top.
+  2. That is a SYMPTOM, not the disease: right before it the log has
+     `[heap] OOM #1..#10 size=8388608 used=978-985 MB` -- the 1 GB arena was
+     essentially FULL (heap_used_ ~985 MB).
+  3. Every one of those OOM lines carries `lr=0038bb4c`. Disassembling the guest
+     at that address: `0x38bb48: bl 0x53b04 <pthread_create@plt>` and 0x38bb4c is
+     the instruction right after the call -- i.e. the 8 MB request is OUR
+     PthreadCreate stack allocation (dispatch.cpp:5766), made on behalf of the
+     guest's pthread_create at 0x38bb48.
+  4. The stack block was reachable from NOWHERE: ThreadState had no stack field,
+     only the thread lambda captured the local. Nothing freed it, and the code
+     even said so ("2MB guest stack from the heap (bump; leak accepted in
+     bring-up)"). 8 MB x ~123 threads = ~985 MB.
+  5. The game was in the known bad-online retry loop throughout: `[glog]
+     VideoRewards: Time was not synchronized, trying to do it now...` x18,
+     HashMap put/init churn, and `[unwind] LOUD nesting 513` + `nativeUpdate
+     ended hr=0x2000000` on every frame -> a loop that creates a thread per
+     iteration, so the leak ran away in seconds.
+- INFERRED (not proven): the ~123 thread count comes from 985 MB / 8 MB; and the
+  final bad free is a consequence of the exhausted arena rather than a second,
+  independent corruption.
+- NOT a regression: C1/C2/D0/D1/D3 touch no allocation path, and the leak is
+  older than all of them (the bump era leaked the same 8 MB, with leak-only free
+  to boot). It just needed a thread-churning loop to become fatal.
+- FIX: `ThreadState::stack` now owns the block; new `Runtime::ReapThreadStack()`
+  frees it exactly once (idempotent, under mutex_, guarded by stack=0). Called
+  from the thread itself right after the guest routine returns (the stack is dead
+  there; a joiner only needs st->retval), and from PthreadJoin / PthreadDetach.
+  The ThreadState stays in `threads_` so a later guest pthread_join still finds
+  tid/retval (POSIX leaves the tid invalid only after a successful join).
+  Also added live counters (`thr_stacks_`, `thr_stack_bytes_`) reported in the
+  OOM line as `thr=/thrMB=`, plus a DiagOn-gated `[thread] reap tid=.. stack=..
+  live=..` line (capped 40) so the fix can be SEEN in a diag run instead of only
+  argued. The 8 MB size (stack-smash guard, 2026-10-16) is unchanged.
