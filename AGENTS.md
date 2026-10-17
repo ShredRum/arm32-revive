@@ -3916,3 +3916,21 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   OOM line as `thr=/thrMB=`, plus a DiagOn-gated `[thread] reap tid=.. stack=..
   live=..` line (capped 40) so the fix can be SEEN in a diag run instead of only
   argued. The 8 MB size (stack-smash guard, 2026-10-16) is unchanged.
+- VERIFIED (harness 54/54 svc=948; device md5 ae645fd0c7ae85115dc2e8c2a74a5765
+  local == installed):
+  1. 5-min title-screen soak, pid 7299 stable, HEAPCORRUPT/HEAPASSERT/CHUNKD/
+     USAGE_ERROR 0, `[heap] OOM` 0, death.log empty, no new tombstone.
+  2. THREAD-CHURN REPRODUCTION (the user played the same spot again, HARNESS_DIAG=1
+     armed via files/abflags.txt for one run, then removed): **120 PthreadCreate
+     calls** (`[thread] create tid=` 120). That is 120 x 8 MB = 960 MB of stacks --
+     more than the whole arena, i.e. exactly the scenario that aborted before.
+     Result: `[heap] OOM` 0, `size=8388608` 0, HEAPCORRUPT/HEAPASSERT/CHUNKD/
+     USAGE_ERROR 0, death.log 0 B, no new tombstone, pid alive at the end.
+     `[thread] reap` shows the blocks coming back: max `live=11` across the logged
+     reaps, only **14 distinct stack addresses** for all of them, and the last five
+     creates (tid 119-123) all received the SAME base 1dadea28 -- immediate reuse.
+     Log 11.85 MB (diag on).
+- The user also reports FPS dips on some levels. Unverifiable-by-us and plausibly
+  emulation overhead, but note the old leak made it worse over time (the arena was
+  filling, so dlmalloc got slower and the heap fragmented): the dips should now be
+  re-measured on a long session rather than assumed.
