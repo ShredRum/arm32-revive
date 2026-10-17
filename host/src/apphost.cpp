@@ -504,8 +504,8 @@ std::shared_ptr<HostThread> Enter() {
     st->stack = g_rt->GuestMalloc(0x800000u);  // 8MB: see above
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = g_cb;
-    cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
-                                                        : Dynarmic::no_optimizations;
+    cfg.optimizations =
+        JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     if (std::getenv("HARNESS_FASTMEM")) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
     }
@@ -1228,7 +1228,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
         std::getenv("HARNESS_NORELEASE") ? "on" : "off",
         diag ? "on" : "off",
-        std::getenv("HARNESS_SAFEOPTS") ? "safe" : "none");
+        JitSafeOpts() ? "safe" : "none");
     Log("RETSUCC re-armed (real fail path stalls)");
     g_apk = FindApk();
     if (g_apk.empty()) {

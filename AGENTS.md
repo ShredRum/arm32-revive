@@ -3755,3 +3755,28 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   canary is meaningful again: any future CHUNKD line is a genuine suspect and
   its dump names the writer.
 - Native harness 54/54, svc=948 unchanged.
+
+## 134. C1 DONE: JIT default -> all_safe_optimizations (2026-10-17)
+- WHY: every UserConfig site (dispatch.cpp x2, apphost.cpp, harness.cpp) chose
+  `no_optimizations` unless HARNESS_SAFEOPTS was set, and nothing shipped it --
+  so the release ran the bring-up JIT. `fastmem` (the big win) was already on.
+- STEP 1 (measure, no code change): pushed `HARNESS_SAFEOPTS=1` via
+  files/abflags.txt and compared CPU ticks (utime+stime, HZ=100) over a fixed
+  90 s window on the deterministic title-screen loop, diag OFF in both arms so
+  logging cannot confound; order none,safe,none,safe cancels drift; pid
+  liveness checked inside each window. Result: none 6960 / 6938, safe 5668 /
+  5791 ticks => **-17.5% CPU** (ranges do not overlap), same visible state
+  (title screen screenshots), `jitopt=safe` confirmed in the flags line.
+- STEP 2 (shipped): default flipped; HARNESS_NOOPT=1 is the explicit
+  off-switch; HARNESS_SAFEOPTS is no longer read (legacy alias for the new
+  default). One helper `abr::JitSafeOpts()` (dispatch.h, `!EnvOn("HARNESS_NOOPT")`)
+  feeds all four sites AND the `flags: jitopt=` print so they cannot drift.
+- CORRECTNESS: the native harness now runs all_safe_optimizations by default
+  and still reports 54/54, svc=948 halts=53 -- the optimized JIT is
+  behaviourally identical on the offline suite. (It is the *default* now, so
+  HARNESS_NOOPT=1 selects the old path for A/B.)
+- DEVICE (md5 82cc8a4507130ebbd81b2a02f7e3042a local == installed, no abflags):
+  5-min soak, pid 3425 unchanged, `flags: ... diag=off jitopt=safe`, CPU 5541
+  ticks over the same 90 s window (noopt baseline ~6.9k => ~-20%), HEAPCORRUPT/
+  HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY (0 B), no new tombstone
+  (newest 16:41 pre-fix), title screen renders, log 51,847 B.

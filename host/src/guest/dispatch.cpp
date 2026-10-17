@@ -5638,8 +5638,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             Dynarmic::A32::UserConfig cfg;
             cfg.callbacks = cb_;
             cfg.optimizations =
-                std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
-                                                : Dynarmic::no_optimizations;
+                JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
             if (std::getenv("HARNESS_FASTMEM")) {
                 cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
             }
@@ -5763,8 +5762,8 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         t_tid = tid;
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
-        cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
-                                                            : Dynarmic::no_optimizations;
+        cfg.optimizations =
+            JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
         if (std::getenv("HARNESS_FASTMEM")) {
             cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
         }

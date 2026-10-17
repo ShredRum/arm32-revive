@@ -104,7 +104,7 @@
 ## Батч C — JIT/сборка
 | # | Что | Где | Статус |
 |---|---|---|---|
-| C1 | JIT по умолчанию `no_optimizations` в 4 местах; `HARNESS_SAFEOPTS` нигде не выставляется. План: дефолт → `all_safe_optimizations` + печатать режим в строке `flags:` | `dispatch.cpp:5565, 5687`; `apphost.cpp:507`; `harness.cpp:612` | PROVEN |
+| C1 | ~~JIT по умолчанию `no_optimizations` в 4 местах; `HARNESS_SAFEOPTS` нигде не выставляется~~ → **СДЕЛАНО (2026-10-17):** дефолт `all_safe_optimizations`, выключатель `HARNESS_NOOPT=1`, единый хелпер `abr::JitSafeOpts()` (`dispatch.h`) на всех 4 точках + строка `flags:` (`jitopt=`). Замер (diag off, фиксированное 90-с окно на титульнике, 2 прогона на режим): none 6960/6938 тика vs safe 5668/5791 ⇒ **−17.5 % CPU**; нативный харнесс с оптимизациями 54/54, svc=948 | `dispatch.h`; `dispatch.cpp:5639,5764`; `apphost.cpp:507,1231`; `harness.cpp:612` | PROVEN |
 | C2 | `-DDEBUG=0` **включает** debug-assert (значение не важно: `#ifdef DEBUG` истинно), `ABORT_ON_ASSERT_FAILURE`=1 (`dlmalloc.c:637`), `ABORT` подменён хуком → `AbrHeapCorruptionHook(); abort();`. Фикс: убрать `DEBUG=0` из defines (тогда ветка `#else` даёт `#define assert(x)`), либо `#if DEBUG` | `host/CMakeLists.txt:47`; `dlmalloc.c:1452-1470`; `abr_heap_hook.h` | PROVEN |
 | C3 | `INSECURE` не задан ⇒ `RTCHECK`/`ok_inuse`/`ok_pinuse` живут (постоянная цена, но и защита) | `host/CMakeLists.txt:47` | INFERRED |
 | C4 | Dynarmic `ASSERT` жив в release (`DYNARMIC_IGNORE_ASSERTS` не выставлен) | `thirdparty/.../mcl/assert.hpp:28` | INFERRED |

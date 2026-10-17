@@ -40,6 +40,15 @@ bool EnvOn(const char* name);
 // "off", "false", "-" and "" mean OFF; any other value means ON.
 bool DiagOn();
 
+// JIT optimization level (2026-10-17, PLAN.md C1). The shipping default is now
+// all_safe_optimizations: measured ~17.5% LESS CPU than no_optimizations on the
+// same title-screen workload (CPU ticks over a fixed 90 s window, diag off;
+// see AGENTS.md 134). HARNESS_NOOPT=1 restores the old bring-up mode.
+// HARNESS_SAFEOPTS is no longer read (it is a legacy alias for "safe", which is
+// now the default). Keep all four UserConfig sites + the `flags:` print on this
+// one helper so they can never drift apart.
+inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
+
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);

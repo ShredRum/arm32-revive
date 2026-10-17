@@ -606,11 +606,10 @@ int main(int argc, char** argv) {
     abr::GuestCallbacks callbacks(&rt);
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = &callbacks;
-    // A/B: HARNESS_SAFEOPTS=1 -> all_safe_optimizations (default lib
-    // mode); unset -> no_optimizations (bring-up mode). MCSM ships fast;
-    // we kept bring-up mode for debuggability. Compare baselines first.
-    cfg.optimizations = std::getenv("HARNESS_SAFEOPTS") ? Dynarmic::all_safe_optimizations
-                                                        : Dynarmic::no_optimizations;
+    // JIT mode: shipping default is all_safe_optimizations (measured ~17.5%
+    // less CPU, PLAN.md C1); env NOOPT/SAFEOPTS is handled by JitSafeOpts().
+    cfg.optimizations =
+        abr::JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     // Fastmem prototype (HARNESS_FASTMEM=1): direct host access to the 1:1
     // 4GB reservation; faults fall back to callbacks (BAD halting
     // preserved via slow path). Diags that sniff callbacks (WP/ScanWP/
