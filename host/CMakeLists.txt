@@ -38,8 +38,13 @@ add_library(guest STATIC
 )
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
 # Bionic-era ARM32, external locking via our bridge mutex).
+# FOOTERS=0/DEBUG=0 for shipping: FOOTERS is a debug layout that (a) stores a
+# host mspace pointer in guest-visible memory at every chunk foot and (b) makes
+# mspace_free dereference that foot first (a smeared foot => wild deref),
+# while DEBUG=1 turns soft invariant failures into aborts. Both were hunt
+# tools (2026-10-16) and must not ship. Re-enable for a hunt build only.
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
-    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;DEBUG=1;FOOTERS=1")
+    "ONLY_MSPACES=1;MSPACES=1;HAVE_MMAP=0;HAVE_MORECORE=0;MALLOC_ALIGNMENT=8;USE_LOCKS=0;NO_MALLINFO=1;NO_MALLOC_STATS=1;DEBUG=0;FOOTERS=0")
 # Corruption hook header (replaces dlmalloc's abort() with an atomic tripwire).
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_OPTIONS
     "-include;${CMAKE_CURRENT_SOURCE_DIR}/src/guest/abr_heap_hook.h")

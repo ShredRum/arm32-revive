@@ -39,6 +39,7 @@ void* mspace_malloc(dl_mspace, size_t);
 void mspace_free(dl_mspace, void*);
 void* mspace_realloc(dl_mspace, void*, size_t);
 void* mspace_calloc(dl_mspace, size_t, size_t);
+size_t mspace_usable_size(const void*);
 }  // extern "C"
 
 
@@ -335,10 +336,16 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         return 0;
     }
     try {
-        // Map holds size+pad (usable incl. slack): the pad zone must read as
-        // ours or the firewall strangles the very slack MALLOCPAD provides.
-        const std::uint32_t usable = size + pad;
-        heap_sizes_[out] = usable < 16 ? 16 : usable;
+        // Honest bound for the firewall/heapwatch: the REAL payload dlmalloc
+        // handed out (>= the request). The old max(size,16) claim left an
+        // 8-byte blind spot on small blocks -- exactly where the next chunk's
+        // header lives -- so a guest overflow there stayed invisible until
+        // mspace_free walked the smeared metadata (2026-10-17 crash).
+        std::uint32_t usable = (std::uint32_t)mspace_usable_size(hp);
+        if (usable < size) {
+            usable = size;  // paranoia: never below the request
+        }
+        heap_sizes_[out] = usable;
         heap_used_ += total;
     } catch (...) {
         // Host-side OOM on bookkeeping (not guest OOM): hand the block back,
@@ -394,8 +401,12 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
-    const std::uint32_t aligned = (std::uint32_t)(((std::uint64_t)total + 7) & ~std::uint64_t(7));
-    heap_sizes_[out] = aligned < 16 ? 16 : aligned;  // usable, malloc-consistent
+    // Honest real payload (same as GuestMalloc: no max(size,16) blind spot).
+    std::uint32_t usable = (std::uint32_t)mspace_usable_size(hp);
+    if (usable < total) {
+        usable = (std::uint32_t)total;
+    }
+    heap_sizes_[out] = usable;
     heap_used_ += total;
     return out;
 }
@@ -466,7 +477,12 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
     {
         heap_sizes_.erase(addr);
-        heap_sizes_[out] = rtotal < 16 ? 16 : rtotal;
+        // Honest real payload again (no max(size,16) blind spot).
+        std::uint32_t usable = (std::uint32_t)mspace_usable_size(hp);
+        if (usable < rtotal) {
+            usable = rtotal;
+        }
+        heap_sizes_[out] = usable;
         heap_used_ += (std::uint64_t)rtotal > old ? (std::uint64_t)rtotal - old : 0;
         if ((std::uint64_t)old > rtotal) {
             heap_used_ -= (std::uint64_t)old - rtotal;
