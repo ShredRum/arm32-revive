@@ -3803,3 +3803,34 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   unchanged, `flags: ... diag=off jitopt=safe`, CPU 5765 ticks/90 s (same band
   as the C1 build), HEAPCORRUPT/HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY,
   no new tombstone, title screen renders, log 51,250 B.
+
+## 136. D1 DONE: ClampHeapWrite firewall OFF by default (2026-10-17)
+- WHAT it was: the dlmalloc "overflow firewall" (commits 8a81005 / 1bcd3b9, the
+  bump-era hunt). Every guest-side memcpy/memmove/memset/strcpy/strcat/fgets/
+  fread/sscanf took `mutex_` (recursive_mutex) and walked `heap_sizes_`
+  (std::map) to find the containing live allocation, then truncated `len` if the
+  write would cross into the next chunk's metadata. It was a PLASTER for a bug
+  class that the JNI-table off-by-one (1177bac) fix had already removed.
+- CHANGE: OFF by default. The bypass sits BEFORE the lock (dispatch.cpp:219),
+  so the hot path pays neither the lock nor the map. `HARNESS_CLAMPWRITE=1`
+  re-arms it. `ClampWriteOn()` lives in dispatch.h.
+- KEPT ON PURPOSE: the two JNI region calls (GetStringRegion /
+  GetStringUTFRegion) pass `force=true`. There the return value is a FUNCTIONAL
+  destination bound (`memcpy(H(buf), s.data()+a2, wlen)`), not a firewall: an
+  unbounded UTF-16 widen had overrun a 24 B block into the next chunk head.
+  Cold path, zero cost, and removing it would re-open a known overflow.
+- `flags:` now prints `clampwrite=off(+jni bound)` (or `on`).
+- MEASURED (same 90 s title-screen window, same protocol as C1): 5648 CPU ticks
+  vs the C1/C2 band 5541-5765 -- **no measurable delta**. Honest result: the
+  firewall was NOT the bottleneck on this workload. Shipped anyway because it
+  removes the lock+tree from every guest memcpy/memset and drops a
+  false-positive-prone truncation path; protection at the mapping level
+  (CheckRange/CheckAccess) is untouched, and D4's CHUNKD quarantine oracle
+  still names any smear.
+- VERIFIED: native harness 54/54, svc=948 (ran with the firewall off). Device:
+  md5 a5270de39f6ee18296127ff49eb65157 local == installed, 5-min soak pid 4951
+  unchanged, flags clampwrite=off(+jni bound) jitopt=safe diag=off, HEAPCORRUPT/
+  HEAPASSERT/CHUNKD/USAGE_ERROR 0, death.log EMPTY, no new tombstone, title
+  screen renders, log 52,200 B.
+- D8 (lock-free prefilter inside ClampHeapWrite) is now moot: the bypass is
+  already before the lock.

@@ -216,7 +216,15 @@ static void Hex64(char*& p, std::uint64_t v) {
     }
 }
 
-std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
+std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
+                                      bool force) {
+    // D1: OFF by default (see dispatch.h). Bypass before the lock so the hot
+    // memory/string paths pay nothing, not even an uncontended lock. force=true
+    // is used only by the JNI region paths, whose return value is a functional
+    // bound.
+    if (!force && !ClampWriteOn()) {
+        return len;
+    }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // Find the containing live allocation: exact hit, else predecessor
     // interval, else successor head (dst in a gap returns len unclamped).
@@ -6834,13 +6842,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            // BOUND THE WRITE BY THE DESTINATION ALLOCATION (2026-10-17): the
-            // game sizes `buf` from its own length bookkeeping, so an unchecked
-            // UTF-16 widen overran a 24B block into the next chunk's head --
-            // exactly the metadata smear that detonated in mspace_free
-            // (ok_inuse failed on a head overwritten by wide chars). CheckRange
-            // only proves the mapping is writable (the whole arena is).
-            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion");
+            // BOUND THE WRITE BY THE DESTINATION ALLOCATION (2026-10-17; kept
+            // under D1 as force=true because it is a functional bound, not a
+            // firewall): the game sizes `buf` from its own length bookkeeping,
+            // so an unchecked UTF-16 widen overran a 24 B block into the next
+            // chunk's head -- exactly the metadata smear that detonated in
+            // mspace_free (ok_inuse failed on a head overwritten by wide
+            // chars). CheckRange only proves the mapping is writable (the whole
+            // arena is).
+            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion", true);
             for (std::uint32_t i = 0; i < a3 && (i + 1) * 2 <= wlen; i++) {
                 const std::uint16_t c = static_cast<std::uint8_t>(s[a2 + i]);  // ASCII widen
                 std::memcpy(H(buf + i * 2), &c, 2);
@@ -6852,7 +6862,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t wlen = ClampHeapWrite(buf, a3, "GetStringUTFRegion");
+            const std::uint32_t wlen = ClampHeapWrite(buf, a3, "GetStringUTFRegion", true);
             std::memcpy(H(buf), s.data() + a2, wlen);
         }
         {

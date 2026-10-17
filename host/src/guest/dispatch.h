@@ -49,6 +49,15 @@ bool DiagOn();
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 
+// D1 (2026-10-17, PLAN.md): the dlmalloc overflow firewall is OFF by default.
+// Default OFF means no recursive_mutex and no heap_sizes_ walk on the
+// memcpy/memmove/memset/strcpy/strcat/fgets/fread/sscanf paths -- the write
+// proceeds at its natural length. HARNESS_CLAMPWRITE=1 re-arms it.
+// The two JNI GetString*Region calls pass force=true: there the return value
+// is a FUNCTIONAL destination bound, not a firewall (an unbounded UTF-16 widen
+// overran a 24 B block into the next chunk head), so it stays on regardless.
+inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
+
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);
@@ -91,7 +100,8 @@ public:
     // dlmalloc headers -> host SIGSEGV with no witness. Exact-base writes
     // are clamped to the mapped size + LOUD (capped); interior-pointer
     // overflows stay visible (future work).
-    std::uint32_t ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n);
+    std::uint32_t ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
+                                 bool force = false);
     // Validates a guest range before host-side bulk access.
     bool CheckRange(std::uint32_t guest, std::size_t size, bool write);
     // Valid code addresses: module RX segments, trampoline page, HALT slot.

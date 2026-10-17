@@ -1221,12 +1221,14 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             std::fclose(ff);
         }
     }
-    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s diag=%s jitopt=%s",
+    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
+        "jitopt=%s",
         std::getenv("HARNESS_FASTMEM") ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
         std::getenv("HARNESS_NORELEASE") ? "on" : "off",
+        ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none");
     Log("RETSUCC re-armed (real fail path stalls)");
