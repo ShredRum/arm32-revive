@@ -6,6 +6,14 @@
 # guest stack).
 # Inputs: work/jni_signatures.txt + work/apk_prod smali (return + static).
 # Rule: NEVER hand-write these; regenerate. Asserts 63.
+#
+# NOTE (E6, 2026-10-18): the OUTPUT host/src/apphost_gen.inc is COMMITTED, and a
+# normal build does not run this script -- the .inc is compiled as-is. That is
+# deliberate and safe: regenerate only when the JNI signature set actually
+# changes. Because both inputs live under work/ (gitignored, derived from the
+# original APK), a fresh clone cannot regenerate the file on its own; it needs
+# the APK, an apktool decode at work/apk_prod and work/jni_signatures.txt.
+# Run from the project root:  python3 host/gen_apphost.py
 import re, glob
 
 SIG = 'work/jni_signatures.txt'

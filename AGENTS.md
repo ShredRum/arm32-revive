@@ -30,23 +30,31 @@
   a device-side KEY=VALUE override file applied AFTER the shipping defaults --
   never leave it on the device.
 - HOW TO VERIFY: native `./host/build-native/harness libAngryBirdsRio.so` =>
-  expect `init done: 54/54 clean, svc=948 halts=53`. Device: deploy -> verify the
-  md5 of the lib extracted from the INSTALLED base.apk (the app dir alternates
-  -1/-2; resolve it with `pm path`) -> run -> grep the markers SEPARATELY (Termux
-  grep does not honour `\|`, so a combined pattern silently returns 0):
-  HEAPCORRUPT, HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD; then check that
+  expect `init done: 54/54 clean, svc=948 halts=53`. (That guest .so is the
+  extracted ARM32 original, `unzip -p <apk> lib/armeabi-v7a/libAngryBirdsRio.so`;
+  it is gitignored, so a fresh clone must extract it once.) Device: `bash
+  scripts/deploy.sh` does the LOCAL half and prints the md5 of our stripped lib
+  plus the exact scp/install/check commands -- it never touches the device. Then
+  verify the md5 of the lib extracted from the INSTALLED base.apk (the app dir
+  alternates -1/-2; resolve it with `pm path`) -> run -> grep the markers
+  SEPARATELY (Termux grep does not honour `\|`, so a combined pattern silently
+  returns 0): HEAPCORRUPT, HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD; then check that
   files/death.log is 0 B and there is no new tombstone; screenshot the state.
 - WHERE THINGS LIVE: PLAN.md = the A-E backlog + the agreed decisions;
   AGENTS.md = this journal (dated entries are historical records -- later entries
-  supersede earlier ones); work/ARCH.md = the architecture description (partially
-  stale, batch E3).
+  supersede earlier ones); scripts/deploy.sh = the deploy chain's local half;
+  work/ARCH.md = the architecture description (E3, 2026-10-18: brought up to the
+  dlmalloc-era truth; lives in gitignored work/, so its edits are not versioned).
 - DO NOT: patch the guest .so (read-only, sha256 checked); remove the
   CheckAccess/CheckRange contract (a wild guest pointer must become a clean halt,
   never a host SIGSEGV); "clean up" RETSUCC/SPURWAKE (real fail-path crutches);
   run parallel device sessions; bulk-edit without backup.
-- HISTORY: the level-1 investigation lives in the §58/§59 entries below, and the
-  dlmalloc/D0 investigation in §130-§137. The old "Menu NOT reached" HANDOFF
+- HISTORY: the level-1 investigation lives in the §58/§59 entries below, the
+  dlmalloc/quarantine/D0 investigation in §130-§137, and the PthreadCreate
+  stack-leak crash fix (F1) in §138. The old "Menu NOT reached" HANDOFF
   (2026-10-13) is superseded: the menu was reached and level 1 now completes.
+  Batches A-E are CLOSED (see PLAN.md for per-item status); the only unplanned
+  addition was F1, found from a user-reported crash mid-play.
 
 ## 0. How to work here (rules learned the hard way)
 - RW ONLY inside this folder (+ /tmp freely). NEVER install anything system-wide.
