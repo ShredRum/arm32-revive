@@ -3602,3 +3602,69 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - PERF VARIANT: MALLOCLOG off (ring dormant). Debug costs ~seconds/boot;
   ship/user builds run quiet. Stash lab (LUACATCH/diag/luamsg, no
   freelist) re-applied after tagging for level-1 work.
+
+## 130. dlmalloc era: heap-corruption root cause found + fixed (2026-10-17)
+- GOAL: drop the bump allocator (it hid guest overruns by never reusing
+  memory) for a real bounded dlmalloc mspace; NORELEASE crutch removed.
+- SHIP CONFIG: dlmalloc built FOOTERS=0;DEBUG=0, and heap_sizes_ now stores
+  the honest mspace_usable_size (was max(size,16) -- an over-claim).
+  flags: line logs fastmem/mallocpad/zerofill/heapwatch/norelease.
+- DEPLOY BUG (proven): `scp <apk> u0_a41@host:` with NO destination name
+  landed as ~/apk_current_signed.apk, so `pm install -r ~/abprod.apk`
+  installed a STALE apk (device md5 == an older build). Always name the
+  destination and verify md5 of the INSTALLED lib.
+- CRASH SHAPE (proven): FOOTERS=1 died on a wild deref in mspace_free
+  (get_mstate_for reads a smeared foot); after FOOTERS=0 it became
+  sig=06 abort at dlmalloc.c:5720 (`erroraction: USAGE_ERROR_ACTION`) with
+  NO HEAPASSERT line. Note: dlmalloc's assert() is guarded by `#ifdef
+  DEBUG`, so -DDEBUG=0 still compiles it -- an abort without HEAPASSERT
+  proves a direct ABORT/USAGE/CORRUPTION site. INSECURE is unset, so
+  RTCHECK really evaluates (ok_inuse/ok_pinuse are live).
+- TOOL (this commit): quarantine-release tripwire (CHUNKD) verifies the
+  chunk head before mspace_free, dumps +-48/96B of the zone and LEAKS the
+  block instead of aborting -> corruption becomes evidence, not death.
+- ROOT CAUSE (proven): the JNI function-table tail was off by one. Real
+  table (parsed from the NDK r27 sysroot jni.h: 233 entries; anchors
+  GetVersion=4/GetMethodID=33/GetObjectRefType=232):
+    220 GetStringRegion | 221 GetStringUTFRegion | 222 GetPrimitiveArrayCritical
+    226 NewWeakGlobalRef | 227 DeleteWeakGlobalRef | 228 ExceptionCheck
+  We served 221 (the game's GetStringUTFRegion = BYTE copy) as
+  GetStringRegion (UTF-16 widen), writing 2*len bytes into a buffer sized
+  for len bytes -> the last bytes smeared the NEXT chunk's head word ->
+  ok_inuse() false -> abort at :5720. The CHUNKD dump showed the widen
+  signature (ASCII with interleaved NULs) written across the head.
+- FIX: correct indices (220/221 region vs utf-region, 222 critical pointer
+  = the array buffer + isCopy=0, 226 NewWeak, 227 DeleteWeak returning 0
+  (caller @0x267FD0 treats r0!=0 as a throw), 228 ExceptionCheck) plus
+  ClampHeapWrite on the region path as a safety net.
+- HUNT DIAG KEPT: CHUNKD verify+leak, GAPWRITE log for unclamped arena-gap
+  host writes, [realloc] pre dumps.
+- READ-ONLY AUDIT (open): host writes bounded only by CheckRange, same
+  class: read, recv/recvfrom, glReadPixels, glGetShader/ProgramInfoLog,
+  glGetActiveUniform/Attrib, glGen*.
+- PERF (open): JIT still defaults to no_optimizations (bring-up crutch;
+  HARNESS_SAFEOPTS enables all_safe_optimizations) -- main suspected
+  slowdown vs the bump build; plus hunt logging + ClampHeapWrite per copy.
+  Concretely: [rate] is an UNCAPPED printf (clock_gettime+write) on every
+  nativeUpdate/nativeRender/nativeInput (apphost.cpp:550) = ~180 log
+  lines/s in play; CHUNKD/GAPWRITE/[realloc] pre dumps; ClampHeapWrite map
+  lookup on every bulk copy. FPS is measurable offline from the deltas of
+  consecutive nativeUpdate t=<ms> stamps (CLOCK_MONOTONIC).
+  SHIPPING DEBUG JUNK (found 2026-10-17): apphost.cpp ~1054-1128 sets a
+  pile of harness env vars UNCONDITIONALLY in the shipping path, incl.
+  HARNESS_WATCHPC=250ab8 -- an instrumentation hook on the nativeUpdate
+  path whose WatchPC is capped at 4 but whose WatchSP is NOT capped and
+  printf's a 12-frame backtrace on EVERY hit (visible interleaved with each
+  [rate] line in the log). Also on: PROBE/PROBE2/PROBE3/PROBE4,
+  PROBE_N=500, RDUMP, DIAG164, THREADLOG, LASTSVC; nativeUpdate is also
+  Log()'d to logcat on every call. Candidate for the cleanup commit.
+- STABILITY (PROVEN, 2026-10-17): corrected-index build md5-verified on the
+  device (INSTALLED == EXPECTED fd798e09b3076ab25901ffff788a57c5), then a
+  fresh-boot soak ran ~4.8 min with the pid unchanged (1444 both stamps),
+  death.log EMPTY, no LOUD/HEAPCORRUPT, no new tombstone (newest still
+  16:48, pre-fix). Every [jni] region hit is a byte copy (no "U" widen) and
+  none clamps (43/48, 16/24, 5/24). Menu renders (title + Play) at 45 s and
+  at the end; render loop alive to the last second: consecutive
+  nativeUpdate t=769874 -> 769890 -> 769908 = 16/18 ms => ~55-60 fps.
+  => the 220/221 off-by-one WAS the whole corruption; dlmalloc is stable
+  with FOOTERS=0 and NORELEASE off.
