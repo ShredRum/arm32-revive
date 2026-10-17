@@ -3737,3 +3737,21 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   corruption signal. Correct test: `(head & CINUSE_BIT) == 0`. One-line fix,
   but it is a BEHAVIOUR change (blocks get freed again) => own run; queued as
   PLAN.md D0.
+
+## 133. D0 DONE: quarantine header test fixed, canary restored (2026-10-17)
+- FIX (dispatch.cpp ~674): `(head & 3) != 3` replaced with `(head & 0x2) == 0`
+  (CINUSE clear = genuinely suspicious) `|| csize < 24 || csize > 16 MB`, and
+  `csize` now masks FLAG_BITS (`& ~7`) to match dlmalloc's `chunksize()`.
+  The dump + leak-on-suspicion stay (they are the real corruption firewall);
+  healthy blocks are returned to `mspace_free` again, so the leak is gone.
+- VERIFIED on device (md5 612ad763e2c0ca15a2ccda87a9b2ac7f local == installed):
+  5-min soak, pid 4247 unchanged, `flags: diag=off jitopt=none`, **CHUNKD 0**
+  (was 12/3 min under the broken test -- every one a healthy chunk), abort 0,
+  HEAPCORRUPT/HEAPASSERT/USAGE_ERROR 0, death.log EMPTY (0 B), no new tombstone
+  (newest 16:41 pre-fix). Title screen renders; log 87,451 B.
+- CONSEQUENCE: dlmalloc chunks were never being smeared in these runs -- the A+B
+  "CHUNKD" lines were the false positives, and the earlier `USAGE_ERROR_ACTION`
+  era really was the JNI 220/221 off-by-one (fixed 1177bac). The quarantine
+  canary is meaningful again: any future CHUNKD line is a genuine suspect and
+  its dump names the writer.
+- Native harness 54/54, svc=948 unchanged.

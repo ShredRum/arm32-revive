@@ -671,10 +671,20 @@ void Runtime::GuestFree(std::uint32_t addr) {
         // dlmalloc.c:5720 (`erroraction: USAGE_ERROR_ACTION` -- ok_inuse /
         // ok_next failed) on exactly this path. Dump the zone (the smear
         // content names the writer) and LEAK the block instead of aborting.
+        // FIX (2026-10-17, PLAN.md D0): the old test `(head & 3) != 3` was a
+        // FALSE POSITIVE for any in-use chunk whose PREDECESSOR is free --
+        // set_inuse (dlmalloc.c:3066) ORs CINUSE but PRESERVES PINUSE
+        // (PINUSE_BIT=1, CINUSE_BIT=2, dlmalloc.c:2261), so `head & 3 == 2` is
+        // perfectly legal. All 12 dumps of the A+B soak had exactly that shape
+        // (csize == sz + 8, csize % 8 == 0) => the mitigation was leaking
+        // HEALTHY blocks and CHUNKD was useless as a canary. A chunk is suspect
+        // only when CINUSE is CLEAR (free / never-allocated -- cannot be a live
+        // quarantined block) or the size field is nonsense. Note dlmalloc's
+        // chunksize() masks FLAG_BITS (=7), not 3.
         if (heap_ms_ && q0.addr >= 64) {
             const std::uint64_t head = *H<std::uint64_t>(q0.addr - 8);
-            const std::uint64_t csize = head & ~std::uint64_t(3);
-            if (((head & 3) != 3) || csize < 24 || csize > (std::uint64_t)(1u << 24)) {
+            const std::uint64_t csize = head & ~std::uint64_t(7);
+            if ((head & 0x2) == 0 || csize < 24 || csize > (std::uint64_t)(1u << 24)) {
                 skip = true;
                 static int dvn = 0;
                 if (dvn < 12) {
