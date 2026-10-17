@@ -13,6 +13,7 @@
 #include <cmath>
 #include <ctime>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -27,6 +28,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <zlib.h>
+
+// libabhost load base, captured once at init (dladdr must NOT be called from
+// the corruption hook: mid-abort, mutex held). LibBaseAnchor() only exists as
+// a dladdr probe address.
+static std::uintptr_t g_lib_base = 0;
+static void LibBaseAnchor() {}
 
 #include <cstring>
 
@@ -133,6 +140,12 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // Guest heap: dlmalloc mspace over the fixed arena (no sbrk/mmap escape;
     // exhaustion returns 0 like before). Bionic-era layout (8B align, chunk
     // headers, LIFO reuse) instead of dense bump packing.
+    {
+        Dl_info di{};
+        if (dladdr(reinterpret_cast<void*>(&LibBaseAnchor), &di) && di.dli_fbase) {
+            g_lib_base = reinterpret_cast<std::uintptr_t>(di.dli_fbase);
+        }
+    }
     heap_ms_ = create_mspace_with_base(H(heap_base_), kHeapSize, 0);
     if (!heap_ms_) {
         std::printf("[heap] LOUD mspace creation failed -- halting\n");
@@ -158,6 +171,13 @@ static void DeathHex2(char*& p, std::uint32_t v) {
         *p++ = Hx[(v >> (i * 4)) & 0xFu];
     }
 }
+static void Hex64(char*& p, std::uint64_t v) {
+    static const char* Hx = "0123456789abcdef";
+    for (int i = 15; i >= 0; i--) {
+        *p++ = Hx[(v >> (i * 4)) & 0xFu];
+    }
+}
+
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // Find the containing live allocation: exact hit, else predecessor
@@ -183,6 +203,32 @@ std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, cons
             size = jt->second;
         }
         if (!size) {
+            // Not inside any LIVE allocation. Inside the arena this means a
+            // dlmalloc header word, a free chunk, the top chunk or a
+            // quarantined (freed) block -- i.e. exactly the bump-era
+            // overflow/UAF-write that bump tolerated (never reused) and
+            // dlmalloc cannot (that memory is metadata now). The write goes
+            // through UNCLAMPED (host-side: heapwatch only sees guest stores).
+            // Log it (capped) so the writer is named before the metadata
+            // detonates.
+            if (dst >= heap_base_ && (std::uint64_t)dst < (std::uint64_t)heap_base_ + kHeapSize) {
+                static int gn = 0;
+                if (gn < 40) {
+                    gn++;
+                    std::uint32_t lr = 0, pc = 0;
+                    Dynarmic::A32::Jit* aj = ActiveJit();
+                    if (aj) {
+                        lr = aj->Regs()[14];
+                        pc = aj->Regs()[15];
+                    }
+                    std::uint32_t nxt = 0;
+                    if (jt != heap_sizes_.end()) {
+                        nxt = jt->first;
+                    }
+                    std::printf("[heap] GAPWRITE %s dst=%08x len=%u nxt=%08x pc=%08x lr=%08x\n", n,
+                                dst, len, nxt, pc, lr);
+                }
+            }
             return len;  // gap/quarantine/module: not ours
         }
     }
@@ -5304,9 +5350,9 @@ extern "C" void AbrAssertHook(const char* expr, int line) {
     (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
     g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
 }
-extern "C" void AbrHeapCorruptionHook(void) {
+extern "C" __attribute__((noinline)) void AbrHeapCorruptionHook(void) {
     g_heap_corrupt_n.fetch_add(1, std::memory_order_relaxed);
-    char buf[96];
+    char buf[384];
     char* p = buf;
     const char* t = "HEAPCORRUPT pc=";
     while (*t) {
@@ -5341,6 +5387,38 @@ extern "C" void AbrHeapCorruptionHook(void) {
         *p++ = *t3++;
     }
     DeathHex2(p, g_last_free_size);
+    // ra: the dlmalloc.c call site of the abort macro (offset in libabhost) --
+    // names the exact invariant that fired. lr: guest caller of the mspace_*
+    // wrapper. fr: raw host frame-walk offsets (symbolizable offline).
+    {
+        const std::uintptr_t ra = (std::uintptr_t)__builtin_return_address(0);
+        const char* t4 = " ra=";
+        while (*t4) {
+            *p++ = *t4++;
+        }
+        Hex64(p, ra - g_lib_base);
+        const char* t5 = " lr=";
+        while (*t5) {
+            *p++ = *t5++;
+        }
+        DeathHex2(p, aj ? aj->Regs()[14] : 0);
+        const char* t6 = " fr=";
+        while (*t6) {
+            *p++ = *t6++;
+        }
+        std::uint64_t fp = (std::uint64_t)__builtin_frame_address(0);
+        for (int f = 0; f < 5 && fp > 0x7000000000ull && (p - buf) < 340; f++) {
+            const std::uint64_t* fr = (const std::uint64_t*)fp;
+            const std::uint64_t next = fr[0];
+            const std::uint64_t ret = fr[1];
+            if (next <= fp) {
+                break;
+            }
+            fp = next;
+            Hex64(p, ret - g_lib_base);
+            *p++ = ' ';
+        }
+    }
     *p++ = '\n';
     (void)write(STDERR_FILENO, buf, (std::size_t)(p - buf));
 }
