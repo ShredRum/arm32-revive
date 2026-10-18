@@ -4184,3 +4184,44 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   this as a win -- run-to-run spread was 56-61 and the tick protocol's spread
   brackets any delta); pid 18556 stable; prod log 45 746 B (the gate works).
 
+## 142. Restructure: `ab-port` multi-game tree + apksigner v2/v3 (2026-10-18)
+- WHY: the port core is title-agnostic and the user wants an umbrella repo. The
+  folder `AngrybirdsRio_port` -> `ab-port` (git history and tags intact; every
+  script path is relative).
+- LAYOUT: `games/<id>/{profile.toml,JOURNAL.md,original/,seeds/,work/}`; rio moved
+  wholesale. Four more titles added -- seasons 6.6.2, space 2.2.14, star-wars
+  1.5.13 (premium iap), star-wars-ii 1.9.25. All four verify as genuine Rovio
+  (signer `O=Rovio Mobile Ltd, L=Helsinki, C=FI` / `3bf28170…`), are
+  armeabi-v7a+x86 only, share the `com.rovio.fusion` JNI framework (62-74 exports
+  vs rio's 63) and the same dead `libjs.so`/`libadcolony.so` (PROVEN byte-identical
+  across titles). Profiles carry machine-checked data only; none ported yet.
+- SCRIPTS: `build-lib.sh` (arm64 lib; `--native` for the harness), `build-apk.sh
+  <id>`, `deploy.sh <id>`, `prepare-tree.sh <id>` (decode + the port edit set),
+  `profile.py`. `keys/debug.keystore` is the identity the device already had
+  (moved out of `work/`, alias `dbg` unchanged).
+- SIGNING CHANGE: `build-apk.sh` now runs `zipalign -p 4` + `apksigner` v1+v2+v3
+  -- apksigner IS present (build-tools 35.0.0), so entry 141's "v2 is impossible
+  locally" is superseded. Same key/alias -> same certificate identity, so
+  `pm install -r` is unaffected. `SIGN_SCHEME=v1` restores the jarsigner path.
+- HARNESS: files root, APK path and screenshot dir are derived from
+  `<root>/games/<id>/` (`HARNESS_FILES`/`HARNESS_APK` still override);
+  `gen_apphost.py` takes an optional game id.
+- PROVEN, no behaviour change: `git diff 788fa1a..af1ab96 -- host/src/guest
+  host/src/apphost.cpp host/src/apphost_gen.inc` is EMPTY. `prepare-tree.sh rio`
+  reproduces the shipped tree (only `apkFileName` and the doNotCompress line order
+  differ). `gen_apphost.py rio` -> byte-identical `apphost_gen.inc`. Native
+  baseline `54/54 clean, svc=948 halts=53`.
+- DEVICE TEST (build af1ab96): `pm install -r` **Success** over the v1-only
+  install (app dir -1 -> -2), installed lib md5
+  `cb136d64f4210475e1f2e52a0699ba81` == the local build, guest still `9c21a987…`;
+  `apksigner verify` v1/v2/v3 true; screenshot shows the real main menu; pid 2071
+  alive 4+ min, RSS 496 -> 468 MB, no new tombstone, `death.log` 0 B, memory
+  markers 0. `LOUD=3` is the `[unwind] LOUD nesting 513 deep … halting` spiral
+  guard in the offline network/ad path -- the same lines appear in decades-old
+  logs (`acctapi1`, `adjudicate*`, `airfaith*`), so it is not a regression.
+- NOTE: the device address is DHCP; after the power cut it moved
+  `192.168.1.202` -> `192.168.1.171` (host keys verified identical before use).
+  Pass `DEV=user@host:8022`; find it by scanning port 8022 on the LAN.
+- The lib md5 changed vs batch G (`296124ee…` -> `cb136d64…`) -- expected: builds
+  embed `__DATE__/__TIME__` and the absolute source path, which moved.
+

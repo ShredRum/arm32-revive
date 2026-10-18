@@ -52,6 +52,8 @@ OFF in prod. Never leave `abflags.txt` on the device.
 
 ## Device
 
-`u0_a41@192.168.1.202:8022`, app uid 10051, `/data/data/com.rovio.angrybirdsrio`
-is `drwx------` (use `sudo` for everything inside). Android 7.1 / SDK 25.
+SSH `u0_a41@<lan-ip>:8022` — the address is **DHCP and changes** (after the
+2026-10-18 power cut it moved `.202` → `.171`; rediscover with a port-8022 scan
+and check the host key). App uid 10051, `/data/data/com.rovio.angrybirdsrio` is
+`drwx------` (use `sudo` for everything inside). Android 7.1 / SDK 25.
 The user drives interaction by hand — synthetic taps are unreliable here.
