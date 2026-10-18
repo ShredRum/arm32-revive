@@ -635,6 +635,7 @@ int main(int argc, char** argv) {
     std::printf("loaded %s: %zu imports (%zu pending data), %zu init, %zu fini, halt=%08x\n",
                 mod.path.c_str(), mod.imports.size(), mod.pending_data.size(), mod.init_array.size(),
                 mod.fini_array.size(), mod.halt_va);
+    abr::CheckGuestBuildId(mod);
     // Temporary GOT audit: JUMP_SLOT region must not retain file values.
     for (std::uint32_t a : {0x671000u, 0x671010u, 0x671018u, 0x671020u}) {
         std::uint32_t v = 0;

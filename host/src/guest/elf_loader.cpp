@@ -114,6 +114,40 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
     }
 
+    // G3.4 (2026-10-18): capture the GNU build-id from PT_NOTE. The whole host
+    // assumes ONE exact guest image (hardcoded guest VAs, patch sites,
+    // behavioural hooks in apphost/dispatch), so the pin should be checkable at
+    // runtime. 20-byte desc, no crypto needed.
+    for (int i = 0; i < ehdr.e_phnum; i++) {
+        Elf32_Phdr ph;
+        std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
+        if (ph.p_type != PT_NOTE || ph.p_offset + ph.p_filesz > len) {
+            continue;
+        }
+        const std::uint8_t* p = file + ph.p_offset;
+        const std::uint8_t* pend = p + ph.p_filesz;
+        while (p + 12 <= pend) {
+            std::uint32_t namesz = 0, descsz = 0, ntype = 0;
+            std::memcpy(&namesz, p, 4);
+            std::memcpy(&descsz, p + 4, 4);
+            std::memcpy(&ntype, p + 8, 4);
+            const std::uint8_t* name = p + 12;
+            const std::uint8_t* desc = name + ((namesz + 3u) & ~3u);
+            const std::uint8_t* next = desc + ((descsz + 3u) & ~3u);
+            if (next > pend) {
+                break;
+            }
+            if (ntype == 3 && namesz == 4 && std::memcmp(name, "GNU", 4) == 0 && descsz > 0) {
+                out.build_id.assign(desc, desc + descsz);
+                break;
+            }
+            p = next;
+        }
+        if (!out.build_id.empty()) {
+            break;
+        }
+    }
+
     // Locate .ARM.exidx (SHT_ARM_EXIDX) for __gnu_Unwind_Find_exidx support.
     // The table lives inside a mapped PT_LOAD (bias 0 => VA == link address).
     if (ehdr.e_shoff != 0 && ehdr.e_shentsize >= sizeof(Elf32_Shdr)) {

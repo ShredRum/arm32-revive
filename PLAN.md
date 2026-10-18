@@ -196,7 +196,7 @@
 | **G3.1** | `GuestMunmap` не удаляет запись маппинга → stale `CheckAccess`/`CheckRange`, возможен host SIGSEGV | `dispatch.cpp:891` | **да** (нужна проверка) | ⏳ |
 | **G3.2** | `GuestMmap` MAP_FIXED-диапазон без проверки наложения на кучу | `dispatch.cpp:871` | низкий (LOUD вместо молчания) | ⏳ |
 | **G3.3** | `errno_slots_` при заполнении молча алиасится на main | `dispatch.cpp:~5845` | нет | ⏳ |
-| **G3.4** | **Self-check пиннинга гостя:** сверить build-id (`NOTE` @0x168, desc 20 Б @0x178) с константой → LOUD при несовпадении. Покрывает разом все хардкод-VA и поведенческие костыли (вместо отдельных проверок байт) | загрузчик `apphost.cpp` | низкий | ⏳ |
+| **G3.4** | **Self-check пиннинга гостя:** сверить build-id (`NOTE` @0x168, desc 20 Б @0x178) с константой → LOUD при несовпадении. Покрывает разом все хардкод-VA и поведенческие костыли (вместо отдельных проверок байт) | загрузчик `apphost.cpp` | низкий | ✅ `ElfLoader` извлекает build-id, `CheckGuestBuildId` в `elf_loader.h`, вызов в apphost+harness; проверено на копии с испорченным байтом — LOUD печатается, нормальный гость молчит |
 | **G4.1** | Шип-гигиена: `minSdkVersion 16` + подпись v1-only SHA-384 против `.so` android-26 → `apksigner` красный | `work/apk_prod/apktool.yml` + подпись | нет рантайм-риска | ⏳ |
 | **G4.2** | Хардкод пути `files` — не работает на secondary user / work profile | `apphost.cpp:1099/1306` | низкий | ⏳ |
 | **G4.3** | Мёртвые `lib/armeabi-v7a/libjs.so`, `libadcolony.so` в APK | APK | нет | ⏳ |

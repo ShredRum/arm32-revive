@@ -1288,6 +1288,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     }
     Log("guest: %zu imports %zu init halt=%08x", g_mod->imports.size(), g_mod->init_array.size(),
         g_mod->halt_va);
+    CheckGuestBuildId(*g_mod);
     // Trampoline map (first 48): lets any future death-pc name its import
     // offline (slot = (pc-kTrampBase)/4, swi = slot, idx = swi-1).
     for (std::size_t ti = 0; ti < g_mod->imports.size() && ti < 48; ti++) {
