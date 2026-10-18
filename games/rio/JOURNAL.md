@@ -57,3 +57,27 @@ SSH `u0_a41@<lan-ip>:8022` — the address is **DHCP and changes** (after the
 and check the host key). App uid 10051, `/data/data/com.rovio.angrybirdsrio` is
 `drwx------` (use `sudo` for everything inside). Android 7.1 / SDK 25.
 The user drives interaction by hand — synthetic taps are unreliable here.
+
+## Re-check after the shared-host changes (2026-10-19)
+
+The host library is shared by every title, so host changes are re-tested here.
+Two commits landed after this tag: `2bb8083` (loader refuses guest writes into
+`PT_GNU_RELRO`) and `79538ef` (`pthread_once` gets its own return trampoline; the
+nested-hijack stack became thread-local). Mechanism, evidence, and the remaining
+deviation: `../space/JOURNAL.md`.
+
+Re-verified on the device with the new lib (md5 of the lib inside the installed
+`base.apk`: `50a2933c31a582b2cb0f74d030b54d3f`; three prod-like launches, no
+`files/abflags.txt` present):
+
+- loads visually and is ready to play (user-verified while running);
+- `pthread_once` **is** reachable at runtime here: 5 hijacks per launch, and none
+  of them in the init array (`svc=948 halts=53` unchanged, i.e. no init return
+  goes through a once trampoline). All five clean — `hijack == done`,
+  `tid == owner_tid`, `STEAL = 0`, `BAD exec = 0`, `FATAL abort = 0`;
+- the tail markers of a Rio start (`[cond] wait … -> 0`, `[mutex]
+  UNLOCK-FOREIGN`, `[unwind] LOUD nesting 513 deep -- halting`) are pre-existing,
+  not caused by these commits: the same guard and the same mutex tracking are
+  present verbatim in this tag.
+
+No new tag without explicit confirmation.
