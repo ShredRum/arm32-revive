@@ -81,3 +81,18 @@ Re-verified on the device with the new lib (md5 of the lib inside the installed
   present verbatim in this tag.
 
 No new tag without explicit confirmation.
+
+### Pending re-check: the `pthread_once` blocking fix (2026-10-19)
+
+A further change landed on the shared host after the re-check above: `pthread_once`
+no longer returns 0 when the control reads `1` (in progress) -- it blocks the
+caller until the initialisation completes, as bionic does, and releases the
+control if the owning thread dies inside the routine. Mechanism, evidence and
+limits: `../space/JOURNAL.md`, section "Правка `state == 1`".
+
+This has **not** been measured on Rio. Rio does walk `pthread_once` at runtime
+(5 events per launch, all runtime, none in the init array), so the changed path
+is reachable here, and the expectation is that it is inert -- but that is an
+expectation, not a device measurement. The installed Rio currently still carries
+the *older* lib. Re-run the 3-launch prod-like check with the new lib before
+calling Rio re-verified for this change.

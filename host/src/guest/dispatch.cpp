@@ -5785,40 +5785,86 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
 
 bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
                           std::array<std::uint32_t, 16>& regs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // unique_lock (not lock_guard): the state==1 case below has to release the
+    // dispatcher lock while it waits.
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (!CheckRange(control, 4, false)) {
         std::printf("[once] BAD control %08x -- halting\n", control);
         stop_step_ = true;
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return false;
     }
-    std::uint32_t state = 0;
-    std::memcpy(&state, H(control), 4);
-    if (state != 0) {
-        if (state == 1) {
-            // IN PROGRESS on another thread (a control this caller already
-            // holds is caught by the recursion check below). bionic blocks the
-            // caller here until the control reads DONE; we return 0 at once and
-            // hand out a half-initialised object -- the likely cause of the
-            // "entropy read failed -> abort" seen once per 10 launches
-            // (guest pc 0x5cf449, libc getentropy family). DIAG only: names the
-            // deviation, does not fix it yet.
-            std::printf("[once] LOUD in-progress control=%08x tid=%u: returning 0 without "
-                        "waiting (bionic blocks)\n",
-                        control, GuestTid());
-        }
-        return false;  // already done: normal return 0
-    }
-    // Same control already in progress => pathological recursion (break it).
-    // A DIFFERENT control while one is in progress is legitimate nesting: the
-    // active init routine is initialising a second once-guard. Space does this
-    // in its init array (control 0x73f0d8 nested inside 0x73f0cc).
+    // Same control already held by THIS thread => pathological recursion (break
+    // it). This must be decided before the wait below: waiting on our own init
+    // would never end. A DIFFERENT control while one is in progress is
+    // legitimate nesting: the active init routine is initialising a second
+    // once-guard. Space does this in its init array (control 0x73f0d8 nested
+    // inside 0x73f0cc).
     for (int i = 0; i < once_depth_; i++) {
         if (once_stack_[i].control == control) {
             std::printf("[once] LOUD recursive once (control=%08x routine=%08x) -- treating as done\n",
                         control, routine);
             return false;
         }
+    }
+    std::uint32_t state = 0;
+    std::memcpy(&state, H(control), 4);
+    if (state == 1) {
+        // IN PROGRESS on another thread. bionic blocks the caller here until the
+        // control reads DONE; returning 0 at once hands out a half-initialised
+        // object. That was measured, not guessed: the caller went straight into
+        // the singleton and aborted (guest pc 0x5cf449, its entropy code, once
+        // per 10 launches) -- see games/space/JOURNAL.md.
+        //
+        // The dispatcher lock is released while waiting: the owner is running
+        // guest code and calls back into us (open/fcntl/read/pthread_key_create),
+        // so holding it would deadlock against the very init we await. Same
+        // idiom as the guest pthread_cond_wait path.
+        if (DiagOn()) {
+            // NB: the tid below is the CALLER (the one that blocks), not the
+            // thread that owns the init. Ownership is thread-local, so the
+            // waiter cannot name the owner -- do not read this as the owner.
+            std::printf("[once] wait: control=%08x in progress on another thread -- caller tid=%u "
+                        "blocks here\n",
+                        control, GuestTid());
+        }
+        // int64: a stuck wait may run long, and signed overflow here would be
+        // undefined behaviour for no reason at all.
+        std::int64_t waited_us = 0;
+        int logged_s = 0;
+        lock.unlock();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            lock.lock();
+            std::memcpy(&state, H(control), 4);
+            if (state != 1) {
+                break;
+            }
+            lock.unlock();
+            waited_us += 500;
+            if (waited_us >= (static_cast<std::int64_t>(logged_s) + 1) * 1000000) {
+                logged_s++;
+                // Not normal: an init routine alive for a whole second means the
+                // owner is stuck (guest deadlock, or a JIT halt inside it). No
+                // timeout and no bail-out -- bionic would block too -- but a
+                // hang must be diagnosable.
+                std::printf("[once] LOUD still waiting %d s for control=%08x (tid=%u) -- the "
+                            "thread that started this init has not finished it\n",
+                            logged_s, control, GuestTid());
+            }
+        }
+        if (DiagOn()) {
+            std::printf("[once] wait over: control=%08x state=%u -- caller tid=%u resumes\n", control,
+                        state, GuestTid());
+        }
+        if (state != 0) {
+            return false;  // the init completed while we waited: normal return 0
+        }
+        // state == 0: released without completing -- the owner thread died (see
+        // ReleaseOnceControlsOnExit). Fall through and run the init ourselves,
+        // exactly as a fresh caller would.
+    } else if (state != 0) {
+        return false;  // already initialised (2): normal return 0
     }
     if (once_depth_ >= kOnceMaxDepth) {
         std::printf("[once] LOUD once depth %d exceeded (control=%08x routine=%08x) -- treating as done\n",
@@ -5853,6 +5899,36 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
     }
     regs[14] = mod_.once_va;
     return true;
+}
+
+// A guest thread can stop while it still owns pthread_once controls that read
+// "in progress" (state == 1): a fatal guest error halts its JIT inside the init
+// routine, or its start routine returns from inside it. Any other thread asking
+// for such a control would then wait in PthreadOnce forever. Reset the control
+// so a later call runs the init again -- the init never completed, so re-running
+// it is the honest recovery (bionic has no such case: its init cannot be killed
+// underneath itself). Runs on the dying thread, over its thread_local stack.
+void Runtime::ReleaseOnceControlsOnExit(std::uint32_t tid) {
+    if (once_depth_ <= 0) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (int i = 0; i < once_depth_; i++) {
+        const std::uint32_t control = once_stack_[i].control;
+        std::uint32_t cur = 0;
+        if (!CheckRange(control, 4, false)) {
+            continue;
+        }
+        std::memcpy(&cur, H(control), 4);
+        if (cur == 1) {
+            const std::uint32_t zero = 0;
+            std::memcpy(H(control), &zero, 4);
+        }
+        std::printf("[once] LOUD tid=%u stopped inside an init routine (control=%08x, state was %u)"
+                    " -- control released; a later call re-runs that init\n",
+                    tid, control, cur);
+    }
+    once_depth_ = 0;
 }
 
 std::uint32_t Runtime::FindExidx(std::uint32_t pc) {
@@ -6470,6 +6546,8 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
             hr = jit.Run();
         }
         (void)hr;
+        // Dying here must not strand a caller that is waiting in PthreadOnce.
+        ReleaseOnceControlsOnExit(tid);
         {
             std::lock_guard<std::mutex> lock(st->m);
             st->retval = regs[0];

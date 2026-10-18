@@ -172,6 +172,12 @@ public:
     // must return from the callback immediately without Ret()).
     bool PthreadOnce(std::uint32_t control, std::uint32_t routine,
                      std::array<std::uint32_t, 16>& regs);
+    // A guest thread can stop (fatal guest error, or its start routine
+    // returning from inside an init routine) while it still owns pthread_once
+    // controls that read "in progress". Release them: the init never completed,
+    // so a later call must run it again -- otherwise a caller that waited would
+    // wait forever. Runs on the dying thread, from its thread_local once stack.
+    void ReleaseOnceControlsOnExit(std::uint32_t tid);
 
     // --- JNI bridge (bring-up): mock JNIEnv table + string handles. ---
     // JniEnv() returns a fake JNIEnv* (guest-data word holding table VA).
