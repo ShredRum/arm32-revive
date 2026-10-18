@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <filesystem>
+#include <functional>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "apphost.h"
+#include "appid.h"
 #include "guest/dispatch.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
@@ -89,7 +91,9 @@ void Log(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     std::printf("[apphost] %s\n", buf);
-    __android_log_print(ANDROID_LOG_INFO, "AngryBirdsRio", "[apphost] %s", buf);
+    // One tag for every title the host serves (the library is libabhost.so);
+    // the package is named in the OnLoad line instead.
+    __android_log_print(ANDROID_LOG_INFO, "abhost", "[apphost] %s", buf);
 }
 
 // G2.2 (2026-10-18): a real thread that enters the guest keeps its 8 MB guest
@@ -140,7 +144,7 @@ std::string GuestFilesDir() {
     const unsigned user = static_cast<unsigned>(getuid() / 100000);
     const std::string base =
         user == 0 ? std::string("/data/data/") : "/data/user/" + std::to_string(user) + "/";
-    return base + "com.rovio.angrybirdsrio/files";
+    return base + AppPackage() + "/files";
 }
 
 // Death witness (debuggerd is SELinux-muted on this device: native crashes
@@ -436,8 +440,16 @@ void CallGuest(Dynarmic::A32::Jit& jit, std::uint32_t target) {
     }
 }
 
-// Mini-zip STORED-only extract (packaging guarantees STORED via doNotCompress).
-bool ZipExtractStored(const std::string& apk, const std::string& inner, const std::string& out) {
+// Mini-zip reader for our own base.apk. Packaging guarantees the guest .so and
+// the seeds are STORED (apktool.yml doNotCompress), so there is no inflate here.
+struct ZipEntry {
+    std::string name;
+    std::uint32_t data_off = 0, csize = 0, usize = 0;
+    std::uint16_t method = 0;
+};
+
+// Walks the central directory in order. fn returns true to stop the walk.
+bool ZipWalk(const std::string& apk, const std::function<bool(const ZipEntry&)>& fn) {
     FILE* f = std::fopen(apk.c_str(), "rb");
     if (!f) {
         Log("zip open %s failed", apk.c_str());
@@ -472,12 +484,9 @@ bool ZipExtractStored(const std::string& apk, const std::string& inner, const st
         Log("zip EOCD not found");
         return false;
     }
-    // Walk central directory.
     std::fseek(f, cd_off, SEEK_SET);
-    bool found = false;
-    std::uint32_t data_off = 0, usize = 0;
-    std::uint16_t method = 0;
-    for (long i = 0; i < cd_n && !found; i++) {
+    bool stop = false;
+    for (long i = 0; i < cd_n && !stop; i++) {
         std::uint8_t h[46];
         if (std::fread(h, 1, 46, f) != 46) {
             break;
@@ -498,20 +507,41 @@ bool ZipExtractStored(const std::string& apk, const std::string& inner, const st
             break;
         }
         std::fseek(f, el + cl, SEEK_CUR);
-        if (nm == inner) {
-            method = (std::uint16_t)h16(10);
-            usize = h32(24);
-            data_off = h32(42);
-            found = true;
+        ZipEntry e;
+        e.name = nm;
+        e.method = (std::uint16_t)h16(10);
+        e.csize = h32(20);
+        e.usize = h32(24);
+        e.data_off = h32(42);
+        if (fn(e)) {
+            stop = true;
         }
     }
-    if (!found || method != 0) {
-        std::fclose(f);
+    std::fclose(f);
+    return true;
+}
+
+bool ZipExtractStored(const std::string& apk, const std::string& inner, const std::string& out) {
+    ZipEntry hit;
+    bool found = false;
+    ZipWalk(apk, [&](const ZipEntry& e) {
+        if (e.name == inner) {
+            hit = e;
+            found = true;
+            return true;
+        }
+        return false;
+    });
+    if (!found || hit.method != 0) {
         Log("zip entry %s %s", inner.c_str(), found ? "not STORED" : "missing");
         return false;
     }
+    FILE* f = std::fopen(apk.c_str(), "rb");
+    if (!f) {
+        return false;
+    }
     // Local header -> data.
-    std::fseek(f, data_off, SEEK_SET);
+    std::fseek(f, hit.data_off, SEEK_SET);
     std::uint8_t lh[30];
     if (std::fread(lh, 1, 30, f) != 30) {
         std::fclose(f);
@@ -519,14 +549,14 @@ bool ZipExtractStored(const std::string& apk, const std::string& inner, const st
     }
     const std::uint32_t lnl = (std::uint32_t)lh[26] | ((std::uint32_t)lh[27] << 8);
     const std::uint32_t lel = (std::uint32_t)lh[28] | ((std::uint32_t)lh[29] << 8);
-    std::fseek(f, data_off + 30 + lnl + lel, SEEK_SET);
+    std::fseek(f, hit.data_off + 30 + lnl + lel, SEEK_SET);
     FILE* o = std::fopen(out.c_str(), "wb");
     if (!o) {
         std::fclose(f);
         return false;
     }
     std::vector<std::uint8_t> buf(1 << 20);
-    std::uint32_t left = usize;
+    std::uint32_t left = hit.usize;
     while (left) {
         const std::uint32_t n = left > buf.size() ? (std::uint32_t)buf.size() : left;
         if (std::fread(buf.data(), 1, n, f) != n) {
@@ -537,8 +567,20 @@ bool ZipExtractStored(const std::string& apk, const std::string& inner, const st
     }
     std::fclose(o);
     std::fclose(f);
-    Log("zip extracted %s (%uB)", inner.c_str(), usize - left);
+    Log("zip extracted %s (%uB)", inner.c_str(), hit.usize - left);
     return left == 0;
+}
+
+// Entry names under a prefix, in central-directory order.
+std::vector<std::string> ZipListPrefix(const std::string& apk, const std::string& prefix) {
+    std::vector<std::string> v;
+    ZipWalk(apk, [&](const ZipEntry& e) {
+        if (e.name.size() >= prefix.size() && e.name.compare(0, prefix.size(), prefix) == 0) {
+            v.push_back(e.name);
+        }
+        return false;
+    });
+    return v;
 }
 
 std::shared_ptr<HostThread> Enter() {
@@ -995,6 +1037,9 @@ std::string FindApk() {
             }
         }
     }
+    // /data/app/<pkg>, <pkg>-1, <pkg>-2 ...: every install-generation directory
+    // starts with the package name, so one prefix match covers them all.
+    const std::string& pkg = AppPackage();
     const char* roots[] = {"/data/app", nullptr};
     for (int r = 0; roots[r]; r++) {
         DIR* d = opendir(roots[r]);
@@ -1003,29 +1048,15 @@ std::string FindApk() {
         }
         while (dirent* e = readdir(d)) {
             const std::string n = e->d_name;
-            if (n == "." || n == "..") {
+            if (n.size() <= pkg.size() || n.compare(0, pkg.size(), pkg) != 0) {
                 continue;
             }
-            for (const std::string& tail :
-                 {"/com.rovio.angrybirdsrio/base.apk", "/com.rovio.angrybirdsrio-1/base.apk",
-                  "/com.rovio.angrybirdsrio-2/base.apk"}) {
-                const std::string cand = std::string(roots[r]) + "/" + n + tail;
-                FILE* f = std::fopen(cand.c_str(), "rb");
-                if (f) {
-                    std::fclose(f);
-                    closedir(d);
-                    return cand;
-                }
-            }
-            // direct child already the package dir
-            if (n.find("com.rovio.angrybirdsrio") == 0) {
-                const std::string cand = std::string(roots[r]) + "/" + n + "/base.apk";
-                FILE* f = std::fopen(cand.c_str(), "rb");
-                if (f) {
-                    std::fclose(f);
-                    closedir(d);
-                    return cand;
-                }
+            const std::string cand = std::string(roots[r]) + "/" + n + "/base.apk";
+            FILE* f = std::fopen(cand.c_str(), "rb");
+            if (f) {
+                std::fclose(f);
+                closedir(d);
+                return cand;
             }
         }
         closedir(d);
@@ -1170,11 +1201,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Cleanliness test FAILED (2026-10-14): real fail path stalls on
     // Fox (no catch/delivery without canned success). RETSUCC re-armed.
     setenv("HARNESS_RETSUCC", "1", 1);
-    // NOT a diagnostic: the ",fill" suffix makes the host write "{}" into the
-    // guest's empty JSON SSO slot at 0x1A410C (dispatch.cpp ~8001), so the
-    // parser proceeds with defaults instead of throwing Unexpected EOF. It is
-    // a behaviour crutch and stays ON, like RETSUCC/FASTMEM/SPURWAKE/REALGL.
-    setenv("HARNESS_PROBE", "1a410c,fill", 1);
+    // The pinned-image probe (HARNESS_PROBE) is armed further down, once the
+    // guest is loaded and we know whether it IS the pinned image: its target is
+    // a guest VA of that one image.
     // ---- diagnostic layer: ONE switch, OFF for shipping (2026-10-17) -------
     // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
     // probes, the WATCHPC hook, the per-call/per-frame tracing and the
@@ -1309,27 +1338,51 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         return 0;
     }
     Log("apk=%s", g_apk.c_str());
+    // The guest .so is whatever sits under assets/guestlib/ (the packaging step
+    // puts exactly one there). Naming it in C would be a per-title constant.
+    const std::string glib_dir = "assets/guestlib/";
+    std::string guest_entry;
+    for (const std::string& e : ZipListPrefix(g_apk, glib_dir)) {
+        if (e.size() > 3 && e.compare(e.size() - 3, 3, ".so") == 0) {
+            if (!guest_entry.empty()) {
+                Log("FATAL: several guest .so under %s: %s, %s", glib_dir.c_str(),
+                    guest_entry.c_str(), e.c_str());
+                return 0;
+            }
+            guest_entry = e;
+        }
+    }
+    if (guest_entry.empty()) {
+        Log("FATAL: no guest .so under %s", glib_dir.c_str());
+        return 0;
+    }
+    Log("guest entry %s", guest_entry.c_str());
     const std::string guest_path = g_files + "/guest.so";
-    if (!ZipExtractStored(g_apk, "assets/guestlib/armeabi-v7a/libAngryBirdsRio.so", guest_path)) {
+    if (!ZipExtractStored(g_apk, guest_entry, guest_path)) {
         Log("FATAL: guest extract failed");
         return 0;
     }
     // First-launch seeds (root-free fresh installs): extract only what is
     // missing, never overwrite user state (registry keeps tokens/progress).
+    // Whatever the title ships under assets/seeds/ is what it needs; a title
+    // without that directory simply has none (Space).
     {
-        const char* seeds[] = {"highscores.lua", "settings.lua", "bi_data.lua", "cacert.pem",
-                               "fusion.registry"};
-        for (const char* s : seeds) {
-            const std::string dst = g_files + "/" + s;
+        const std::string seeds_dir = "assets/seeds/";
+        for (const std::string& e : ZipListPrefix(g_apk, seeds_dir)) {
+            const std::string name = e.substr(seeds_dir.size());
+            if (name.empty() || name.find('/') != std::string::npos) {
+                continue;  // flat files only
+            }
+            const std::string dst = g_files + "/" + name;
             FILE* probe = std::fopen(dst.c_str(), "rb");
             if (probe) {
                 std::fclose(probe);
                 continue;
             }
-            if (ZipExtractStored(g_apk, std::string("assets/seeds/") + s, dst)) {
-                Log("seeded %s", s);
+            if (ZipExtractStored(g_apk, e, dst)) {
+                Log("seeded %s", name.c_str());
             } else {
-                Log("seed MISSING from apk: %s", s);
+                Log("seed MISSING from apk: %s", e.c_str());
             }
         }
     }
@@ -1348,6 +1401,16 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     Log("guest: %zu imports %zu init halt=%08x", g_mod->imports.size(), g_mod->init_array.size(),
         g_mod->halt_va);
     CheckGuestBuildId(*g_mod);
+    const bool pinned = IsPinnedGuest(*g_mod);
+    // Behaviour crutch for THE PINNED IMAGE ONLY: the ",fill" suffix makes the
+    // host write "{}" into that image's empty JSON SSO slot (guest VA 1a410c),
+    // so its parser proceeds with defaults instead of throwing Unexpected EOF.
+    // A crutch, not a diagnostic (like RETSUCC/FASTMEM/SPURWAKE/REALGL) -- but
+    // tied to one image's VA, so a different guest gets none: there that
+    // address is arbitrary code or data.
+    if (pinned) {
+        setenv("HARNESS_PROBE", "1a410c,fill", 1);
+    }
     // Trampoline map (first 48): lets any future death-pc name its import
     // offline (slot = (pc-kTrampBase)/4, swi = slot, idx = swi-1).
     for (std::size_t ti = 0; ti < g_mod->imports.size() && ti < 48; ti++) {
@@ -1371,10 +1434,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_rt->set_callbacks(&callbacks);
     auto st = Enter();  // OnLoad thread state (+ real attach)
     g_rt->set_jit(st->jit);
-    // Static init (park the dead-by-construction #22 stub 0x5885C).
+    // Static init (park the dead-by-construction #22 stub 0x5885C -- a pinned-
+    // image VA: only that image has the stub at that address).
     std::size_t ok = 0;
     for (std::size_t k = 0; k < g_mod->init_array.size(); k++) {
-        if (g_mod->init_array[k] == 0x5885Cu) {
+        if (pinned && g_mod->init_array[k] == 0x5885Cu) {
             Log("[init] #%zu @0005885c PARKED (dead-by-construction)", k);
             ok++;
             continue;

@@ -23,6 +23,7 @@
 #include "dynarmic/interface/A32/config.h"
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/interface/halt_reason.h"
+#include "appid.h"
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"
@@ -506,8 +507,10 @@ private:
     std::unordered_map<std::uint32_t, std::uint32_t> jni_objclass_;  // obj -> class
     std::unordered_map<std::uint32_t, std::string> jni_strings_;  // jstring -> UTF-8
 
-    // File-bridge state.
-    std::string files_prefix_ = "/data/data/com.rovio.angrybirdsrio/files";
+    // File-bridge state. The guest-visible prefix is derived from our own
+    // package name (appid.h); SetFilesDir overrides it with what the caller
+    // knows, and the file bridge also matches the package tail either way.
+    std::string files_prefix_ = GuestFilesPrefix();
     std::string files_hostbase_;  // set by harness (SetFilesDir)
     struct HostFile {
         FILE* f = nullptr;

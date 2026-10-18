@@ -72,12 +72,19 @@ inline const std::vector<std::uint8_t>& PinnedGuestBuildId() {
     return id;
 }
 
+// True when the loaded module is the pinned image (build-id matches). The
+// host's engine VAs and behavioural crutches belong to that one image; a
+// different guest must run without them.
+inline bool IsPinnedGuest(const LoadedModule& mod) {
+    return !mod.build_id.empty() && mod.build_id == PinnedGuestBuildId();
+}
+
 // One LOUD line if the loaded module is not the pinned image (absent, empty or
 // different build-id). Never fatal: the host still runs, but every pinned VA is
 // suspect, so the caller must know.
 inline void CheckGuestBuildId(const LoadedModule& mod) {
     const std::vector<std::uint8_t>& pin = PinnedGuestBuildId();
-    if (mod.build_id == pin) {
+    if (IsPinnedGuest(mod)) {
         return;
     }
     std::printf("[guest] LOUD build-id mismatch -- host pins VAs/hooks for the known image\n");

@@ -128,25 +128,88 @@ per-game constants are ~10 package/lib sites and ~20 VA sites:
 * everything else (`2B0C50`, `C2144`, `250C80`, `263300`, `283B5C`, …) is
   behind a `HARNESS_*` poke flag → inert in prod.
 
+## Прогресс: runtime-identity + ABI-фикс exidx + устройство
+
+### Runtime-identity (шаг 1 плана — сделан)
+
+`host/src/appid.h`: `AppPackage()` выводит пакет из `/proc/self/cmdline` (в
+Android имя главного процесса И ЕСТЬ пакет; `:proc` срезается; если это путь —
+fallback), `GuestFilesPrefix()`. Использование:
+
+* `apphost.cpp`: каталог files, поиск APK по префиксу пакета в `/data/app`,
+  **гостевая либа и seeds находятся листингом zip** (`ZipWalk` + `ZipListPrefix`;
+  добавлен листинг центрального каталога, извлечение STORED осталось тем же);
+* `dispatch.h`: дефолт `files_prefix_`; `dispatch.cpp`: мок
+  `getPathToFileCacheDirectory`;
+* лог-тег Android теперь `abhost` для всех тайтлов (в OnLoad-строке печатается
+  пакет). Rio-APK при этом строится из тех же констант бит-в-бит
+  (`com.rovio.angrybirdsrio`).
+
+### Мостик файлов — правило стало общим
+
+Любой гость-путь вида `/data/{data,user/<N>}/<pkg>/files<rest>` отображается в
+host-files. Харнесс задаёт префикс Rio (`SetFilesDir(...)`) и раньше путь Space
+не мапился → ложная стена `unmapped guest path`. Мы хостим одного гостя, так что
+компонент пакета знать не обязательно (на устройстве гость и так видит только
+свой каталог).
+
+### `__gnu_Unwind_Find_exidx`: починен ABI (для не-pinned образов)
+
+Настоящий ABI: `(pc, int* count)` → **база таблицы** exidx, в `*count` — число
+8-байтных записей; сам гость (его статический libgcc) дальше делает бинарный
+поиск. Наш стаб возвращал **отдельную запись** для `pc` и не писал `count`.
+
+* ПРОВЕРЕНО: Rio этот импорт в прогоне харнесса **не вызывает** (0 срабатываний),
+  но на fail-path (prod) вызывает — поэтому pinned-образ сохранён бит-в-бит;
+* Space: получил нашу запись как «базу», искал ~2.7М записей с мусорным count →
+  wild read `0x1AE6328` при `guest-pc=0x557538` (`ldr r3,[r0]`, ARM-код, не Thumb:
+  регион — ARM; `HARNESS_EXIDXLOG` показал `pc=0051fce5 -> entry=00666f90`, и
+  00666f90 — ровно та «база», по которой гость улетел);
+* после фикса дикого чтения нет.
+
+Важно: `.ARM.exidx` на **prod-пути уже выводится** из модуля
+(`Runtime::FindExidx` → `mod_.exidx_va/exidx_count`); хардкод `59D250/18184`
+остался только в dev-диагностике/TTUNW → для буста не критичен.
+
+### Устройство (первая установка Space)
+
+`sudo pm install -r ~/ab_space.apk` (в Termux `pm` — это
+`PATH=/system/bin exec /system/bin/pm`, ставить надо под `sudo`/tsu: иначе
+`SecurityException: runInstallCreate ... user -1`). Пакет
+`com.rovio.angrybirdsspaceHD`, Rio не задет.
+
+Хост отработал end-to-end: `init done: 67/67`, `guest OnLoad r0=00010006`,
+`product live`; файлы созданы в `/data/user/0/com.rovio.angrybirdsspaceHD/files`
+(значит runtime-identity верна и на устройстве), `death.log` 0 Б, гость
+извлечён из APK (7341052 Б). Блокер был тот же wild read.
+
+### Харнесс после фиксов (порядок как в приложении: config → init)
+
+```
+HARNESS_ONLOAD=cec08 HARNESS_JNI=d0454,d3864 \
+HARNESS_JSTR=/data/data/com.rovio.angrybirdsspaceHD/files ./host/build-native/harness <space.so>
+```
+
+* `nativeConfig` возвращает объект (`r0=10003ad8`), НЕ падает;
+* `nativeInit` **завершается чистым halt** (`hr=UserDefined1`, `svc=360448`,
+  13 гостевых потоков, GL-текстуры, Lua-строки `new/res/lua/nil`);
+* `data/script_paths.json` нет НИ в одном оригинале — движок переживает
+  отсутствие, если `nativeConfig` был вызван первым (без него — `IOException:
+  Cannot find script commands.lua in script paths` → `abort()`).
+
+Baseline Rio не изменился: `init done: 54/54 clean, svc=948 halts=53`.
+
 ## Next steps
 
-1. **Game identity, runtime-derived (no per-title build):** the package/files dir
-   / APK discovery can come from `/proc/self/cmdline` (on Android the process
-   name *is* the package name, and it does not carry the `-1`/`-2` app-dir
-   suffix), and the guest lib asset can be discovered by listing
-   `assets/guestlib/armeabi-v7a/` instead of naming it. That makes one
-   `libabhost.so` serve every title and leaves the *engine* data as the only
-   per-title thing. Rio's derived values must equal today's constants
-   (`com.rovio.angrybirdsrio`), i.e. verify on device with the installed Rio.
-2. **Gate the Rio engine crutches on image identity** (`CheckGuestBuildId`
-   already computes it): the probe (`1a410c` fill), the functor forge
-   (`65E650`/`5FE70`), the park stub `5885C`, `45A778`/`457FE7`/`D5994`, the
-   RET-fixup list `28A380…` and the pokes all belong to *that* image; a
-   non-pinned image should simply run without them. Layout **bounds** are
-   derivable and were measured on Rio: `0x653D1C` = LOAD0 `p_filesz`,
-   `0x6EE000` = mapped end of LOAD1, `0x59D250` = `exidx_va`; the
-   `0x600000..0x6F0000` "is data" window is Rio's LOAD1 start rounded down to
-   1 MB and its end rounded up to 64 KB (INFERRED from one sample).
-3. Re-derive Space's VAs one blocker at a time, harness-first
-   (`nativeConfig` jstring → `nativeInit` engine path), then device.
-4. `PORTING.md` from the path actually walked.
+1. **Space `assets/seeds/`**: движку нужен `fusion.registry` в files-каталоге
+   (после общего правила мостика видно, что он его открывает). Взять тот же
+   first-launch набор, что у Rio-порта (он лежит в `games/rio/work/.../assets/seeds/`);
+   проверить, какие из них реально нужны Space.
+2. Дальше по фронту: `nativeUpdate` (`0xd5e74`) / `nativeRender` (`0xcebec`)
+   несколько раз подряд; затем `nativeResize` (`0xcebb4`) + `nativeInput`.
+3. Пересобрать android-либу + Space APK, переустановить, читать логи. Затем
+   пересобрать Rio APK и проверить, что устанавливаемый Rio-образ не изменился
+   (identity/мостик), т.к. изменения затрагивают общий код.
+4. Вывести layout-границы из модуля (сейчас хардкод в dev-диагностике; на
+   prod-пути exidx уже выведен) — когда будем трогать разворачиватель.
+5. `PORTING.md` from the path actually walked.

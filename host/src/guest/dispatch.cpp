@@ -2705,7 +2705,31 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 poke_n++;
             }
         }
-        Ret(regs, FindExidx(ask_pc));
+        // The imported ABI is (pc, int* count) -> the exidx TABLE BASE of the
+        // module holding pc, with *count = number of 8-byte entries; the caller
+        // (the guest's own statically linked libgcc) then binary-searches that
+        // table. The legacy answer below returned the single table ENTRY for pc
+        // and never wrote count, so a caller took one entry as the table base
+        // and searched `count` entries from it -- with whatever garbage its
+        // local count held. The pinned image's fail path is tuned around that
+        // (its walk sticks at 0x45A778 and RETSUCC re-arms it), so it keeps the
+        // legacy value bit-for-bit. Space calls this for real: its libgcc
+        // searched ~2.7M entries from a bogus base and wild-read 0x1AE6328 at
+        // guest-pc 0x557538. Non-pinned images get the ABI answer.
+        if (IsPinnedGuest(mod_)) {
+            Ret(regs, FindExidx(ask_pc));
+            return;
+        }
+        const std::uint32_t pc = a0 & ~std::uint32_t(1);
+        std::uint32_t base = 0, count = 0;
+        if (IsCodeAddress(pc) && mod_.exidx_va != 0) {
+            base = mod_.exidx_va;
+            count = mod_.exidx_count;
+        }
+        if (a1 != 0 && CheckRange(a1, 4, true)) {
+            std::memcpy(H(a1), &count, 4);
+        }
+        Ret(regs, base);
         return;
     }
     // --- file bridge (bring-up) ---
@@ -2769,14 +2793,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 !files_hostbase_.empty()) {
                 return files_hostbase_ + g.substr(files_prefix_.size());
             }
-            // Same app dir via the /data/user/<N> alias (real getFilesDir on
-            // device returns /data/user/0/... while our prefix is /data/data).
-            // Match on the package tail so both spellings land in files/.
-            {
-                const std::string tail = "/com.rovio.angrybirdsrio/files";
-                const std::size_t at = g.find(tail);
-                if (at != std::string::npos && !files_hostbase_.empty()) {
-                    return files_hostbase_ + g.substr(at + tail.size());
+            // Any guest path shaped /data/{data,user/<N>}/<pkg>/files<rest> is
+            // this app's files dir. We host exactly one guest, so the package
+            // component need not be known here: the offline harness has no
+            // cmdline package (its SetFilesDir prefix is a caller choice), and
+            // on a real device the guest can only reach its own package's dir.
+            if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
+                                             g.compare(0, 11, "/data/user/") == 0)) {
+                const std::size_t at = g.find("/files");
+                if (at != std::string::npos && (g.size() == at + 6 || g[at + 6] == '/')) {
+                    return files_hostbase_ + g.substr(at + 6);
                 }
             }
             // Bare relative names (no leading '/'): the game opens seeds like
@@ -7408,7 +7434,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             mdesc.compare(mdesc.size() - 20, 20, "()Ljava/lang/String;") == 0) {
             std::string content;
             if (mdesc.find("getPathToFileCacheDirectory") != std::string::npos) {
-                content = "/data/data/com.rovio.angrybirdsrio/files";
+                content = GuestFilesPrefix();
             }
             // HARNESS_DEVID=<hex16> overrides the mock device ID (default: a
             // fixed plausible ANDROID_ID; empty broke key-derivation paths).
