@@ -22,3 +22,7 @@ angrybirdsriodebug.7z
 libAngryBirds*.so
 rio_boot2.log
 0xd6f60
+
+# Local working areas without a games/<id>/ home (root-level leftovers).
+work/
+Ghidra_AngryBirdsSpace/

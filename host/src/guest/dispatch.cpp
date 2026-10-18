@@ -1171,6 +1171,193 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     CallImport(idx, regs);
 }
 
+std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
+    auto next32 = [&]() -> std::uint32_t {
+        std::uint32_t v = 0;
+        if (st.via_va) {
+            if (st.stack != 0 && CheckRange(st.stack, 4, false)) {
+                std::memcpy(&v, H(st.stack), 4);
+            }
+            st.stack += 4;
+            return v;
+        }
+        if (st.ai < 4) {
+            return st.gargs[st.ai++];
+        }
+        if (CheckRange(st.stack, 4, false)) {
+            std::memcpy(&v, H(st.stack), 4);
+        }
+        st.stack += 4;
+        return v;
+    };
+    // Variadic doubles follow the BASE standard: 8 bytes in core words / stack.
+    auto next64 = [&]() -> std::uint64_t {
+        const std::uint64_t lo = next32();
+        const std::uint64_t hi = next32();
+        return lo | (hi << 32);
+    };
+
+    std::string out;
+    std::size_t fi = 0;
+    while (fi < fmt.size() && out.size() < 4096) {
+        const char c = fmt[fi++];
+        if (c != '%') {
+            out += c;
+            continue;
+        }
+        if (fi >= fmt.size()) {
+            out += '%';
+            break;
+        }
+        if (fmt[fi] == '%') {
+            fi++;
+            out += '%';
+            continue;
+        }
+        std::string flags;
+        for (; fi < fmt.size(); fi++) {
+            const char f = fmt[fi];
+            if (f == '-' || f == '+' || f == ' ' || f == '#' || f == '0' || f == '\'') {
+                if (flags.find(f) == std::string::npos) {
+                    flags += f;
+                }
+            } else {
+                break;
+            }
+        }
+        std::string width;
+        if (fi < fmt.size() && fmt[fi] == '*') {
+            fi++;
+            const int w = (int)next32();
+            if (w < 0) {
+                if (flags.find('-') == std::string::npos) {
+                    flags += '-';
+                }
+                width = std::to_string(-w);
+            } else {
+                width = std::to_string(w);
+            }
+        } else {
+            while (fi < fmt.size() && fmt[fi] >= '0' && fmt[fi] <= '9') {
+                width += fmt[fi++];
+            }
+        }
+        std::string prec;
+        if (fi < fmt.size() && fmt[fi] == '.') {
+            fi++;
+            prec = ".";
+            if (fi < fmt.size() && fmt[fi] == '*') {
+                fi++;
+                prec += std::to_string((int)next32());
+            } else {
+                while (fi < fmt.size() && fmt[fi] >= '0' && fmt[fi] <= '9') {
+                    prec += fmt[fi++];
+                }
+            }
+        }
+        int lmod = 0;  // 0 = int, 1 = long(32-bit here), 2 = long long, 3 = size_t
+        while (fi < fmt.size()) {
+            const char L = fmt[fi];
+            if (L == 'h') {
+                fi++;
+                if (fi < fmt.size() && fmt[fi] == 'h') {
+                    fi++;
+                }
+            } else if (L == 'l') {
+                fi++;
+                lmod = (lmod >= 1) ? 2 : 1;
+                if (fi < fmt.size() && fmt[fi] == 'l') {
+                    fi++;
+                    lmod = 2;
+                }
+            } else if (L == 'L' || L == 'z' || L == 'j' || L == 't') {
+                fi++;
+                lmod = 2;
+            } else {
+                break;
+            }
+        }
+        const std::string spec = flags + width + prec;
+        if (fi >= fmt.size()) {  // truncated spec: emit it as text
+            out += '%';
+            out += spec;
+            break;
+        }
+        const char conv = fmt[fi++];
+        char buf[512];
+        switch (conv) {
+        case 'd':
+        case 'i': {
+            const long long v = (lmod >= 2) ? (long long)next64() : (long long)(std::int32_t)next32();
+            std::snprintf(buf, sizeof(buf), ("%" + spec + "lld").c_str(), v);
+            out += buf;
+            break;
+        }
+        case 'u':
+        case 'o':
+        case 'x':
+        case 'X': {
+            const unsigned long long v = (lmod >= 2) ? (unsigned long long)next64()
+                                                      : (unsigned long long)next32();
+            std::snprintf(buf, sizeof(buf), ("%" + spec + "ll" + conv).c_str(), v);
+            out += buf;
+            break;
+        }
+        case 'p': {
+            std::snprintf(buf, sizeof(buf), ("%" + spec + "llx").c_str(),
+                          (unsigned long long)next32());
+            out += "0x";
+            out += buf;
+            break;
+        }
+        case 'f':
+        case 'F':
+        case 'e':
+        case 'E':
+        case 'g':
+        case 'G':
+        case 'a':
+        case 'A': {
+            const std::uint64_t bits = next64();
+            double d = 0;
+            std::memcpy(&d, &bits, 8);
+            std::snprintf(buf, sizeof(buf), ("%" + spec + conv).c_str(), d);
+            out += buf;
+            break;
+        }
+        case 'c':
+            std::snprintf(buf, sizeof(buf), ("%" + spec + "c").c_str(), (int)(next32() & 0xFF));
+            out += buf;
+            break;
+        case 's': {
+            const char* s = GuestStr(next32());
+            std::snprintf(buf, sizeof(buf), ("%" + spec + "s").c_str(), s ? s : "");
+            out += buf;
+            break;
+        }
+        case 'n': {
+            const std::uint32_t p = next32();
+            if (p != 0 && CheckRange(p, 4, true)) {
+                if (lmod >= 2) {
+                    const std::uint64_t n = out.size();
+                    std::memcpy(H(p), &n, 8);
+                } else {
+                    const std::uint32_t n = (std::uint32_t)out.size();
+                    std::memcpy(H(p), &n, 4);
+                }
+            }
+            break;
+        }
+        default:
+            out += '%';
+            out += spec;
+            out += conv;
+            break;
+        }
+    }
+    return out;
+}
+
 void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
@@ -1185,6 +1372,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
          n == "setsockopt" || n == "shutdown" || n == "sendmsg" || n == "recvmsg")) {
         std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                     GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
+    }
+
+    // DIAG-only audit: record every distinct guest import actually CALLED.
+    // Used to find host-side service gaps of the kind that broke Space (a
+    // missing strtod left luaO_str2d's endptr uninitialised, so Lua's
+    // string->number coercion mis-reported and drawSprite picked the wrong
+    // argument branch). Off in prod.
+    if (DiagOn()) {
+        static std::vector<std::string> seen_imports;
+        bool known = false;
+        for (const std::string& s : seen_imports) {
+            if (s == n) {
+                known = true;
+                break;
+            }
+        }
+        if (!known && seen_imports.size() < 900) {
+            seen_imports.push_back(n);
+            std::printf("[import] first call: %s\n", n.c_str());
+        }
     }
 
     // --- memory management ---
@@ -2080,8 +2287,89 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    if (n == "strtod") {
+        // Guest ABI: strtod(nptr=a0, endptr=a1) -> double in r0:r1 (softfp:
+        // little-endian, low word in r0 -- see math_thunks.inc and the guest's
+        // luaO_str2d, which reads the value back as CONCAT44(r1, r0)).
+        //
+        // This one is load-bearing: the engine's Lua string->number coercion
+        // (luaO_str2d) declares `char *endptr;` uninitialised and relies on
+        // strtod to write it. If the call returns without touching a1, endptr
+        // keeps stack garbage, so luaO_str2d most often reports "converted OK"
+        // -- and lua_isnumber() then claims arbitrary strings are numbers.
+        // Symptom: drawSprite() takes its numeric-argument branch for calls
+        // that pass a sprite NAME (e.g. Image.lua: res.drawSprite("",
+        // "LOGO_ROVIO", 0, 0, "HPIVOT","VPIVOT",w,h)) -> "Excepted type NUMBER
+        // at stack position 2 but found STRING" -> uncaught LuaException ->
+        // engine's terminate handler -> abort(), every frame.
+        if (!CheckRange(a0, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string s(GuestStr(a0));
+        char* end = nullptr;
+        const double v = std::strtod(s.c_str(), &end);
+        if (a1 != 0) {
+            if (!CheckRange(a1, 4, true)) {
+                goto bad_ptr;
+            }
+            const std::uint32_t ev = a0 + static_cast<std::uint32_t>(end - s.c_str());
+            std::memcpy(H(a1), &ev, 4);
+        }
+        if (DiagOn()) {
+            static int strtod_shown = 0;
+            if (strtod_shown < 8) {
+                ++strtod_shown;
+                std::printf("[svc] strtod(\"%.40s\") -> %g consumed=%d\n", s.c_str(), v,
+                            static_cast<int>(end - s.c_str()));
+            }
+        }
+        std::uint32_t w64[2] = {0, 0};
+        std::memcpy(w64, &v, 8);
+        Ret(regs, w64[0], w64[1]);
+        return;
+    }
     if (n == "__errno") {
         Ret(regs, ErrnoSlot());
+        return;
+    }
+    if (n == "strerror" || n == "strerror_r") {
+        // Must hand back a GUEST string: a host pointer is read as guest memory
+        // (the engine's own log then printed the .so's ELF header as the
+        // "errno text"). Per-host-thread guest scratch; callers never free it.
+        const int e = (int)a0;
+        const char* msg = ::strerror(e == 0 ? EINVAL : e);
+        if (!msg) {
+            msg = "Unknown error";
+        }
+        if (n == "strerror_r") {
+            // bionic: int strerror_r(int err, char* buf, size_t len).
+            if (a1 == 0 || a2 == 0) {
+                Ret(regs, static_cast<std::uint32_t>(EINVAL));
+                return;
+            }
+            const std::size_t cap = (std::size_t)a2;
+            const std::size_t w = std::min<std::size_t>(std::strlen(msg), cap - 1);
+            if (!CheckRange(a1, w + 1, true)) {
+                Ret(regs, static_cast<std::uint32_t>(ERANGE));
+                return;
+            }
+            std::memcpy(H(a1), msg, w);
+            H(a1)[w] = 0;
+            Ret(regs, 0);
+            return;
+        }
+        static thread_local std::uint32_t sbuf = 0;
+        if (sbuf == 0) {
+            sbuf = GuestMalloc(128);
+        }
+        if (sbuf == 0 || !CheckRange(sbuf, 1, true)) {
+            Ret(regs, 0);
+            return;
+        }
+        const std::size_t w = std::min<std::size_t>(std::strlen(msg), 127);
+        std::memcpy(H(sbuf), msg, w);
+        H(sbuf)[w] = 0;
+        Ret(regs, sbuf);
         return;
     }
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
@@ -2176,7 +2464,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::uint32_t ai = 3;  // next arg: r3 first (a0-a2 consumed: prio,tag,fmt)
         std::uint32_t stack = regs[13];
         std::string out;
-        for (const char* p = fmt.c_str(); *p && out.size() < 512; p++) {
+        for (const char* p = fmt.c_str(); *p && out.size() < 8192; p++) {
             if (*p != '%') {
                 out += *p;
                 continue;
@@ -2234,6 +2522,40 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         std::printf("[glog] %s\n", out.c_str());
         Ret(regs, 0);
+        return;
+    }
+    // --- printf family writing into GUEST buffers ---
+    // Space's engine imports these; the stub tail used to make them silent
+    // no-ops, so every buffer it formatted (its Lua error text, symbol names,
+    // JSON fragments) came out untouched/garbage. C99 truncation semantics:
+    // at most cap-1 chars + NUL, return = untruncated length.
+    if (n == "snprintf" || n == "vsnprintf" || n == "sprintf" || n == "vsprintf") {
+        const bool sized = (n == "snprintf" || n == "vsnprintf");
+        const bool via_va = (n == "vsnprintf" || n == "vsprintf");
+        const std::uint32_t dst = a0;
+        const std::uint32_t cap = sized ? a1 : 0xFFFFFFFFu;
+        const std::uint32_t fmtp = sized ? a2 : a1;
+        if (!CheckRange(fmtp, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string fmt(GuestStr(fmtp));  // copy: GuestStr reuses scratch
+        GuestFmtArgs st;
+        st.gargs[0] = a0;
+        st.gargs[1] = a1;
+        st.gargs[2] = a2;
+        st.gargs[3] = a3;
+        st.ai = sized ? 3 : 2;                              // first vararg core reg
+        st.via_va = via_va;
+        st.stack = via_va ? (sized ? a3 : a2) : regs[13];   // va_list or stack args
+        const std::string out = ExpandPrintf(fmt, st);
+        if (cap > 0 && CheckRange(dst, 1, true)) {
+            const std::size_t w = std::min<std::size_t>(out.size(), (std::size_t)cap - 1);
+            if (CheckRange(dst, w + 1, true)) {
+                std::memcpy(H(dst), out.data(), w);
+                H(dst)[w] = 0;
+            }
+        }
+        Ret(regs, static_cast<std::uint32_t>(out.size()));
         return;
     }
     // --- sleeps: real but capped, so delay loops can't hang bring-up ---
@@ -2967,6 +3289,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!f) {
                 std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
                             mode.c_str(), errno);
+                SetGuestErrno(errno);
                 Ret(regs, 0);
                 return;
             }
@@ -3226,6 +3549,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             int fd = ::open(hp.c_str(), (int)a1, (mode_t)a2);
             if (fd < 0) {
                 std::printf("[files] open(\"%s\",%o) -> -1 (errno %d)\n", hp.c_str(), a1, errno);
+                SetGuestErrno(errno);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -4045,6 +4369,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (n == "stat") {
                 struct stat st {};
                 if (::stat(hp.c_str(), &st) != 0 || !fill_stat(a1, st)) {
+                    SetGuestErrno(errno);
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
                 }
@@ -4052,18 +4377,29 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             if (n == "access") {
-                Ret(regs, static_cast<std::uint32_t>(::access(hp.c_str(), (int)a1)));
+                const int r = ::access(hp.c_str(), (int)a1);
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (n == "mkdir") {
                 std::error_code ec;
                 bool ok = std::filesystem::create_directories(hp, ec);
+                if (!ok || ec) {
+                    SetGuestErrno(errno ? errno : EEXIST);
+                }
                 Ret(regs, (ok && !ec) ? 0u : static_cast<std::uint32_t>(-1));
                 (void)ok;
                 return;
             }
             if (n == "unlink" || n == "remove") {
-                Ret(regs, static_cast<std::uint32_t>(::unlink(hp.c_str())));
+                const int r = ::unlink(hp.c_str());
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (n == "rename") {
@@ -4072,25 +4408,41 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
                 ensure_parent(hp2);
-                Ret(regs, static_cast<std::uint32_t>(::rename(hp.c_str(), hp2.c_str())));
+                const int r = ::rename(hp.c_str(), hp2.c_str());
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (n == "rmdir") {
-                Ret(regs, static_cast<std::uint32_t>(::rmdir(hp.c_str())));
+                const int r = ::rmdir(hp.c_str());
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             // chmod
-            Ret(regs, static_cast<std::uint32_t>(::chmod(hp.c_str(), (mode_t)a1)));
+            {
+                const int r = ::chmod(hp.c_str(), (mode_t)a1);
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
+            }
             return;
         }
         if (n == "fstat") {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
+                SetGuestErrno(EBADF);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
             struct stat st {};
             if (::fstat(hfd, &st) != 0 || !fill_stat(a1, st)) {
+                SetGuestErrno(errno);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -4113,6 +4465,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             DIR* d = ::opendir(hp.c_str());
             if (!d) {
+                SetGuestErrno(errno);
                 Ret(regs, 0);
                 return;
             }
@@ -5947,6 +6300,13 @@ std::uint32_t Runtime::ErrnoSlot() {
     }
     errno_slots_[tid] = s;
     return s;
+}
+
+void Runtime::SetGuestErrno(int e) {
+    const std::uint32_t s = ErrnoSlot();
+    if (CheckRange(s, 4, true)) {
+        std::memcpy(H(s), &e, 4);
+    }
 }
 
 std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, std::uint32_t start,
@@ -8509,6 +8869,12 @@ void GuestCallbacks::LastThis(std::uint64_t r0obj, std::uint64_t, std::uint64_t)
 
 static int wseq_shared = 0;
 static std::uint32_t wpc_shared = 0;
+static std::uint32_t wstash_a = 0, wstash_b = 0, wstash_c = 0;
+void GuestCallbacks::WatchRegs(std::uint64_t a, std::uint64_t b, std::uint64_t c) {
+    wstash_a = (std::uint32_t)a;
+    wstash_b = (std::uint32_t)b;
+    wstash_c = (std::uint32_t)c;
+}
 void GuestCallbacks::WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr) {
     // HARNESS_WATCHPC=<pc>: regs at pc (part 1/2; part 2 = WatchSP).
     // Capped at 4 fires. Own env/pc, consumes no probe slot.
@@ -8520,6 +8886,197 @@ void GuestCallbacks::WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t l
     wseq_shared++;
     std::printf("[watchpc] #%d r0=%08x r1=%08x lr=%08x\n", wseq_shared, (std::uint32_t)r0,
                 (std::uint32_t)r1, (std::uint32_t)lr);
+    // Context/position/SP stashed by WatchRegs (same block, emitted first).
+    std::printf("[watchpc] #%d r4=%08x r6=%08x sp=%08x\n", wseq_shared, wstash_a, wstash_b,
+                wstash_c);
+    // HARNESS_WATCHDUMP=<hexoff>,<hexlen>: object dumps around the watched pc.
+    //   "ctx"  = r4 (+off): the binder context (word 0 = descriptor/vtable).
+    //   "desc" = *(ctx+0): the descriptor, where the binding names itself.
+    //   "arg"  = the Lua value at (ctx+8)->[+0xc + (pos-1)*8]; {value,type}.
+    // Every word that is a plausible pointer is also resolved as a C-string.
+    {
+        static bool dinit = false;
+        static std::int32_t doff = 0;
+        static std::int32_t dlen = 0;
+        if (!dinit) {
+            dinit = true;
+            if (const char* e = std::getenv("HARNESS_WATCHDUMP")) {
+                unsigned o = 0, l = 0;
+                const int n = std::sscanf(e, "%x,%x", &o, &l);
+                if (n >= 1) {
+                    doff = (std::int32_t)o;
+                }
+                dlen = l ? (std::int32_t)l : 64;
+            }
+        }
+        GuestCallbacks* cbd = g_probe_cb;
+        auto ptr_ok = [cbd](std::uint32_t w) {
+            const bool m = w >= 0x1000 && w < 0x741000;
+            const bool h = w >= 0x10000000u && w < 0x50000000u;
+            return (m || h) && w && cbd->rt_->CheckRange(w, 4, false);
+        };
+        auto dump_obj = [cbd, &ptr_ok](const char* tag, std::uint32_t addr, std::int32_t len) {
+            if (!addr || !cbd->rt_->CheckRange(addr, (std::uint32_t)len, false)) {
+                std::printf("[watchdump] %s @%08x BAD\n", tag, addr);
+                return;
+            }
+            std::printf("[watchdump] %s @%08x:", tag, addr);
+            for (std::int32_t i = 0; i + 4 <= len; i += 4) {
+                std::uint32_t w = 0;
+                std::memcpy(&w, cbd->rt_->H(addr + i), 4);
+                std::printf(" %08x", w);
+            }
+            std::printf("\n[watchdump] %s ascii:", tag);
+            for (std::int32_t i = 0; i + 4 <= len; i += 4) {
+                const char* rb = cbd->rt_->H<const char>(addr + i);
+                for (int j = 0; j < 4; j++) {
+                    const char c = rb[j];
+                    std::printf("%c", (c >= 32 && c < 127) ? c : '.');
+                }
+            }
+            std::printf("\n");
+            for (std::int32_t i = 0; i + 4 <= len; i += 4) {
+                std::uint32_t w = 0;
+                std::memcpy(&w, cbd->rt_->H(addr + i), 4);
+                if (ptr_ok(w)) {
+                    const char* s = cbd->rt_->H<const char>(w);
+                    char buf[41];
+                    int k = 0;
+                    while (k < 40 && s[k] >= 32 && s[k] < 127) {
+                        buf[k] = s[k];
+                        k++;
+                    }
+                    buf[k] = 0;
+                    if (k >= 4) {
+                        std::printf("[watchdump] %s+%02x -> %08x :: \"%s\"\n", tag, i, w, buf);
+                    }
+                }
+            }
+        };
+        if (dlen && cbd && wstash_a) {
+            const std::uint32_t ctx = (std::uint32_t)((std::int32_t)wstash_a + doff);
+            dump_obj("ctx", ctx, dlen);
+            std::uint32_t desc = 0;
+            if (cbd->rt_->CheckRange(ctx, 4, false)) {
+                std::memcpy(&desc, cbd->rt_->H(ctx), 4);
+            }
+            if (ptr_ok(desc)) {
+                dump_obj("desc", desc, 0x80);
+            }
+            // Binder stack: ctx+8 = Lua stack object; stack+0xc = value array
+            // base (8 bytes per slot: word0 payload, word1 type; 4 = string).
+            std::uint32_t stk = 0;
+            if (cbd->rt_->CheckRange(wstash_a, 0x10, false)) {
+                std::memcpy(&stk, cbd->rt_->H(wstash_a + 8), 4);
+            }
+            std::uint32_t vb = 0;
+            if (stk && cbd->rt_->CheckRange(stk, 0x10, false)) {
+                std::memcpy(&vb, cbd->rt_->H(stk + 0xc), 4);
+            }
+            const std::int32_t pos = (std::int32_t)wstash_b;
+            if (vb && pos >= 1 &&
+                cbd->rt_->CheckRange(vb + (std::uint32_t)(pos - 1) * 8, 8, false)) {
+                const std::uint32_t slot = vb + (std::uint32_t)(pos - 1) * 8;
+                if (cbd->rt_->CheckRange(slot, 8, false)) {
+                    std::uint32_t val = 0, ty = 0;
+                    std::memcpy(&val, cbd->rt_->H(slot), 4);
+                    std::memcpy(&ty, cbd->rt_->H(slot + 4), 4);
+                    std::printf("[watchdump] stack=%08x base=%08x pos=%d slot=%08x val=%08x type=%d\n",
+                                stk, vb, pos, slot, val, (int)ty);
+                    // Whole argument list: slots 1..10, 8 bytes each (word0
+                    // payload, word1 type). Lua 5.1 TString: length at +8, char
+                    // data at +16. This shows whether the caller passed one
+                    // string among numbers or a shifted list.
+                    for (std::int32_t p = 1; p <= 10; p++) {
+                        const std::uint32_t sl = vb + (std::uint32_t)(p - 1) * 8;
+                        if (!cbd->rt_->CheckRange(sl, 8, false)) {
+                            break;
+                        }
+                        std::uint32_t pv = 0, pt = 0;
+                        std::memcpy(&pv, cbd->rt_->H(sl), 4);
+                        std::memcpy(&pt, cbd->rt_->H(sl + 4), 4);
+                        char extra[80];
+                        extra[0] = 0;
+                        if (pt == 4 && cbd->rt_->CheckRange(pv + 8, 0x40, false)) {
+                            std::uint32_t ln = 0;
+                            std::memcpy(&ln, cbd->rt_->H(pv + 8), 4);
+                            const char* sp = cbd->rt_->H<const char>(pv + 16);
+                            char sb[49];
+                            int k = 0;
+                            while (k < 48 && sp[k]) {
+                                sb[k] = sp[k];
+                                k++;
+                            }
+                            sb[k] = 0;
+                            std::snprintf(extra, sizeof(extra), " str[%u]=\"%s\"", ln, sb);
+                        } else if (pt == 3) {
+                            float fv = 0;
+                            std::memcpy(&fv, &pv, 4);
+                            std::snprintf(extra, sizeof(extra), " num=%g", (double)fv);
+                        }
+                        std::printf("[watchdump] arg%d: type=%u val=%08x%s\n", p, pt, pv, extra);
+                    }
+                }
+            }
+            // Object at r0 as well: at a vmcall trampoline entry (the Lua C
+            // frame seen for every bound method) r0 is the method descriptor,
+            // whose name string (set at registration) identifies the method.
+            const std::uint32_t arg0 = (std::uint32_t)r0;
+            if (ptr_ok(arg0)) {
+                dump_obj("arg0", arg0, 0x40);
+            }
+            // Stack window: at a checker failure the calling method's return
+            // address sits near sp. Print every plausible code pointer so the
+            // enclosing function can be resolved offline.
+            if (wstash_c && cbd->rt_->CheckRange(wstash_c, 0x2c0, false)) {
+                for (std::int32_t i = 0; i < 0x2c0; i += 4) {
+                    std::uint32_t w = 0;
+                    std::memcpy(&w, cbd->rt_->H(wstash_c + i), 4);
+                    if (w >= 0x1000 && w < 0x741000 && (w & 1) == 0) {
+                        std::printf("[watchdump] stk+%03x = %08x\n", i, w);
+                    }
+                }
+            }
+        }
+    }
+    // HARNESS_WATCHHEXFILE=<hexaddr>,<hexlen>,<path>: raw dump of a fixed
+    // guest range at the first watched hit -- live heap at the failure, unlike
+    // the post-mortem HARNESS_HEXDUMPFILE (whose objects are already dead).
+    {
+        static bool hxinit = false;
+        static bool hxdone = false;
+        static std::uint32_t hxa = 0;
+        static std::uint32_t hxl = 0;
+        static char hxp[512] = {0};
+        if (!hxinit) {
+            hxinit = true;
+            if (const char* e = std::getenv("HARNESS_WATCHHEXFILE")) {
+                unsigned a = 0, l = 0;
+                char p[512] = {0};
+                if (std::sscanf(e, "%x,%x,%511s", &a, &l, p) >= 2) {
+                    hxa = a;
+                    hxl = l;
+                    std::snprintf(hxp, sizeof(hxp), "%s", p);
+                }
+                if (hxl > 0x100000) {
+                    hxl = 0x100000;
+                }
+            }
+        }
+        GuestCallbacks* cbh = g_probe_cb;
+        if (!hxdone && hxl && cbh && cbh->rt_->CheckRange(hxa, hxl, false)) {
+            hxdone = true;
+            FILE* f = std::fopen(hxp, "wb");
+            if (f) {
+                std::fwrite(cbh->rt_->H<std::uint8_t>(hxa), 1, hxl, f);
+                std::fclose(f);
+                std::printf("[watchdump] hexfile %08x+%u -> %s\n", hxa, hxl, hxp);
+            }
+        } else if (!hxdone && hxl && cbh) {
+            std::printf("[watchdump] hexfile BAD range %08x+%u\n", hxa, hxl);
+            hxdone = true;
+        }
+    }
     // Session stash for the login trigger: D5994 entry with a live object.
     // (Updates pass the real session-ish object here; the forged account
     // needs it linked at +32 or the subtree faults on null+off.)
@@ -10508,6 +11065,13 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
             }
             if (wpc && pc == wpc) {
                 wpc_shared = wpc;
+                ir.CallHostFunction(&WatchRegs,
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(4))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))),
+                                    ir.ZeroExtendWordToLong(
+                                        ir.GetRegister(static_cast<Dynarmic::A32::Reg>(13))));
                 ir.CallHostFunction(&WatchPC,
                                     ir.ZeroExtendWordToLong(
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(0))),

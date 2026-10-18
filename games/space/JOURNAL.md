@@ -199,8 +199,65 @@ HARNESS_JSTR=/data/data/com.rovio.angrybirdsspaceHD/files ./host/build-native/ha
 
 Baseline Rio не изменился: `init done: 54/54 clean, svc=948 halts=53`.
 
+## Root cause found and fixed: missing host `strtod` (2026-10-18)
+
+**Симптом (device, PROVEN):** `Excepted type NUMBER at position 2 but found
+STRING` = 783, `Uncaught exception` = 261, `[svc] FATAL abort()` = 261,
+`nativeUpdate ended` = 262 → ровно 3 Lua-исключения на кадр, каждый кадр;
+меню не появляется (ни точки, ни кнопок).
+
+**Причина (PROVEN, чтением гостя):** `ui/Image.lua` /p5 зовёт
+`res.drawSprite("", self.image, 0, 0, "HPIVOT", "VPIVOT", floor(w), floor(h))`
+— вызов корректный. Ветку в `drawSprite` (`FUN_002b4038`) выбирает
+`lua_isnumber(L,2)` → `FUN_00410ae0` → `luaO_str2d` (`FUN_0041f6fc`):
+
+```c
+char *endptr;               /* НЕ инициализирован */
+strtod(s, &endptr);
+*param_2 = (float)(double)CONCAT44(r1, r0);
+if (endptr == s) return 0;  /* читает endptr */
+```
+
+Хост `strtod` **не реализовывал**. У гостя каждый UND-импорт получает
+трамплин, незнакомое имя проваливается в хвост диспетчера и возвращает
+`Ret(regs, 0)` — `endptr` не записан, остаётся стековый мусор →
+`luaO_str2d` почти всегда рапортует «число» → строковый аргумент уходит в
+ветку NUMBER → исключение в Lua → `abort()`.
+
+Аудит импортов (DIAG-only лог `[import] first call:`): гость реально вызывает
+162 разных импорта, `strtod` среди них — это была единственная настоящая
+дырка. Остальные 12, не упомянутые в исходниках хоста (`memmem`,
+`btowc`/`wctob`/`wctype`, `getauxval`, `setjmp`, `dlerror`, `gethostname`,
+`pathconf`, `pthread_condattr_init/destroy`, `pthread_setname_np`,
+`__cxa_atexit`), возвращают 0 — ровно как и заглушка; на этом пути не
+критичны (в этом прогоне `longjmp` гость вообще не зовёт, поэтому
+незаполненный `jmp_buf` от `setjmp` никого не задел).
+
+**Фикс:** ветка `strtod` в `host/src/guest/dispatch.cpp` (гостевой ABI: double
+в r0:r1, softfp; `endptr` пишется, `errno` не трогаем).
+
+**Проверка:**
+* харнесс: `Excepted type` 3 → **0**, `FATAL abort` 1 → **0**; вотчпоинт на
+  самом чекере (`HARNESS_WATCHPC=2fc67c`) больше не срабатывает вообще
+  (`watchdump=0`) — падавший путь просто не вызывается;
+* Rio: `init done: 54/54 clean, svc=948 halts=53` — без изменений;
+* device (установленная либа побайтово наша, md5 сверен): `Excepted type`
+  783 → **0**, `Uncaught exception` 261 → **0**, `FATAL abort` 261 → **0**,
+  `death.log` = 0 B.
+
+**Что открылось дальше (device):** движок пошёл дальше и дошёл до сети:
+6 × `HTTP Error … Unknown SSL protocol error in connection to cloud.rovio.com`,
+30 × `[glog] Session login not yet done, retrying later.` — меню ждёт логин
+сессии (серверы Rovio в 2026 отдают 301/недоступны). Плюс раски-класс
+`[mem] BAD write … -- halting` (3 шт., pc=0x45ad5c, lr=0x43b644),
+воспроизводится и в харнессе (9 шт. в watch-прогоне).
+
 ## Next steps
 
+0. **Логин/сеть**: движок упирается в `Session login` + мёртвый
+   `cloud.rovio.com`. Понять, можно ли обойти (локальный ответ сессии /
+   отключение сегментации) — от этого зависит, дойдёт ли Space до меню.
+   Разобрать `[mem] BAD write` @ pc=0x45ad5c (FUN_0046ab40, lr=0x43b644).
 1. **Space `assets/seeds/`**: движку нужен `fusion.registry` в files-каталоге
    (после общего правила мостика видно, что он его открывает). Взять тот же
    first-launch набор, что у Rio-порта (он лежит в `games/rio/work/.../assets/seeds/`);

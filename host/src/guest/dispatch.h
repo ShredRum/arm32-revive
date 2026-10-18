@@ -96,6 +96,20 @@ public:
 
     const char* GuestStr(std::uint32_t guest);
 
+    // Guest printf vararg cursor. Two shapes share it: inline APCS words then
+    // stack (ai starts at the first free core reg; stack = regs[13] at entry),
+    // or a guest va_list read as a flat word array (via_va; stack = va ptr).
+    struct GuestFmtArgs {
+        std::uint32_t gargs[4];
+        int ai;
+        std::uint32_t stack;
+        bool via_va;
+    };
+    // Expand a guest printf/format string (C99 subset; unknown specs stay
+    // literal). Shared by __android_log_print and the snprintf family so the
+    // engine's own text is never silently empty.
+    std::string ExpandPrintf(const std::string& fmt, GuestFmtArgs& st);
+
     // dlmalloc corruption tripwire count + guest pc at first trip (see
     // AbrHeapCorruptionHook). Polled by the watchdog.
     unsigned HeapCorruptionCount();
@@ -230,6 +244,10 @@ public:
     std::uint32_t PthreadJoin(std::uint32_t tid, std::uint32_t retval_out);
     std::uint32_t PthreadDetach(std::uint32_t tid);
     std::uint32_t ErrnoSlot();
+    // Publish the host errno into the calling guest thread's errno cell. Guest
+    // code that branches on errno (e.g. Space's "file missing = fresh install"
+    // path) must not see a stale 0 after a failed libc call.
+    void SetGuestErrno(int e);
     void set_callbacks(Dynarmic::A32::UserCallbacks* cb) { cb_ = cb; }
 
     // G1.2: monotonic diag counter; only ever read in diag/harness dumps, so
@@ -710,6 +728,10 @@ public:
     // (ladder forensics: who calls with null-derived args). Capped, no slot.
     static void WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
     static void WatchSP(std::uint64_t, std::uint64_t, std::uint64_t);
+    // HARNESS_WATCHPC companion: stashes r4/r6/sp at the watched pc (the binder
+    // checkers keep the context in r4 and the arg position in r6; probing only
+    // r0/r1/lr hid both). Dev-only, emitted only for the watched pc.
+    static void WatchRegs(std::uint64_t a, std::uint64_t b, std::uint64_t c);
     // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
     // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
     // must observe for the sessions->menu handoff.
