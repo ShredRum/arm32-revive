@@ -24,6 +24,9 @@
 #include "guest/realgl.h"
 
 namespace {
+// Seconds before the watchdog aborts a stuck run; armed with alarm() all over
+// this file. The old hardcoded message claimed 300s while alarm(kWatchdogSeconds) was used.
+constexpr unsigned kWatchdogSeconds = 60;
 volatile int g_current_init = -1;
 volatile bool g_running = false;
 std::uint32_t g_snap_region[64] = {};
@@ -33,7 +36,8 @@ std::uint32_t g_login_acct = 0;
 
 void Watchdog(int) {
     char buf[128];
-    int n = snprintf(buf, sizeof(buf), "\n[watchdog] STUCK at init (300s) -- aborting\n");
+    int n = snprintf(buf, sizeof(buf), "\n[watchdog] STUCK at init (%us) -- aborting\n",
+                     kWatchdogSeconds);
     if (n > 0) {
         (void)write(STDOUT_FILENO, buf, static_cast<std::size_t>(n));
     }
@@ -189,7 +193,7 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
     CallGuest(jit, fn);
     std::printf("[jni] calling @%08x env=%08x r2=%08x r3=%08x ... ", fn, regs[0], r2, r3);
     std::fflush(stdout);
-    alarm(60);
+    alarm(kWatchdogSeconds);
     Dynarmic::HaltReason hr;
     // HARNESS_JNISTEP (empty/1): step this call. HARNESS_JNISTEP=N: step only
     // calls with sequence index >= N (fast-forward earlier calls with Run()).
@@ -218,7 +222,7 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
         // Runtime; ApplyRedirect is per-Jit so cross-talk is impossible).
         int redirs = 0;
         while (hr == Dynarmic::HaltReason::UserDefined1 && redirs++ < 4 && rt.ApplyRedirect()) {
-            alarm(60);
+            alarm(kWatchdogSeconds);
             hr = jit.Run();
         }
     }
@@ -982,7 +986,7 @@ int main(int argc, char** argv) {
         CallGuest(jit, fn);
         std::printf("[raw] calling @%08x ... ", fn);
         std::fflush(stdout);
-        alarm(60);
+        alarm(kWatchdogSeconds);
         Dynarmic::HaltReason hr = jit.Run();
         alarm(0);
         std::printf("hr=%d r0=%08x (%u) r1=%08x svc=%llu\n", static_cast<int>(hr), regs[0], regs[0],
@@ -1038,7 +1042,7 @@ int main(int argc, char** argv) {
             CallGuest(jit, onload);
             std::printf("[jni] JNI_OnLoad @%08x jvm=%08x ... ", onload, regs[0]);
             std::fflush(stdout);
-            alarm(60);
+            alarm(kWatchdogSeconds);
             Dynarmic::HaltReason ohr = jit.Run();
             alarm(0);
             std::printf("hr=%d r0=%08x svc=%llu\n", static_cast<int>(ohr), regs[0],
@@ -1238,7 +1242,7 @@ int main(int argc, char** argv) {
                             CallGuest(jit, 0x283A3Cu);
                             std::printf("[scene7] calling @000283a3c ... ");
                             std::fflush(stdout);
-                            alarm(60);
+                            alarm(kWatchdogSeconds);
                             Dynarmic::HaltReason hr2 = jit.Run();
                             alarm(0);
                             std::uint32_t post = 0xFFFFFFFFu;
@@ -1322,7 +1326,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, 0x283B5Cu);
                         std::printf("[mgrat] calling @000283b5c ... ");
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::uint32_t post = 0;
@@ -1454,7 +1458,7 @@ int main(int argc, char** argv) {
                             CallGuest(jit, 0x250AB8u);
                             std::printf("[builder] calling @000250ab8 live #%d ... ", bi);
                             std::fflush(stdout);
-                            alarm(60);
+                            alarm(kWatchdogSeconds);
                             Dynarmic::HaltReason hr2 = jit.Run();
                             alarm(0);
                             std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
@@ -1481,7 +1485,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, 0x250AB8u);
                         std::printf("[builder] calling @000250ab8 ... ");
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
@@ -1567,7 +1571,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, 0x5CE50u);
                         std::printf("[loginat] calling @0005ce50 ... ");
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);
@@ -1608,7 +1612,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, 0x5D2F0u);
                         std::printf("[loginat1] calling @0005d2f0 r1=1 ... ");
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::uint8_t post25 = 0xFF;
@@ -1671,7 +1675,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, 0xBC158u);
                         std::printf("[bc158] calling @000bc158 ... ");
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2),
@@ -1887,7 +1891,7 @@ int main(int argc, char** argv) {
                         CallGuest(jit, rawfn);
                         std::printf("[rawpost] calling @%08x obj=%08x ... ", rawfn, found);
                         std::fflush(stdout);
-                        alarm(60);
+                        alarm(kWatchdogSeconds);
                         Dynarmic::HaltReason hr2 = jit.Run();
                         alarm(0);
                         std::printf("hr=%d r0=%08x\n", static_cast<int>(hr2), rgs[0]);

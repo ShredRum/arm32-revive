@@ -160,13 +160,16 @@
   (discovery mode).
   Ret() = r0/r1 result + pc=lr&~1 + SetCpsr(USER + T-from-LR + preserved NZCV).
   **RULE: SVC trampolines never change state; Ret restores caller state.**
-- Memory callbacks only (NO fastmem yet — debuggability first; enable later).
-  All ranges tracked; violations halt cleanly. Host NEVER segfaults on guest
-  input (CheckRange on bulk thunks; remaining gaps known, see §6).
-- Heap: bump + size map (realloc COPIES now). free = no-op (leak, bring-up OK).
+- Memory callbacks + fastmem (prod `fastmem=on`; debuggability kept via
+  HARNESS_FASTMEM toggle). All ranges tracked; violations halt cleanly. Host
+  NEVER segfaults on guest input (CheckRange on bulk thunks; remaining gaps
+  known, see §6).
+- Heap: dlmalloc (`malloc`/`free`/`realloc` real, v7a 32-bit pointer ABI);
+  1 GB virtual reservation @0x10000000 (see §51), NORESERVE.
 - pthread: REAL mutex/cond/key/TLS maps with lazy creation (Bionic allows
   static-init use); RECURSIVE host mutexes. cond_timedwait capped 5s.
-  pthread_create/join/detach = LOUD halt (not implemented).
+  pthread_create/join/detach: REAL host threads + per-thread Jit (see §6);
+  exit via pthread-key destructor (batch G, G2.2); errno/TLS slots reaped.
   pthread_once = CONTROL-FLOW HIJACK (no nested Run): redirect pc to routine
   with lr=HALT, on HALT mark done + restore saved regs (r0=0) + resume.
   Recursion → LOUD + treat done. Implemented, built, not yet triggered.
@@ -174,7 +177,8 @@
 - libm: ~60 funcs forwarded to host libm with softfp marshalling
   (host/src/guest/math_thunks.inc). HARNESS_HEAPBASE/HARNESS_SKIP/HARNESS_DEFER/
   HARNESS_STEP/HARNESS_FULLTRACE/HARNESS_WP/HARNESS_WPA/HARNESS_TRANSLOG envs
-  for experiments (see harness.cpp). stdout is _IONBF. Watchdog alarm(300).
+  for experiments (see harness.cpp). stdout is _IONBF. Watchdog alarm(60,
+  `kWatchdogSeconds` in harness.cpp) + per-thread enter/leave lines in prod.
   Heartbeat thread samples pc (RACY values — liveness only, see audit #13).
 
 ## 4. Dynarmic API facts (verified in headers/sources, NOT assumed)
@@ -517,7 +521,8 @@ dead subsystem, game degrades without it).
 - MCSM COMPARISON (their .apks, read-only): same architecture independently
   converged (guest pristine in assets/guestlib, Dynarmic host, NDK r27, no
   guest code patches — only ResourcePatchSet for DATA). Differences: they use
-  RegisterNatives (1 JNI_OnLoad, 0 Java_*), fastmem (we don't yet), coarse
+  RegisterNatives (1 JNI_OnLoad, 0 Java_*), fastmem (now also us,
+  `fastmem=on`), coarse
   gameplay hooks vs our per-import thunks. Their engine boundary is thinner
   (no analytics/payments/social/Lua tax like ours).
 - CURRENT WALL (update) REVISED 2026-10-10: the throw is

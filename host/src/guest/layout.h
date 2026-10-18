@@ -19,6 +19,11 @@ inline constexpr std::uint32_t kGuestDataSize = 0x00010000u;
 inline constexpr std::uint32_t kStackBase = 0xFE000000u;
 inline constexpr std::uint32_t kStackSize = 0x00800000u;  // 8MB
 inline constexpr std::uint32_t kStackTop = kStackBase + kStackSize;
+// G5.1: guest stack handed to every CREATED thread (both the guest's own
+// pthread_create threads and the Java->native host threads). Same size as the
+// main stack but a distinct concept, so it gets its own name. 8MB x thread
+// churn is what once exhausted the 1GB arena (F1).
+inline constexpr std::uint32_t kThreadStackSize = 0x00800000u;  // 8MB
 
 // SVC numbers. Import trampoline i executes `svc #(i+1)`; swi 0 = HALT.
 inline constexpr std::uint32_t kSwiHalt = 0;

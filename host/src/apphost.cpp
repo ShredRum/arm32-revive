@@ -131,6 +131,18 @@ void HostThreadKeyInit() {
     pthread_key_create(&g_hostthread_key, HostThreadRelease);
 }
 
+// App data dir (G4.2, 2026-10-18). /data/data/<pkg> is only the user-0 alias of
+// /data/user/0/<pkg>; on a work profile or secondary user the real path is
+// /data/user/<user>/<pkg>. Derive the user id from our own uid (uid = user *
+// 100000 + appid) instead of assuming user 0. For user 0 this returns exactly
+// the old hardcoded string.
+std::string GuestFilesDir() {
+    const unsigned user = static_cast<unsigned>(getuid() / 100000);
+    const std::string base =
+        user == 0 ? std::string("/data/data/") : "/data/user/" + std::to_string(user) + "/";
+    return base + "com.rovio.angrybirdsrio/files";
+}
+
 // Death witness (debuggerd is SELinux-muted on this device: native crashes
 // leave no tombstone). Pre-opened fd + alt stack + async-safe-only handler:
 // fault addr + guest regs into files/death.log, then re-raise to die as before.
@@ -540,7 +552,7 @@ std::shared_ptr<HostThread> Enter() {
         }
     }
     auto st = std::make_shared<HostThread>();
-    st->stack = g_rt->GuestMalloc(0x800000u);  // 8MB: see above
+    st->stack = g_rt->GuestMalloc(kThreadStackSize);  // 8MB: see above
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = g_cb;
     cfg.optimizations =
@@ -647,7 +659,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
                     Log("[functor] forged ctx=%08x acct=%08x, calling 0x5FE70", cx, zb);
                     auto& fr = st->jit->Regs();
                     fr.fill(0);
-                    fr[13] = st->stack + 0x800000u - 0x100u;
+                    fr[13] = st->stack + kThreadStackSize - 0x100u;
                     fr[14] = g_mod->halt_va;
                     fr[0] = cx;
                     CallGuest(*st->jit, 0x5FE70u);
@@ -739,7 +751,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
     auto& regs = st->jit->Regs();
     regs.fill(0);
-    const std::uint32_t spbase = st->stack + 0x800000u - 0x100u;
+    const std::uint32_t spbase = st->stack + kThreadStackSize - 0x100u;
     regs[13] = spbase;
     for (std::size_t i = 0; i < words.size() && i < 4; i++) {
         regs[i] = words[i];
@@ -1144,7 +1156,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_vm = vm;
     GuestCallbacks::g_real_env_hook = RealEnvForThread;
     // Logs to app files dir (pullable); stdout unbuffered.
-    g_files = "/data/data/com.rovio.angrybirdsrio/files";
+    g_files = GuestFilesDir();
     std::error_code ec;
     std::filesystem::create_directories(g_files, ec);
     const std::string logpath = g_files + "/apphost.log";
@@ -1352,7 +1364,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         std::memcpy(g_mem->host(abr::kGuestDataBase + 0), &canary, 4);
     }
     g_rt->InitDataImports();
-    g_rt->SetFilesDir("/data/data/com.rovio.angrybirdsrio/files", g_files);
+    g_rt->SetFilesDir(GuestFilesDir(), g_files);
     g_rt->SetApkPath(g_apk);
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
@@ -1369,7 +1381,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         }
         auto& regs = st->jit->Regs();
         regs.fill(0);
-        regs[13] = st->stack + 0x800000u - 8;
+        regs[13] = st->stack + kThreadStackSize - 8;
         regs[14] = g_mod->halt_va;
         CallGuest(*st->jit, g_mod->init_array[k]);
         const Dynarmic::HaltReason hr = st->jit->Run();
@@ -1387,7 +1399,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         if (it != g_mod->defined.end() && !(it->second & 1u)) {
             auto& regs = st->jit->Regs();
             regs.fill(0);
-            regs[13] = st->stack + 0x800000u - 8;
+            regs[13] = st->stack + kThreadStackSize - 8;
             regs[14] = g_mod->halt_va;
             // Guest OnLoad expects a JavaVM* (mock handle; real pointers
             // are 64-bit and must never enter 32-bit guest regs). Our JVM

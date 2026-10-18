@@ -5922,7 +5922,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // 8MB guest stack from the heap. Stack-overflow smash guard (triage
     // 2026-10-16). The block is owned by the ThreadState now and handed back by
     // ReapThreadStack (2026-10-18: it used to be leaked outright).
-    const std::uint32_t stack = GuestMalloc(0x800000u);
+    const std::uint32_t stack = GuestMalloc(kThreadStackSize);
     if (!stack) {
         return 12;  // ENOMEM
     }
@@ -5933,7 +5933,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         tid = next_tid_++;
         st->stack = stack;
         thr_stacks_++;
-        thr_stack_bytes_ += 0x800000ull;
+        thr_stack_bytes_ += kThreadStackSize;
         threads_[tid] = st;
     }
     if (!CheckRange(tid_out, 4, true)) {
@@ -5987,7 +5987,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         auto& regs = jit.Regs();
         regs.fill(0);
-        regs[13] = stack + 0x800000u - 8;  // 8-aligned top
+        regs[13] = stack + kThreadStackSize - 8;  // 8-aligned top
         regs[14] = mod_.halt_va;           // routine return ends the thread
         regs[0] = arg;
         if (start & 1u) {
@@ -6071,7 +6071,7 @@ void Runtime::ReapThreadStack(std::uint32_t tid) {
     const std::uint32_t s = it->second->stack;
     it->second->stack = 0;
     thr_stacks_--;
-    thr_stack_bytes_ -= 0x800000ull;
+    thr_stack_bytes_ -= kThreadStackSize;
     if (DiagOn()) {
         static int rn = 0;
         if (rn < 40) {

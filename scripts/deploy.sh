@@ -7,8 +7,12 @@
 # Layout it expects (see AGENTS.md HANDOFF):
 #   work/apk_prod/                      decoded APK tree (apktool d) with our libs
 #   work/apk_prod_signed.apk            output
-#   work/gadget/debug.keystore          alias dbg, store/key pass "android"
+#   work/gadget/debug.keystore          alias dbg
 #   tools/apktool_3.0.3.jar             tools/ is gitignored -> keep it locally
+#
+# G4.4 (2026-10-18): the device address and keystore credentials are NOT baked in
+# any more -- override via the environment:
+#   DEV=user@host:port  KS=path/to.keystore  KS_ALIAS=...  KS_PASS=...  APK_NAME=...
 set -euo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,9 +23,12 @@ APK_OUT=work/apk_prod_signed.apk
 LIB_SRC=host/build-android/libabhost.so
 LIB_DST=work/apk_prod/lib/arm64-v8a/libabhost.so
 APKTOOL=tools/apktool_3.0.3.jar
-KS=work/gadget/debug.keystore
-DEV="u0_a41@192.168.1.202"
-APK_NAME=abprod.ab.apk
+KS="${KS:-work/gadget/debug.keystore}"
+KS_ALIAS="${KS_ALIAS:-dbg}"
+KS_PASS="${KS_PASS:-android}"
+DEV="${DEV:-user@host:8022}"
+APK_NAME="${APK_NAME:-abprod.ab.apk}"
+SSH_PORT="${SSH_PORT:-8022}"
 
 for f in "$APK_IN" "$LIB_SRC" "$APKTOOL" "$KS"; do
     if [ ! -e "$f" ]; then
@@ -34,7 +41,13 @@ llvm-strip "$LIB_SRC" -o "$LIB_DST"
 java -jar "$APKTOOL" b -o work/apk_prod_unsigned.apk "$APK_IN" >/dev/null
 cp -f work/apk_prod_unsigned.apk "$APK_OUT"
 zip -q -d "$APK_OUT" 'META-INF/*' || true
-jarsigner -keystore "$KS" -storepass android -keypass android "$APK_OUT" dbg >/dev/null
+# v1 (JAR) signature. SHA-256, not SHA-384: the platform's JAR verifier only
+# understands SHA-384 from API 18 up, so SHA-384 made apksigner report
+# "DOES NOT VERIFY" for the declared minSdk 16. SHA-256 verifies everywhere.
+# (v2 needs apksigner, which is not available here; targetSdk 26 does not
+# require v2, so v1-only stays.)
+jarsigner -keystore "$KS" -storepass "$KS_PASS" -keypass "$KS_PASS" \
+    -digestalg SHA-256 -sigalg SHA256withRSA "$APK_OUT" "$KS_ALIAS" >/dev/null
 
 MD5=$(md5sum "$LIB_DST" | cut -d' ' -f1)
 echo "stripped lib md5: $MD5"
@@ -43,14 +56,14 @@ echo "apk: $(stat -c %s "$APK_OUT") bytes"
 cat <<EOF
 
 --- device half (run by hand) -------------------------------------------
-scp -P 8022 "$APK_OUT" $DEV:$APK_NAME
-ssh -p 8022 $DEV "sudo pm install -r /data/data/com.termux/files/home/$APK_NAME; pm path com.rovio.angrybirdsrio"
+scp -P $SSH_PORT "$APK_OUT" $DEV:$APK_NAME
+ssh -p $SSH_PORT $DEV "sudo pm install -r /data/data/com.termux/files/home/$APK_NAME; pm path com.rovio.angrybirdsrio"
 # ALWAYS verify the INSTALLED lib (the app dir alternates -1/-2; the path above
 # is authoritative). Expect: $MD5
-ssh -p 8022 $DEV "APK=\$(pm path com.rovio.angrybirdsrio | sed 's/^package://'); sudo unzip -p \$APK lib/arm64-v8a/libabhost.so | md5sum"
+ssh -p $SSH_PORT $DEV "APK=\$(pm path com.rovio.angrybirdsrio | sed 's/^package://'); sudo unzip -p \$APK lib/arm64-v8a/libabhost.so | md5sum"
 # mark the boundary in the log, then launch:
 #   echo === NEW RUN === >> files/apphost.log   (or just note the boot time)
-ssh -p 8022 $DEV "sudo am start -n com.rovio.angrybirdsrio/com.rovio.fusion.App"
+ssh -p $SSH_PORT $DEV "sudo am start -n com.rovio.angrybirdsrio/com.rovio.fusion.App"
 # marker checks -- grep SEPARATELY (Termux grep does not honour \\|):
 #   for p in HEAPCORRUPT HEAPASSERT CHUNKD USAGE_ERROR LOUD; do ...; done
 #   also: sudo ls -la files/death.log   (must be 0 B) and sudo ls -la /data/tombstones
