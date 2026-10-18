@@ -401,7 +401,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                             cnt, i);
             }
         }
-        std::printf("%s shader=%u parts=%u %s\n", tag, s, cnt, ok ? "ok" : "BAD-PTR");
+        if (DiagOn() || !ok) {  // a BAD-PTR stays visible without the flag
+            std::printf("%s shader=%u parts=%u %s\n", tag, s, cnt, ok ? "ok" : "BAD-PTR");
+        }
         r->Ret(regs, 0);
         return true;
     }

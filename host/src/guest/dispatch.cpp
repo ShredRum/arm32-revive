@@ -676,7 +676,7 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     // Pre-dump chunk header zone (writers smash here; names the content).
     {
         static int rhd = 0;
-        if (rhd < 30 && addr >= 32 && CheckRange(addr - 32, 32, false)) {
+        if (DiagOn() && rhd < 30 && addr >= 32 && CheckRange(addr - 32, 32, false)) {
             rhd++;
             const std::uint8_t* hp = H<const std::uint8_t>(addr - 32);
             std::printf("[realloc] pre %08x:", addr);
@@ -1479,7 +1479,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // Lua chunknames start with @, cert names, filenames). Capped 20.
         {
             static int sdn = 0;
-            if (sdn < 20) {
+            if (DiagOn() && sdn < 20) {
                 sdn++;
                 std::printf("[strdup] %08x \"%.48s\"\n", a0, s ? s : "?");
             }
@@ -2930,7 +2930,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         {
             static std::uint64_t pollret_hits = 0;
-            if (++pollret_hits <= 5) {
+            if (DiagOn() && ++pollret_hits <= 5) {
                 std::printf("[poll] -> %d%s\n", r,
                             pollret_hits == 5 ? " (quiet henceforth)" : "");
             }
@@ -3330,8 +3330,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             FILE* f = std::fopen(hp.c_str(), mode.c_str());
             if (!f) {
-                std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
-                            mode.c_str(), errno);
+                if (DiagOn()) {
+                    std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
+                                mode.c_str(), errno);
+                }
                 SetGuestErrno(errno);
                 Ret(regs, 0);
                 return;
@@ -3641,7 +3643,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::uint32_t g1 = alloc_guest_fd(hfds[1]);
             std::memcpy(H(a0), &g0, 4);
             std::memcpy(H(a0 + 4), &g1, 4);
-            std::printf("[files][t%u] pipe() -> [%u %u]\n", GuestTid(), g0, g1);
+            if (DiagOn()) {
+                std::printf("[files][t%u] pipe() -> [%u %u]\n", GuestTid(), g0, g1);
+            }
             Ret(regs, 0);
             return;
         }
@@ -4194,7 +4198,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // (DNS replies, HTTP bodies). Capped hex.
             {
                 static int nlog = 0;
-                if (nlog < 40 && r > 0) {
+                if (DiagOn() && nlog < 40 && r > 0) {
                     nlog++;
                     const std::uint8_t* p = H<const std::uint8_t>(a1);
                     std::string hex;
@@ -4273,7 +4277,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (n == "fcntl") {
             // TEMP-DIAG (stuck workers): pinpoint the parking line.
             static int fcl = 0;
-            const int fldiag = (fcl < 40) ? fcl++ : -1;
+            const int fldiag = (DiagOn() && fcl < 40) ? fcl++ : -1;
             if (fldiag >= 0) {
                 std::printf("[fcntl] #%d enter tid=%u fd=%d cmd=%d arg=%d\n", fldiag, GuestTid(),
                             (int)a0, (int)a1, (int)a2);
@@ -4344,7 +4348,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         std::memcpy(H(a2), &s, 4);
                         std::memcpy(H(a2 + 4), &ns, 4);
                         static int alog = 0;
-                        if (alog < 3) {
+                        if (DiagOn() && alog < 3) {
                             alog++;
                             std::printf("[alarm] GET_TIME type=%u -> %u.%09u\n", type, s,
                                         ns);
@@ -5687,7 +5691,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         // predicate flag the waiter polls, e.g. Signal.cpp [r4+8]).
         {
             static int cd = 0;
-            if (cd < 3 && CheckRange(cond > 64 ? cond - 64 : 0, 128, false)) {
+            if (DiagOn() && cd < 3 && CheckRange(cond > 64 ? cond - 64 : 0, 128, false)) {
                 cd++;
                 const std::uint8_t* p = H<const std::uint8_t>(cond - 64);
                 std::printf("[cond] wait c=%08x m=%08x t=%u dump:", cond, arg1, GuestTid());
@@ -5712,7 +5716,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             // TEMP-DIAG (cond triage): who waits/signals which cond.
             {
                 static int cw = 0;
-                if (cw < 10) {
+                if (DiagOn() && cw < 10) {
                     cw++;
                     std::printf("[cond] wait c=%08x m=%08x t=%u -> %d\n", cond, arg1,
                                 GuestTid(), r);
@@ -5722,7 +5726,9 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             // of ETIMEDOUT (POSIX-legal; predicates re-check). Probes whether
             // the waiter proceeds (predicate already true) or re-waits.
             if (r != 0 && EnvOn("HARNESS_SPURWAKE")) {
-                std::printf("[cond] spurwake c=%08x t=%u (was %d)\n", cond, GuestTid(), r);
+                if (DiagOn()) {
+                    std::printf("[cond] spurwake c=%08x t=%u (was %d)\n", cond, GuestTid(), r);
+                }
                 return 0;
             }
             return static_cast<std::uint32_t>(r);
@@ -7653,7 +7659,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             // believe the destination allocation has. alloc=0 = not a heap
             // block (jni arena / static) -> ClampHeapWrite left it unclamped.
             static int rn = 0;
-            if (rn < 8) {
+            if (DiagOn() && rn < 8) {
                 rn++;
                 std::uint32_t asz = LiveIdxFind(buf);
                 std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",

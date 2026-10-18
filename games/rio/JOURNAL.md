@@ -121,5 +121,16 @@ lines (`hijack`, `routine done`) moved behind `HARNESS_DIAG` (anomalies stay
 loud). It is log-only, but the installed lib changed again
 (`5c49beed299e7132ee73d18fef2855df`), so Rio was prod-run once more on it:
 354 lines instead of 364 -- exactly the ten once lines gone, `hijack = 0`,
-`done = 0`, `abort = 0`, process alive, flag file absent. The lib installed on
-Rio now equals the committed build.
+`done = 0`, `abort = 0`, process alive, flag file absent.
+
+Then the remaining *normal* dumps followed under the same flag (log-only):
+`[fcntl]` 58, `[files] fopen(...) -> NULL` 32, `[realloc] pre` 30, `[strdup]` 20,
+`[cond]` 4, `[netsock]` 5, `[jni] region` 8, `[poll]` 4, `[alarm]` 3 and the
+repeating `[realgl] glShaderSource ... ok` 12. Rio's prod log: 354 -> **168**
+lines; with `HARNESS_DIAG=1` everything comes back. Lib
+`b8804206ec9cc2e3025a7778bba98fec`, installed and md5-checked.
+
+Rio is the **pinned image** (its `LOUD build-id mismatch` line is absent, Space's
+is not), so `HARNESS_PROBE=1a410c,fill` is armed for it: 15 of the 168 remaining
+lines are that probe's dump. They belong to the `PROBE` crutch (PLAN.md backlog
+item 3) and must not be mistaken for a regression.
