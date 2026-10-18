@@ -4098,3 +4098,54 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   lines), `death.log` 0 B, no new tombstone (newest 2026-10-17 16:41), no
   `abflags.txt` on the device.
 
+## 141. Batch G: 4-agent follow-up review, all items closed (2026-10-18)
+- WHY: after the review-fix tag, four more read-only subagents (CPU/JIT, memory/
+  long-session, GL/audio/frames, strategy/risk) swept the tree. Every finding,
+  including cosmetics, is in `PLAN.md` "Батч G" (G1..G6). User rule: fix
+  everything; device-verify only where a regression is possible.
+- CODE (safe, no device needed) -- commits `5d9c805`, `09ab027`, `fbe59dc`,
+  `1a33a15`, `a576987`, `7fedf64`:
+  - G1.1 `enable_cycle_counting=false` (`kJitCycleCounting`, 4 prod sites: the JIT
+    was counting ticks whose only consumer was `AddTicks{}`). G1.2 `svc_count`
+    `fetch_add(relaxed)`.
+  - G1.3/G1.4/A6: every per-call `realgl` printf and the per-call `[realcall]`/
+    `[realnew]` lines are now under `HARNESS_GLDRAWLOG`/`DiagOn()`; only error
+    paths (`SHORTBUF`/`SMALLBUF`/`UNHANDLED`/`FAIL`/`LOUD`) print in prod. Killed
+    the no-op ternary `fn>=114 ? a1 : a1`.
+  - G2.4 `glGetString` returns one stable guest slot per enum (`glstr_slots_`).
+  - G3.2 `GuestMmap` MAP_FIXED refuses overlap with the heap (`[mmap] LOUD`);
+    G3.3 one-shot `[thread] LOUD` on errno-slot exhaustion.
+  - G3.4 guest-pin self-check: `ElfLoader` extracts the GNU build-id,
+    `CheckGuestBuildId` LOUDs on mismatch (verified on a copy with a flipped byte).
+  - G5.2 removed dead `kGuestAddrSpace`; G5.3 fixed stale AGENTS prose
+    (`fastmem`/`pthread_create` "not implemented" -> SHIPPED, heap "free=no-op"
+    -> dlmalloc, `alarm(300)` -> 60) and recalibrated PLAN A6/B6.
+- LEAK FIXES (device-verified, the risky ones): G2.1 `AAsset_close` now frees the
+  guest buffer; G2.2 `HostThread` is released by a pthread-key destructor
+  (stack + `Dynarmic::Jit` + `g_threads` entry); G2.6 `ReapThreadTls` returns the
+  errno slot to a free list and erases per-tid TLS. Soak evidence: RSS
+  **426 892 -> 373 380 -> 385 316 -> 301 288 -> 266 588 kB** across
+  menu/level/menu/level (net *down* ~160 MB, no accumulation); `created=3 live=3`,
+  `leave=0` (no Java-thread churn for this title); all markers 0; `death.log` 0 B.
+- SHIP HYGIENE: G4.1 signed v1 with **SHA-256** (`-digestalg SHA-256 -sigalg
+  SHA256withRSA`; NOT a minSdk bump -- the device is API 25 and minSdk 26 would be
+  uninstallable; `META-INF/*.SF` now shows `SHA-256-Digest`; v2 is impossible
+  locally without `apksigner` and not required at targetSdk 26). G4.2
+  `GuestFilesDir()` derives the user id as `getuid()/100000`. G4.3 removed the dead
+  v7a `libjs.so`/`libadcolony.so` (backup in `/tmp/opencode/dead_libs_backup/`).
+  G4.4 `scripts/deploy.sh` parameterized by env (`DEV`/`KS`/`KS_ALIAS`/`KS_PASS`/
+  `APK_NAME`/`SSH_PORT`). G5.1 `0x800000` -> `kThreadStackSize` (9 sites),
+  `alarm(60)` -> `kWatchdogSeconds` (13) + stale "(300s)" message fixed.
+  Deliberate non-fixes: G2.5 (`jni_strings_` identity is tied to the mock handle),
+  G2.7 (`WrapObject` identity semantics, bounded set), G3.1 (`GuestMunmap` is
+  unreachable -- the guest imports neither `mmap` nor `munmap`; the D3 cache
+  invariant is "mappings only grow").
+- VERIFIED: native baseline `54/54 clean, svc=948 halts=53` unchanged;
+  `HARNESS_LIVEIDX_TEST=1` PASS; warning-free host build. Device deploy: lib md5
+  `296124ee23aa29fe0378786269db57af` local == installed, APK 50 983 023 B,
+  `jar verified`, build marker `Oct 18 2026 05:38:28`, guest `.so` still pristine
+  `9c21a9874b10bb5f7d7bf4afab68a475`, dead libs absent. Menu + gameplay HUD
+  screenshots show real frames; 63.3 ticks/s over a clean 60 s window (do NOT read
+  this as a win -- run-to-run spread was 56-61 and the tick protocol's spread
+  brackets any delta); pid 18556 stable; prod log 45 746 B (the gate works).
+
