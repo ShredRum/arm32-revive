@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 id           = "space"
 title        = "Angry Birds Space HD"
-status       = "planned"
+status       = "in_progress"   # loader stage passes; see JOURNAL.md
 strategy     = "jit"
 
 [apk]
@@ -22,12 +22,18 @@ abi    = "armeabi-v7a"
 lib    = "libAngryBirdsSpace.so"
 size   = 7341052
 sha256 = "cc11a1e9d5d18cc04cd57a08802f03f2e5a5cd869f0e056d8ba92e695fb6b1ce"
+# No GNU build-id note (only .note.gnu.gold-version): CheckGuestBuildId() LOUDs
+# and continues. The *absence* of a build-id is a clean "not Rio" marker.
+build_id = "none"
+imports  = 314      # undefined; same pending-data set as Rio
+init     = 67       # DT_INIT_ARRAY entries (rio: 54); harness: 67/67 clean
 
 [host]
 abi          = "arm64-v8a"
 lib          = "libabhost.so"
 jni_package  = "com.rovio.fusion"
 jni_exports  = 62
+jni_onload   = 0x0cec08   # returns JNI_VERSION_1_6 on the native harness
 
 [strip]
 libs = ["libjs.so", "libadcolony.so"]
