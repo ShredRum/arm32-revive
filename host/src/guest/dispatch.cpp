@@ -869,6 +869,15 @@ std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int pro
         if (addr < 0x10000000u || addr + size > 0xF0000000u) {
             return 0xFFFFFFFFu;
         }
+        // Never let a FIXED map shadow the guest heap: it would silently steal
+        // the arena's address space (allocations keep "succeeding" while the
+        // mapping is clobbered). LOUD once per call site is cheap; refusals are
+        // already the failure mode for out-of-range requests above.
+        if (addr < heap_base_ + kHeapSize) {
+            std::printf("[mmap] LOUD FIXED %08x+%x overlaps heap [%08x,%08x) -- refusing\n", addr,
+                        size, heap_base_, heap_base_ + kHeapSize);
+            return 0xFFFFFFFFu;
+        }
         if (!mem_.Map(addr, size, hprot)) {
             return 0xFFFFFFFFu;
         }
@@ -5840,7 +5849,15 @@ std::uint32_t Runtime::ErrnoSlot() {
     const std::uint32_t s = kGuestDataBase + 0x104 + next_errno_slot_ * 4;
     next_errno_slot_++;
     if (std::uint64_t(s) + 4 > std::uint64_t(kGuestDataBase) + 0x2000) {
-        return kGuestDataBase + 0x100;  // arena full: alias main (bring-up)
+        // Slot pool exhausted (~1979 threads): alias the main slot. LOUD once:
+        // two threads sharing an errno cell is a real (if rare) divergence, so
+        // it must never be silent.
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            std::printf("[thread] LOUD errno slots exhausted (next=%u) -- aliasing main slot\n",
+                        next_errno_slot_);
+        }
+        return kGuestDataBase + 0x100;
     }
     errno_slots_[tid] = s;
     return s;

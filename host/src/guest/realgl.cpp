@@ -897,11 +897,23 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         const char* s = (const char*)glGetString((GLenum)a0);
         std::uint32_t out = 0;
         if (s) {
-            // Reuse the fake shim's slot cache? Simplest: fresh guest copy.
-            std::size_t L = std::strlen(s);
-            out = r->GuestMalloc((std::uint32_t)(L + 1));
-            if (out && r->CheckRange(out, L + 1, true)) {
-                std::memcpy(r->H(out), s, L + 1);
+            // One stable guest slot per name: the guest keeps the pointer, and
+            // the driver string for a live context does not change. Refresh the
+            // content in place (grows beyond the slot -> fresh allocation).
+            std::size_t L = std::strlen(s) + 1;
+            auto it = glstr_slots_.find(a0);
+            if (it != glstr_slots_.end() && r->CheckRange(it->second, L, true)) {
+                out = it->second;
+            } else {
+                out = r->GuestMalloc(static_cast<std::uint32_t>(L));
+                if (out) {
+                    glstr_slots_[a0] = out;
+                }
+            }
+            if (out && r->CheckRange(out, L, true)) {
+                std::memcpy(r->H(out), s, L);
+            } else {
+                out = 0;
             }
         }
         if (DiagOn()) {

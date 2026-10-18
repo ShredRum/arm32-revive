@@ -48,6 +48,9 @@ class RealGL {
     std::uint32_t bound_tex2d_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     // TEMP-DIAG: uploaded texture sizes (w | h<<16) by real handle.
     std::unordered_map<std::uint32_t, std::uint32_t> tex_size_;
+    // G2.4: one stable guest slot per glGetString enum (the guest holds the
+    // returned pointer; allocating a fresh copy per call leaked it).
+    std::unordered_map<std::uint32_t, std::uint32_t> glstr_slots_;
 };
 
 }  // namespace abr
