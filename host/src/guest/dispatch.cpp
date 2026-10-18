@@ -899,6 +899,18 @@ std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int pro
 
 int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
     size = (size + 0xFFFu) & ~std::uint32_t(0xFFFu);
+    // Known gap (G3.1, 2026-10-18): this leaves the mappings_ entry behind, so
+    // CheckAccess/CheckRange would still allow access to the (now PROT_NONE)
+    // range. Unreachable for THIS guest -- the .so imports neither mmap nor
+    // munmap (readelf --dyn-syms) -- so it is left as-is: the D3 last-hit cache
+    // relies on "mappings only ever grow", and a correct fix would need epoch
+    // invalidation. LOUD keeps a future guest that does call it from being
+    // silent about a stale mapping.
+    static std::atomic<bool> loud{false};
+    if (!loud.exchange(true)) {
+        std::printf("[mmap] LOUD munmap(%08x+%x) -- mappings_ keeps the old prot (G3.1)\n", addr,
+                    size);
+    }
     // Don't actually release (arena reuse later); just revoke access.
     if (!mem_.Protect(addr, size, PROT_NONE)) {
         return -1;
@@ -2818,6 +2830,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 g = next_guest_fd_++;
                 if (g >= 0x8000) {
+                    static std::atomic<bool> warned{false};
+                    if (!warned.exchange(true)) {
+                        std::printf("[files] LOUD guest fd table exhausted (cap %u)\n", 0x8000u);
+                    }
                     return false;
                 }
                 fd_map_[g] = fileno(f);
@@ -2836,6 +2852,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         };
         auto alloc_guest_fd = [&](int hfd) -> std::uint32_t {
             std::lock_guard<std::mutex> io(io_mutex_);
+            if (next_guest_fd_ >= 0x8000u) {
+                // Same ceiling as bind_file: guest fd numbers must stay
+                // representable (a FILE* carries its fd in a 16-bit _file
+                // field). LOUD once instead of silently truncating; the callers
+                // pass the value straight to the guest, where -1 reads as a
+                // plain "call failed" (no silent aliasing).
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true)) {
+                    std::printf("[files] LOUD guest fd table exhausted (cap %u)\n", 0x8000u);
+                }
+                return 0xFFFFFFFFu;
+            }
             const std::uint32_t g = next_guest_fd_++;
             fd_map_[g] = hfd;
             return g;
@@ -4417,10 +4445,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "AAsset_close") {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            if (asset_map_.erase(a0) == 0) {
-                Ret(regs, 0);
-                return;
+            bool known = false;
+            {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                known = asset_map_.erase(a0) != 0;
+            }
+            // The handle IS the guest buffer (getBuffer model), so closing must
+            // free it exactly like AAsset_close on the NDK -- otherwise every
+            // opened asset leaks its decompressed bytes (862 opens/boot ~21 MB).
+            // Free only handles we actually handed out, never a random address.
+            if (known) {
+                GuestFree(a0);
             }
             Ret(regs, 0);
             return;
