@@ -92,6 +92,23 @@ clean "not Rio" marker.
 * **JNI stage**: `HARNESS_ONLOAD=<addr>` (default is Rio's `0xc2db4` — always set
   it for a non-Rio image) and `HARNESS_JNI=<addr>[,<addr>…]`.
 
+## Progress log
+
+* 2026-10-18: `scripts/prepare-tree.sh space` OK — decode clean, guest moved to
+  `assets/guestlib/armeabi-v7a/` STORED, `Gen.smali` patched (`AngryBirdsSpace`
+  → `abhost`, 1 occurrence, so the profile's EXPECTED lib name was right),
+  sha256 re-verified. No `seeds/` yet (a fresh game captures them on first run).
+* 2026-10-18: `work/jni_signatures.txt` extracted from the smali — exactly the
+  62 signatures of the guest's 62 `Java_*` exports (79 native methods are
+  declared; the other 17 belong to other libs in the APK: Camera, Location,
+  Share, VideoPlayer). Compared with Rio: **60 shared names, all with identical
+  signatures, 0 conflicts**; 3 Rio-only (`fusion/WebViewWrapper`), 2 Space-only
+  (`fusion/RemoteNotificationsClientWrapper`).
+* 2026-10-18: `gen_apphost.py --union` (commit `2880539`) — one `libabhost.so`
+  for all titles; union is now 65 forwarders (63 rio + the 2 space-only),
+  purely additive for Rio, and the per-game path reproduces the committed `.inc`
+  byte-for-byte.
+
 ## Game-specific surface actually in **prod** code (verified inventory)
 
 A hex-literal scan of the prod sources (comments stripped) corrects the earlier
@@ -113,13 +130,23 @@ per-game constants are ~10 package/lib sites and ~20 VA sites:
 
 ## Next steps
 
-1. Game parameterisation: compile-time game header (package, guest lib asset,
-   build-id pin, probe slot, VA table + bounds) selected by `-DGAME=<id>`,
-   default **rio** so the shipped build is untouched; verify with the Rio native
-   baseline plus a value-level diff.
-2. `scripts/prepare-tree.sh space` (apktool decode is game-parameterised) →
-   extract the 62 JNI signatures into `work/jni_signatures.txt` →
-   `host/gen_apphost.py space` (adjust its 63-export assert).
+1. **Game identity, runtime-derived (no per-title build):** the package/files dir
+   / APK discovery can come from `/proc/self/cmdline` (on Android the process
+   name *is* the package name, and it does not carry the `-1`/`-2` app-dir
+   suffix), and the guest lib asset can be discovered by listing
+   `assets/guestlib/armeabi-v7a/` instead of naming it. That makes one
+   `libabhost.so` serve every title and leaves the *engine* data as the only
+   per-title thing. Rio's derived values must equal today's constants
+   (`com.rovio.angrybirdsrio`), i.e. verify on device with the installed Rio.
+2. **Gate the Rio engine crutches on image identity** (`CheckGuestBuildId`
+   already computes it): the probe (`1a410c` fill), the functor forge
+   (`65E650`/`5FE70`), the park stub `5885C`, `45A778`/`457FE7`/`D5994`, the
+   RET-fixup list `28A380…` and the pokes all belong to *that* image; a
+   non-pinned image should simply run without them. Layout **bounds** are
+   derivable and were measured on Rio: `0x653D1C` = LOAD0 `p_filesz`,
+   `0x6EE000` = mapped end of LOAD1, `0x59D250` = `exidx_va`; the
+   `0x600000..0x6F0000` "is data" window is Rio's LOAD1 start rounded down to
+   1 MB and its end rounded up to 64 KB (INFERRED from one sample).
 3. Re-derive Space's VAs one blocker at a time, harness-first
    (`nativeConfig` jstring → `nativeInit` engine path), then device.
 4. `PORTING.md` from the path actually walked.
