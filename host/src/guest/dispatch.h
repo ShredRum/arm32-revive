@@ -474,11 +474,15 @@ private:
     // control reappearing while in progress is real (pathological) recursion.
     struct OnceHijack {
         std::uint32_t control = 0;
+        std::uint32_t owner_tid = 0;  // guest thread that ran the init routine
         std::array<std::uint32_t, 16> saved_regs{};
     };
     static constexpr int kOnceMaxDepth = 16;
-    std::array<OnceHijack, kOnceMaxDepth> once_stack_{};
-    int once_depth_ = 0;
+    // Per-thread, NOT shared: the stack records "this thread is inside these
+    // init routines". A shared stack let a bystander thread's return pop
+    // another thread's slot (see games/space/JOURNAL.md, kSwiOnce).
+    static thread_local std::array<OnceHijack, kOnceMaxDepth> once_stack_;
+    static thread_local int once_depth_;
 
     // JNI bridge state.
     std::uint32_t jni_table_ = 0;   // guest VA of 256-entry function table

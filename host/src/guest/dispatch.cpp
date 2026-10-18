@@ -1054,41 +1054,61 @@ void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what)
 
 void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     svc_count.fetch_add(1, std::memory_order_relaxed);
+    if (swi == kSwiOnce) {
+        // The pthread_once init routine returned via ITS OWN trampoline (only
+        // PthreadOnce() ever puts once_va in LR). Unambiguous by construction:
+        // a thread exit or a qsort comparator return arrives as kSwiHalt and
+        // can no longer be misread as "the init routine finished".
+        if (once_depth_ <= 0) {
+            std::printf("[once] LOUD kSwiOnce with no init in progress -- halting\n");
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        // Innermost hijacked once-routine finished. Mark its control done,
+        // restore ITS caller context, resume after that once call. Outer
+        // levels stay on the stack (an init routine may itself call
+        // pthread_once on a different control).
+        OnceHijack& top = once_stack_[once_depth_ - 1];
+        const std::uint32_t halt_tid = GuestTid();
+        if (halt_tid != top.owner_tid) {
+            // Only reachable if the guest branched to once_va itself: our
+            // trampoline address is never a valid guest return address.
+            std::printf("[once] STEAL: control=%08x owner_tid=%u halt_tid=%u depth=%d "
+                        "sp=%08x -- init return from a foreign thread\n",
+                        top.control, top.owner_tid, halt_tid, once_depth_, regs[13]);
+        }
+        std::uint32_t done = 2;
+        std::memcpy(H(top.control), &done, 4);
+        for (int r = 0; r <= 12; r++) {
+            regs[r] = top.saved_regs[r];
+        }
+        regs[13] = top.saved_regs[13];
+        regs[14] = top.saved_regs[14];
+        regs[0] = 0;  // pthread_once() return value
+        // Resume AFTER the once call. The saved LR is a Thumb branch
+        // return address (bit 0 = interworking marker), so PC must have
+        // that bit stripped -- exactly like Ret(). Leaving it in PC makes
+        // the JIT fetch from an odd address and mis-decode everything
+        // after (Space init #9 died with a wild read that way).
+        regs[15] = top.saved_regs[14] & ~std::uint32_t(1);
+        // The hijack redirected pc without Ret(), leaving handler CPSR
+        // (SVC mode). Rebuild exactly like Ret(): USER + caller T-bit from
+        // LR, NZCV/GE preserved (thunks never set flags intentionally).
+        {
+            const std::uint32_t lr = top.saved_regs[14];
+            std::uint32_t cpsr = ActiveJit()->Cpsr();
+            cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
+                   ((lr & 1u) ? std::uint32_t(0x20) : std::uint32_t(0));
+            ActiveJit()->SetCpsr(cpsr);
+        }
+        once_depth_--;
+        std::printf("[once] routine done, resumed (depth now %d) control=%08x tid=%u "
+                    "owner_tid=%u\n",
+                    once_depth_, top.control, halt_tid, top.owner_tid);
+        return;  // keep running, do NOT halt
+    }
     if (swi == kSwiHalt) {
         halt_count++;
-        if (once_depth_ > 0) {
-            // Innermost hijacked once-routine finished (returned via HALT
-            // trampoline). Mark its control done, restore ITS caller context,
-            // resume after that once call. Outer levels stay on the stack.
-            OnceHijack& top = once_stack_[once_depth_ - 1];
-            std::uint32_t done = 2;
-            std::memcpy(H(top.control), &done, 4);
-            for (int r = 0; r <= 12; r++) {
-                regs[r] = top.saved_regs[r];
-            }
-            regs[13] = top.saved_regs[13];
-            regs[14] = top.saved_regs[14];
-            regs[0] = 0;  // pthread_once() return value
-            // Resume AFTER the once call. The saved LR is a Thumb branch
-            // return address (bit 0 = interworking marker), so PC must have
-            // that bit stripped -- exactly like Ret(). Leaving it in PC makes
-            // the JIT fetch from an odd address and mis-decode everything
-            // after (Space init #9 died with a wild read that way).
-            regs[15] = top.saved_regs[14] & ~std::uint32_t(1);
-            // The hijack redirected pc without Ret(), leaving handler CPSR
-            // (SVC mode). Rebuild exactly like Ret(): USER + caller T-bit from
-            // LR, NZCV/GE preserved (thunks never set flags intentionally).
-            {
-                const std::uint32_t lr = top.saved_regs[14];
-                std::uint32_t cpsr = ActiveJit()->Cpsr();
-                cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
-                       ((lr & 1u) ? std::uint32_t(0x20) : std::uint32_t(0));
-                ActiveJit()->SetCpsr(cpsr);
-            }
-            once_depth_--;
-            std::printf("[once] routine done, resumed (depth now %d)\n", once_depth_);
-            return;  // keep running, do NOT halt
-        }
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
         return;
     }
@@ -5799,10 +5819,12 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return false;
     }
-    std::printf("[once] hijack: control=%08x routine=%08x depth=%d\n", control, routine,
-                once_depth_);
+    const std::uint32_t owner = GuestTid();
+    std::printf("[once] hijack: control=%08x routine=%08x depth=%d tid=%u\n", control, routine,
+                once_depth_, owner);
     OnceHijack& slot = once_stack_[once_depth_++];
     slot.control = control;
+    slot.owner_tid = owner;
     slot.saved_regs = regs;
     const std::uint32_t one = 1;  // in-progress marker
     std::memcpy(H(control), &one, 4);
@@ -5817,7 +5839,7 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
         ActiveJit()->SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10));
         regs[15] = routine;
     }
-    regs[14] = mod_.halt_va;
+    regs[14] = mod_.once_va;
     return true;
 }
 
@@ -6018,6 +6040,11 @@ namespace {
 thread_local Dynarmic::A32::Jit* t_active_jit = nullptr;
 thread_local std::uint32_t t_tid = 0;
 }  // namespace
+
+// Per-thread pthread_once hijack stack (see dispatch.h): shared state here
+// would let one thread's return pop another thread's in-progress entry.
+thread_local std::array<Runtime::OnceHijack, Runtime::kOnceMaxDepth> Runtime::once_stack_{};
+thread_local int Runtime::once_depth_ = 0;
 
 Dynarmic::A32::Jit* Runtime::ActiveJit() {
     return t_active_jit ? t_active_jit : jit_;

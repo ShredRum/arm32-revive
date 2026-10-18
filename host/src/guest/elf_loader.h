@@ -33,6 +33,7 @@ struct LoadedModule {
     std::string path;
     std::uint32_t bias = 0;  // load bias (0: mapped at linked addresses)
     std::uint32_t halt_va = 0;  // `svc #0` trampoline: LR target for calls into guest
+    std::uint32_t once_va = 0;  // `svc #kSwiOnce`: LR target for a pthread_once init routine
     std::vector<LoadSegment> segments;  // mapped LOAD ranges (for access tracking)
     std::vector<std::uint32_t> init_array;
     std::vector<std::uint32_t> fini_array;

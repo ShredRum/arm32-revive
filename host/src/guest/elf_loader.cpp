@@ -351,6 +351,10 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     };
     // Slot 0: HALT trampoline (svc #0), LR target for init calls.
     out.halt_va = emit_tramp(kSwiHalt);
+    // Slot 1: pthread_once init-return trampoline. Distinct from HALT so a
+    // halt from any other source (thread exit, qsort comparator) can never be
+    // mistaken for "the once init routine returned" (see Runtime::OnSvc).
+    out.once_va = emit_tramp(kSwiOnce);
 
     std::unordered_map<std::string, std::uint32_t> import_index;
     auto get_import = [&](const std::string& name, bool is_func) -> std::uint32_t {

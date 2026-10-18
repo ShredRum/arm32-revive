@@ -26,7 +26,14 @@ inline constexpr std::uint32_t kStackTop = kStackBase + kStackSize;
 inline constexpr std::uint32_t kThreadStackSize = 0x00800000u;  // 8MB
 
 // SVC numbers. Import trampoline i executes `svc #(i+1)`; swi 0 = HALT.
+// kSwiHalt is the generic "guest code returned to the host" trampoline, used as
+// the LR target for init calls, thread start routines and qsort comparators --
+// it says NOTHING about which of those returned. The pthread_once init routine
+// gets its own trampoline so its return is unambiguous: with a shared HALT a
+// bystander thread's exit used to be consumed as "the init routine finished",
+// teleporting that thread onto the initialising thread's saved PC/SP.
 inline constexpr std::uint32_t kSwiHalt = 0;
+inline constexpr std::uint32_t kSwiOnce = 0x200000u;  // pthread_once init returned
 inline constexpr std::uint32_t kSwiJniBase = 0x100000u;
 
 }  // namespace abr
