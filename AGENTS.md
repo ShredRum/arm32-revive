@@ -3942,3 +3942,88 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   emulation overhead, but note the old leak made it worse over time (the arena was
   filling, so dlmalloc got slower and the heap fragmented): the dips should now be
   re-measured on a long session rather than assumed.
+
+## 139. D2 DONE: the per-alloc std::map is gone, containment stays EXACT (2026-10-18)
+- WHAT WAS WRONG: `heap_sizes_` (`std::map<guest base, usable payload>`) was
+  maintained on EVERY guest malloc/calloc/realloc/free: one host-heap node
+  allocated per live block and freed on every free (a hidden second allocator
+  round-trip through bionic malloc, with its own failure mode on the hottest
+  path in the emulator), plus O(log n) pointer chasing over ~180-210k scattered
+  nodes. Its main consumers had already been turned off (D1: the overflow
+  firewall; heapwatch is off too) yet the structure stayed unconditional.
+- CHANGE: `host/src/guest/live_heap.h` -- `abr::LiveHeapIndex`, open addressing
+  (Fibonacci multiply-shift on base>>3), tombstones, doubling growth, idle shrink;
+  4 MB flat table for the same ~130-210k live blocks, zero allocation per op.
+  `dispatch.cpp` no longer has `heap_sizes_` at all; the consumers (free-of-unknown
+  whitelist, realloc guard, audio-pool liveness, JNI region bound, sscanf clamp,
+  firewall/heapwatch) go through `Runtime::LiveIdx{Insert,Erase,Find,Containing}`.
+- THE TRAP THAT WAS CAUGHT (this is the part worth keeping): a hash cannot answer
+  "which block contains this INTERIOR pointer", so the first cut answered it with a
+  bounded back-probe (64 x 8 B = 512 B, bases are 8-aligned). A diag session
+  REFUTED it: `contain_diff == contain_miss` = 1218 (boot) / 1242 (after gameplay)
+  while `contain_ok=0` -- i.e. every real in-arena containment query is either an
+  exact base or an interior FARTHER than 512 B back. Probe-only therefore silently
+  dropped the sscanf `%s/%[/%c` field clamp (and would have dropped the JNI region
+  bounds for such destinations) on 1218 boot-path writes. A bounded probe is not
+  containment.
+- FIX: `LiveIdxContaining` is now exactly two tiers, cheapest first: (1) exact base
+  = one hash lookup; (2) blocks larger than `kProbeReach` (512 B) -- the only blocks
+  whose interiors the probe cannot reach -- in an ORDERED side-index `big_live_`
+  (`std::map`, ordering is precisely what containment needs); (3) everything at or
+  below the reach via the bounded probe. `big_live_` is maintained on the size
+  crossing only, for a base that is not live by construction (fresh malloc/calloc,
+  or realloc right after its erase), so the small-block hot path stays untouched.
+- PROVEN EQUAL to the old structure: with a temporary DiagOn oracle (the old full
+  `std::map`, since deleted) maintained in parallel, the two-tier answer agreed on
+  every query -- `contain_diff=0` across boot + gameplay, `contain_miss=0`,
+  `contain_big` 1218 -> 1242 (exactly the previously lost interiors, now resolved
+  by tier 1), and the independent table walk matched the side-index each report
+  (`big=2347 bigscan=2347` -> `big=2578 bigscan=2578`).
+- COST OF TIER 2 (measured): large blocks are 2.3-2.4% of live blocks, and
+  `big_ins=31097 big_del=28519` against `ops=2424635` -> ~1.3-2.5% of index ops,
+  i.e. ~15-20 ns/appended on average and nothing at all on small-block allocs.
+  Index load: ~12.9k ops/s on the title loop (788346->1562041 over 60 s), ~44k/s in
+  gameplay. `free_unk=realloc_unk=pool_stale=0` -- those odd paths never fired.
+- RESHAPE SPIKES (the "hitches" hypothesis) -- REFUTED, measured: per session
+  `grown=8 compacted=3 shrunk=0` and the worst single guest insert ever seen
+  (timed under diag) was 2648 us; ~11 events per session, tens of ms in total. An
+  O(n) reshape is not a plausible source of sustained FPS dips.
+- A/B vs the pre-D2 build (same protocol: restart, then /proc/PID/stat fields 14+15
+  sampled every 10 s for 150 s, `diag=off`, `jitopt=safe`; cpu7 pinned at 2910000
+  and thermal zones flat in BOTH arms -> no throttling): D2 was lower at every
+  sample point, steady attract window (65-152 s) 56.0 vs 60.3 ticks/s and
+  0-90 s ~5670 vs ~5918 ticks. HONEST ATTRIBUTION: the title loop does only ~12.9k
+  index ops/s, which at any plausible old per-op cost is ~1-2% CPU -- NOT 5-7%. So
+  most of that delta is code layout / hot-path size in the new binary, not the
+  index; **do not claim D2 bought 5-7%**. There is a hard confirmation of that
+  caution: the FINAL (cleaned) build measured 14699 ticks / 240 s = 61.2 ticks/s in
+  its prod soak, against 56.0/s for the earlier D2 prod run and 60.3/s for the
+  pre-D2 build -- i.e. runs of essentially the same code spread over 56.0-61.2
+  ticks/s (9%), which BRACKETS the 7% A/B delta. This protocol cannot resolve a
+  difference that small (it resolved C1's 17.5% only because that effect was far
+  larger); the honest verdict is "no measurable difference", not "D2 is faster".
+  What it provably removes is the host
+  allocation per operation, the `bad_alloc` path on the hot path, and ~7 MB of host
+  heap at 180-210k live blocks. The user's "FPS dropped" report was the DIAG build
+  (pid 10513, diag on: oracle map + per-frame prints), not D2 in prod.
+- VERIFIED: native harness 54/54, svc=948 halts=53; `HARNESS_LIVEIDX_TEST=1`
+  differential self-test PASS (400k randomized ops vs std::map, grow/shrink stress,
+  tombstone churn + update/resurrect, fails=0). Device: md5
+  ed7c03f6872623d972a32b086b505959 local == installed, build marker `Oct 18 2026
+  04:14:41`, prod soak 4 min (pid 16010 unchanged, no abflags on device,
+  `diag=off`), HEAPCORRUPT/HEAPASSERT/CHUNKD/USAGE_ERROR/GAPWRITE 0, death.log 0 B,
+  no new tombstone (newest 2026-10-17 16:41, pre-fix), LOUD 3 (the known unwind
+  lines), log 52,118 B, `heapidx` lines 0 with diag off (telemetry really absent
+  from the shipped lib: 0 matching strings). Diag session ran clean too (markers
+  0, LOUD=1, pid alive). NOTE: the APK embeds `__DATE__ __TIME__`
+  (`apphost.cpp:1098` Log("build marker ...")), so a rebuild can NEVER reproduce an
+  md5 -- verify which build runs by the `build marker` line in the log.
+- Commit trail: `289739a` (implementation), `9e0d960` (exact two-tier containment +
+  closing diagnostics), final cleanup (oracle/telemetry removed, docs) = the tagged
+  state. Deviation from PLAN.md's route is recorded there: metadata reads were
+  rejected because they would have turned the free-whitelist, the realloc guard and
+  the pool-liveness check into heuristics.
+- Also for the record: the firewall's gap log field `nxt=` became `base=` (0 = no
+  containing live block); a hash index cannot cheaply produce the old successor
+  head, and that log line was its only consumer.
+
