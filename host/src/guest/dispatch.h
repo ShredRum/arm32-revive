@@ -443,13 +443,17 @@ private:
     std::vector<std::uint32_t> errno_free_;
 
     // pthread_once hijack state: run the init routine inline by redirecting
-    // guest control flow (no nested Run). See PthreadOnce().
+    // guest control flow (no nested Run). See PthreadOnce(). A *stack* is
+    // required: an init routine may legitimately call pthread_once on a
+    // different control variable (observed in Space init #9). Only the same
+    // control reappearing while in progress is real (pathological) recursion.
     struct OnceHijack {
-        bool active = false;
         std::uint32_t control = 0;
         std::array<std::uint32_t, 16> saved_regs{};
     };
-    OnceHijack once_hijack_;
+    static constexpr int kOnceMaxDepth = 16;
+    std::array<OnceHijack, kOnceMaxDepth> once_stack_{};
+    int once_depth_ = 0;
 
     // JNI bridge state.
     std::uint32_t jni_table_ = 0;   // guest VA of 256-entry function table

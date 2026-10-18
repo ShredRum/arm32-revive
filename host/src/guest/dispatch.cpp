@@ -1038,30 +1038,37 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     svc_count.fetch_add(1, std::memory_order_relaxed);
     if (swi == kSwiHalt) {
         halt_count++;
-        if (once_hijack_.active) {
-            // Hijacked once-routine finished (returned via HALT trampoline).
-            // Mark done, restore caller context, resume after the once call.
+        if (once_depth_ > 0) {
+            // Innermost hijacked once-routine finished (returned via HALT
+            // trampoline). Mark its control done, restore ITS caller context,
+            // resume after that once call. Outer levels stay on the stack.
+            OnceHijack& top = once_stack_[once_depth_ - 1];
             std::uint32_t done = 2;
-            std::memcpy(H(once_hijack_.control), &done, 4);
+            std::memcpy(H(top.control), &done, 4);
             for (int r = 0; r <= 12; r++) {
-                regs[r] = once_hijack_.saved_regs[r];
+                regs[r] = top.saved_regs[r];
             }
-            regs[13] = once_hijack_.saved_regs[13];
-            regs[14] = once_hijack_.saved_regs[14];
+            regs[13] = top.saved_regs[13];
+            regs[14] = top.saved_regs[14];
             regs[0] = 0;  // pthread_once() return value
-            regs[15] = once_hijack_.saved_regs[14];
+            // Resume AFTER the once call. The saved LR is a Thumb branch
+            // return address (bit 0 = interworking marker), so PC must have
+            // that bit stripped -- exactly like Ret(). Leaving it in PC makes
+            // the JIT fetch from an odd address and mis-decode everything
+            // after (Space init #9 died with a wild read that way).
+            regs[15] = top.saved_regs[14] & ~std::uint32_t(1);
             // The hijack redirected pc without Ret(), leaving handler CPSR
             // (SVC mode). Rebuild exactly like Ret(): USER + caller T-bit from
             // LR, NZCV/GE preserved (thunks never set flags intentionally).
             {
-                const std::uint32_t lr = once_hijack_.saved_regs[14];
+                const std::uint32_t lr = top.saved_regs[14];
                 std::uint32_t cpsr = ActiveJit()->Cpsr();
                 cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
                        ((lr & 1u) ? std::uint32_t(0x20) : std::uint32_t(0));
                 ActiveJit()->SetCpsr(cpsr);
             }
-            std::printf("[once] routine done, resumed\n");
-            once_hijack_.active = false;
+            once_depth_--;
+            std::printf("[once] routine done, resumed (depth now %d)\n", once_depth_);
             return;  // keep running, do NOT halt
         }
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
@@ -5373,9 +5380,20 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
     if (state != 0) {
         return false;  // already done: normal return 0
     }
-    if (once_hijack_.active) {
-        std::printf("[once] LOUD recursive once (control=%08x routine=%08x) -- treating as done\n",
-                    control, routine);
+    // Same control already in progress => pathological recursion (break it).
+    // A DIFFERENT control while one is in progress is legitimate nesting: the
+    // active init routine is initialising a second once-guard. Space does this
+    // in its init array (control 0x73f0d8 nested inside 0x73f0cc).
+    for (int i = 0; i < once_depth_; i++) {
+        if (once_stack_[i].control == control) {
+            std::printf("[once] LOUD recursive once (control=%08x routine=%08x) -- treating as done\n",
+                        control, routine);
+            return false;
+        }
+    }
+    if (once_depth_ >= kOnceMaxDepth) {
+        std::printf("[once] LOUD once depth %d exceeded (control=%08x routine=%08x) -- treating as done\n",
+                    once_depth_, control, routine);
         return false;
     }
     if (!IsCodeAddress(routine & ~std::uint32_t(1))) {
@@ -5384,10 +5402,11 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return false;
     }
-    std::printf("[once] hijack: control=%08x routine=%08x\n", control, routine);
-    once_hijack_.active = true;
-    once_hijack_.control = control;
-    once_hijack_.saved_regs = regs;
+    std::printf("[once] hijack: control=%08x routine=%08x depth=%d\n", control, routine,
+                once_depth_);
+    OnceHijack& slot = once_stack_[once_depth_++];
+    slot.control = control;
+    slot.saved_regs = regs;
     const std::uint32_t one = 1;  // in-progress marker
     std::memcpy(H(control), &one, 4);
     // Redirect: run routine with HALT trampoline as its return address.
