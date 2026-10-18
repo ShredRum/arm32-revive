@@ -50,6 +50,12 @@ bool DiagOn();
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 
+// G1.1 (2026-10-18, PLAN.md): JIT cycle counting is pure overhead here. The
+// A32 callbacks make AddTicks a no-op and GetTicksRemaining return a constant
+// 1e9 (dispatch.h), so the per-block/per-SVC cycle accounting can never affect
+// control flow. Kept as one constant so all four UserConfig sites stay in sync.
+inline constexpr bool kJitCycleCounting = false;
+
 // D1 (2026-10-17, PLAN.md): the dlmalloc overflow firewall is OFF by default.
 // Default OFF means no recursive_mutex and no live-block index walk on the
 // memcpy/memmove/memset/strcpy/strcat/fgets/fread paths -- the write proceeds at
@@ -225,6 +231,8 @@ public:
     std::uint32_t ErrnoSlot();
     void set_callbacks(Dynarmic::A32::UserCallbacks* cb) { cb_ = cb; }
 
+    // G1.2: monotonic diag counter; only ever read in diag/harness dumps, so
+    // relaxed is enough (never an ordering dependency).
     std::atomic<std::uint64_t> svc_count{0};
     // Last import entered (any thread): stuck-update watchdog reads these
     // (no strings here - index resolved against mod_.imports at dump time).

@@ -506,6 +506,7 @@ std::shared_ptr<HostThread> Enter() {
     cfg.callbacks = g_cb;
     cfg.optimizations =
         JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+    cfg.enable_cycle_counting = kJitCycleCounting;
     if (std::getenv("HARNESS_FASTMEM")) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
     }

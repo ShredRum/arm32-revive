@@ -1014,7 +1014,7 @@ void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what)
 }
 
 void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
-    svc_count++;
+    svc_count.fetch_add(1, std::memory_order_relaxed);
     if (swi == kSwiHalt) {
         halt_count++;
         if (once_hijack_.active) {
@@ -5763,6 +5763,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             cfg.callbacks = cb_;
             cfg.optimizations =
                 JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+            cfg.enable_cycle_counting = kJitCycleCounting;
             if (std::getenv("HARNESS_FASTMEM")) {
                 cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
             }
@@ -5893,6 +5894,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         cfg.callbacks = cb_;
         cfg.optimizations =
             JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+        cfg.enable_cycle_counting = kJitCycleCounting;
         if (std::getenv("HARNESS_FASTMEM")) {
             cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
         }

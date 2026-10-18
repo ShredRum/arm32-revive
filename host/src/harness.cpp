@@ -733,6 +733,7 @@ int main(int argc, char** argv) {
     // less CPU, PLAN.md C1); env NOOPT/SAFEOPTS is handled by JitSafeOpts().
     cfg.optimizations =
         abr::JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+    cfg.enable_cycle_counting = abr::kJitCycleCounting;
     // Fastmem prototype (HARNESS_FASTMEM=1): direct host access to the 1:1
     // 4GB reservation; faults fall back to callbacks (BAD halting
     // preserved via slow path). Diags that sniff callbacks (WP/ScanWP/

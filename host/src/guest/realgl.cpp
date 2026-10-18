@@ -630,13 +630,16 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // Don't consume the driver's error queue on the fast path: the game
         // polls glGetError itself for the ETC->soft-decode fallback, and an
         // intermediate query eats its signal. Query only for diag.
-        GLenum e = EnvOn("HARNESS_GLDRAWLOG") ? glGetError() : (GLenum)0;
-        // TEMP-DIAG: track size by bound texture of active unit.
-        if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
-            tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            const GLenum e = glGetError();
+            // TEMP-DIAG: track size by bound texture of active unit (read only
+            // by the GLDRAWLOG block at :819, so write under the same gate).
+            if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
+                tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
+            }
+            std::printf("%s %ux%u fmt=%04x typ=%04x %s err=%04x\n", tag, a3, h, fmt, typ,
+                        p ? "data" : "NULL", e);
         }
-        std::printf("%s %ux%u fmt=%04x typ=%04x %s err=%04x\n", tag, a3, h, fmt, typ,
-                    p ? "data" : "NULL", e);
         r->Ret(regs, 0);
         return true;
     }
@@ -755,7 +758,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else {
             glBufferSubData((GLenum)a0, (GLintptr)a1, (GLsizeiptr)size, p);
         }
-        std::printf("%s tgt=%04x %uB %s\n", tag, a0, size, p ? "data" : "NULL");
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            std::printf("%s tgt=%04x %uB %s\n", tag, a0, size, p ? "data" : "NULL");
+        }
         r->Ret(regs, 0);
         return true;
     }
