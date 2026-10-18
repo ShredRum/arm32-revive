@@ -145,8 +145,10 @@
 
 ## 3. Host design (implemented, in host/src/guest/)
 - 4GB reservation (mmap PROT_NONE+NORESERVE); modules mapped at linked addrs.
-- Layout: modules [0, ~0x6EE000); heap bump allocator @0x10000000 (256MB,
-  HARNESS_HEAPBASE env can relocate for experiments); mmap arena from
+- Layout: modules [0, ~0x6EE000); guest heap (dlmalloc) @0x10000000 (1 GB
+  virtual: ends 0x50000000, still below the mmap arena, so no overlap; mapped
+  NORESERVE, so no physical cost — see AGENTS §51; HARNESS_HEAPBASE env can
+  relocate for experiments); mmap arena from
   0x70000000 up; trampolines @0xF0000000 (64KB, `svc #idx+1`, slot0=`svc #0`
   HALT); JNI table @0xF0010000 (reserved, bridge TODO); guest data @0xF1000000
   (canary+0, errno+0x100, misc slots); stack @0xFE000000+8MB, SP top 0xFE800000.
@@ -427,8 +429,10 @@ dead subsystem, game degrades without it).
 - Real ctype tables (2014-era Bionic layout) for inline macros.
 - C++ exception unwinding through translated code (personality/exidx at runtime;
   __cxa_throw is DEFINED in-module — future milestone, will need bridge care).
-- Real threads (pthread_create + per-thread Jit + errno/TLS slots).
-- fastmem enablement (after correctness), code-cache management.
+- ~~Real threads (pthread_create + per-thread Jit + errno/TLS slots).~~ SHIPPED
+  (§9: host std::thread + private Jit per guest thread, TLS/errno per tid).
+- ~~fastmem enablement (after correctness), code-cache management.~~ SHIPPED
+  (HARNESS_FASTMEM=1, prod `fastmem=on`; code cache managed by Dynarmic).
 - Heartbeat Regs race (liveness-only use now; ok).
 - stdout _IONBF set; logs must survive _exit (watchdog path).
 

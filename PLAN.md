@@ -186,6 +186,7 @@
 | **G1.1** | `enable_cycle_counting=false` — JIT считает тики вхолостую (`AddTicks{}` no-op, `GetTicksRemaining` = константа 1e9), 4 прод-сайта | `apphost.cpp:505`, `harness.cpp:730`, `dispatch.cpp:5762/5892` | нет (нейтрально по построению) | ✅ `kJitCycleCounting` в `dispatch.h`, 4 сайта; нативный базлайн `54/54 svc=948` |
 | **G1.2** | `svc_count++` — `seq_cst` атомик на каждый SVC; читается только в diag/харнессе | `dispatch.h:228`, `dispatch.cpp:1017` | нет | ✅ `fetch_add(relaxed)` |
 | **G1.3** | Два незагейченных per-call `printf` (glTexImage2D/glBufferData) + запись `tex_size_` (её читает только GLDRAWLOG-блок) | `realgl.cpp:638`, `:758`, `:635` | нет | ✅ под `HARNESS_GLDRAWLOG` |
+| **G1.4** | Незагейченные per-call info-печати `[realcall]` (184/сессию) и `[realnew]` (47/сессию) — единственный **неограниченный** прод-шум по логу устройства; заодно no-op тернарник `fn >= 114 ? a1 : a1` | `dispatch.cpp:6160`, `:6513` | нет | ✅ под `DiagOn()`; ошибки (`FAILED`/`THREW`/null) оставлены |
 | **G2.1** | **Утечка:** `AAsset_close` только `asset_map_.erase`, буфер гостя не освобождается (862 открытия/boot ≈ 21 МБ) | `dispatch.cpp:4410` | да (сначала проверить, что все закрытия корректны) | ⏳ |
 | **G2.2** | **Утечка:** apphost `HostThread` (8 МБ стек + `Dynarmic::Jit`) + запись в `g_threads` никогда не освобождаются; `ThreadEnter` есть, `ThreadExit` нет | `apphost.cpp:497/529/1049` | **да** (нужен хук выхода потока) | ⏳ |
 | **G2.3** | **Гостевые fd монотонны без переиспользования:** `bind_file` имеет кап `0x8000` → молчаливый NULL; `alloc_guest_fd` **без капа** (16-бит поле `_file` переполнится на 65536); в нашем соке счётчик уже 600+ | `dispatch.cpp:2811`, `:2830` | да (средний) | ⏳ |
@@ -202,7 +203,7 @@
 | **G4.3** | Мёртвые `lib/armeabi-v7a/libjs.so`, `libadcolony.so` в APK | APK | нет | ⏳ |
 | **G4.4** | Секреты + адрес устройства в `scripts/deploy.sh` → вынести в env/аргументы | `scripts/deploy.sh` | нет | ⏳ |
 | **G5.1** | Дублированные гостевые константы → именованные: `0x65E650`+`0x2C`+`0x20` (`apphost.cpp:596`, `harness.cpp:1816`), `0x653d1c` ×7, `0x672010`, `0x800000` ×5, `800×480` ×3, `alarm(60)` ×12, путь `files` ×3 | по файлам | нет (косметика) | ⏳ |
-| **G5.2** | Мёртвый код | `layout.h:7`, `dispatch.cpp:6158`, `:7425` | нет | ⏳ |
+| **G5.2** | Мёртвый код: неиспользуемый `kGuestAddrSpace` (== 0, вводит в заблуждение) | `layout.h:7` | нет | ✅ удалён; заодно устаревший комментарий кучи («leak-only free», 256 МБ) |
 | **G5.3** | Доки: AGENTS §6 (устаревшие TODO «Real threads»/«fastmem» — оба сделаны), `AGENTS:148` (bump 256 МБ — устарело), PLAN A6 (печати realgl не загейчены — станет верно после G1.3), B6 («6-8 strstr» → реально 2) | `AGENTS.md`, `PLAN.md` | нет | ⏳ |
 | **G6** | Диагностика/измерение (НЕ фикс, по желанию): frame-timer, `HARNESS_LIVEIDX_TEST` как ctest-target, integer-counter soak, счётчик `glReadPixels` | — | — | 📝 |
 

@@ -4,12 +4,12 @@
 
 namespace abr {
 
-inline constexpr std::uint32_t kGuestAddrSpace = 0x100000000ULL & 0xFFFFFFFFu;  // 4GB
 inline constexpr std::uint32_t kHeapBase = 0x10000000u;
-inline constexpr std::uint32_t kHeapSize = 0x40000000u;  // 1GB (256MB starved
-// long runs: leak-only free + per-update textures hit the ceiling ~call 30,
-// mallocs return NULL -> null+off faults downstream; arena ends 0x50000000,
-// mmap arena starts 0x70000000, no overlap)
+// 1 GB (starved at 256 MB on long runs: per-update textures + guest assets hit
+// the ceiling ~update 30, mallocs returned NULL -> null+off faults downstream).
+// Arena ends 0x50000000, the mmap arena starts 0x70000000: no overlap. Mapped
+// NORESERVE, so the size is virtual only (AGENTS §51; live usage ~250 MB).
+inline constexpr std::uint32_t kHeapSize = 0x40000000u;
 inline constexpr std::uint32_t kTrampBase = 0xF0000000u;
 inline constexpr std::uint32_t kTrampSize = 0x00010000u;  // 64KB
 inline constexpr std::uint32_t kJniTableBase = 0xF0010000u;
