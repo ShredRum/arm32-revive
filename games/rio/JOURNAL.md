@@ -115,3 +115,11 @@ running on the screen so the user can look at it; the on-screen result of the
 previous re-check was already confirmed by hand.
 
 Result: Rio is re-verified for `0b5642c` -- the pending caveat above is closed.
+
+One further host change landed right after (`9a42892`): the *normal* `[once]`
+lines (`hijack`, `routine done`) moved behind `HARNESS_DIAG` (anomalies stay
+loud). It is log-only, but the installed lib changed again
+(`5c49beed299e7132ee73d18fef2855df`), so Rio was prod-run once more on it:
+354 lines instead of 364 -- exactly the ten once lines gone, `hijack = 0`,
+`done = 0`, `abort = 0`, process alive, flag file absent. The lib installed on
+Rio now equals the committed build.
