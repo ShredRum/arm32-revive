@@ -410,8 +410,9 @@ private:
     // Callback-JIT pool (PvZ re-enter pattern): host thunks run inside the
     // outer Jit's Run(), where nested Run() asserts. Guest callbacks (qsort
     // comparators) run on SEPARATE Jit instances (own stack, lr=halt slot,
-    // loop till halt) with t_active_jit swapped for the duration. 2 slots;
-    // exhaustion (pathological nesting) fails the sort LOUD, array untouched.
+    // loop till halt) with t_active_jit swapped for the duration. 8 slots
+    // (cb_slots_.resize(8) on first use); exhaustion (pathological nesting)
+    // fails the sort LOUD, array untouched.
     struct CbSlot {
         std::unique_ptr<Dynarmic::A32::Jit> jit;
         std::uint32_t stack = 0;

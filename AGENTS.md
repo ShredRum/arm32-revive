@@ -4027,3 +4027,65 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   containing live block); a hash index cannot cheaply produce the old successor
   head, and that log line was its only consumer.
 
+## 140. Code review: magic numbers + quality pass, 3 real charges fixed (2026-10-18)
+- WHY: after D2 the user asked whether the tree contains "magic numbers taken from
+  thin air" and wanted a fresh quality pass. Three READ-ONLY subagent reviews covered
+  all of `host/src` (~17.5k lines) plus `scripts/`. Nothing else changed for the
+  review; the findings were then re-verified by hand (line by line) before touching
+  code.
+- VERDICT on "magic numbers": the overwhelming majority of numeric literals are
+  DERIVED, not invented -- guest-binary VAs (nativeInput `0xC23E4`, `JNI_OnLoad`
+  `0xc2db4`, patch sites `0x2B0C50..`, all with a recorded derivation), ABI/spec
+  constants (dlmalloc FLAG_BITS=7/CINUSE=2, ARM reloc types + rel31 sign/mask, CPSR
+  USER+ARM `0x3F`/`0x10`, ARM prologue encodings, JNI slot indices from NDK r27
+  `jni.h`, `jchar`=2, GLES2 enum tables, ZIP EOCD), and measured values
+  (`kProbeReach`=512 from `contain_ok=0`, `kHeapSize`, the 123x8MB stack leak).
+  What IS "from the head" is the heuristic thresholds: log caps, `kQuarantineCap=64`,
+  `tomb_>64`, initial capacity `1<<10`, idle-shrink `>4096 && live*8<=size`,
+  `ExclusiveMonitor(8)`, cb pool 8, and FOUR different size caps for one intent
+  (`0x10000000` / `0x1000000` / `0x2000000` / `0x4000000`). All of those live in
+  cold paths or behind a flag; none is load-bearing for correctness.
+- FIXED (all PRE-EXISTING, none from D2; D2 semantics untouched):
+  1. `realgl.cpp:545` `is_del = n[3] == 'D'` -> `n[2] == 'D'`. PROVEN bug: for all
+     eight names `gl<Gen|Delete>{Textures,Buffers,Framebuffers,Renderbuffers}` index
+     2 is the G/D switch and index 3 is 'e' in every one, so `is_del` was always
+     false -- **every `glDelete*` was executed as the matching `glGen*`** (objects
+     leaked, and the stale-handle duality purge at 563-574 never ran). This was on
+     the LIVE prod path: `apphost.cpp:1201` sets `HARNESS_REALGL=1` unconditionally,
+     `dispatch.cpp:4454` hands every `gl*` name to RealGL before the fake shim, and
+     the guest imports all four Delete families (readelf --dyn-syms). Not observed as
+     a crash (call frequency on device unmeasured).
+  2. `realgl.cpp:1005` `n[10]` -> `n[9]` ("glUniform<1|2|3|4>{f,i}v": the digit is
+     index 9, 'f'/'i' is 10; the old code forced per=4 and made CheckRange check 4x
+     too much). LATENT for this game: the guest imports no `glUniform{1,2,3}{f,i}v`.
+  3. `harness.cpp:1876` `pre[4]` -> `pre[8]`: 0x20 bytes are memcpy'd and printed
+     into a 16-byte array (compiler `-Wstringop-overflow`). Harness-only diag path,
+     but a real stack overflow; the rebuild is now warning-free.
+  4. Doc-only truthfulness fixes: `apphost.cpp:53` "2MB guest stack" -> 8MB (the code
+     allocates 0x800000); `dispatch.h:413` "2 slots" -> 8 (`cb_slots_.resize(8)`);
+     `live_heap.h:198` comment said "tombstones below half the live set" while the
+     code compacts at `tomb_ > live_`.
+- REFUTED by verification (do not re-flag): `0xF1100000` is the mock-handle COUNTER
+  `next_obj_` (dispatch.h:443-445, deliberately outside the guest map), not a
+  pointer; "text-range bounds 0x653D1C vs 0x6EE000 disagree" is not a conflict --
+  readelf: the EXEC LOAD has filesz exactly 0x653d1c, while 0x655cc0+0x978b0 =
+  0x6EE570 is the whole module (the device's own `[phdr] LOAD ... -> map
+  [00655000,006ee000)` line corroborates). Both values are correct for what they name.
+- RECORDED DEBT, not fixed (cosmetic / duplication, no behaviour): guest constants
+  duplicated across files -- `0x65E650`+`0x2C`+`0x20` in `apphost.cpp:596` AND
+  `harness.cpp:1816`; `0x653d1c` in 7 sites; `0x672010` in `elf_loader.cpp:311` +
+  `harness.cpp:659`; `0x800000` x5; 800x480 x3; `alarm(60)` x12; the app files path
+  in 3 places; `0x10000000` hardcoded where `kHeapBase` exists. Dead: `layout.h:7`
+  (`0x100000000ULL & 0xFFFFFFFFu` == 0), `dispatch.cpp:6158` no-op ternary
+  `fn>=114 ? a1 : a1`, `dispatch.cpp:7425` unreachable `fn==145`. Secrets in VCS:
+  `scripts/deploy.sh` carries the device address and the keystore passwords inline.
+- VERIFIED: native rebuild warning-free; `HARNESS_LIVEIDX_TEST=1` PASS (fails=0,
+  400k randomized ops vs std::map, grow/shrink stress, tombstone churn). Device:
+  lib md5 `939ede0a8dce12cc00d38cd32e2873b3` local == installed, guest `.so` pristine
+  `9c21a9874b10bb5f7d7bf4afab68a475`, `jar verified`, build marker
+  `Oct 18 2026 04:35:41`; the MENU renders real frames (screenshot pulled), 62.4
+  ticks/s over a clean 60 s window, pid 16807 unchanged >3 min, markers
+  HEAPCORRUPT/HEAPASSERT/CHUNKD/USAGE_ERROR/GAPWRITE 0, LOUD 3 (the known unwind
+  lines), `death.log` 0 B, no new tombstone (newest 2026-10-17 16:41), no
+  `abflags.txt` on the device.
+

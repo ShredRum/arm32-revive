@@ -195,8 +195,9 @@ private:
             Rehash(tab_.size() / 2);
             return;
         }
-        // Keep occupancy <=70% AND tombstones below half the live set: probe
-        // chains stay short without growing the table on every erase.
+        // Keep occupancy <=70%: probe chains stay short without growing the
+        // table on every erase. (Separately, once tombstones outnumber the live
+        // set and exceed 64, the table is compacted in place -- see below.)
         if ((live_ + tomb_) * 10 >= tab_.size() * 7) {
             if (live_ * 2 <= tab_.size()) {
                 ++compacted_;

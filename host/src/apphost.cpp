@@ -50,7 +50,7 @@ std::string g_apk;    // our own base.apk (asset source)
 
 struct HostThread {
     Dynarmic::A32::Jit* jit = nullptr;
-    std::uint32_t stack = 0;  // 2MB guest stack base
+    std::uint32_t stack = 0;  // guest stack base (8MB, see GuestMalloc below)
     std::uint32_t tid = 0;    // bridge tid (errno/TLS routing)
     JNIEnv* env = nullptr;    // real, attached
     // Re-entrancy guard: a nested JNI entry on the same thread while its

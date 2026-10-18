@@ -1873,7 +1873,7 @@ int main(int argc, char** argv) {
                             rgs[1] = static_cast<std::uint32_t>(std::strtoul(r1e, nullptr, 16));
                         }
                         // Pre/post snapshot around +0x14 (skeleton re-check).
-                        std::uint32_t pre[4] = {};
+                        std::uint32_t pre[8] = {};  // 0x20 bytes are copied/printed below
                         if (rt.CheckRange(found, 0x20, false)) {
                             std::memcpy(pre, rt.H(found), 0x20);
                         }

@@ -542,7 +542,10 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     if (n == "glGenTextures" || n == "glGenBuffers" || n == "glGenFramebuffers" ||
         n == "glGenRenderbuffers" || n == "glDeleteTextures" || n == "glDeleteBuffers" ||
         n == "glDeleteFramebuffers" || n == "glDeleteRenderbuffers") {
-        const bool is_del = n[3] == 'D';
+        // All eight names are "gl<Gen|Delete>...": the G/D switch is at index 2
+        // (index 3 is 'e' in both, so n[3] was always false -> every delete ran
+        // as a gen: leaked objects + the stale-buffer purge below never ran).
+        const bool is_del = n[2] == 'D';
         // 64-bit multiply (was 32-bit 4*a0: wraps at n~0x40000000 -> 0-byte
         // check passes -> driver writes past the guest buffer). Cap 1M (game
         // gens handfuls; wrap/garbage caught) + LOUD instead of smash.
@@ -1002,7 +1005,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             } else if (n.find("Matrix2") != std::string::npos) {
                 per = 4;
             } else {
-                per = (n[10] == '1') ? 1 : (n[10] == '2') ? 2 : (n[10] == '3') ? 3 : 4;
+                // "glUniform<1|2|3|4>{f,i}v": the digit is index 9 ('f'/'i' is 10).
+                per = (n[9] == '1') ? 1 : (n[9] == '2') ? 2 : (n[9] == '3') ? 3 : 4;
             }
             std::size_t nb = (std::size_t)cnt * per * 4;
             const void* p =
