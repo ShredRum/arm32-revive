@@ -1102,9 +1102,14 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
             ActiveJit()->SetCpsr(cpsr);
         }
         once_depth_--;
-        std::printf("[once] routine done, resumed (depth now %d) control=%08x tid=%u "
-                    "owner_tid=%u\n",
-                    once_depth_, top.control, halt_tid, top.owner_tid);
+        // Normal event, not an anomaly: behind the flag, like the rest of the
+        // diagnostic layer. The loud lines in this file (STEAL, still waiting,
+        // stopped inside an init routine) stay unconditional on purpose.
+        if (DiagOn()) {
+            std::printf("[once] routine done, resumed (depth now %d) control=%08x tid=%u "
+                        "owner_tid=%u\n",
+                        once_depth_, top.control, halt_tid, top.owner_tid);
+        }
         return;  // keep running, do NOT halt
     }
     if (swi == kSwiHalt) {
@@ -5878,8 +5883,10 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
         return false;
     }
     const std::uint32_t owner = GuestTid();
-    std::printf("[once] hijack: control=%08x routine=%08x depth=%d tid=%u\n", control, routine,
-                once_depth_, owner);
+    if (DiagOn()) {
+        std::printf("[once] hijack: control=%08x routine=%08x depth=%d tid=%u\n", control, routine,
+                    once_depth_, owner);
+    }
     OnceHijack& slot = once_stack_[once_depth_++];
     slot.control = control;
     slot.owner_tid = owner;

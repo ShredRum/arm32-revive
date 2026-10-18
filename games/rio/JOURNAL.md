@@ -82,17 +82,36 @@ Re-verified on the device with the new lib (md5 of the lib inside the installed
 
 No new tag without explicit confirmation.
 
-### Pending re-check: the `pthread_once` blocking fix (2026-10-19)
+### Re-check: the `pthread_once` blocking fix (2026-10-19) -- MEASURED
 
-A further change landed on the shared host after the re-check above: `pthread_once`
-no longer returns 0 when the control reads `1` (in progress) -- it blocks the
-caller until the initialisation completes, as bionic does, and releases the
-control if the owning thread dies inside the routine. Mechanism, evidence and
-limits: `../space/JOURNAL.md`, section "Правка `state == 1`".
+The change: `pthread_once` no longer returns 0 when the control reads `1` (in
+progress) -- it blocks the caller until the initialisation completes, as bionic
+does, and releases the control if the owning thread dies inside the routine.
+Mechanism, evidence and limits: `../space/JOURNAL.md`, section "Правка
+`state == 1`". Committed as `0b5642c`; the installed lib md5 is
+`6adc66d278d0940dadd2a87ceb18fd07`.
 
-This has **not** been measured on Rio. Rio does walk `pthread_once` at runtime
-(5 events per launch, all runtime, none in the init array), so the changed path
-is reachable here, and the expectation is that it is inert -- but that is an
-expectation, not a device measurement. The installed Rio currently still carries
-the *older* lib. Re-run the 3-launch prod-like check with the new lib before
-calling Rio re-verified for this change.
+Measured on the device: three prod-like launches, 45 s each, no
+`files/abflags.txt` (the lib inside the installed `base.apk` was md5-checked
+before the runs and matched the commit):
+
+| run | lines | hijack | done | tid≠owner | STEAL | abort | other | process |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 373 | 5 | 5 | 0 | 0 | 0 | BAD exec 0, future_error 0, ExceptionRaised 0 | alive, 63.0 % CPU, RSS 38 MB |
+| 2 | 364 | 5 | 5 | 0 | 0 | 0 | ditto | alive, 62.9 % CPU, RSS 65 MB |
+| 3 | 364 | 5 | 5 | 0 | 0 | 0 | ditto | alive, 63.9 % CPU, RSS 47 MB |
+
+The five events are the same five controls every launch
+(`006eb9f4/0045bed9`, `006ebca8/004da08d`, `006ebf74/00509549`,
+`006eb9e0/0045845d`, `006de2d4/003a5d80`), all at `depth=0`, `tid` equal to
+`owner_tid` (tids 1001/3/9/11 differ run to run -- the guest's own scheduling).
+No wait, no steal, no abort: the blocking path is reachable here but never
+*entered* in a clean run, exactly as on Space (`wait` fires only when the same
+once is entered concurrently). 45 s window justified by the loading-burst
+measurement in `../space/JOURNAL.md`.
+
+User confirmation of this specific run: pending -- the third launch was left
+running on the screen so the user can look at it; the on-screen result of the
+previous re-check was already confirmed by hand.
+
+Result: Rio is re-verified for `0b5642c` -- the pending caveat above is closed.
