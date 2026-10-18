@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Star Wars HD (Premium IAP)
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum).
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "star-wars"
+title        = "Angry Birds Star Wars HD (premium iap)"
+status       = "planned"
+strategy     = "jit"
+
+[apk]
+package      = "com.rovio.angrybirdsstarwarshd.premium.iap"
+version_name = "1.5.13"
+version_code = 151300
+min_sdk      = 16
+target_sdk   = 26
+original     = "original/com_rovio_angrybirdsstarwarshd_premium_iap-151300.apk"
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsStarWars.so"
+size   = 7869668
+sha256 = "10c050d8b53a89290058ad1dc79e98169e423f6dae852e2998cb9eb9be9b5b2c"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+jni_exports  = 71
+
+[strip]
+libs = ["libjs.so", "libadcolony.so"]
+
+[tree]
+smali_lib_name_orig = "AngryBirdsStarWars"   # EXPECTED; verify at first decode
+smali_patch_verified = false
+
+[notes]
+# Premium/IAP build -> licensing checks expected. Port LAST of the series
+# (or treat as an experiment), see AGENTS.md strategy note.

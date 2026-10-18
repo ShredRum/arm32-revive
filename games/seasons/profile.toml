@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Seasons
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum).
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "seasons"
+title        = "Angry Birds Seasons"
+status       = "planned"
+strategy     = "jit"
+
+[apk]
+package      = "com.rovio.angrybirdsseasons"
+version_name = "6.6.2"
+version_code = 6620
+min_sdk      = 16
+target_sdk   = 22
+original     = "original/angry-birds-seasons-6-6-2.apk"
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsSeasonsFull.so"
+size   = 8528904
+sha256 = "8183b73d9e2873e0bd3c661acbfef7e6eeef40c3403916e98830f97a9e239baf"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+jni_exports  = 72                # NOTE: includes HockeyAppWrapper (breakpad)
+
+[strip]
+libs = ["libjs.so", "libadcolony.so"]
+
+[tree]
+smali_lib_name_orig = "AngryBirdsSeasonsFull"   # EXPECTED; verify at first decode
+smali_patch_verified = false

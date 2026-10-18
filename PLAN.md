@@ -198,7 +198,7 @@
 | **G3.2** | `GuestMmap` MAP_FIXED-диапазон без проверки наложения на кучу | `dispatch.cpp:871` | низкий (LOUD вместо молчания) | ✅ отказ + `[mmap] LOUD` при наложении на `[heap_base_, +kHeapSize)` |
 | **G3.3** | `errno_slots_` при заполнении молча алиасится на main | `dispatch.cpp:~5845` | нет | ✅ одноразовый `[thread] LOUD` |
 | **G3.4** | **Self-check пиннинга гостя:** сверить build-id (`NOTE` @0x168, desc 20 Б @0x178) с константой → LOUD при несовпадении. Покрывает разом все хардкод-VA и поведенческие костыли (вместо отдельных проверок байт) | загрузчик `apphost.cpp` | низкий | ✅ `ElfLoader` извлекает build-id, `CheckGuestBuildId` в `elf_loader.h`, вызов в apphost+harness; проверено на копии с испорченным байтом — LOUD печатается, нормальный гость молчит |
-| **G4.1** | Шип-гигиена: `minSdkVersion 16` + подпись v1-only SHA-384 против `.so` android-26 → `apksigner` красный | `work/apk_prod/apktool.yml` + подпись | нет рантайм-риска | ✅ решено подписью v1 **SHA-256** (`-digestalg/-sigalg`), НЕ bump minSdk: тестовое устройство **API 25**, minSdk 26 было бы неустанавливаемо; `.SF` теперь `SHA-256-Digest` (проверено), v2 локально невозможен (нет `apksigner`), targetSdk 26 v2 не требует |
+| **G4.1** | Шип-гигиена: `minSdkVersion 16` + подпись v1-only SHA-384 против `.so` android-26 → `apksigner` красный | `work/apk_prod/apktool.yml` + подпись | нет рантайм-риска | ✅ решено подписью v1 **SHA-256** (`-digestalg/-sigalg`), НЕ bump minSdk: тестовое устройство **API 25**, minSdk 26 было бы неустанавливаемо; `.SF` теперь `SHA-256-Digest` (проверено), targetSdk 26 v2 не требует. **Уточнение 2026-10-18 (перестройка):** `apksigner` в SDK всё-таки есть (build-tools 35.0.0), поэтому `scripts/build-apk.sh` подписывает **v1+v2+v3** (`zipalign -p 4` + apksigner; `SIGN_SCHEME=v1` возвращает старый путь). Ключ и алиас не менялись → идентичность сертификата и `pm install -r` не затронуты; `apksigner verify`: v1/v2/v3 = true |
 | **G4.2** | Хардкод пути `files` — не работает на secondary user / work profile | `apphost.cpp:1099/1306` | низкий | ✅ `GuestFilesDir()` = `/data/data/<pkg>/files` под uid → user-id `getuid()/100000`; для user 0 вывод идентичен |
 | **G4.3** | Мёртвые `lib/armeabi-v7a/libjs.so`, `libadcolony.so` в APK | APK | нет | ✅ удалены из decoded-дерева (бэкап `/tmp/opencode/dead_libs_backup/`), в установленном APK отсутствуют |
 | **G4.4** | Секреты + адрес устройства в `scripts/deploy.sh` → вынести в env/аргументы | `scripts/deploy.sh` | нет | ✅ параметризован (`DEV`/`KS`/`KS_ALIAS`/`KS_PASS`/`APK_NAME`/`SSH_PORT`) + `-digestalg SHA-256 -sigalg SHA256withRSA` |
@@ -208,6 +208,31 @@
 | **G6** | Диагностика/измерение (НЕ фикс, по желанию): frame-timer, `HARNESS_LIVEIDX_TEST` как ctest-target, integer-counter soak, счётчик `glReadPixels` | — | — | 📝 |
 
 Порядок выполнения: G1 (безрисковое) → G3.4/G5 (безрисковое) → G2.1/G2.3/G2.4/G3.1/G3.2/G3.3 → G2.2/G2.6 (самое рискованное, с устройством) → G4 → G5.1/G5.2. Каждый батч — отдельный коммит; устройство — только для рискованных.
+
+## Структура: `ab-port` — многoигровой репозиторий (2026-10-18)
+Каталог переименован `AngrybirdsRio_port` → `ab-port` (история и теги сохранены,
+все пути в скриптах относительные). Цель: общий `host/` + отдельная папка на игру.
+
+| фаза | что | статус |
+|---|---|---|
+| 0 | known-good тег для отката | ✅ `works-2026-10-18-batch-g` |
+| 1 | переименование + пересборка CMake-каталогов (кэши хранят абс. пути) | ✅ |
+| 2 | `games/<id>/{profile.toml,JOURNAL.md,original/,seeds/,work/}` | ✅ `rio` (SHIPPED), 📝 ещё 4 игры |
+| 3 | разделение `core/` vs `host/` | ⏳ отложено (не требуется для сборки) |
+| 4 | воспроизводимая процедура порта | ◐ `scripts/prepare-tree.sh <id>` |
+
+Игры серии (все подлинные Rovio, один сертификат `3bf28170…`, все только
+armeabi-v7a+x86 → нужен порт): `rio` ✅, `seasons` (6.6.2), `space` (2.2.14),
+`star-wars` (1.5.13 premium iap), `star-wars-ii` (1.9.25). У всех тот же
+JNI-фреймворк `com.rovio.fusion` (62–74 экспорта против 63 у Rio) и те же
+мёртвые `libjs.so`/`libadcolony.so` (побайтово идентичны — проверено sha256).
+
+Проверено после перестройки: `prepare-tree.sh rio` воспроизводит дерево
+(отличия только `apkFileName` и порядок строк в `doNotCompress`); `gen_apphost.py
+rio` даёт побайтово тот же `.inc` (63 forwarder'а); нативный baseline
+`init done: 54/54 clean, svc=948 halts=53`; `scripts/deploy.sh rio` собирает и
+подписывает APK. Побочно: в SDK нашёлся `apksigner`, поэтому подпись переведена
+с v1-only на **v1+v2+v3** (см. G4.1).
 
 ## НЕ трогать
 - `CheckAccess`/`CheckRange` как **контракт** (дикий guest-указатель → чистый halt, а не SIGSEGV хоста).

@@ -1,18 +1,24 @@
-com.rovio.angrybirdsrio.2676.apk
-lifeline-silent-night-1-4-apk-arm64.json
+# ---- per-game artifacts (never committed: copyrighted APKs, huge trees) ----
+games/*/original/
+games/*/work/
+
+# ---- signing keys (local only; keep a backup somewhere safe) ----
+keys/
+
+# ---- toolchain / vendor drops ----
 tools/
 thirdparty/
-work/
+.venv/
+
+# ---- build output ----
 out/
 host/build-native/
 host/build-android/
-.venv/
 
-# Local analysis artifacts / scratch (never in git): the Ghidra project (207 MB),
-# the debug-APK dump, the extracted guest .so (a copy of the APK's own library),
-# boot logs and an empty stray redirect target.
+# ---- local analysis artifacts / scratch ----
+lifeline-silent-night-1-4-apk-arm64.json
 Ghidra_AngryBirdsRio/
 angrybirdsriodebug.7z
-libAngryBirdsRio.so
+libAngryBirds*.so
 rio_boot2.log
 0xd6f60

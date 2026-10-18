@@ -593,6 +593,46 @@ int LiveIdxSelfTest() {
     return fails == 0 ? 0 : 1;
 }
 
+// Screenshot directory, resolved in main() from the guest .so path (the
+// filmstrip code below has no access to argv).
+std::string g_shotdir = "work";
+
+// Find "<root>/games/<id>" from a path that contains "/games/<id>/", e.g. the
+// guest .so at <root>/games/rio/work/apk_prod/assets/guestlib/armeabi-v7a/x.so.
+// Returns "" when the path has no games/<id> component (caller falls back).
+std::string GameDirFrom(const std::string& path) {
+    static const std::string ksep = "/games/";
+    std::size_t id_start = std::string::npos;
+    const std::size_t at = path.rfind(ksep);
+    if (at != std::string::npos) {
+        id_start = at + ksep.size();
+    } else if (path.rfind("games/", 0) == 0) {  // relative path from the repo root
+        id_start = 6;
+    } else {
+        return {};
+    }
+    const std::size_t id_end = path.find('/', id_start);
+    if (id_end == std::string::npos) {
+        return {};
+    }
+    return path.substr(0, id_end);  // <root>/games/<id>
+}
+
+// First *.apk in a directory (the pristine Rovio APK of a game).
+std::string FirstApkIn(const std::string& dir) {
+    std::error_code ec;
+    std::filesystem::directory_iterator it(dir, ec);
+    if (ec) {
+        return {};
+    }
+    for (const auto& e : it) {
+        if (e.path().extension() == ".apk") {
+            return e.path().string();
+        }
+    }
+    return {};
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // logs must survive _exit()
     // Run fingerprint (relthrow-class lesson: lost envs waste runs): log the
@@ -682,12 +722,15 @@ int main(int argc, char** argv) {
     std::memcpy(mem.host(abr::kGuestDataBase + 0), &canary, 4);
     rt.InitDataImports();  // ctype tables + data-import slots (needs mappings)
 
-    // File bridge root: HARNESS_FILES=<hostdir>, else <project>/work/files
-    // derived from the .so path (ROOT/work/lib/armeabi-v7a/<file>).
+    // File bridge root: HARNESS_FILES=<hostdir>, else <root>/games/<id>/work/files
+    // derived from the guest .so path.
+    const std::string game_dir = GameDirFrom(argv[1]);
     {
         std::string hostdir;
         if (const char* e = std::getenv("HARNESS_FILES")) {
             hostdir = e;
+        } else if (!game_dir.empty()) {
+            hostdir = game_dir + "/work/files";
         } else {
             std::string p = argv[1];
             for (int i = 0; i < 3; i++) {
@@ -707,23 +750,19 @@ int main(int argc, char** argv) {
         }
         rt.SetFilesDir("/data/data/com.rovio.angrybirdsrio/files", hostdir);
     }
+    g_shotdir = game_dir.empty() ? "work" : game_dir + "/work";
 
-    // APK path for the AAssetManager bridge: HARNESS_APK or derived
-    // (<project>/com.rovio.angrybirdsrio.2676.apk alongside work/).
+    // APK path for the AAssetManager bridge: HARNESS_APK, else the pristine APK
+    // at <root>/games/<id>/original/.
     {
         std::string apk;
         if (const char* e = std::getenv("HARNESS_APK")) {
             apk = e;
-        } else {
-            std::string p = argv[1];
-            for (int i = 0; i < 3; i++) {
-                const std::size_t s = p.rfind('/');
-                if (s == std::string::npos) {
-                    break;
-                }
-                p = p.substr(0, s);
-            }
-            apk = p + "/../com.rovio.angrybirdsrio.2676.apk";
+        } else if (!game_dir.empty()) {
+            apk = FirstApkIn(game_dir + "/original");
+        }
+        if (apk.empty()) {
+            std::printf("[apk] WARNING: no APK found (set HARNESS_APK)\n");
         }
         rt.SetApkPath(apk);
     }
@@ -1922,17 +1961,19 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (every > 0 && (i + 1) % (std::size_t)every == 0) {
-                    char path[64];
-                    std::snprintf(path, sizeof(path), "work/shot%03zu.ppm", i + 1);
+                    char path[256];
+                    const std::string p = g_shotdir + "/shot";
+                    std::snprintf(path, sizeof(path), "%s%03zu.ppm", p.c_str(), i + 1);
                     rt.RealGLBackend()->Screenshot(path, 800, 480);
                     std::printf("[realgl] filmstrip -> %s\n", path);
                 }
             }
         }
         // HARNESS_SCREENSHOT=1: capture the real-GL drawable (needs
-        // HARNESS_REALGL=1) to work/shot.ppm after the JNI sequence.
+        // HARNESS_REALGL=1) to <games/<id>/work/shot.ppm after the JNI sequence.
         if (std::getenv("HARNESS_SCREENSHOT")) {
-            rt.RealGLBackend()->Screenshot("work/shot.ppm", 800, 480);
+            const std::string shot = g_shotdir + "/shot.ppm";
+            rt.RealGLBackend()->Screenshot(shot.c_str(), 800, 480);
         }
         rt.ThreadCensus();
         // TEMP-DIAG (sessions handoff): session-flag value at exit.

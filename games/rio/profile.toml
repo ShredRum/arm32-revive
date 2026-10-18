@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Rio
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "rio"
+title        = "Angry Birds Rio"
+status       = "shipped"        # shipped | in-progress | planned
+strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
+
+[apk]
+package      = "com.rovio.angrybirdsrio"
+version_name = "2.6.13"
+version_code = 2676
+min_sdk      = 16
+target_sdk   = 26
+original     = "original/com.rovio.angrybirdsrio.2676.apk"
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsRio.so"
+size   = 6759156
+sha256 = "980fad194cc6aefa56b4860965cefcf1de83dbb84c4d06a56c219327fe06486b"
+md5    = "9c21a9874b10bb5f7d7bf4afab68a475"
+build_id = "2b1e207cc30ad64fac6b1f234c8a4c0fbbdb3e36"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"   # framework shared by the whole series
+jni_exports  = 63
+
+[strip]
+# Dead ad/analytics SDK libs. PROVEN byte-identical across the series
+# (libjs.so sha256 5eb5b260... , libadcolony.so sha256 71b9c4fb...).
+libs = ["libjs.so", "libadcolony.so"]
+
+[tree]
+# The complete edit set applied to the apktool decode (verified by diffing a
+# fresh decode of original/ against work/apk_prod/ — nothing else differs).
+# 1. lib/armeabi-v7a/<guest lib> -> assets/guestlib/armeabi-v7a/<guest lib> (STORED)
+# 2. rm -rf lib/armeabi-v7a lib/x86           (guest moved out, x86 unused)
+# 3. add lib/arm64-v8a/libabhost.so           (our host, from the build)
+# 4. copy seeds/ -> assets/seeds/
+# 5. smali/com/rovio/fusionapp/Gen.smali: the loaded lib name
+# 6. apktool.yml doNotCompress += assets/guestlib/armeabi-v7a/<guest lib> and seeds/*
+smali_lib_name_orig = "AngryBirdsRio"   # Gen.smali: const-string v0, "<orig>" -> "abhost"
+smali_patch_verified = true

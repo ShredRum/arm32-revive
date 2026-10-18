@@ -1,5 +1,11 @@
 # AGENTS.md — AngryBirdsRio arm64 port (dynarmic). FULL STATE DUMP.
 
+> 2026-10-18 RESTRUCTURE: the repo was renamed `AngrybirdsRio_port` -> `ab-port`
+> and turned into a multi-game tree (`games/<id>/`). This file is still the RIO
+> journal and full state dump; §1 below has the new paths, `games/rio/JOURNAL.md`
+> is the game-local summary, and every other title has `games/<id>/profile.toml`.
+> Nothing about the port itself changed -- same code, same ship config.
+
 ## HANDOFF (read first after any compression; rewritten 2026-10-18)
 - STATUS (user-verified 2026-10-18): the arm64 port runs the untouched ARM32 game
   offline, standalone, and **the whole game is in working order as far as the user
@@ -23,6 +29,15 @@
 - ALWAYS-ON BEHAVIOUR CRUTCHES (behaviour, NOT diagnostics; do not "clean"):
   RETSUCC, SPURWAKE, REALGL, FASTMEM, and `HARNESS_PROBE=1a410c,fill` (writes
   "{}" into the guest JSON SSO slot at 0x1A410C so the parser takes defaults).
+- BUILD (multi-game tree): `scripts/build-lib.sh` (arm64 `libabhost.so`) then
+  `scripts/deploy.sh rio` (strip -> apktool b -> zipalign -> apksigner v1+v2+v3,
+  local only; prints the device half). Tree `games/rio/work/apk_prod`, output
+  `games/rio/work/apk_signed.apk`. `scripts/prepare-tree.sh <id>` rebuilds a
+  tree from `games/<id>/original/` (verified: reproduces the shipped rio tree
+  byte-for-byte apart from the cosmetic `apkFileName`/list-order in apktool.yml).
+  Signing changed from v1-only (jarsigner) to v1+v2+v3 (apksigner, build-tools
+  35.0.0) now that apksigner is present; the key/alias are unchanged, so the
+  certificate identity -- and `pm install -r` -- are unchanged.
 - DIAGNOSTICS: exactly one switch, HARNESS_DIAG (real env OR files/abflags.txt,
   read at boot; "" / "-" / "0" / "off" / "false" = OFF). It arms the pc probes,
   the WATCHPC hook, the per-call / per-frame traces and the hot-path logs. OFF
@@ -33,8 +48,8 @@
   expect `init done: 54/54 clean, svc=948 halts=53`. (That guest .so is the
   extracted ARM32 original, `unzip -p <apk> lib/armeabi-v7a/libAngryBirdsRio.so`;
   it is gitignored, so a fresh clone must extract it once.) Device: `bash
-  scripts/deploy.sh` does the LOCAL half and prints the md5 of our stripped lib
-  plus the exact scp/install/check commands -- it never touches the device. Then
+  scripts/deploy.sh rio` does the LOCAL half and prints the md5 of our stripped
+  lib plus the exact scp/install/check commands -- it never touches the device. Then
   verify the md5 of the lib extracted from the INSTALLED base.apk (the app dir
   alternates -1/-2; resolve it with `pm path`) -> run -> grep the markers
   SEPARATELY (Termux grep does not honour `\|`, so a combined pattern silently
@@ -82,8 +97,28 @@
      only in conversation.
 
 ## 1. Layout (all portable, nothing outside this dir except /tmp)
-- `com.rovio.angrybirdsrio.2676.apk` — ORIGINAL, DO NOT MODIFY (sha256 of
-  lib/armeabi-v7a/libAngryBirdsRio.so = 980fad19…; verify if in doubt).
+Multi-game since 2026-10-18: one shared core/host, one folder per title.
+Paths are relative to the repo root (`ab-port`).
+
+- `games/<id>/profile.toml` — machine-readable identity of one title: package,
+  version, min/target sdk, guest lib name+sha256, JNI export count, libs to
+  strip, tree edits. VERIFIED data only; history in `games/<id>/JOURNAL.md`.
+- `games/<id>/original/<apk>` — ORIGINAL Rovio APK, DO NOT MODIFY (gitignored).
+  rio: `com.rovio.angrybirdsrio.2676.apk`, guest sha256 980fad19…; verify if in
+  doubt. All titles carry the same signer `O=Rovio Mobile Ltd …` / `3bf28170…`.
+- `games/<id>/seeds/` — first-launch files copied into `assets/seeds/`; TRACKED
+  (without them a fresh install has no registry/settings).
+- `games/<id>/work/` — decode + builds, gitignored. rio holds the historical
+  logs, inventories and Ghidra project (see below).
+- Titles: `rio` (SHIPPED), `seasons`, `space`, `star-wars`, `star-wars-ii`
+  (planned: originals in place, profiles written, not ported yet).
+- `scripts/` — `build-lib.sh` (host lib; `--native` for the harness),
+  `build-apk.sh <id>` (strip+pack+align+sign), `deploy.sh <id>` (both, then the
+  device commands), `prepare-tree.sh <id>` (decode + the port edits),
+  `profile.py` (profile reader).
+- `keys/` — signing key, gitignored. `keys/debug.keystore` (alias `dbg`) is the
+  identity already installed on the device; KEEP A BACKUP or `pm install -r`
+  stops replacing the app.
 - `tools/` — SDK: build-tools 35, platform android-35, platform-tools (adb 37),
   NDK r27 (27.2.12479018), apktool jar, `sdkmanager.sh` + `avdmanager.sh`
   wrappers (stock scripts break on SPACES in path; wrappers call java directly
@@ -95,25 +130,25 @@
   (`cc4b893a…`). `BOOST_ROOT` = thirdparty/ itself (contains boost/version.hpp);
   also set `Boost_INCLUDE_DIR` (FindBoost is half-removed in CMake 4.4 and fails
   under NDK cross-compile without it). `DYNARMIC_USE_BUNDLED_EXTERNALS=ON`.
-- `work/abr` — apktool decode (framework seeded in work/framework/1.apk).
-- `work/lib/armeabi-v7a/libAngryBirdsRio.so` — guest binary copy for harness.
-- `work/*.txt` — inventories: `inventory_imports.txt` (338 undefined imports),
-  `inventory_jni.txt` (63 Java_ exports), `jni_signatures.txt` (all 63 signatures
-  extracted from smali — hot path is primitives/arrays only),
+- `games/rio/work/abr` — apktool decode (framework seeded in the same `work/`).
+- `games/rio/work/lib/armeabi-v7a/libAngryBirdsRio.so` — guest copy for harness.
+- `games/rio/work/*.txt` — inventories: `inventory_imports.txt` (338 undefined
+  imports), `inventory_jni.txt` (63 Java_ exports), `jni_signatures.txt` (all 63
+  signatures extracted from smali — hot path is primitives/arrays only),
   `thunk_inventory.txt`, `funcs_1a.txt` (Ghidra functions, NOTE: Ghidra's
   address space may be shifted vs file offsets — DO NOT trust blindly),
   `dis_1aebc0.txt` (same caveat), `decomp_killer.txt`, `xrefs.txt`.
-- `work/scripts/` — Ghidra scripts (ListFuncs, DisRange, DecompileAt, XrefsTo).
-  Ghidra itself: /opt/ghidra 12.1.2, run headless with JAVA_HOME=java-21 +
-  HOME=work/fakehome (keeps ~/.ghidra out of the system).
-- `work/ghidra_proj` — Ghidra project (kept, has analyzed import).
-- `work/harness.log`, `work/decomp.txt` (Lifeline-era? no — ABR decomp not made).
+- `games/rio/work/scripts/` — Ghidra scripts (ListFuncs, DisRange, DecompileAt,
+  XrefsTo). Ghidra itself: /opt/ghidra 12.1.2, run headless with JAVA_HOME=java-21
+  + HOME=games/rio/work/fakehome (keeps ~/.ghidra out of the system).
+- `games/rio/work/ghidra_proj` — Ghidra project (kept, has analyzed import).
+- `games/rio/work/harness.log`, `decomp.txt` (Lifeline-era? ABR decomp not made).
 - `host/` — the arm64 host project (CMake). Targets: `smoke_a32`, `cbnz_test`
   (scratch micro-tests), `distv` (Dynarmic-based ARM/Thumb disassembler for the
   game file — TRUSTED decoder), `guest` lib (elf_loader, dispatch), `harness`.
   `host/build-native` (x86_64), `host/build-android` (NDK arm64 — libdynarmic.a
-  PROVEN to build there).
-- `out/` — final APK goes here (empty so far).
+  PROVEN to build there). The CMake caches bake absolute paths: after a folder
+  move, delete and reconfigure (`build-lib.sh` always re-runs configure).
 - /tmp scratch (survives): /tmp/abr3 (guest .so copy), /tmp/eng_*.so (patched
   COPIES for experiments — originals never patched), /tmp/zero.log.
 

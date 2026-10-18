@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Space HD
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum).
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "space"
+title        = "Angry Birds Space HD"
+status       = "planned"
+strategy     = "jit"
+
+[apk]
+package      = "com.rovio.angrybirdsspaceHD"
+version_name = "2.2.14"
+version_code = 221400
+min_sdk      = 16
+target_sdk   = 26
+original     = "original/angry-birds-space-hd-2-2-14.apk"
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsSpace.so"
+size   = 7341052
+sha256 = "cc11a1e9d5d18cc04cd57a08802f03f2e5a5cd869f0e056d8ba92e695fb6b1ce"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+jni_exports  = 62
+
+[strip]
+libs = ["libjs.so", "libadcolony.so"]
+
+[tree]
+smali_lib_name_orig = "AngryBirdsSpace"   # EXPECTED; verify at first decode
+smali_patch_verified = false
