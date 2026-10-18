@@ -106,13 +106,22 @@ public:
 
     // D2 (2026-10-18): the live-block index surface. Insert/erase/find keep the
     // exact base semantics the old std::map had; Containing resolves an interior
-    // pointer by probing backwards for a base (bounded) because a hash index has
-    // no ordering. All four are called with mutex_ already held, and under
-    // DiagOn() they cross-check the (temporary) std::map oracle.
+    // pointer EXACTLY, by two mechanisms: an ordered side-index of the (few)
+    // blocks larger than the probe's reach -- the only blocks whose interiors a
+    // hash cannot reach -- and a bounded back-probe for everything smaller.
+    // The two-tier shape is not taste: a real session showed every in-arena
+    // containment query is either an exact base or an interior farther than
+    // 512 B back (contain_ok=0), so a probe alone silently LOST the sscanf field
+    // clamp on 1242 Boot-path destinations. All four are called with mutex_
+    // already held; under DiagOn() they cross-check the (temporary, full) std::map
+    // oracle, so exactness is measured, not asserted.
     void LiveIdxInsert(std::uint32_t base, std::uint32_t size);
     std::uint32_t LiveIdxErase(std::uint32_t base);       // 0 = was not live
     std::uint32_t LiveIdxFind(std::uint32_t base);        // 0 = not live
-    bool LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size);
+    // `what` names the caller (ClampHeapWrite's name, "sscanf-str", "heapwatch")
+    // so the diagnostic counters can say WHO asks about interior pointers.
+    bool LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size,
+                           const char* what = "?");
     // One-line index + consumer-counter report (diag only; see apphost.cpp).
     void PrintHeapIdx();
     // Validates a guest range before host-side bulk access.
@@ -347,10 +356,24 @@ private:
     // has been OFF by default since D1. See live_heap.h for the shape and the
     // semantics kept; harness.cpp has the differential self-test.
     abr::LiveHeapIndex live_idx_;
-    // Diag-only oracle for the transition: the OLD std::map, maintained in
-    // parallel under DiagOn() so ONE diag session can PROVE the new index
-    // agrees with it on the real workload (disagreements are logged + counted).
-    // Removed once that session is clean.
+    // D2 exactness, second tier (2026-10-18): an ORDERED index of the live
+    // blocks the bounded back-probe cannot reach, i.e. usable size >
+    // kProbeReach. Ordering is what "which block contains this interior pointer"
+    // needs and a hash cannot provide; keeping it for the large blocks only is
+    // enough because an interior offset > reach is only possible inside a block
+    // larger than the reach. Those blocks are the long-lived buffers, not the
+    // allocation churn, so the host node per entry here is bounded (measured:
+    // printed as big= / bigscan= next to the flat index it shadows) -- while the
+    // hot small-block path stays allocation-free. INVARIANT: LiveIdxInsert is
+    // only ever called for a base that is NOT live (fresh malloc/calloc, or
+    // realloc after its erase), so a stale entry can never linger here.
+    // Membership maintenance counts (big_ins_n_/big_del_n_) price this tier.
+    static constexpr std::uint32_t kProbeReach = 512;  // 64 x 8 B probe steps
+    std::map<std::uint32_t, std::uint32_t> big_live_;
+    // Diag-only oracle for the transition: the OLD std::map (ALL blocks),
+    // maintained in parallel under DiagOn() so ONE diag session can PROVE the
+    // new two-tier answer agrees with it on the real workload (disagreements are
+    // logged + counted). Removed once that session is clean.
     std::map<std::uint32_t, std::uint32_t> live_idx_oracle_;
     // D2 measurement counters (plain members: every call site already holds
     // mutex_). They answer "what did the old structure actually cost / did its
@@ -361,6 +384,16 @@ private:
     unsigned long long hx_realloc_unknown_ = 0;
     unsigned long long hx_pool_stale_ = 0;     // pooled array whose block was freed
     unsigned long long hx_disagree_ = 0;       // new index vs the diag oracle
+    // Closing measurement (2026-10-18): the only two things the D2 run left
+    // unexplained -- (1) is the bounded back-probe answer ever DIFFERENT from the
+    // old ordered-tree answer, and (2) does an O(n) reshape ever spike a guest
+    // alloc visibly. Both are diag-only/diag-cost; removed with the oracle.
+    unsigned long long hx_contain_diff_ = 0;   // probe answer != ordered answer
+    unsigned long long hx_worst_ins_us_ = 0;   // worst single LiveIdxInsert (us)
+    unsigned long long hx_contain_big_ = 0;    // interior resolved by big_live_
+    unsigned long long big_ins_n_ = 0;         // big-block inserts (side-index cost)
+    unsigned long long big_del_n_ = 0;         // big-block erases
+    std::map<std::string, unsigned long long> hx_miss_by_caller_;
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {

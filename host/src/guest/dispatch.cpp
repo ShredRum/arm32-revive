@@ -221,11 +221,16 @@ static void Hex64(char*& p, std::uint64_t v) {
 // The old structure was a std::map<base, usable>: exact base lookups PLUS
 // ORDERED interval containment for interior pointers. The new index (live_heap.h)
 // is flat and allocation-free per operation and exact for bases; containment is
-// answered by probing backwards for a base (bases are 8-aligned, the smallest
-// payload is 16 B), which is bounded and only ever asked by cold consumers
-// (the diagnostic firewall, heapwatch, sscanf's %s/%[/%c destination).
+// answered EXACTLY by two tiers: an ordered side-index of blocks larger than the
+// probe's reach (big_live_) plus a bounded back-probe for every smaller block.
+// Why not the probe alone: a real session showed every in-arena containment
+// query is either an exact base or an interior farther than 512 B back
+// (contain_ok=0), so a probe-only answer silently dropped the sscanf field clamp
+// on 1242 boot-path destinations -- a bounded probe is not containment.
+// Containment is still only ever asked by cold consumers (the diagnostic
+// firewall, heapwatch, sscanf's %s/%[/%c destination, the two JNI region bounds).
 // Every call site already holds mutex_. Under DiagOn() each operation is also
-// applied to the temporary std::map oracle and any disagreement is counted and
+// applied to the temporary full-map oracle and any disagreement is counted and
 // logged -- so the replacement is proven on the real workload, not asserted.
 // ---------------------------------------------------------------------------
 static void HxReportDisagree(unsigned long long& counter, const char* what, std::uint32_t key,
@@ -238,15 +243,64 @@ static void HxReportDisagree(unsigned long long& counter, const char* what, std:
     }
 }
 
+// Ordered containment over a map<base, usable>: an exact base hit, else the
+// interval of the immediately preceding live block if the address falls inside
+// it. Used (a) in production for the large-block side-index (the only tier where
+// ordering is needed, see dispatch.h) and (b) under DiagOn() as the full-map
+// oracle the new two-tier answer is cross-checked against.
+static bool MapContaining(const std::map<std::uint32_t, std::uint32_t>& m, std::uint32_t addr,
+                          std::uint32_t* base, std::uint32_t* size) {
+    const auto it = m.find(addr);
+    if (it != m.end()) {
+        *base = addr;
+        *size = it->second;
+        return true;
+    }
+    auto jt = m.upper_bound(addr);
+    if (jt != m.begin()) {
+        --jt;
+        if ((std::uint64_t)addr - jt->first < jt->second) {
+            *base = jt->first;
+            *size = jt->second;
+            return true;
+        }
+    }
+    return false;
+}
+
 void Runtime::LiveIdxInsert(std::uint32_t base, std::uint32_t size) {
-    live_idx_.Insert(base, size);
     if (DiagOn()) {
+        // Worst-case single insert: this is the one place an O(n) reshape
+        // (grow/compaction/shrink) can happen, so timing here prices the
+        // "reshape spikes cause the visible hitches" hypothesis.
+        const auto t0 = std::chrono::steady_clock::now();
+        live_idx_.Insert(base, size);
+        const auto us = (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        if (us > hx_worst_ins_us_) {
+            hx_worst_ins_us_ = us;
+        }
         live_idx_oracle_[base] = size;
+    } else {
+        live_idx_.Insert(base, size);
+    }
+    // Large-block side-index (exact containment tier). Safe to insert without
+    // checking for a previous entry: callers only insert a base that is not live
+    // (fresh malloc/calloc, or realloc right after its erase). Small blocks pay
+    // nothing here -- and that is the hot path.
+    if (size > kProbeReach) {
+        big_live_[base] = size;
+        ++big_ins_n_;
     }
 }
 
 std::uint32_t Runtime::LiveIdxErase(std::uint32_t base) {
     const std::uint32_t got = live_idx_.Erase(base);
+    if (got > kProbeReach) {
+        big_live_.erase(base);
+        ++big_del_n_;
+    }
     if (DiagOn()) {
         const auto it = live_idx_oracle_.find(base);
         const std::uint32_t want = (it == live_idx_oracle_.end()) ? 0 : it->second;
@@ -272,48 +326,105 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
     return got;
 }
 
-bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
-    const std::uint32_t exact = LiveIdxFind(addr);
+bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size,
+                                const char* what) {
+    // EXACT, two tiers, cheapest first:
+    //   1. a live block whose base is this very address (one hash lookup);
+    //   2. a block LARGER than the probe's reach -- the only blocks whose
+    //      interiors the probe below cannot reach (one ordered lookup, small map);
+    //   3. a block at most kProbeReach payload: its base is at most 64 x 8 B
+    //      behind the 8-aligned address (bounded back-probe).
+    // Cost note: only the cold consumers ask this (sscanf's %s/%[/%c bound, the
+    // JNI region bounds, the diagnostic firewall/heapwatch) -- never the
+    // alloc/free hot path.
+    std::uint32_t b = 0, s = 0;
+    bool found = false;
+    const std::uint32_t exact = live_idx_.Find(addr);
     if (exact) {
-        *base = addr;
-        *size = exact;
-        return true;
-    }
-    // Interior pointer. Only an in-arena address can be inside a live block, so
-    // the common non-heap destination (guest stack, module) costs one range
-    // check and zero probes.
-    if (addr < heap_base_ || (std::uint64_t)addr >= (std::uint64_t)heap_base_ + kHeapSize) {
-        return false;
-    }
-    const std::uint32_t a8 = addr & ~std::uint32_t(7);
-    for (unsigned k = 1; k <= 64; ++k) {
-        const std::uint32_t off = k * 8u;
-        if (a8 < heap_base_ + off) {
-            break;  // walked past the start of the arena
+        b = addr;
+        s = exact;
+        found = true;
+    } else if (addr >= heap_base_ && (std::uint64_t)addr < (std::uint64_t)heap_base_ + kHeapSize) {
+        // Interior pointer. Only an in-arena address can be inside a live block,
+        // so the common non-heap destination (guest stack, module) costs one
+        // range check and nothing else.
+        if (MapContaining(big_live_, addr, &b, &s)) {
+            found = true;
+            ++hx_contain_big_;
         }
-        const std::uint32_t cand = a8 - off;
-        const std::uint32_t cs = LiveIdxFind(cand);
-        if (cs && (std::uint64_t)addr - cand < cs) {
-            *base = cand;
-            *size = cs;
-            ++hx_contain_ok_;
-            return true;
+        if (!found) {
+            const std::uint32_t a8 = addr & ~std::uint32_t(7);
+            for (unsigned k = 1; k <= 64; ++k) {
+                const std::uint32_t off = k * 8u;
+                if (a8 < heap_base_ + off) {
+                    break;  // walked past the start of the arena
+                }
+                const std::uint32_t cand = a8 - off;
+                const std::uint32_t cs = live_idx_.Find(cand);
+                if (cs && (std::uint64_t)addr - cand < cs) {
+                    b = cand;
+                    s = cs;
+                    found = true;
+                    ++hx_contain_ok_;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            ++hx_contain_miss_;
+            if (DiagOn()) {
+                ++hx_miss_by_caller_[what ? what : "?"];
+            }
         }
     }
-    ++hx_contain_miss_;
-    return false;
+    if (DiagOn()) {
+        // Prove (or refute) the two-tier answer against the OLD full ordered map
+        // (the oracle) on the real workload: same verdict AND same block, or it
+        // counts as a diff. Also the oracle must not contain a block the
+        // side-index claims, or the other way round -- the self-check below.
+        std::uint32_t ob = 0, os = 0;
+        const bool ofound = MapContaining(live_idx_oracle_, addr, &ob, &os);
+        if (ofound != found || (ofound && (ob != b || os != s))) {
+            ++hx_contain_diff_;
+            static int n = 0;
+            if (n < 20) {
+                n++;
+                std::printf(
+                    "[heapidx] CONTAIN DIFF what=%s addr=%08x new=%d/%08x+%u old=%d/%08x+%u\n",
+                    what ? what : "?", addr, (int)found, b, s, (int)ofound, ob, os);
+            }
+        }
+    }
+    if (found) {
+        *base = b;
+        *size = s;
+    }
+    return found;
 }
 
 void Runtime::PrintHeapIdx() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // bigscan= walks the flat table independently: it must equal big= (the
+    // ordered side-index size) or the two tiers have drifted apart.
+    const std::size_t bigscan = live_idx_.CountLargerThan(kProbeReach);
     std::printf(
-        "[heapidx] live=%zu max=%zu cap=%zu grown=%u ops=%llu contain_ok=%llu "
-        "contain_miss=%llu free_unk=%llu realloc_unk=%llu pool_stale=%llu disagree=%llu "
-        "oracle=%zu usedKB=%llu\n",
+        "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
+        "contain_ok=%llu contain_big=%llu contain_miss=%llu contain_diff=%llu free_unk=%llu "
+        "realloc_unk=%llu pool_stale=%llu disagree=%llu worst_ins_us=%llu big=%zu bigscan=%zu "
+        "big_ins=%llu big_del=%llu oracle=%zu usedKB=%llu\n",
         live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
-        live_idx_.Ops(), hx_contain_ok_, hx_contain_miss_, hx_free_unknown_, hx_realloc_unknown_,
-        hx_pool_stale_, hx_disagree_, live_idx_oracle_.size(),
+        live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_contain_ok_,
+        hx_contain_big_, hx_contain_miss_, hx_contain_diff_, hx_free_unknown_,
+        hx_realloc_unknown_, hx_pool_stale_, hx_disagree_, hx_worst_ins_us_, big_live_.size(),
+        bigscan, big_ins_n_, big_del_n_, live_idx_oracle_.size(),
         (unsigned long long)(heap_used_ >> 10));
+    if (!hx_miss_by_caller_.empty()) {
+        std::printf("[heapidx] in-arena misses by caller:");
+        for (const auto& kv : hx_miss_by_caller_) {
+            std::printf(" %s=%llu", kv.first.c_str(), kv.second);
+        }
+        std::printf("\n");
+    }
 }
 
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
@@ -329,7 +440,7 @@ std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, cons
     // Find the containing live block: exact base, else (interior) a bounded
     // backwards probe for a base. Not inside one -> unclamped, same as before.
     std::uint32_t base = 0, size = 0;
-    if (!LiveIdxContaining(dst, &base, &size)) {
+    if (!LiveIdxContaining(dst, &base, &size, n)) {
         // Not inside any LIVE allocation. Inside the arena this means a dlmalloc
         // header word, a free chunk, the top chunk or a quarantined (freed)
         // block -- i.e. exactly the bump-era overflow/UAF-write that bump
@@ -1674,7 +1785,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::uint64_t rem = 0;
                 // D2: one containment query instead of find + upper_bound.
                 std::uint32_t cbase = 0, csize = 0;
-                if (LiveIdxContaining(dp, &cbase, &csize)) {
+                if (LiveIdxContaining(dp, &cbase, &csize, "sscanf-str")) {
                     in_heap = true;
                     rem = (std::uint64_t)cbase + csize - dp;
                 }
@@ -5645,7 +5756,7 @@ bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
     // D2: one containment query covers both old branches (an exact base hit is
     // just containment with base == addr).
     std::uint32_t cbase = 0, csize = 0;
-    if (LiveIdxContaining(addr, &cbase, &csize) &&
+    if (LiveIdxContaining(addr, &cbase, &csize, "heapwatch") &&
         (std::uint64_t)addr + size <= (std::uint64_t)cbase + csize) {
         return false;  // fully inside a live allocation
     }
