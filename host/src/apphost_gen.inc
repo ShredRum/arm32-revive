@@ -188,4 +188,10 @@ extern "C" void Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onSendAppR
 extern "C" void Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onShareCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onShareCallback", "(JLcom/rovio/rcs/socialnetwork/SocialServiceResponse;I)V", env, thiz, a0, a1, a2); return;
 }
-// GEN_COUNT=63
+extern "C" void Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteMessage(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteMessage", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteRegistrationID(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteRegistrationID", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+// GEN_COUNT=65
