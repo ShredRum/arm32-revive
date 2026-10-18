@@ -5795,6 +5795,18 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
     std::uint32_t state = 0;
     std::memcpy(&state, H(control), 4);
     if (state != 0) {
+        if (state == 1) {
+            // IN PROGRESS on another thread (a control this caller already
+            // holds is caught by the recursion check below). bionic blocks the
+            // caller here until the control reads DONE; we return 0 at once and
+            // hand out a half-initialised object -- the likely cause of the
+            // "entropy read failed -> abort" seen once per 10 launches
+            // (guest pc 0x5cf449, libc getentropy family). DIAG only: names the
+            // deviation, does not fix it yet.
+            std::printf("[once] LOUD in-progress control=%08x tid=%u: returning 0 without "
+                        "waiting (bionic blocks)\n",
+                        control, GuestTid());
+        }
         return false;  // already done: normal return 0
     }
     // Same control already in progress => pathological recursion (break it).

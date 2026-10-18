@@ -1398,8 +1398,8 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         Log("FATAL: load failed: %s", err.c_str());
         return 0;
     }
-    Log("guest: %zu imports %zu init halt=%08x", g_mod->imports.size(), g_mod->init_array.size(),
-        g_mod->halt_va);
+    Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
+        g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
     CheckGuestBuildId(*g_mod);
     const bool pinned = IsPinnedGuest(*g_mod);
     // Behaviour crutch for THE PINNED IMAGE ONLY: the ",fill" suffix makes the
@@ -1412,7 +1412,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         setenv("HARNESS_PROBE", "1a410c,fill", 1);
     }
     // Trampoline map (first 48): lets any future death-pc name its import
-    // offline (slot = (pc-kTrampBase)/4, swi = slot, idx = swi-1).
+    // offline. Slots: 0 = halt (swi 0), 1 = once return (swi kSwiOnce), then
+    // import idx at slot idx+2 (swi idx+1) -- so name it by the va printed
+    // here, not by slot arithmetic: idx = slot - 2.
     for (std::size_t ti = 0; ti < g_mod->imports.size() && ti < 48; ti++) {
         Log("tramp #%02zu va=%08x %s", ti, g_mod->imports[ti].tramp_va,
             g_mod->imports[ti].name.c_str());
