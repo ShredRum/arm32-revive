@@ -20,6 +20,9 @@ constexpr std::uint32_t kGlobDat = 21;
 constexpr std::uint32_t kJumpSlot = 22;
 constexpr std::uint32_t kRelative = 23;
 
+// PT_GNU_RELRO is not in every <elf.h>; the value is ABI-fixed.
+constexpr std::uint32_t kGnuRelro = 0x6474e552u;
+
 std::uint32_t ProtFromFlags(std::uint32_t flags) {
     std::uint32_t prot = 0;
     if (flags & PF_R) {
@@ -111,6 +114,30 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
         if (!mem_.Protect(start, end - start, ProtFromFlags(ph.p_flags))) {
             return fail("segment protect failed");
+        }
+    }
+
+    // PT_GNU_RELRO: the real linker mprotects this to R once relocations are
+    // applied, so the dynamic loader itself never writes .got/.dynamic/
+    // init_array at runtime. The host keeps the pages RW (they hold host-written
+    // relocation targets), so a GUEST wild write here was silent -- proven
+    // 2026-10-18: GOT slot 0x6FFE28 zeroed mid-run -> `ldr pc,[r12,#0x3c4]!` ->
+    // jump to 0 -> worker died without closing its promise. Record the range
+    // (glibc's _dl_protect_relro rounding: both ends page-truncated) so the
+    // runtime can refuse + name guest writes there.
+    for (int i = 0; i < ehdr.e_phnum; i++) {
+        Elf32_Phdr ph;
+        std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
+        if (ph.p_type != kGnuRelro || ph.p_memsz == 0) {
+            continue;
+        }
+        const std::uint32_t page = 0x1000;
+        const std::uint32_t rstart = AlignDown(ph.p_vaddr, page);
+        const std::uint32_t rend = AlignDown(ph.p_vaddr + ph.p_memsz, page);
+        if (rend > rstart) {
+            out.relro_start = rstart;
+            out.relro_size = rend - rstart;
+            std::printf("[phdr] GNU_RELRO [%08x,%08x) -- guest writes refused\n", rstart, rend);
         }
     }
 

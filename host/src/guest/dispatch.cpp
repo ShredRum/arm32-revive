@@ -195,6 +195,24 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
     mappings_.push_back({start, start + size, prot});
 }
 
+void Runtime::AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what) {
+    if (size == 0) {
+        return;
+    }
+    write_guards_.push_back({start, start + size, what});
+}
+
+bool Runtime::WriteGuardHit(std::uint32_t addr, std::size_t size, const char** what) {
+    const std::uint64_t end = std::uint64_t(addr) + size;
+    for (const WriteGuard& g : write_guards_) {
+        if (addr >= g.start && end <= g.end) {
+            *what = g.what;
+            return true;
+        }
+    }
+    return false;
+}
+
 // dlmalloc corruption tripwire (see abr_heap_hook.h): runs INSTEAD of a bare
 // abort() when dlmalloc detects heap corruption. Async-safe: atomics, TLS
 // read, raw write(2) only (stderr is freopen'd to apphost.log). The macro
@@ -8581,6 +8599,27 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
 
 template <typename T>
 void GuestCallbacks::Write(VAddr addr, T v) {
+    {
+        const char* gwhat = nullptr;
+        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
+            // RELRO after relocation: the real loader makes these pages
+            // read-only, so this write cannot be legitimate. Refuse it (a
+            // zeroed GOT slot turns the next PLT call into `pc = 0`), and name
+            // the writer: pc + caller LR + the args that name the victim/source.
+            if (rt_->NoteWriteGuard()) {
+                std::printf("[mem] %s write REFUSED @ %08x size %zu guest-pc=%08x lr=%08x\n",
+                            gwhat, addr, sizeof(T), rt_->ActiveJit()->Regs()[15],
+                            rt_->ActiveJit()->Regs()[14]);
+                std::printf("[mem] %s REFUSED regs r0=%08x r1=%08x r2=%08x r3=%08x "
+                            "r4=%08x r5=%08x r6=%08x r7=%08x\n",
+                            gwhat, rt_->ActiveJit()->Regs()[0], rt_->ActiveJit()->Regs()[1],
+                            rt_->ActiveJit()->Regs()[2], rt_->ActiveJit()->Regs()[3],
+                            rt_->ActiveJit()->Regs()[4], rt_->ActiveJit()->Regs()[5],
+                            rt_->ActiveJit()->Regs()[6], rt_->ActiveJit()->Regs()[7]);
+            }
+            return;
+        }
+    }
     if (!rt_->CheckAccess(addr, sizeof(T), true, false)) {
         if (rt_->NoteBad()) {
             std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,

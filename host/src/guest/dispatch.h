@@ -144,6 +144,12 @@ public:
     void PrintHeapIdx();
     // Validates a guest range before host-side bulk access.
     bool CheckRange(std::uint32_t guest, std::size_t size, bool write);
+    // Refuse guest writes into [start,start+size) (RELRO after relocation).
+    // Host-side writes (H()/SetData) bypass this by design.
+    void AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what);
+    // True when [addr,addr+size) lies inside a guard; *what names it.
+    bool WriteGuardHit(std::uint32_t addr, std::size_t size, const char** what);
+    bool NoteWriteGuard() { return ++write_guard_hits_ <= 32; }
     // Valid code addresses: module RX segments, trampoline page, HALT slot.
     bool IsCodeAddress(std::uint32_t va);
 
@@ -646,6 +652,15 @@ private:
         int prot;
     };
     std::vector<Mapping> mappings_;
+    // RELRO-style write guard: guest writes into these ranges are refused (and
+    // named, capped) instead of silently corrupting a function pointer. The
+    // loader registers the module's PT_GNU_RELRO here once relocations are done.
+    struct WriteGuard {
+        std::uint32_t start, end;
+        const char* what;
+    };
+    std::vector<WriteGuard> write_guards_;
+    std::atomic<unsigned> write_guard_hits_{0};
     // Real GLES backend (HARNESS_REALGL=1); null until first gl* call.
     // Harness-only bring-up; same forwarding serves the device build later.
     class RealGL* realgl_ = nullptr;
@@ -779,6 +794,14 @@ private:
     void Write(VAddr addr, T v);
     template <typename T>
     bool ExclusiveWrite(VAddr addr, T v, T expected) {
+        const char* gwhat = nullptr;
+        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
+            if (rt_->NoteWriteGuard()) {
+                std::printf("[mem] %s write REFUSED (exclusive) @ %08x size %zu guest-pc=%08x\n",
+                            gwhat, addr, sizeof(T), rt_->ActiveJit()->Regs()[15]);
+            }
+            return false;
+        }
         if (!rt_->CheckAccess(addr, sizeof(T), true, false)) {
             if (rt_->NoteBad()) {
                 std::printf("[mem] BAD exclusive write @ %08x size %zu -- halting\n", addr,

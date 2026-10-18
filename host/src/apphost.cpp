@@ -1427,6 +1427,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         std::memcpy(g_mem->host(abr::kGuestDataBase + 0), &canary, 4);
     }
     g_rt->InitDataImports();
+    // After relocation the guest's PT_GNU_RELRO is read-only in a real process;
+    // refuse guest writes there so a wild write cannot zero a GOT slot (and be
+    // named when it happens) instead of turning a later PLT call into pc = 0.
+    g_rt->AddWriteGuard(g_mod->relro_start, g_mod->relro_size, "RELRO");
     g_rt->SetFilesDir(GuestFilesDir(), g_files);
     g_rt->SetApkPath(g_apk);
     static GuestCallbacks callbacks(g_rt);

@@ -721,6 +721,7 @@ int main(int argc, char** argv) {
     const std::uint32_t canary = (static_cast<std::uint32_t>(rd()) << 1) | 1u;
     std::memcpy(mem.host(abr::kGuestDataBase + 0), &canary, 4);
     rt.InitDataImports();  // ctype tables + data-import slots (needs mappings)
+    rt.AddWriteGuard(mod.relro_start, mod.relro_size, "RELRO");
 
     // File bridge root: HARNESS_FILES=<hostdir>, else <root>/games/<id>/work/files
     // derived from the guest .so path.

@@ -42,6 +42,11 @@ struct LoadedModule {
     std::uint32_t jvm_tramp_base = 0;  // 8 `svc` trampolines: swi = kSwiJniBase+0x100+i
     std::uint32_t exidx_va = 0;        // .ARM.exidx guest VA (0 if absent)
     std::uint32_t exidx_count = 0;     // number of 8-byte entries
+    // PT_GNU_RELRO as the real linker protects it (glibc page rounding). Holds
+    // .got/.dynamic/init_array: read-only after relocation, never written at
+    // runtime. The host refuses guest writes there (see Runtime::AddWriteGuard).
+    std::uint32_t relro_start = 0;
+    std::uint32_t relro_size = 0;
     std::vector<std::uint8_t> build_id;  // GNU build-id (NOTE desc; empty if absent)
     std::unordered_map<std::string, std::uint32_t> defined;  // DEFINED sym name -> st_value (for apphost Java_* lookup)
 };
