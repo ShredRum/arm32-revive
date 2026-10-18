@@ -553,6 +553,17 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         const long long rms = (long long)rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
         std::printf("[rate] %s t=%lld tid=%d\n", name, rms, (int)gettid());
     }
+    // D2 telemetry (2026-10-18): the live-block index plus its consumer
+    // counters, every ~600 nativeUpdate frames (~10 s). Answers "what did the
+    // old std::map actually cost, and did its odd paths (interior containment,
+    // free-of-unknown, stale pool entries) ever fire" with numbers instead of
+    // assumptions. Diag only, exactly like the rate stamp above.
+    if (DiagOn() && std::strstr(name, "nativeUpdate")) {
+        static unsigned long n = 0;
+        if (++n % 600 == 0 && g_rt) {
+            g_rt->PrintHeapIdx();
+        }
+    }
     // Watchdog entry stamp (nativeUpdate only).
     static int upd_seq = 0;
     const bool is_update = std::strstr(name, "nativeUpdate") != nullptr;

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <csignal>
 #include <filesystem>
+#include <map>
 #include <random>
 #include <string>
 #include <thread>
@@ -470,6 +471,124 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
 }
 }  // namespace
 
+// D2 self-test (2026-10-18): differential test of abr::LiveHeapIndex against the
+// std::map it replaced -- the exact semantics the live consumers depend on
+// (free-of-unknown whitelist, realloc guard, audio-pool liveness, JNI bound).
+// Run with HARNESS_LIVEIDX_TEST=1; needs no guest .so. Returns 0 on success.
+int LiveIdxSelfTest() {
+    int fails = 0;
+    std::printf("[liveidx] differential test vs std::map ...\n");
+    {
+        std::mt19937 rng(12345);
+        abr::LiveHeapIndex idx;
+        std::map<std::uint32_t, std::uint32_t> ref;
+        for (int round = 0; round < 400000; ++round) {
+            const int op = (int)(rng() % 100);
+            const std::uint32_t key = 0x10000000u + (rng() % 4096) * 8u;
+            if (op < 55) {
+                const std::uint32_t sz = 8 + rng() % 4096;
+                idx.Insert(key, sz);
+                ref[key] = sz;
+            } else if (op < 85) {
+                const std::uint32_t a = idx.Erase(key);
+                auto it = ref.find(key);
+                const std::uint32_t b = (it == ref.end()) ? 0 : it->second;
+                if (a != b) {
+                    ++fails;
+                    std::printf("FAIL erase key=%08x new=%u old=%u\n", key, a, b);
+                }
+                if (it != ref.end()) {
+                    ref.erase(it);
+                }
+            } else {
+                const std::uint32_t a = idx.Find(key);
+                auto it = ref.find(key);
+                const std::uint32_t b = (it == ref.end()) ? 0 : it->second;
+                if (a != b) {
+                    ++fails;
+                    std::printf("FAIL find key=%08x new=%u old=%u\n", key, a, b);
+                }
+            }
+            if (idx.Size() != ref.size()) {
+                ++fails;
+                std::printf("FAIL size new=%zu old=%zu\n", idx.Size(), ref.size());
+            }
+        }
+        std::printf("[liveidx] 400k ops: live=%zu cap=%zu grown=%u fails=%d\n", idx.Size(),
+                    idx.Capacity(), idx.Grown(), fails);
+    }
+    std::printf("[liveidx] grow/shrink stress ...\n");
+    {
+        abr::LiveHeapIndex idx;
+        const std::uint32_t n = 200000;
+        for (std::uint32_t i = 0; i < n; ++i) {
+            idx.Insert(0x10000000u + i * 8u, 24 + (i % 512));
+        }
+        if (idx.Size() != n) {
+            ++fails;
+            std::printf("FAIL stress size=%zu want=%u\n", idx.Size(), n);
+        }
+        const std::size_t big = idx.Capacity();
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (idx.Erase(0x10000000u + i * 8u) != 24 + (i % 512)) {
+                ++fails;
+                std::printf("FAIL stress erase %u\n", i);
+            }
+        }
+        if (idx.Size() != 0) {
+            ++fails;
+            std::printf("FAIL stress not empty: %zu\n", idx.Size());
+        }
+        idx.Insert(0x50000000u, 32);  // one insert triggers the idle shrink
+        if (idx.Capacity() >= big) {
+            ++fails;
+            std::printf("FAIL shrink: cap %zu not below %zu\n", idx.Capacity(), big);
+        }
+        if (idx.Find(0x50000000u) != 32 || idx.Size() != 1) {
+            ++fails;
+            std::printf("FAIL shrink lost state (find=%u size=%zu)\n", idx.Find(0x50000000u),
+                        idx.Size());
+        }
+        std::printf("[liveidx] 200k insert/erase: cap %zu -> %zu, survives (fails=%d)\n", big,
+                    idx.Capacity(), fails);
+    }
+    std::printf("[liveidx] tombstone churn + update/resurrect ...\n");
+    {
+        abr::LiveHeapIndex idx;
+        const std::size_t cap0 = idx.Capacity();
+        for (int r = 0; r < 200000; ++r) {
+            const std::uint32_t k = 0x20000000u + (r % 1000) * 8u;
+            idx.Insert(k, 32);
+            if (idx.Erase(k) != 32) {
+                ++fails;
+            }
+        }
+        if (idx.Size() != 0 || idx.Capacity() != cap0) {
+            ++fails;
+            std::printf("FAIL churn: size=%zu cap %zu -> %zu\n", idx.Size(), cap0, idx.Capacity());
+        }
+        idx.Insert(0x30000000u, 100);
+        idx.Insert(0x30000000u, 200);  // update in place
+        if (idx.Find(0x30000000u) != 200 || idx.Size() != 1) {
+            ++fails;
+            std::printf("FAIL update: find=%u size=%zu\n", idx.Find(0x30000000u), idx.Size());
+        }
+        if (idx.Erase(0x30000000u) != 200 || idx.Erase(0x30000000u) != 0) {
+            ++fails;
+            std::printf("FAIL erase/double-erase\n");
+        }
+        idx.Insert(0x30000000u, 50);  // resurrect over a tombstone
+        if (idx.Find(0x30000000u) != 50 || idx.Size() != 1) {
+            ++fails;
+            std::printf("FAIL resurrect: find=%u size=%zu\n", idx.Find(0x30000000u), idx.Size());
+        }
+        std::printf("[liveidx] churn/update/resurrect done (fails=%d)\n", fails);
+    }
+    std::printf("[liveidx] %s (fails=%d)\n", fails == 0 ? "SELFTEST PASS" : "SELFTEST FAIL",
+                fails);
+    return fails == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // logs must survive _exit()
     // Run fingerprint (relthrow-class lesson: lost envs waste runs): log the
@@ -491,6 +610,10 @@ int main(int argc, char** argv) {
         int t2 = std::memcmp("PVR", "PVR", 3);
         int t3 = std::memcmp("PVR", "BMP", 3);
         std::printf("[memselftest] %d %d %d (want 7 0 14)\n", t1, t2, t3);
+    }
+    // D2 self-test: no guest .so needed, so it runs before argv is checked.
+    if (std::getenv("HARNESS_LIVEIDX_TEST")) {
+        return LiveIdxSelfTest();
     }
     if (argc < 2) {
         std::printf("usage: harness <libAngryBirdsRio.so>\n");

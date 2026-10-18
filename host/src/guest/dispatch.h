@@ -26,6 +26,7 @@
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"
+#include "live_heap.h"
 
 namespace abr {
 
@@ -50,9 +51,9 @@ bool DiagOn();
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 
 // D1 (2026-10-17, PLAN.md): the dlmalloc overflow firewall is OFF by default.
-// Default OFF means no recursive_mutex and no heap_sizes_ walk on the
-// memcpy/memmove/memset/strcpy/strcat/fgets/fread/sscanf paths -- the write
-// proceeds at its natural length. HARNESS_CLAMPWRITE=1 re-arms it.
+// Default OFF means no recursive_mutex and no live-block index walk on the
+// memcpy/memmove/memset/strcpy/strcat/fgets/fread paths -- the write proceeds at
+// its natural length. HARNESS_CLAMPWRITE=1 re-arms it.
 // The two JNI GetString*Region calls pass force=true: there the return value
 // is a FUNCTIONAL destination bound, not a firewall (an unbounded UTF-16 widen
 // overran a 24 B block into the next chunk head), so it stays on regardless.
@@ -102,6 +103,18 @@ public:
     // overflows stay visible (future work).
     std::uint32_t ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
                                  bool force = false);
+
+    // D2 (2026-10-18): the live-block index surface. Insert/erase/find keep the
+    // exact base semantics the old std::map had; Containing resolves an interior
+    // pointer by probing backwards for a base (bounded) because a hash index has
+    // no ordering. All four are called with mutex_ already held, and under
+    // DiagOn() they cross-check the (temporary) std::map oracle.
+    void LiveIdxInsert(std::uint32_t base, std::uint32_t size);
+    std::uint32_t LiveIdxErase(std::uint32_t base);       // 0 = was not live
+    std::uint32_t LiveIdxFind(std::uint32_t base);        // 0 = not live
+    bool LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size);
+    // One-line index + consumer-counter report (diag only; see apphost.cpp).
+    void PrintHeapIdx();
     // Validates a guest range before host-side bulk access.
     bool CheckRange(std::uint32_t guest, std::size_t size, bool write);
     // Valid code addresses: module RX segments, trampoline page, HALT slot.
@@ -326,9 +339,28 @@ private:
     std::unordered_map<std::uint32_t, pthread_key_t> key_map_;
     std::uint32_t next_key_ = 1;
     std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value
-    // Live heap blocks (base -> usable bytes). ORDERED map: the overflow
-    // firewall needs interval containment for interior pointers (upper_bound).
-    std::map<std::uint32_t, std::uint32_t> heap_sizes_;  // guest addr -> size
+    // D2 (2026-10-18): flat index of live heap blocks (base -> usable bytes)
+    // replaces the std::map that used to sit here. The map allocated a host
+    // node per live guest block and freed it on every guest free -- a hidden
+    // second allocator round-trip plus O(log n) pointer chasing on the hottest
+    // path in the emulator -- while its main consumer (the overflow firewall)
+    // has been OFF by default since D1. See live_heap.h for the shape and the
+    // semantics kept; harness.cpp has the differential self-test.
+    abr::LiveHeapIndex live_idx_;
+    // Diag-only oracle for the transition: the OLD std::map, maintained in
+    // parallel under DiagOn() so ONE diag session can PROVE the new index
+    // agrees with it on the real workload (disagreements are logged + counted).
+    // Removed once that session is clean.
+    std::map<std::uint32_t, std::uint32_t> live_idx_oracle_;
+    // D2 measurement counters (plain members: every call site already holds
+    // mutex_). They answer "what did the old structure actually cost / did its
+    // odd paths ever fire", instead of asserting it.
+    unsigned long long hx_contain_ok_ = 0;     // interior found by the back-probe
+    unsigned long long hx_contain_miss_ = 0;   // in-arena, not inside a live block
+    unsigned long long hx_free_unknown_ = 0;   // free of a pointer we never handed out
+    unsigned long long hx_realloc_unknown_ = 0;
+    unsigned long long hx_pool_stale_ = 0;     // pooled array whose block was freed
+    unsigned long long hx_disagree_ = 0;       // new index vs the diag oracle
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {

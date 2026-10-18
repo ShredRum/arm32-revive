@@ -216,6 +216,106 @@ static void Hex64(char*& p, std::uint64_t v) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// D2 (2026-10-18): live-block index surface.
+// The old structure was a std::map<base, usable>: exact base lookups PLUS
+// ORDERED interval containment for interior pointers. The new index (live_heap.h)
+// is flat and allocation-free per operation and exact for bases; containment is
+// answered by probing backwards for a base (bases are 8-aligned, the smallest
+// payload is 16 B), which is bounded and only ever asked by cold consumers
+// (the diagnostic firewall, heapwatch, sscanf's %s/%[/%c destination).
+// Every call site already holds mutex_. Under DiagOn() each operation is also
+// applied to the temporary std::map oracle and any disagreement is counted and
+// logged -- so the replacement is proven on the real workload, not asserted.
+// ---------------------------------------------------------------------------
+static void HxReportDisagree(unsigned long long& counter, const char* what, std::uint32_t key,
+                             std::uint32_t got, std::uint32_t want) {
+    ++counter;
+    static int n = 0;
+    if (n < 20) {
+        n++;
+        std::printf("[heapidx] DISAGREE %s key=%08x new=%u old=%u\n", what, key, got, want);
+    }
+}
+
+void Runtime::LiveIdxInsert(std::uint32_t base, std::uint32_t size) {
+    live_idx_.Insert(base, size);
+    if (DiagOn()) {
+        live_idx_oracle_[base] = size;
+    }
+}
+
+std::uint32_t Runtime::LiveIdxErase(std::uint32_t base) {
+    const std::uint32_t got = live_idx_.Erase(base);
+    if (DiagOn()) {
+        const auto it = live_idx_oracle_.find(base);
+        const std::uint32_t want = (it == live_idx_oracle_.end()) ? 0 : it->second;
+        if (got != want) {
+            HxReportDisagree(hx_disagree_, "erase", base, got, want);
+        }
+        if (it != live_idx_oracle_.end()) {
+            live_idx_oracle_.erase(it);
+        }
+    }
+    return got;
+}
+
+std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
+    const std::uint32_t got = live_idx_.Find(base);
+    if (DiagOn()) {
+        const auto it = live_idx_oracle_.find(base);
+        const std::uint32_t want = (it == live_idx_oracle_.end()) ? 0 : it->second;
+        if (got != want) {
+            HxReportDisagree(hx_disagree_, "find", base, got, want);
+        }
+    }
+    return got;
+}
+
+bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
+    const std::uint32_t exact = LiveIdxFind(addr);
+    if (exact) {
+        *base = addr;
+        *size = exact;
+        return true;
+    }
+    // Interior pointer. Only an in-arena address can be inside a live block, so
+    // the common non-heap destination (guest stack, module) costs one range
+    // check and zero probes.
+    if (addr < heap_base_ || (std::uint64_t)addr >= (std::uint64_t)heap_base_ + kHeapSize) {
+        return false;
+    }
+    const std::uint32_t a8 = addr & ~std::uint32_t(7);
+    for (unsigned k = 1; k <= 64; ++k) {
+        const std::uint32_t off = k * 8u;
+        if (a8 < heap_base_ + off) {
+            break;  // walked past the start of the arena
+        }
+        const std::uint32_t cand = a8 - off;
+        const std::uint32_t cs = LiveIdxFind(cand);
+        if (cs && (std::uint64_t)addr - cand < cs) {
+            *base = cand;
+            *size = cs;
+            ++hx_contain_ok_;
+            return true;
+        }
+    }
+    ++hx_contain_miss_;
+    return false;
+}
+
+void Runtime::PrintHeapIdx() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::printf(
+        "[heapidx] live=%zu max=%zu cap=%zu grown=%u ops=%llu contain_ok=%llu "
+        "contain_miss=%llu free_unk=%llu realloc_unk=%llu pool_stale=%llu disagree=%llu "
+        "oracle=%zu usedKB=%llu\n",
+        live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
+        live_idx_.Ops(), hx_contain_ok_, hx_contain_miss_, hx_free_unknown_, hx_realloc_unknown_,
+        hx_pool_stale_, hx_disagree_, live_idx_oracle_.size(),
+        (unsigned long long)(heap_used_ >> 10));
+}
+
 std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
                                       bool force) {
     // D1: OFF by default (see dispatch.h). Bypass before the lock so the hot
@@ -226,57 +326,34 @@ std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, cons
         return len;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // Find the containing live allocation: exact hit, else predecessor
-    // interval, else successor head (dst in a gap returns len unclamped).
+    // Find the containing live block: exact base, else (interior) a bounded
+    // backwards probe for a base. Not inside one -> unclamped, same as before.
     std::uint32_t base = 0, size = 0;
-    auto it = heap_sizes_.find(dst);
-    if (it != heap_sizes_.end()) {
-        base = dst;
-        size = it->second;
-    } else {
-        auto jt = heap_sizes_.upper_bound(dst);
-        if (jt != heap_sizes_.begin()) {
-            auto pt = jt;
-            --pt;
-            if ((std::uint64_t)dst - pt->first < pt->second) {
-                base = pt->first;
-                size = pt->second;
-            }
-        }
-        if (!size && jt != heap_sizes_.end() && dst >= jt->first &&
-            (std::uint64_t)dst - jt->first < jt->second) {
-            base = jt->first;
-            size = jt->second;
-        }
-        if (!size) {
-            // Not inside any LIVE allocation. Inside the arena this means a
-            // dlmalloc header word, a free chunk, the top chunk or a
-            // quarantined (freed) block -- i.e. exactly the bump-era
-            // overflow/UAF-write that bump tolerated (never reused) and
-            // dlmalloc cannot (that memory is metadata now). The write goes
-            // through UNCLAMPED (host-side: heapwatch only sees guest stores).
-            // Log it (capped) so the writer is named before the metadata
-            // detonates.
-            if (dst >= heap_base_ && (std::uint64_t)dst < (std::uint64_t)heap_base_ + kHeapSize) {
-                static int gn = 0;
-                if (gn < 40) {
-                    gn++;
-                    std::uint32_t lr = 0, pc = 0;
-                    Dynarmic::A32::Jit* aj = ActiveJit();
-                    if (aj) {
-                        lr = aj->Regs()[14];
-                        pc = aj->Regs()[15];
-                    }
-                    std::uint32_t nxt = 0;
-                    if (jt != heap_sizes_.end()) {
-                        nxt = jt->first;
-                    }
-                    std::printf("[heap] GAPWRITE %s dst=%08x len=%u nxt=%08x pc=%08x lr=%08x\n", n,
-                                dst, len, nxt, pc, lr);
+    if (!LiveIdxContaining(dst, &base, &size)) {
+        // Not inside any LIVE allocation. Inside the arena this means a dlmalloc
+        // header word, a free chunk, the top chunk or a quarantined (freed)
+        // block -- i.e. exactly the bump-era overflow/UAF-write that bump
+        // tolerated (never reused) and dlmalloc cannot (that memory is metadata
+        // now). The write goes through UNCLAMPED (host-side: heapwatch only sees
+        // guest stores). Log it (capped) so the writer is named before the
+        // metadata detonates. NOTE (D2): `base=0` means "no containing live
+        // block"; it replaced the old `nxt=` successor head, which a hash index
+        // cannot cheaply produce (and whose only consumer was this log line).
+        if (dst >= heap_base_ && (std::uint64_t)dst < (std::uint64_t)heap_base_ + kHeapSize) {
+            static int gn = 0;
+            if (gn < 40) {
+                gn++;
+                std::uint32_t lr = 0, pc = 0;
+                Dynarmic::A32::Jit* aj = ActiveJit();
+                if (aj) {
+                    lr = aj->Regs()[14];
+                    pc = aj->Regs()[15];
                 }
+                std::printf("[heap] GAPWRITE %s dst=%08x len=%u base=%08x pc=%08x lr=%08x\n", n,
+                            dst, len, 0, pc, lr);
             }
-            return len;  // gap/quarantine/module: not ours
         }
+        return len;  // gap/quarantine/module: not ours
     }
     const std::uint64_t lim = (std::uint64_t)base + size;
     const std::uint64_t end = (std::uint64_t)dst + len;
@@ -438,7 +515,7 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         if (usable < size) {
             usable = size;  // paranoia: never below the request
         }
-        heap_sizes_[out] = usable;
+        LiveIdxInsert(out, usable);
         heap_used_ += total;
     } catch (...) {
         // Host-side OOM on bookkeeping (not guest OOM): hand the block back,
@@ -499,7 +576,7 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
     if (usable < total) {
         usable = (std::uint32_t)total;
     }
-    heap_sizes_[out] = usable;
+    LiveIdxInsert(out, usable);
     heap_used_ += total;
     return out;
 }
@@ -520,13 +597,11 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     bool known = false;
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     {
-        const auto it = heap_sizes_.find(addr);
-        if (it != heap_sizes_.end()) {
-            old = it->second;
-            known = true;
-        }
+        old = LiveIdxFind(addr);
+        known = (old != 0);
     }
     if (!known) {
+        ++hx_realloc_unknown_;
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
@@ -564,18 +639,18 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         // entry and LEAK deliberately: the old block is already consumed, and
         // quarantining it would later mspace_free a moved chunk (double-free).
         std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
-        heap_sizes_.erase(addr);
+        LiveIdxErase(addr);
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
     {
-        heap_sizes_.erase(addr);
+        LiveIdxErase(addr);
         // Honest real payload again (no max(size,16) blind spot).
         std::uint32_t usable = (std::uint32_t)mspace_usable_size(hp);
         if (usable < rtotal) {
             usable = rtotal;
         }
-        heap_sizes_[out] = usable;
+        LiveIdxInsert(out, usable);
         heap_used_ += (std::uint64_t)rtotal > old ? (std::uint64_t)rtotal - old : 0;
         if ((std::uint64_t)old > rtotal) {
             heap_used_ -= (std::uint64_t)old - rtotal;
@@ -617,8 +692,13 @@ void Runtime::GuestFree(std::uint32_t addr) {
             std::printf("[heap] LOUD double free of quarantined %08x lr=%08x\n", addr, lr);
             return;
     }
-    auto it = heap_sizes_.find(addr);
-    if (it == heap_sizes_.end()) {
+    // D2: one hash lookup both yields the size and removes the entry (the old
+    // map needed find + erase + a host node free). 0 = "we never handed this
+    // out" -> the legacy lenient no-op, counted so a session can show whether
+    // that path ever actually fires.
+    const std::uint32_t size = LiveIdxErase(addr);
+    if (!size) {
+        ++hx_free_unknown_;
         if (EnvOn("HARNESS_MALLOCLOG")) {
             std::uint32_t lr = 0;
             Dynarmic::A32::Jit* aj = ActiveJit();
@@ -632,8 +712,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
         }
         return;  // free of unknown: ignore (legacy semantics)
     }
-    const std::uint32_t size = it->second;
-    heap_sizes_.erase(it);
     // Drop any audio-pool reference (stale reuse would alias).
     for (auto pit = array_pool_.begin(); pit != array_pool_.end(); ++pit) {
         if (pit->first == addr) {
@@ -1594,19 +1672,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::lock_guard<std::recursive_mutex> flock(mutex_);
                 bool in_heap = false;
                 std::uint64_t rem = 0;
-                auto fit = heap_sizes_.find(dp);
-                if (fit != heap_sizes_.end()) {
+                // D2: one containment query instead of find + upper_bound.
+                std::uint32_t cbase = 0, csize = 0;
+                if (LiveIdxContaining(dp, &cbase, &csize)) {
                     in_heap = true;
-                    rem = fit->second;
-                } else {
-                    auto jt = heap_sizes_.upper_bound(dp);
-                    if (jt != heap_sizes_.begin()) {
-                        --jt;
-                        if ((std::uint64_t)dp - jt->first < jt->second) {
-                            in_heap = true;
-                            rem = (std::uint64_t)jt->first + jt->second - dp;
-                        }
-                    }
+                    rem = (std::uint64_t)cbase + csize - dp;
                 }
                 if (in_heap) {
                     if (conv == 'c') {
@@ -5572,26 +5642,12 @@ bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    auto it = heap_sizes_.find(addr);
-    if (it != heap_sizes_.end() && size <= it->second) {
-        return false;
-    }
-    if (it == heap_sizes_.end()) {
-        auto jt = heap_sizes_.upper_bound(addr);
-        bool ok = false;
-        if (jt != heap_sizes_.begin()) {
-            auto pt = jt;
-            --pt;
-            ok = (a - pt->first < pt->second) &&
-                 (a + size <= (std::uint64_t)pt->first + pt->second);
-        }
-        if (!ok && jt != heap_sizes_.end() && a >= jt->first) {
-            ok = (a - jt->first < jt->second) &&
-                 (a + size <= (std::uint64_t)jt->first + jt->second);
-        }
-        if (ok) {
-            return false;
-        }
+    // D2: one containment query covers both old branches (an exact base hit is
+    // just containment with base == addr).
+    std::uint32_t cbase = 0, csize = 0;
+    if (LiveIdxContaining(addr, &cbase, &csize) &&
+        (std::uint64_t)addr + size <= (std::uint64_t)cbase + csize) {
+        return false;  // fully inside a live allocation
     }
     // Quarantined (freed, held)? Distinct verdict: UAF write.
     for (const auto& q : quarantine_) {
@@ -6927,11 +6983,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             static int rn = 0;
             if (rn < 8) {
                 rn++;
-                std::uint32_t asz = 0;
-                const auto ita = heap_sizes_.find(buf);
-                if (ita != heap_sizes_.end()) {
-                    asz = ita->second;
-                }
+                std::uint32_t asz = LiveIdxFind(buf);
                 std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",
                             fn == 220 ? "U" : "", a1, a2, a3, buf, asz);
             }
@@ -7508,11 +7560,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     {
                         std::lock_guard<std::recursive_mutex> lock(mutex_);
                         for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-                            if (it->second == (std::uint32_t)len &&
-                                heap_sizes_.count(it->first)) {
-                                gb = it->first;
-                                array_pool_.erase(it);
-                                break;
+                            if (it->second == (std::uint32_t)len) {
+                                if (LiveIdxFind(it->first)) {
+                                    gb = it->first;
+                                    array_pool_.erase(it);
+                                    break;
+                                }
+                                // Stale pool entry (its block was freed): counted,
+                                // then skipped -- a fresh block is allocated below.
+                                ++hx_pool_stale_;
                             }
                         }
                     }
