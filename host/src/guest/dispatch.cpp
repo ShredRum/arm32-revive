@@ -5881,18 +5881,24 @@ std::uint32_t Runtime::ErrnoSlot() {
     if (it != errno_slots_.end()) {
         return it->second;
     }
-    const std::uint32_t s = kGuestDataBase + 0x104 + next_errno_slot_ * 4;
-    next_errno_slot_++;
-    if (std::uint64_t(s) + 4 > std::uint64_t(kGuestDataBase) + 0x2000) {
-        // Slot pool exhausted (~1979 threads): alias the main slot. LOUD once:
-        // two threads sharing an errno cell is a real (if rare) divergence, so
-        // it must never be silent.
-        static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
-            std::printf("[thread] LOUD errno slots exhausted (next=%u) -- aliasing main slot\n",
-                        next_errno_slot_);
+    // G2.6: reuse a finished thread's slot before bumping (the pool is finite).
+    std::uint32_t s = 0;
+    if (!errno_free_.empty()) {
+        s = errno_free_.back();
+        errno_free_.pop_back();
+    } else {
+        s = kGuestDataBase + 0x104 + next_errno_slot_ * 4;
+        next_errno_slot_++;
+        if (std::uint64_t(s) + 4 > std::uint64_t(kGuestDataBase) + 0x2000) {
+            // Slot pool exhausted (~1979 threads alive at once): alias the main
+            // slot. LOUD once: two threads sharing an errno cell is a real (if
+            // rare) divergence, so it must never be silent.
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                std::printf("[thread] LOUD errno slots exhausted -- aliasing main slot\n");
+            }
+            return kGuestDataBase + 0x100;
         }
-        return kGuestDataBase + 0x100;
     }
     errno_slots_[tid] = s;
     return s;
@@ -6074,6 +6080,26 @@ void Runtime::ReapThreadStack(std::uint32_t tid) {
         }
     }
     GuestFree(s);
+    ReapThreadTls(tid);
+}
+
+// G2.6 (2026-10-18): per-tid state must not outlive the thread. Hands the errno
+// slot back for reuse (the pool is finite) and drops the thread's TLS entries
+// (keyed (key<<32)|tid). Idempotent.
+void Runtime::ReapThreadTls(std::uint32_t tid) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = errno_slots_.find(tid);
+    if (it != errno_slots_.end()) {
+        errno_free_.push_back(it->second);
+        errno_slots_.erase(it);
+    }
+    for (auto i = tls_map_.begin(); i != tls_map_.end();) {
+        if (static_cast<std::uint32_t>(i->first & 0xFFFFFFFFu) == tid) {
+            i = tls_map_.erase(i);
+        } else {
+            ++i;
+        }
+    }
 }
 
 std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) {

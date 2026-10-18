@@ -415,6 +415,9 @@ private:
     unsigned long long thr_stack_bytes_ = 0;
     // Hand a finished thread's guest stack back to the heap (idempotent).
     void ReapThreadStack(std::uint32_t tid);
+    // G2.6 (2026-10-18): drop a finished thread's per-tid state (errno slot
+    // back to the free list, TLS entries removed). Called from ReapThreadStack.
+    void ReapThreadTls(std::uint32_t tid);
     // Callback-JIT pool (PvZ re-enter pattern): host thunks run inside the
     // outer Jit's Run(), where nested Run() asserts. Guest callbacks (qsort
     // comparators) run on SEPARATE Jit instances (own stack, lr=halt slot,
@@ -435,6 +438,9 @@ private:
                        std::int32_t& out);
     std::unordered_map<std::uint32_t, std::uint32_t> errno_slots_;  // tid -> guest slot
     std::uint32_t next_errno_slot_ = 0;  // bump from kGuestDataBase+0x104
+    // G2.6: slots of finished threads, handed out again before bumping (the
+    // pool is finite: kGuestDataBase+0x2000 => ~1979 slots).
+    std::vector<std::uint32_t> errno_free_;
 
     // pthread_once hijack state: run the init routine inline by redirecting
     // guest control flow (no nested Run). See PthreadOnce().

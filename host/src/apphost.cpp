@@ -92,6 +92,45 @@ void Log(const char* fmt, ...) {
     __android_log_print(ANDROID_LOG_INFO, "AngryBirdsRio", "[apphost] %s", buf);
 }
 
+// G2.2 (2026-10-18): a real thread that enters the guest keeps its 8 MB guest
+// stack + private Jit in g_threads forever (nothing erased them). A pthread TLS
+// destructor releases both when the real thread exits, so thread churn cannot
+// accumulate 8 MB per thread -- the F1 shape, on the Java->native path. By then
+// the thread has stopped running guest code, so deleting the Jit and freeing
+// the stack is safe; an in-flight shared_ptr (AppHost_CallImpl) keeps the
+// HostThread itself alive on its own.
+pthread_key_t g_hostthread_key;
+pthread_once_t g_hostthread_once = PTHREAD_ONCE_INIT;
+std::atomic<unsigned> g_ht_created{0};
+
+void HostThreadRelease(void* p) {
+    const pid_t me = static_cast<pid_t>(reinterpret_cast<std::intptr_t>(p));
+    std::shared_ptr<HostThread> st;
+    std::size_t live = 0;
+    {
+        std::lock_guard<std::mutex> l(g_tmu);
+        const auto it = g_threads.find(me);
+        if (it == g_threads.end()) {
+            return;
+        }
+        st = it->second;
+        g_threads.erase(it);
+        live = g_threads.size();
+    }
+    Log("thread leave tid=%u stack=%08x live=%zu (created=%u)", st->tid, st->stack, live,
+        g_ht_created.load());
+    if (st->stack) {
+        g_rt->GuestFree(st->stack);
+        st->stack = 0;
+    }
+    delete st->jit;
+    st->jit = nullptr;
+}
+
+void HostThreadKeyInit() {
+    pthread_key_create(&g_hostthread_key, HostThreadRelease);
+}
+
 // Death witness (debuggerd is SELinux-muted on this device: native crashes
 // leave no tombstone). Pre-opened fd + alt stack + async-safe-only handler:
 // fault addr + guest regs into files/death.log, then re-raise to die as before.
@@ -523,16 +562,24 @@ std::shared_ptr<HostThread> Enter() {
     }
     st->env = env;
     std::uint32_t tid = 0;
+    std::size_t live = 0;
     {
         std::lock_guard<std::mutex> l(g_tmu);
         tid = g_next_tid++;
         st->tid = tid;
         g_threads[me] = st;
+        live = g_threads.size();
     }
+    // Arm the exit destructor (G2.2) once per process, then point this thread's
+    // key at its own tid so HostThreadRelease can find and free its entry.
+    pthread_once(&g_hostthread_once, HostThreadKeyInit);
+    pthread_setspecific(g_hostthread_key, reinterpret_cast<void*>(static_cast<std::intptr_t>(me)));
+    const unsigned created = ++g_ht_created;
     g_rt->ThreadEnter(st->jit, tid);
-    if (DiagOn()) {
-        Log("thread enter tid=%u stack=%08x attached=%d", (unsigned)tid, st->stack, env ? 1 : 0);
-    }
+    // One line per real thread (bounded -- not per call): the only witness that
+    // Java->native thread churn would show. Always on.
+    Log("thread enter tid=%u stack=%08x attached=%d live=%zu (created=%u)", (unsigned)tid, st->stack,
+        env ? 1 : 0, live, created);
     return st;
 }
 
