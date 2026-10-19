@@ -42,6 +42,11 @@ if [ "$DIAG" = 1 ]; then
 fi
 LIB_SRC=host/build-android/libabhost.so
 LIB_DST="$TREE/lib/arm64-v8a/libabhost.so"
+# OUT_NAME=apk_fill.apk writes the signed artifact under a distinct name
+# without touching the prod/diag defaults.
+if [ -n "${OUT_NAME:-}" ] && [ "$DIAG" != 1 ]; then
+    OUT="games/$GAME/work/$OUT_NAME"
+fi
 GUEST="$TREE/assets/guestlib/armeabi-v7a/$GUEST_LIB"
 APKTOOL=tools/apktool_3.0.3.jar
 BT=tools/android-sdk/build-tools/35.0.0
