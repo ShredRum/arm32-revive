@@ -3022,75 +3022,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
                         FindExidx(a0), regs[7], regs[13], regs[14]);
         }
-        // HARNESS_SKIPFRAME=1: flip-test (§87, refined §89): the walk sticks
-        // at frame 0x45A758 (queried as pc=0x45A778) but live R7 is getInfo's
-        // frame (SP=R7-0x20 + [R7+4]=0x45AAFB constant PROVES it) — pc and R7
-        // come from DIFFERENT frames, so descriptors pop the wrong words.
-        // Answer for the LIVE frame instead (lr&~1 = 0x45AF66, getInfo body):
-        // descriptors then match live R7 and the walk should advance through
-        // real frames (0x45AAFB -> 0x45AAC0 -> ...). No guest state touched.
-        // Binary: new pcs/handlers/terminate vs same loop. Harness-only.
-        std::uint32_t ask_pc = a0;
-        if (EnvOn("HARNESS_SKIPFRAME") && a0 == 0x45A778u) {
-            ask_pc = regs[14] & ~std::uint32_t(1);
-            std::printf("[skipframe] pc=0045a778 live-lr=%08x -> answering for %08x\n",
-                        regs[14], ask_pc);
-            // Caller hunt: the re-invoker leaves return addrs on stack.
-            // Dump first code-range words in [sp,sp+512) (outer frames).
-            static int skdump = 0;
-            if (skdump < 2) {
-                skdump++;
-                std::printf("[skipframe] stack:");
-                int shown = 0;
-                for (std::uint32_t a = regs[13]; a < regs[13] + 512 && shown < 8; a += 4) {
-                    if (!CheckRange(a, 4, false)) {
-                        break;
-                    }
-                    std::uint32_t w = 0;
-                    std::memcpy(&w, H<const std::uint8_t>(a), 4);
-                    if (w >= 0x1000 && w < 0x653D1Cu) {
-                        std::printf(" %08x", w);
-                        shown++;
-                    }
-                }
-                std::printf("\n");
-            }
-        }
-        // HARNESS_R7POKE=1: flip-test (§79): the raise driver's frame #1
-        // has a stale saved-LR ([R7+8] reads heap, never 0x457FE7), so
-        // pop re-presents pc=0x45A778 forever. Poke the LR slot with the
-        // true return (BL @0x457FE2 -> 0x457FE6|1) on the first queries
-        // and watch whether the walk advances past frame #1.
-        // Harness-only diag, never ships.
-        if (EnvOn("HARNESS_R7POKE")) {
-            static int poke_n = 0;
-            const std::uint32_t r7v = regs[7];
-            if (poke_n < 3 && a0 == 0x45A778u && r7v != 0 && r7v != 0xFFFFFFFFu &&
-                CheckRange(r7v + 8, 4, true)) {
-                std::uint32_t old = 0;
-                std::memcpy(&old, H<const std::uint8_t>(r7v + 8), 4);
-                const std::uint32_t fix = 0x457FE7u;
-                std::memcpy(H(r7v + 8), &fix, 4);
-                std::printf("[r7poke] #%d R7=%08x [R7+8] %08x -> %08x\n", poke_n, r7v,
-                            old, fix);
-                poke_n++;
-            }
-        }
         // The imported ABI is (pc, int* count) -> the exidx TABLE BASE of the
         // module holding pc, with *count = number of 8-byte entries; the caller
         // (the guest's own statically linked libgcc) then binary-searches that
-        // table. The legacy answer below returned the single table ENTRY for pc
-        // and never wrote count, so a caller took one entry as the table base
-        // and searched `count` entries from it -- with whatever garbage its
-        // local count held. The pinned image's fail path is tuned around that
-        // (its walk sticks at 0x45A778 and RETSUCC re-arms it), so it keeps the
-        // legacy value bit-for-bit. Space calls this for real: its libgcc
-        // searched ~2.7M entries from a bogus base and wild-read 0x1AE6328 at
-        // guest-pc 0x557538. Non-pinned images get the ABI answer.
-        if (IsPinnedGuest(mod_)) {
-            Ret(regs, FindExidx(ask_pc));
-            return;
-        }
+        // table. This used to return the single table ENTRY for pc and never
+        // write count, so a caller took one entry as the table base. The pinned
+        // Rio image was deliberately kept on that legacy answer because its
+        // fail path "depended" on the 0x45A778 spiral (which RETSUCC masked).
+        // That was a crutch, and on a phone it is fatal: with count==0 the
+        // guest's setInfo marks the frame `_unwindInfoMissing`, phase1 returns
+        // FATAL before any descriptor runs, and the first main-thread throw
+        // wedges the updater (black screen). The ABI answer is correct for
+        // every image: frame #1 then pops its saved LR (0x457FE7) and the walk
+        // continues into __cxa_throw and the game's own handler.
         const std::uint32_t pc = a0 & ~std::uint32_t(1);
         std::uint32_t base = 0, count = 0;
         if (IsCodeAddress(pc) && mod_.exidx_va != 0) {
