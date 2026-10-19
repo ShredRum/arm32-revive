@@ -6717,7 +6717,11 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         return false;
     }
     const bool is_static = fn >= 114;
-    const int vtag = (fn == 114 || fn == 34) ? 0 : ((fn == 115 || fn == 35) ? 1 : 2);
+    // fn 61/62/63 are the void forms: same varargs / V / A shapes as the
+    // object-returning 34/35/36 and 114/115/116.
+    const int vtag = (fn == 114 || fn == 34 || fn == 61)
+                         ? 0
+                         : ((fn == 115 || fn == 35 || fn == 62) ? 1 : 2);
     // Split "[static|field ]com/a/B.name(sig)" -> cls, name, sig, ret.
     // (Instance methods carry a legacy "field " tag from the mock path.)
     std::string d = mdesc;
@@ -7828,6 +7832,25 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (DiagOn()) {
             std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
         }
+#ifdef __ANDROID__
+        // Product host: the guest's audio engine calls AudioOutput.stopOutput()
+        // on pause and AudioOutput.requestExclusiveAudio(Z) on focus changes.
+        // Java never calls stopOutput (no caller in the dex); the only caller
+        // is the native side, so the generic void mock below would drop it and
+        // leave the AudioTrack playing after the app is backgrounded. Forward
+        // exactly these two to the real object; every other void call stays
+        // mocked (services/analytics are intentionally inert).
+        if (mdesc.find("AudioOutput.stopOutput") != std::string::npos ||
+            mdesc.find("AudioOutput.requestExclusiveAudio") != std::string::npos) {
+            if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
+                return;
+            }
+            // A real AudioOutput that cannot take its own method is an anomaly,
+            // not a mock path. The old silent drop WAS the background-audio bug.
+            std::printf("[jni] LOUD %s real call failed -- audio state not applied\n",
+                        mdesc.c_str());
+        }
+#endif
         Ret(regs, 0);  // void JNI: zero r0
         return;
     }
