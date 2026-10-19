@@ -70,9 +70,10 @@ static std::int64_t TimeWarp() {
 
 // Honest guest sleep (2026-10-19, PLAN item 8). bionic blocks the calling
 // thread for the requested time; the old 5 ms clamp was a bring-up guard
-// against delay loops hanging the emulator. Neither shipped guest walks the
-// sleep imports on its frame path (Space imports nanosleep but never calls it;
-// Rio imports no sleeps), so this is fidelity, not a prod behaviour change.
+// against delay loops hanging the emulator. Neither shipped guest sleeps on a
+// normal frame path: Rio's nanosleep is a dead PLT entry (no call site), and
+// Space's sleep_ms is reached only on fatal paths right before abort(). So this
+// is fidelity, not a prod behaviour change.
 static void GuestSleepUs(std::uint64_t us) {
     if (!us) {
         return;

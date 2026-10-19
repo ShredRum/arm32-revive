@@ -673,3 +673,13 @@ abort 0, 70.3 % CPU, меню на скриншоте, застоя строк �
      вместе с этим пунктом) и **скаффолдинг
      tapbeat** (резолв `MyInputHandler` через JNI на первом `nativeUpdate`
      безусловно, хотя инъекция входа выключена).
+
+### Shared lib: background audio forwarding (2026-10-19)
+
+The `AudioOutput.stopOutput()`/`requestExclusiveAudio()` forwarding added for
+Rio (a299190, AGENTS §143) lives in the shared host lib and applies to Space
+too. Space prod: `apk_signed.apk` md5
+`93fd811854a02ec45498116afdde5531`, lib
+`7a7e731d194c08bd6ca29bbb4d4ee0fd`, versionCode 221400; native init 67/67
+clean. No Space-specific background-audio symptom was reported and no Space
+device run was made; this is the same shared call path.

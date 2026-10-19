@@ -4261,3 +4261,33 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - SIDE FINDING: the `[regio] fread 31` line was `/dev/urandom`; g_regfiles is
   not pruned on fclose, so a reused FILE* inherits the registry tag (log-only).
 
+
+## 143. Background audio: stopOutput was dropped by the void JNI mock (2026-10-19)
+- SYMPTOM (device, prod `d7506295`): audio kept playing after Home; resume was
+  fine. Not a timing/latency issue.
+- CHAIN (dex): `App.onPause` -> `MySurfaceView.onPause` -> `MyRenderer.onPause`
+  -> `Updater.onPause` -> `NativeApplication.doPause` -> `nativePause` (our
+  generated wrapper). The guest does receive the pause.
+- `AudioOutput.stopOutput()V` stops/flushes/releases the AudioTrack and quits
+  its HandlerThread. The dex has NO Java caller (only the method body): the
+  native audio engine is the only caller, which is why the guest resolves the
+  method ID at audio init.
+- BUG: generic `CallVoidMethod*` (fns 61/62/63) returned 0 without invoking the
+  real method, so `stopOutput`/`requestExclusiveAudio` were silently dropped.
+  The AudioTrack stayed alive and the Java callback kept mixing in background.
+- FIX (a299190): forward exactly `AudioOutput.stopOutput()V` and
+  `AudioOutput.requestExclusiveAudio(Z)V` to the real object (whitelist, same
+  style as the existing `startOutput` path); `RealCallObject` learned the
+  61/62/63 varargs/V/A shapes. Every other void call stays mocked. A failed
+  real call logs `[jni] LOUD`; the old silent drop was the bug.
+- DEVICE (DIAG build `8865bceb101fce53fbedcf36adc3417b`): user-verified -- Home
+  silences, resume restores, normal play unchanged.
+- PROD BUILDS (shared lib `7a7e731d194c08bd6ca29bbb4d4ee0fd`):
+  - Rio `apk_signed.apk` md5 `d0664a270c8f70dcf6984871513ee5fa`, versionCode 2676;
+  - Space `apk_signed.apk` md5 `93fd811854a02ec45498116afdde5531`, versionCode 221400.
+  Both non-debuggable, no `1a410c,fill` string. Space init 67/67 clean.
+- SLEEP COMMENT CORRECTION: "Rio imports no sleeps / Space imports but never
+  calls" was wrong. Rio has a dead `nanosleep` PLT entry (no call site); Space's
+  `sleep_ms` is called only from three fatal paths immediately before `abort()`.
+  HEAD still has honest sleeps (74d7cac); the only remaining 5000 ms cap is
+  `poll`'s deliberate 5-SECOND hang guard.

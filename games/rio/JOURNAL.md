@@ -273,3 +273,24 @@ Harness, fresh 224 B seed registry (phone state), `HARNESS_EXIDXLOG=1`:
 Phone build (`apk_signed.apk`): md5 `d7506295a55f21d954f049a51327ca0c`, lib
 `24b221a31da61916651ea0153e0f9caf`, no fill, versionCode 2676. Waiting for the
 device run; `apk_fill.apk` kept only as the fallback artifact.
+
+### Fixed: background audio — stopOutput was a no-op (2026-10-19)
+
+`AudioOutput.stopOutput()V` is the method that stops/flushes/releases the
+AudioTrack and quits its HandlerThread. The dex has no Java caller, so the
+guest's native pause path is the only caller (it resolves the method ID at
+audio init). Our generic `CallVoidMethod*` returned 0 without invoking it, so
+after Home the track kept playing.
+
+Fix (a299190): real-forward exactly `AudioOutput.stopOutput()V` and
+`requestExclusiveAudio(Z)V` (whitelist, same style as `startOutput`); other
+void calls stay mocked; a failed real call is a loud `[jni] LOUD` anomaly.
+
+Device (DIAG `8865bceb101fce53fbedcf36adc3417b`): Home silences, resume
+restores. Prod builds: Rio `d0664a270c8f70dcf6984871513ee5fa`, Space
+`93fd811854a02ec45498116afdde5531`, shared lib `7a7e731d194c08bd6ca29bbb4d4ee0fd`,
+versionCodes 2676 / 221400, no fill string.
+
+Correction to the 74d7cac entry below: Rio does have a `nanosleep` import (dead
+PLT entry, zero call sites), and Space's `sleep_ms` is reached only on three
+fatal paths before `abort()` — neither sleeps on a normal frame.
