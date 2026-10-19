@@ -4234,3 +4234,30 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 - The lib md5 changed vs batch G (`296124ee…` -> `cb136d64…`) -- expected: builds
   embed `__DATE__/__TIME__` and the absolute source path, which moved.
 
+## 105. The 0x45A778 spiral: wrong exidx ABI, not a broken guest (2026-10-19)
+- ROOT (PROVEN statically + harness): `__gnu_Unwind_Find_exidx(pc, int *count)`
+  must return the `.ARM.exidx` TABLE BASE and write the entry count. The pinned
+  Rio image was deliberately kept on the legacy answer (single entry for pc, no
+  count) since 6de206a, because its fail path "depended" on the spiral (RETSUCC
+  masked it). The guest's setInfo (0x45AF30) clears count, checks `count==0`
+  after the call (0x45AF70) and then sets `_unwindInfoMissing`, skipping
+  0x45B230: phase1 returns `_URC_FATAL_PHASE1_ERROR` before ANY descriptor
+  runs. The 513 "nesting" is 513 independent throws (game retry), not one walk.
+- WHY THE PHONE DIED: fresh seed registry (224B) has no
+  `cloud.session_configuration`; the config lookup (0x17DDC0) misses, the JSON
+  parser (0x1A522C) gets an empty range -> ParseError on the GL/update thread
+  -> spiral -> sticky UserDefined2 -> black screen. The PC/sandbox filesN dirs
+  were 496B with a saved session config (from the fill era), so they never
+  threw on the main thread. The `fill` probe wrote "{}" at 0x1A410C and hid it.
+- FIX (4af8d8a): drop the pinned branch; every image gets base+count. Removed
+  SKIPFRAME/R7POKE (they poked the live getInfo R7; the descriptor uses the
+  context R7 and never ran while count==0).
+- HARNESS PROOF (fresh seeds, HARNESS_EXIDXLOG=1): before = 513x pc=45A778 ->
+  LOUD; after = 45A778 -> 457FE5 (__cxa_throw) -> 2A6E6B -> ... -> 1A413B,
+  17 lookups, 0 unwind/BAD/FATAL, init 54/54 clean svc=948 halts=53,
+  sesswatch exit flag=1. Space init 67/67 (non-pinned path unchanged).
+- PHONE BUILD: apk_signed.apk md5 `d7506295a55f21d954f049a51327ca0c`, lib
+  `24b221a31da61916651ea0153e0f9caf`, no fill string, versionCode 2676.
+- SIDE FINDING: the `[regio] fread 31` line was `/dev/urandom`; g_regfiles is
+  not pruned on fclose, so a reused FILE* inherits the registry tag (log-only).
+

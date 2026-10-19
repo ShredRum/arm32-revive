@@ -252,3 +252,24 @@ Installed lib md5 `9dfa10872d0fd60806889f7c31901fa3`. Prod run, 75 s:
 Space in the same install: 213 lines (`[regio]` 60, `glog` 61; the +1 vs 212 is
 the benign `[mutex] UNLOCK-FOREIGN` marker, which varies 4-5 per run), no stall,
 menu. No new tag without explicit confirmation.
+
+### Fixed: exidx ABI — the 0x45A778 spiral was ours (2026-10-19)
+
+`__gnu_Unwind_Find_exidx` must return the exidx table base and write `*count`.
+The pinned Rio image was kept on the legacy "single entry, no count" answer
+(6de206a) because its fail path "depended" on the spiral. The guest checks
+`count==0` and marks the frame `_unwindInfoMissing`: phase1 fails before any
+descriptor runs. On a phone the first main-thread throw (fresh seed registry has
+no `cloud.session_configuration` -> JSON ParseError) became the black screen;
+the fill probe was masking exactly that throw.
+
+Fix (4af8d8a): every image gets the ABI answer; SKIPFRAME/R7POKE removed (they
+poked the live getInfo R7, not the context R7).
+
+Harness, fresh 224 B seed registry (phone state), `HARNESS_EXIDXLOG=1`:
+45A778 -> 457FE5 (__cxa_throw) -> 2A6E6B -> ... -> 1A413B, 17 lookups, no
+`[unwind]`/BAD/FATAL, init 54/54, `sesswatch exit flag=1`. Space init 67/67.
+
+Phone build (`apk_signed.apk`): md5 `d7506295a55f21d954f049a51327ca0c`, lib
+`24b221a31da61916651ea0153e0f9caf`, no fill, versionCode 2676. Waiting for the
+device run; `apk_fill.apk` kept only as the fallback artifact.
