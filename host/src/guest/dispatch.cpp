@@ -11296,8 +11296,9 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                         ir.GetRegister(static_cast<Dynarmic::A32::Reg>(6))));
             }
         }
-        if (probe > 0 && (pc == probe_pc || pc == probe_pc2 || pc == probe_pc3 || pc == probe_pc4 ||
-                        pc == probe_pc5)) {
+        if (probe > 0 && ((probe_pc && pc == probe_pc) || (probe_pc2 && pc == probe_pc2) ||
+                          (probe_pc3 && pc == probe_pc3) || (probe_pc4 && pc == probe_pc4) ||
+                          (probe_pc5 && pc == probe_pc5))) {
             g_probe_pc = pc;
             std::printf("[probe-emit] %c %08x\n", is_thumb ? 'T' : 'A', pc);
             // HARNESS_FIXPVR=1: at 0x2B0C50 (post image-format lookup) force

@@ -27,18 +27,14 @@
   (C1, measured ~-20% CPU vs no_optimizations); HARNESS_NOOPT=1 restores the old
   bring-up mode; HARNESS_SAFEOPTS is dead.
 - ALWAYS-ON BEHAVIOUR CRUTCHES (behaviour, NOT diagnostics; do not "clean"
-  without a measurement first): REALGL, FASTMEM, and
-  `HARNESS_PROBE=1a410c,fill` (writes "{}" into the guest JSON SSO slot at
-  0x1A410C so the parser takes defaults). RETSUCC, SPURWAKE and the 5 s
-  `cond_wait` cap were in this list until 2026-10-19. SPURWAKE/cap: measured as
-  **not** load-bearing (with the cap off Space runs its frame path and its audio
-  JNI for 75 s, `spurwake=0`), then removed -- untimed `pthread_cond_wait` now
-  blocks like bionic (PLAN item 2). RETSUCC: proven **dead code** -- the
-  injection lives on the diag-only PROBE3 hook and its target raiser 0x28a3dc
-  was never even translated (0 `[succ]` / 0 probe3-emit in any diag log); the
-  setenv and the false "re-armed" log line are gone, and a diag run still
-  reaches the menu with no injection at all (PLAN item 1). See PLAN.md and
-  games/*/JOURNAL.md for the before/after.
+  without a measurement first): REALGL and FASTMEM (both are the honest path,
+  kept on purpose -- see PLAN.md items 4-5). RETSUCC, SPURWAKE, the 5 s
+  `cond_wait` cap and `HARNESS_PROBE=1a410c,fill` were in this list until
+  2026-10-19, each removed after a measurement: SPURWAKE/cap were not
+  load-bearing (PLAN item 2); RETSUCC was dead code behind the diag-only PROBE3
+  hook (item 1); the pinned-image fill fired but found the SSO slot already
+  filled -- `[probe] OUT non-empty, kept` -- so it only added 16 log lines
+  (item 3). See PLAN.md and games/*/JOURNAL.md for the before/after.
 - BUILD (multi-game tree): `scripts/build-lib.sh` (arm64 `libabhost.so`) then
   `scripts/deploy.sh rio` (strip -> apktool b -> zipalign -> apksigner v1+v2+v3,
   local only; prints the device half). Tree `games/rio/work/apk_prod`, output
@@ -72,10 +68,10 @@
   dlmalloc-era truth; lives in gitignored work/, so its edits are not versioned).
 - DO NOT: patch the guest .so (read-only, sha256 checked); remove the
   CheckAccess/CheckRange contract (a wild guest pointer must become a clean halt,
-  never a host SIGSEGV); "clean up" REALGL / FASTMEM / the PROBE fill without a
-  device measurement first (RETSUCC, SPURWAKE and the cond_wait cap WERE
-  cleaned, 2026-10-19, each after proving it was dead or not load-bearing); run
-  parallel device sessions; bulk-edit without backup.
+  never a host SIGSEGV); "clean up" REALGL / FASTMEM without a device measurement
+  first (RETSUCC, SPURWAKE, the cond_wait cap and the PROBE fill WERE cleaned,
+  2026-10-19, each after proving it was dead or not load-bearing); run parallel
+  device sessions; bulk-edit without backup.
 - HISTORY: the level-1 investigation lives in the §58/§59 entries below, the
   dlmalloc/quarantine/D0 investigation in §130-§137, and the PthreadCreate
   stack-leak crash fix (F1) in §138. The old "Menu NOT reached" HANDOFF

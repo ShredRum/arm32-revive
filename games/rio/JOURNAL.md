@@ -183,3 +183,29 @@ verified inside the installed `base.apk`). Prod run, 75 s, no abflags:
 | tail | `[mutex] UNLOCK-FOREIGN` + `[unwind] LOUD nesting 513 deep` | identical |
 
 Rio is behaviourally unchanged. No new tag without explicit confirmation.
+
+### Re-check: `HARNESS_PROBE=1a410c,fill` removal (2026-10-19) -- MEASURED
+
+The pinned-image fill (PLAN.md item 3) is gone. Its own prod verdict was
+`[probe] OUT non-empty, kept`: the probe fired at 0x1A410C on every run, but the
+SSO slot was already filled by the guest, so the `"{}"` write never happened --
+the only effect was 16 log lines (1 `[probe-emit]` + 15 `[probe]`). The
+`,fill` code stays as an opt-in experiment, and the probe-slot comparison now
+requires the slot to be non-zero (an unset slot is 0 and would have matched
+`pc == 0`).
+
+Installed lib md5 `ac70bd93ad4a29ca44a0b20969833674` (both titles carry the same
+lib; checked inside the installed `base.apk`). Prod run, 75 s, no abflags:
+
+| metric | before (`14c43eda`) | after (`ac70bd93`) |
+|---|---|---|
+| log lines | 167 -> 170 | 151 -> **154** (-16: the probe block) |
+| `[probe]` / `[probe-emit]` | 15 / 1 | 0 / 0 |
+| `[regio]` | 60 | 60 |
+| abort / HEAPCORRUPT / `[mem] BAD` | 0 / 0 / 0 | 0 / 0 / 0 |
+| process | alive, 63.1 % CPU | alive, 65.7 % CPU, RSS 38 MB |
+| screen | menu | menu (screenshot, 2.46 MB PNG) |
+
+Space ran as the control in the same install (it is not the pinned image, so it
+never had the probe): 212 lines before and after, `[probe]`=0, menu on screen.
+No new tag without explicit confirmation.

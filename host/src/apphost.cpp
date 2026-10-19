@@ -1205,9 +1205,6 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // translated -- no `[probe-emit] ... 0028a3dc` and no `[succ]` line in any
     // diag run. So the crutch is inert; the lever is gone and the experiment
     // stays opt-in (put HARNESS_RETSUCC=1 into files/abflags.txt with diag on).
-    // The pinned-image probe (HARNESS_PROBE) is armed further down, once the
-    // guest is loaded and we know whether it IS the pinned image: its target is
-    // a guest VA of that one image.
     // ---- diagnostic layer: ONE switch, OFF for shipping (2026-10-17) -------
     // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
     // probes, the WATCHPC hook, the per-call/per-frame tracing and the
@@ -1404,15 +1401,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
     CheckGuestBuildId(*g_mod);
     const bool pinned = IsPinnedGuest(*g_mod);
-    // Behaviour crutch for THE PINNED IMAGE ONLY: the ",fill" suffix makes the
-    // host write "{}" into that image's empty JSON SSO slot (guest VA 1a410c),
-    // so its parser proceeds with defaults instead of throwing Unexpected EOF.
-    // A crutch, not a diagnostic (like RETSUCC/FASTMEM/REALGL) -- but
-    // tied to one image's VA, so a different guest gets none: there that
-    // address is arbitrary code or data.
-    if (pinned) {
-        setenv("HARNESS_PROBE", "1a410c,fill", 1);
-    }
+    // The pinned-image JSON SSO fill ("{}" at guest VA 1a410c) used to be
+    // armed here as HARNESS_PROBE=1a410c,fill. Measured on 2026-10-19 (lib
+    // 14c43eda, Rio prod 75 s): the probe fires, but its own verdict is
+    // `[probe] OUT non-empty, kept` -- the slot is already filled by the guest,
+    // so the write never happens; the only effect was 16 log lines. Removed.
+    // The ',fill' code stays as an opt-in experiment (HARNESS_PROBE=...,fill).
     // Trampoline map (first 48): lets any future death-pc name its import
     // offline. Slots: 0 = halt (swi 0), 1 = once return (swi kSwiOnce), then
     // import idx at slot idx+2 (swi idx+1) -- so name it by the va printed
