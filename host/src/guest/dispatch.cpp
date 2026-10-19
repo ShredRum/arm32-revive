@@ -68,6 +68,22 @@ static std::int64_t TimeWarp() {
     return w;
 }
 
+// Honest guest sleep (2026-10-19, PLAN item 8). bionic blocks the calling
+// thread for the requested time; the old 5 ms clamp was a bring-up guard
+// against delay loops hanging the emulator. Neither shipped guest walks the
+// sleep imports on its frame path (Space imports nanosleep but never calls it;
+// Rio imports no sleeps), so this is fidelity, not a prod behaviour change.
+static void GuestSleepUs(std::uint64_t us) {
+    if (!us) {
+        return;
+    }
+    struct timespec ts {};
+    ts.tv_sec = static_cast<time_t>(us / 1000000u);
+    ts.tv_nsec = static_cast<long>((us % 1000000u) * 1000u);
+    while (::nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
 // Cached env flag (perf): getenv() is a linear environ scan; per-malloc /
 // per-free / per-cond-wait calls must not pay it. All HARNESS_* setenv happen
 // once in the boot block before any guest runs (apphost.cpp) and nothing ever
@@ -2601,7 +2617,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(out.size()));
         return;
     }
-    // --- sleeps: real but capped, so delay loops can't hang bring-up ---
+    // --- sleeps: honest (PLAN item 8) --------------------------------------
     if (n == "nanosleep") {
         std::uint32_t sec = 0, nsec = 0;
         if (a0) {
@@ -2609,12 +2625,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::memcpy(&nsec, H(a0 + 4), 4);
         }
         std::uint64_t us = std::uint64_t(sec) * 1000000u + nsec / 1000u;
-        if (us > 5000u) {
-            us = 5000u;
-        }
-        if (us > 0) {
-            usleep(static_cast<useconds_t>(us));
-        }
+        GuestSleepUs(us);
         if (a1) {
             const std::uint32_t z = 0;
             std::memcpy(H(a1), &z, 4);
@@ -2625,12 +2636,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "usleep" || n == "sleep") {
         std::uint64_t us = (n == "sleep") ? std::uint64_t(a0) * 1000000u : a0;
-        if (us > 5000u) {
-            us = 5000u;
-        }
-        if (us > 0) {
-            usleep(static_cast<useconds_t>(us));
-        }
+        GuestSleepUs(us);
         Ret(regs, 0);
         return;
     }
@@ -4364,7 +4370,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-                if (op == 3) {  // SET_AND_WAIT: sleep till target, capped
+                if (op == 3) {  // SET_AND_WAIT: sleep till target (honest, item 8)
                     std::uint32_t gsec = 0, gnsec = 0;
                     if (CheckRange(a2, 8, false)) {
                         std::memcpy(&gsec, H(a2), 4);
@@ -4381,12 +4387,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     if (want > have) {
                         us = (std::uint64_t)(want - have) / 1000u;
                     }
-                    if (us > 5000u) {
-                        us = 5000u;  // same cap policy as nanosleep
-                    }
-                    if (us > 0) {
-                        usleep(static_cast<useconds_t>(us));
-                    }
+                    GuestSleepUs(us);
                     Ret(regs, 0);
                     return;
                 }

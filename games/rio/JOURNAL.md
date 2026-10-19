@@ -230,3 +230,25 @@ Installed lib md5 `ae1645e2e0ac9c2af19b1e5d24acff2d`. Prod run, 75 s:
 
 Space in the same install: 212 lines (unchanged), `[tapbeat]`=0, menu.
 No new tag without explicit confirmation.
+
+### Re-check: honest sleeps (2026-10-19) -- MEASURED
+
+The 5 ms clamp is gone from `nanosleep`, `usleep`/`sleep` and the
+`ANDROID_ALARM_SET_AND_WAIT` ioctl (the last one was mislabelled "clock_nanosleep"
+in the first audit; there is no such handler). One helper, `GuestSleepUs()`,
+blocks the calling thread for the full requested time, as bionic does. Dormant
+for Rio (it imports no sleeps), so this run is a control for the shared lib.
+
+Installed lib md5 `9dfa10872d0fd60806889f7c31901fa3`. Prod run, 75 s:
+
+| metric | before (`ae1645e2`) | after (`9dfa1087`) |
+|---|---|---|
+| log lines | 150 -> 153 | 150 -> 153 (unchanged) |
+| `[regio]` / stall | 58 | 60, no stalled window |
+| abort / `[mem] BAD` / `[guest] LOUD` | 0 / 0 / 0 | 0 / 0 / 0 |
+| process | alive, 59.5 % CPU | alive, 63.6 % CPU, RSS 33 MB |
+| screen | menu | menu (screenshot) |
+
+Space in the same install: 213 lines (`[regio]` 60, `glog` 61; the +1 vs 212 is
+the benign `[mutex] UNLOCK-FOREIGN` marker, which varies 4-5 per run), no stall,
+menu. No new tag without explicit confirmation.
