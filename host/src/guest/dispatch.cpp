@@ -5617,7 +5617,7 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
 }
 
 std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
-                                   std::uint32_t arg2, bool monotonic) {
+                                   std::uint32_t arg2, bool /*monotonic*/) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy") {
         if (n == "pthread_cond_init") {
@@ -5682,11 +5682,6 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
                 }
             }
         }
-        // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
-        // Otherwise bound unbounded waits like timedwait: a worker/main
-        // deadlock on a never-signaled cond (seen at loading: worker waits
-        // for main's processing, main polls for worker's message) hangs
-        // forever; spurious wakeups let predicates re-check instead.
         // TEMP-DIAG (rendezvous hunt): dump around cond+mutex (find the
         // predicate flag the waiter polls, e.g. Signal.cpp [r4+8]).
         {
@@ -5701,47 +5696,31 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
                 std::printf("\n");
             }
         }
-        // HARNESS_NOCAPWAIT=1 disables the cap (fidelity experiments).
-        // Otherwise bound unbounded waits like timedwait: a worker/main
-        // deadlock on a never-signaled cond (seen at loading: worker waits
-        // for main's processing, main polls for worker's message) hangs
-        // forever; spurious wakeups let predicates re-check instead.
-        if (!EnvOn("HARNESS_NOCAPWAIT")) {
-            struct timespec ts {};
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 5;
-            mutex_.unlock();
-            const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
-            mutex_.lock();
-            // TEMP-DIAG (cond triage): who waits/signals which cond.
-            {
-                static int cw = 0;
-                if (DiagOn() && cw < 10) {
-                    cw++;
-                    std::printf("[cond] wait c=%08x m=%08x t=%u -> %d\n", cond, arg1,
-                                GuestTid(), r);
-                }
-            }
-            // TEMP-EXP (HARNESS_SPURWAKE=1): report spurious success instead
-            // of ETIMEDOUT (POSIX-legal; predicates re-check). Probes whether
-            // the waiter proceeds (predicate already true) or re-waits.
-            if (r != 0 && EnvOn("HARNESS_SPURWAKE")) {
-                if (DiagOn()) {
-                    std::printf("[cond] spurwake c=%08x t=%u (was %d)\n", cond, GuestTid(), r);
-                }
-                return 0;
-            }
-            return static_cast<std::uint32_t>(r);
-        }
+        // Untimed wait: block until signalled, as bionic does. There used to be
+        // a 5 s cap here plus HARNESS_SPURWAKE, which turned the cap's ETIMEDOUT
+        // into a spurious success -- both are gone (PLAN.md backlog item 2).
+        // Rationale for the old cap ("a worker/main rendezvous on a never
+        // signalled cond hangs forever") was measured on the device: with the
+        // cap off (HARNESS_NOCAPWAIT=1, the pre-change opt-out) Space runs its
+        // frame path and its audio JNI for 75 s with zero spurwake events.
+        // A waiter that never gets its broadcast stays visible in the
+        // end-of-run [census] instead of being papered over here.
         mutex_.unlock();
         const int r = pthread_cond_wait(it->second, mit->second);
         mutex_.lock();
+        // TEMP-DIAG (cond triage): who waits/signals which cond.
+        {
+            static int cw = 0;
+            if (DiagOn() && cw < 10) {
+                cw++;
+                std::printf("[cond] wait c=%08x m=%08x t=%u -> %d\n", cond, arg1, GuestTid(), r);
+            }
+        }
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_cond_timedwait") {
         // Guest ABI: absolute timeout as 2x u32 (sec, nsec) at arg2 --
-        // NOT a 16B host timespec (over-read misparsed tv_sec/nsec and
-        // fired the absurd-cap spuriously).
+        // NOT a 16B host timespec (over-read misparsed tv_sec/nsec).
         std::uint32_t gsec = 0, gnsec = 0;
         if (CheckRange(arg2, 8, false)) {
             std::memcpy(&gsec, H(arg2), 4);
@@ -5750,18 +5729,13 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         struct timespec ts {};
         ts.tv_sec = (time_t)gsec;
         ts.tv_nsec = (long)gnsec;
-        // Cap absurd waits so missing signals surface instead of hanging forever.
-        // Compare against the MATCHING clock (monotonic timeouts are not realtime).
-        struct timespec now {};
-        clock_gettime(monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &now);
-        const std::uint64_t want =
-            std::uint64_t(ts.tv_sec) * 1000000000u + std::uint64_t(ts.tv_nsec);
-        const std::uint64_t have =
-            std::uint64_t(now.tv_sec) * 1000000000u + std::uint64_t(now.tv_nsec);
-        if (want > have + 5000000000u) {
-            ts.tv_sec = now.tv_sec + 5;
-            ts.tv_nsec = now.tv_nsec;
-        }
+        // The guest's own absolute deadline is honoured as-is. A 5 s clamp used
+        // to shorten anything further out ("cap absurd waits so missing signals
+        // surface"), which made ETIMEDOUT arrive earlier than the guest asked
+        // (PLAN.md backlog item 2). A timedwait cannot hang: it carries its own
+        // deadline. NOTE: the clock of the deadline is the guest's business --
+        // pthread_condattr_setclock is still ignored, so the (currently unused)
+        // _monotonic variant would compare against the wrong epoch.
         mutex_.unlock();
         const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
         mutex_.lock();

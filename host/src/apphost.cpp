@@ -1208,7 +1208,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
     // probes, the WATCHPC hook, the per-call/per-frame tracing and the
     // hot-path logs; with it off that whole layer is skipped (no logs, no
-    // per-call cost). RETSUCC, PROBE(fill), FASTMEM, SPURWAKE and REALGL are
+    // per-call cost). RETSUCC, PROBE(fill), FASTMEM and REALGL are
     // NOT diagnostics -- they change behaviour -- and stay unconditional.
     // See PLAN.md, batches A/B.
     const bool diag = DiagBootWanted(g_files);
@@ -1252,11 +1252,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
     // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
     if (diag) setenv("HARNESS_PROBE4", "c52ac", 1);
-    // POSIX-truth (2026-10-14, proven by worker abort): untimed
-    // cond_wait must never fail with ETIMEDOUT (game aborts on 110:
-    // audio loader died this way). Cap cycles as SPURIOUS success (0)
-    // so predicates re-check; true deadlocks stay visible in census.
-    setenv("HARNESS_SPURWAKE", "1", 1);
+    // (Removed 2026-10-19: HARNESS_SPURWAKE=1 capped cycles as spurious
+    // success for untimed cond_wait. The cap is gone and the wait now
+    // blocks like bionic; measured on device that behaviour is correct --
+    // see PLAN.md backlog item 2.)
     // Stuck-update forensics (2026-10-14): per-thread last import is
     // always tracked now (watchdog resolves the name at dump time).
     if (diag) setenv("HARNESS_LASTSVC", "1", 1);
@@ -1405,7 +1404,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // Behaviour crutch for THE PINNED IMAGE ONLY: the ",fill" suffix makes the
     // host write "{}" into that image's empty JSON SSO slot (guest VA 1a410c),
     // so its parser proceeds with defaults instead of throwing Unexpected EOF.
-    // A crutch, not a diagnostic (like RETSUCC/FASTMEM/SPURWAKE/REALGL) -- but
+    // A crutch, not a diagnostic (like RETSUCC/FASTMEM/REALGL) -- but
     // tied to one image's VA, so a different guest gets none: there that
     // address is arbitrary code or data.
     if (pinned) {

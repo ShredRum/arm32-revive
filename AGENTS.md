@@ -26,9 +26,14 @@
   the external bridge mutex. JIT: Dynarmic `all_safe_optimizations` by default
   (C1, measured ~-20% CPU vs no_optimizations); HARNESS_NOOPT=1 restores the old
   bring-up mode; HARNESS_SAFEOPTS is dead.
-- ALWAYS-ON BEHAVIOUR CRUTCHES (behaviour, NOT diagnostics; do not "clean"):
-  RETSUCC, SPURWAKE, REALGL, FASTMEM, and `HARNESS_PROBE=1a410c,fill` (writes
-  "{}" into the guest JSON SSO slot at 0x1A410C so the parser takes defaults).
+- ALWAYS-ON BEHAVIOUR CRUTCHES (behaviour, NOT diagnostics; do not "clean"
+  without a measurement first): RETSUCC, REALGL, FASTMEM, and
+  `HARNESS_PROBE=1a410c,fill` (writes "{}" into the guest JSON SSO slot at
+  0x1A410C so the parser takes defaults). SPURWAKE + the 5 s `cond_wait` cap
+  were in this list until 2026-10-19: measured as **not** load-bearing (with the
+  cap off Space runs its frame path and its audio JNI for 75 s, `spurwake=0`),
+  then removed -- untimed `pthread_cond_wait` now blocks like bionic. See
+  PLAN.md backlog item 2 and games/space/JOURNAL.md for the before/after.
 - BUILD (multi-game tree): `scripts/build-lib.sh` (arm64 `libabhost.so`) then
   `scripts/deploy.sh rio` (strip -> apktool b -> zipalign -> apksigner v1+v2+v3,
   local only; prints the device half). Tree `games/rio/work/apk_prod`, output
@@ -62,8 +67,9 @@
   dlmalloc-era truth; lives in gitignored work/, so its edits are not versioned).
 - DO NOT: patch the guest .so (read-only, sha256 checked); remove the
   CheckAccess/CheckRange contract (a wild guest pointer must become a clean halt,
-  never a host SIGSEGV); "clean up" RETSUCC/SPURWAKE (real fail-path crutches);
-  run parallel device sessions; bulk-edit without backup.
+  never a host SIGSEGV); "clean up" RETSUCC (a real fail-path crutch -- SPURWAKE
+  and the cond_wait cap WERE cleaned, 2026-10-19, after measuring that the cap
+  was not load-bearing); run parallel device sessions; bulk-edit without backup.
 - HISTORY: the level-1 investigation lives in the §58/§59 entries below, the
   dlmalloc/quarantine/D0 investigation in §130-§137, and the PthreadCreate
   stack-leak crash fix (F1) in §138. The old "Menu NOT reached" HANDOFF

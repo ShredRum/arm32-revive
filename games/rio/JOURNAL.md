@@ -134,3 +134,33 @@ Rio is the **pinned image** (its `LOUD build-id mismatch` line is absent, Space'
 is not), so `HARNESS_PROBE=1a410c,fill` is armed for it: 15 of the 168 remaining
 lines are that probe's dump. They belong to the `PROBE` crutch (PLAN.md backlog
 item 3) and must not be mistaken for a regression.
+
+### Re-check: the `cond_wait` cap + `HARNESS_SPURWAKE` removal (2026-10-19) -- MEASURED
+
+The change (PLAN.md backlog item 2): the untimed `pthread_cond_wait` no longer
+runs on a host `pthread_cond_timedwait(now+5 s)` whose `ETIMEDOUT` was turned
+into a spurious success -- it blocks until signalled, as bionic does; the 5 s
+clamp of a guest-supplied `pthread_cond_timedwait` deadline is gone too, and
+`HARNESS_SPURWAKE` / `HARNESS_NOCAPWAIT` no longer exist. Rationale, the
+pre-change measurement (the cap was **not** load-bearing) and Space's numbers:
+`../space/JOURNAL.md`.
+
+Installed lib md5 `76f2342b4d3b9dc19896b64c05c6dcb1` (checked inside the
+installed `base.apk`; it is the same `libabhost.so` both titles carry). Prod
+run, 75 s, no `files/abflags.txt`, sampled at 25 s and 75 s:
+
+| metric | before (`b8804206`, cap+SPURWAKE) | after (`76f2342b`, honest wait) |
+|---|---|---|
+| log lines | 168 -> 171 | 168 -> 171 |
+| `[regio]` | 60 | 59 (the 60th lands on the window boundary) |
+| abort / HEAPCORRUPT / `[mem] BAD` | 0 / 0 / 0 | 0 / 0 / 0 |
+| `[guest] LOUD` | 0 (pinned image) | 0 |
+| process | alive, 64.8 % CPU, RSS 40 MB | alive, 60.4 % CPU, RSS 45 MB |
+| tail | `[mutex] UNLOCK-FOREIGN` + `[unwind] LOUD nesting 513 deep` | identical |
+
+The same guest milestones are reached (`[regio] fwrite #58`, `fread #59/#60`;
+the `#N` counter is the guest's own file-call sequence, so its exact split
+differs run to run). The tail markers are pre-existing (see the section above),
+not a consequence of this change. Rio is behaviourally unchanged.
+
+No new tag without explicit confirmation.
