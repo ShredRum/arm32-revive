@@ -24,6 +24,22 @@ TREE="games/$GAME/work/apk_prod"
 UNS="games/$GAME/work/apk_unsigned.apk"
 OUT="games/$GAME/work/apk_signed.apk"
 ALIGNED="games/$GAME/work/apk_aligned.apk"
+# DIAG=1 builds a throwaway debuggable twin (run-as becomes possible) into
+# apk_diag.apk without touching the prod tree or artifacts.
+DIAG="${DIAG:-0}"
+if [ "$DIAG" = 1 ]; then
+    TREE="games/$GAME/work/apk_diag"
+    UNS="games/$GAME/work/apk_diag_unsigned.apk"
+    OUT="games/$GAME/work/apk_diag.apk"
+    ALIGNED="games/$GAME/work/apk_diag_aligned.apk"
+    rm -rf "$TREE"
+    cp -a "games/$GAME/work/apk_prod" "$TREE"
+    sed -i 's/android:debuggable="false"/android:debuggable="true"/' "$TREE/AndroidManifest.xml"
+    if ! grep -q 'android:debuggable="true"' "$TREE/AndroidManifest.xml"; then
+        echo "build-apk: diag: could not flip android:debuggable" >&2
+        exit 1
+    fi
+fi
 LIB_SRC=host/build-android/libabhost.so
 LIB_DST="$TREE/lib/arm64-v8a/libabhost.so"
 GUEST="$TREE/assets/guestlib/armeabi-v7a/$GUEST_LIB"

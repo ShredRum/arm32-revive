@@ -96,6 +96,44 @@ void Log(const char* fmt, ...) {
     __android_log_print(ANDROID_LOG_INFO, "abhost", "[apphost] %s", buf);
 }
 
+// First abnormal guest halt: the LOUD reason is printed to files/apphost.log
+// (stdout is redirected there), which is invisible in logcat and unreadable on
+// a non-debuggable install. Mirror the tail of that file into logcat exactly
+// once, so the trigger can be identified from a plain logcat dump.
+void DumpHaltTailOnce(const char* name, int hr) {
+    static std::atomic<bool> done{false};
+    if (done.exchange(true)) {
+        return;
+    }
+    const std::string path = g_files + "/apphost.log";
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) {
+        Log("[halt] no log file at %s", path.c_str());
+        return;
+    }
+    std::fseek(f, 0, SEEK_END);
+    const long sz = std::ftell(f);
+    const long kTail = 16384;
+    const long from = sz > kTail ? sz - kTail : 0;
+    std::fseek(f, from, SEEK_SET);
+    std::string buf(static_cast<std::size_t>(sz - from), '\0');
+    const std::size_t rd = std::fread(buf.data(), 1, buf.size(), f);
+    std::fclose(f);
+    buf.resize(rd);
+    Log("[halt] %s hr=%08x: apphost.log tail:", name, static_cast<unsigned>(hr));
+    std::size_t p = 0;
+    while (p < buf.size()) {
+        std::size_t e = buf.find('\n', p);
+        if (e == std::string::npos) {
+            e = buf.size();
+        }
+        if (e > p) {
+            Log("[halt] | %.*s", static_cast<int>(e - p), buf.data() + p);
+        }
+        p = e + 1;
+    }
+}
+
 // G2.2 (2026-10-18): a real thread that enters the guest keeps its 8 MB guest
 // stack + private Jit in g_threads forever (nothing erased them). A pthread TLS
 // destructor releases both when the real thread exits, so thread churn cannot
@@ -1005,7 +1043,9 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
 #endif
     if (hr != Dynarmic::HaltReason::UserDefined1) {
-        Log("%s ended hr=%d r0=%08x", name, (int)hr, regs[0]);
+        Log("%s ended hr=%d r0=%08x pc=%08x lr=%08x sp=%08x", name, (int)hr, regs[0],
+            regs[15], regs[14], regs[13]);
+        DumpHaltTailOnce(name, (int)hr);
     }
 #ifdef __ANDROID__
     // r0-polarity forensics: log EVERY nativeUpdate return (clean ones
