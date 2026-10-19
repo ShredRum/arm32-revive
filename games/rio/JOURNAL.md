@@ -208,4 +208,25 @@ lib; checked inside the installed `base.apk`). Prod run, 75 s, no abflags:
 
 Space ran as the control in the same install (it is not the pinned image, so it
 never had the probe): 212 lines before and after, `[probe]`=0, menu on screen.
+
+### Re-check: tapbeat JNI resolve gated (2026-10-19) -- MEASURED
+
+The input-driver scaffolding (PLAN.md item 6) resolved the genuine
+`MyInputHandler` through JNI on the first `nativeUpdate` even with the driver
+off: two `NewGlobalRef`, `GetObjectClass`, `GetFieldID`, `GetObjectField`,
+`WrapObject`, plus a `[tapbeat] handler mock=` line. It now runs only when
+`HARNESS_TAPBEAT` is set.
+
+Installed lib md5 `ae1645e2e0ac9c2af19b1e5d24acff2d`. Prod run, 75 s:
+
+| metric | before (`ac70bd93`) | after (`ae1645e2`) |
+|---|---|---|
+| log lines | 151 -> 154 | 150 -> **153** (the tapbeat line is gone) |
+| `[tapbeat]` / `[probe]` | 1 / 0 | 0 / 0 |
+| `[regio]` | 60 | 58 (guest's own call counter; 58-60 run to run) |
+| abort / `[mem] BAD` / `[guest] LOUD` | 0 / 0 / 0 | 0 / 0 / 0 |
+| process | alive, 65.7 % CPU | alive, 59.5 % CPU, RSS 38 MB |
+| screen | menu | menu (screenshot) |
+
+Space in the same install: 212 lines (unchanged), `[tapbeat]`=0, menu.
 No new tag without explicit confirmation.

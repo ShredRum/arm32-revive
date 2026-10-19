@@ -826,7 +826,12 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         // calls carry <6 words; updates are the beat domain anyway).
         static void* g_real_app = nullptr;
         static std::uint32_t g_handler_mock = 0;
-        if (lastw.empty() && std::strstr(name, "nativeUpdate")) {
+        // 2026-10-19 (PLAN item 6): the JNI resolve below exists only to give
+        // the synthetic driver a genuine MyInputHandler mock. The driver is off
+        // unless HARNESS_TAPBEAT is set, so in prod this did 2 NewGlobalRef +
+        // GetObjectClass/GetFieldID/GetObjectField on the first update for
+        // nothing (and printed `[tapbeat] handler mock=`). Gated on beat_on.
+        if (beat_on && lastw.empty() && std::strstr(name, "nativeUpdate")) {
             if (!g_real_app && thiz &&
                 abr::GuestCallbacks::g_real_env_hook) {
                 JNIEnv* re =
