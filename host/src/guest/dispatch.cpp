@@ -9721,11 +9721,14 @@ void GuestCallbacks::RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64
     }
 }
 void GuestCallbacks::SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_t) {
-    // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser (0x28A3DC)
-    // entry for the .../time endpoint only. Fills the response struct
-    // (status 200 + JSON body string) and resumes at the caller, skipping
-    // the real network (which always throws offline). Other endpoints fall
-    // through to the natural path.
+    // HARNESS_RETSUCC=1 (OPT-IN experiment, not armed by default since
+    // 2026-10-19): synthesize HTTP success at the raiser (0x28A3DC) entry for
+    // the .../time endpoint only. Fills the response struct (status 200 + JSON
+    // body string) and resumes at the caller, skipping the real network (which
+    // always throws offline). Other endpoints fall through to the natural path.
+    // It is a PROBE3 hook, so it needs HARNESS_DIAG too; measured on the current
+    // baseline this raiser is never translated, so the experiment is dead code
+    // in practice (PLAN.md backlog item 1).
     static int calls = 0;
     static int n = 0;
     ++calls;

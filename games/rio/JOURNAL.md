@@ -163,4 +163,23 @@ the `#N` counter is the guest's own file-call sequence, so its exact split
 differs run to run). The tail markers are pre-existing (see the section above),
 not a consequence of this change. Rio is behaviourally unchanged.
 
-No new tag without explicit confirmation.
+### Re-check: `HARNESS_RETSUCC` removal (2026-10-19) -- MEASURED
+
+The shipping `setenv("HARNESS_RETSUCC","1")` is gone (PLAN.md item 1). It was
+dead code: the injection hangs off the diag-only PROBE3 hook, and its target
+raiser never translated in any diag log. Rio's prod log loses exactly the false
+`RETSUCC re-armed (real fail path stalls)` line, and nothing else.
+
+Installed lib md5 `14c43eda5500250bfdb16aeb43a35180` (same lib in both titles;
+verified inside the installed `base.apk`). Prod run, 75 s, no abflags:
+
+| metric | before (`76f2342b`) | after (`14c43eda`) |
+|---|---|---|
+| log lines | 168 -> 171 | 167 -> 170 (-1, the RETSUCC line) |
+| `[regio]` | 59 | 60 |
+| abort / HEAPCORRUPT / `[mem] BAD` | 0 / 0 / 0 | 0 / 0 / 0 |
+| `[guest] LOUD` | 0 (pinned image) | 0 |
+| process | alive, 60.4 % CPU | alive, 63.1 % CPU, RSS 67 MB |
+| tail | `[mutex] UNLOCK-FOREIGN` + `[unwind] LOUD nesting 513 deep` | identical |
+
+Rio is behaviourally unchanged. No new tag without explicit confirmation.

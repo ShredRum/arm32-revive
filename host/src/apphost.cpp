@@ -1198,9 +1198,13 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::set_terminate(TerminateWitness);  // name escaping host exceptions instead of silent abort
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
-    // Cleanliness test FAILED (2026-10-14): real fail path stalls on
-    // Fox (no catch/delivery without canned success). RETSUCC re-armed.
-    setenv("HARNESS_RETSUCC", "1", 1);
+    // RETSUCC was re-armed unconditionally here (2026-10-14, "real fail path
+    // stalls on Fox"), but it never had a shipping effect: the injection is a
+    // PROBE3 hook, and PROBE3 is only armed under HARNESS_DIAG. Measured on the
+    // current baseline, the raiser it targets (guest VA 0x28a3dc) is never even
+    // translated -- no `[probe-emit] ... 0028a3dc` and no `[succ]` line in any
+    // diag run. So the crutch is inert; the lever is gone and the experiment
+    // stays opt-in (put HARNESS_RETSUCC=1 into files/abflags.txt with diag on).
     // The pinned-image probe (HARNESS_PROBE) is armed further down, once the
     // guest is loaded and we know whether it IS the pinned image: its target is
     // a guest VA of that one image.
@@ -1208,7 +1212,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
     // probes, the WATCHPC hook, the per-call/per-frame tracing and the
     // hot-path logs; with it off that whole layer is skipped (no logs, no
-    // per-call cost). RETSUCC, PROBE(fill), FASTMEM and REALGL are
+    // per-call cost). PROBE(fill), FASTMEM and REALGL are
     // NOT diagnostics -- they change behaviour -- and stay unconditional.
     // See PLAN.md, batches A/B.
     const bool diag = DiagBootWanted(g_files);
@@ -1330,7 +1334,6 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none");
-    Log("RETSUCC re-armed (real fail path stalls)");
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");
