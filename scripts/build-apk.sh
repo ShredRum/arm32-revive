@@ -78,6 +78,21 @@ echo "== stripping host lib =="
 llvm-strip "$LIB_SRC" -o "$LIB_DST"
 
 echo "== apktool b =="
+# Guest fingerprint: the packaging step writes the guest .so's SHA-256 next to
+# it, and the harness verifies it at start-up. The Seasons and Space images
+# carry no GNU build-id note, so the build-id check could never confirm their
+# identity -- this digest does, per title, at runtime.
+if [ -f "$GUEST" ]; then
+    GDIR="$(dirname "$GUEST")"
+    printf '%s\n' "$GUEST_SHA" > "$GDIR/guest.sha256"
+    # The harness reads it straight out of the APK, so it must be STORED:
+    # add its path (relative to the tree) to apktool's doNotCompress list.
+    GREL="${GUEST#$TREE/}"                 # e.g. assets/guestlib/armeabi-v7a/libX.so
+    GDIRREL="$(dirname "$GREL")"           # e.g. assets/guestlib/armeabi-v7a
+    sed -i "\|^[^-]*- *$GDIRREL/guest\.sha256$|d" "$TREE/apktool.yml"
+    sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/guest.sha256|" "$TREE/apktool.yml"
+    echo "guest fingerprint: $GUEST_SHA -> $GDIRREL/guest.sha256"
+fi
 java -jar "$APKTOOL" b -o "$UNS" "$TREE" >/dev/null
 
 # Drop any stale signatures from the tree/repack before aligning + signing.

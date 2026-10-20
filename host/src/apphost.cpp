@@ -38,6 +38,7 @@
 #include "guest/dispatch.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
+#include "guest/sha256.h"
 
 namespace abr {
 namespace {
@@ -1499,6 +1500,70 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         Log("FATAL: guest extract failed");
         return 0;
     }
+    // Guest identity: the packaging step wrote the guest .so's SHA-256 next
+    // to it inside the APK. Comparing it with the extracted image makes the
+    // identity of the running guest a RUNTIME fact. The GNU build-id note is
+    // missing from some titles' images (Seasons, Space), so for them this is
+    // the only identity check there is; the build-id note stays as a second,
+    // independent signal where the image has one.
+    bool guest_identity_ok = false;
+    {
+        const std::size_t slash = guest_entry.find_last_of('/');
+        const std::string digest_entry =
+            (slash == std::string::npos ? std::string() : guest_entry.substr(0, slash + 1)) +
+            "guest.sha256";
+        const std::string want_path = g_files + "/guest.sha256";
+        std::string want;
+        if (ZipExtractStored(g_apk, digest_entry, want_path)) {
+            FILE* wf = std::fopen(want_path.c_str(), "rb");
+            if (wf) {
+                char line[160] = {0};
+                if (std::fgets(line, sizeof(line), wf)) {
+                    want = line;
+                    while (!want.empty() && (want.back() == '\n' || want.back() == '\r' ||
+                                             want.back() == ' ' || want.back() == '\t')) {
+                        want.pop_back();
+                    }
+                }
+                std::fclose(wf);
+            }
+        }
+        std::string got;
+        FILE* gf = std::fopen(guest_path.c_str(), "rb");
+        if (gf) {
+            abr::Sha256 sh;
+            std::vector<std::uint8_t> buf(1 << 20);
+            std::size_t n;
+            while ((n = std::fread(buf.data(), 1, buf.size(), gf)) > 0) {
+                sh.Update(buf.data(), n);
+            }
+            std::fclose(gf);
+            std::uint8_t out[32];
+            sh.Final(out);
+            static const char* hex = "0123456789abcdef";
+            got.reserve(64);
+            for (int i = 0; i < 32; i++) {
+                got.push_back(hex[out[i] >> 4]);
+                got.push_back(hex[out[i] & 0x0f]);
+            }
+        }
+        std::string wlow;
+        for (char c : want) {
+            wlow.push_back(static_cast<char>(c >= 'A' && c <= 'F' ? c - 'A' + 'a' : c));
+        }
+        if (!want.empty() && !got.empty()) {
+            if (wlow == got) {
+                guest_identity_ok = true;
+                Log("[guest] sha256 OK %s", got.c_str());
+            } else {
+                Log("[guest] LOUD guest sha256 mismatch: apk says %s, image is %s -- refusing to run",
+                    wlow.c_str(), got.c_str());
+                return 0;
+            }
+        } else {
+            Log("[guest] no guest fingerprint in the apk (older packaging) -- identity unverified");
+        }
+    }
     // First-launch seeds (root-free fresh installs): extract only what is
     // missing, never overwrite user state (registry keeps tokens/progress).
     // Whatever the title ships under assets/seeds/ is what it needs; a title
@@ -1537,7 +1602,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     }
     Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
-    CheckGuestBuildId(*g_mod);
+    CheckGuestBuildId(*g_mod, guest_identity_ok);
     const bool pinned = IsPinnedGuest(*g_mod);
     // The pinned-image JSON SSO fill ("{}" at guest VA 1a410c) used to be
     // armed here as HARNESS_PROBE=1a410c,fill. Measured on 2026-10-19 (lib

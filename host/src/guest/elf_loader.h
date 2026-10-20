@@ -121,9 +121,20 @@ inline bool IsPinnedGuest(const LoadedModule& mod) {
 // One LOUD line if the loaded module is not the pinned image (absent, empty or
 // different build-id). Never fatal: the host still runs, but every pinned VA is
 // suspect, so the caller must know.
-inline void CheckGuestBuildId(const LoadedModule& mod) {
+//
+// identity_verified: the caller independently confirmed the image against the
+// SHA-256 the packaging step put in the APK (see AppHost). Then the image IS
+// the expected one for this title and the missing/different build-id note is
+// a property of that image, not an anomaly -- so it is reported plainly
+// instead of LOUD.
+inline void CheckGuestBuildId(const LoadedModule& mod, bool identity_verified = false) {
     const std::vector<std::uint8_t>& pin = PinnedGuestBuildId();
     if (IsPinnedGuest(mod)) {
+        return;
+    }
+    if (identity_verified) {
+        std::printf("[guest] image fingerprint verified; this image has no matching GNU build-id note "
+                    "(host pins VAs/hooks for the Rio image, which do not apply here)\n");
         return;
     }
     std::printf("[guest] LOUD build-id mismatch -- host pins VAs/hooks for the known image\n");

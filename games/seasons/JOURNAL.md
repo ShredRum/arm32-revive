@@ -640,3 +640,51 @@ the before/after code). The patch review returns `escalate` with correctness
 1.57 (confidence 0.35), spec_match 1.85 (0.78), test_gap 1.31 (0.43),
 blast_radius 1.95 (0.94) -- the reviewer does not independently confirm the
 ABI reasoning from the diff alone; the reasoning is spelled out above.
+
+### 2026-10-21 — per-title guest identity: SHA-256 pin instead of the build-id note
+
+The `LOUD build-id mismatch` on Seasons and Space was not a real mismatch:
+their images carry **no GNU build-id note** at all (only `NT_GNU_GOLD_VERSION`),
+so the build-id check could never confirm anything for them, and the host's pin
+is Rio's image. The consequence was that those two titles had **no runtime
+identity check whatsoever** -- their image was only pinned at build time
+(`build-apk.sh` verifies the guest .so's sha256 against `profile.toml`).
+
+Now the identity is checked at runtime, per title:
+
+- `scripts/build-apk.sh` writes the guest .so's SHA-256 (the value the profile
+  already pins, and which the same script already verifies against the tree)
+  into the APK next to the library, as
+  `assets/guestlib/<abi>/guest.sha256`, and adds it to apktool's
+  `doNotCompress` list so the harness can read it straight out of the APK.
+- `host/src/guest/sha256.h`: a compact SHA-256 (FIPS 180-4) for the check.
+  Verified against `sha256sum` on the 8.5 MB guest .so (identical digest) and
+  against the three published test vectors (`"abc"`, the empty string, the
+  56-byte string) -- all match.
+- `host/src/apphost.cpp`: after extracting the guest, the harness compares
+  the APK's digest with the digest of the extracted image. Match -> it logs
+  `[guest] sha256 OK <digest>`; mismatch -> it logs
+  `[guest] LOUD guest sha256 mismatch: ... -- refusing to run` and does not
+  start the guest. A missing digest (APK packaged before this change) is
+  reported as "identity unverified" and the game still runs.
+- `CheckGuestBuildId(mod, identity_verified)`: when the fingerprint matched,
+  the missing/different build-id note is a property of that image, not an
+  anomaly, so it is reported plainly instead of LOUD. `IsPinnedGuest()` is
+  untouched, so Rio's build-id still gates the Rio-specific init-stub parking
+  exactly as before (Rio's image carries the pinned build-id and still passes
+  silently).
+
+Device verification:
+
+- good path, all three titles: `[guest] sha256 OK 980fad19...` (Rio),
+  `8183b73d...` (Seasons), `cc11a1e9...` (Space); the build-id LOUD is gone;
+  every death.log is 0 B; Rio, Seasons and Space all boot and play.
+- refusal path: a build with a deliberately wrong digest in the APK produced
+  `[guest] LOUD guest sha256 mismatch: apk says 0000...0000, image is
+  8183b73d... -- refusing to run` and the guest did not start (verified on the
+  device, then the correct APK was rebuilt and reinstalled).
+
+Digest values: Rio `980fad194cc6aefa56b4860965cefcf1de83dbb84c4d06a56c219327fe06486b`
+(the same value the build-id pin's comment already names), Seasons
+`8183b73d9e2873e0bd3c661acbfef7e6eeef40c3403916e98830f97a9e239baf`, Space
+`cc11a1e9d5d18cc04cd57a08802f03f2e5a5cd869f0e056d8ba92e695fb6b1ce`.
