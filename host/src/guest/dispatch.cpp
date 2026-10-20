@@ -2002,8 +2002,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 2;  // first vararg: r2
         std::uint32_t stack = regs[13];
+        // vsscanf(str, fmt, va_list): the va_list is an 8-byte struct
+        // {void *area} that AAPCS32 passes in MEMORY (a composite type
+        // larger than 4 bytes goes to the stack), so the callee finds it at
+        // its entry SP -- which is the SP we see here, because the guest
+        // reaches us through a PLT stub that does not touch SP. The area
+        // holds the variadic arguments back to back: 4-byte slots, and an
+        // 8-byte slot is 8-byte aligned (clang's ARM32 va_start layout: the
+        // callee saves r1-r3 and the caller's stack arguments follow
+        // contiguously). Treating vsscanf as sscanf -- as this did -- took
+        // the va_list pointer itself as the first variadic argument.
+        const bool via_va = (n == "vsscanf");
+        std::uint32_t va_area = 0;
+        if (via_va) {
+            if (!CheckRange(stack, 4, false)) {
+                goto bad_ptr;
+            }
+            std::memcpy(&va_area, H(stack), 4);
+        }
         auto next_ptr = [&]() -> std::uint32_t {
             std::uint32_t v = 0;
+            if (via_va) {
+                if (CheckRange(va_area, 4, false)) {
+                    std::memcpy(&v, H(va_area), 4);
+                }
+                va_area += 4;
+                return v;
+            }
             if (ai < 4) {
                 v = gargs[ai++];
             } else {
@@ -2628,7 +2653,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "__android_log_print") {
         // Expand guest printf-style args (ARM APCS: r0-r3 then stack) so the
         // game's own diagnostics (e.g. "Parsing JSON failed! Reason: ...")
-        // become visible. Supports %s %d %i %u %x %X %p %c %% (+l ignored).
+        // become visible. Supports %s %d %i %u %x %X %p %c %f %e %g %% (+l
+        // ignored). A double arrives in r0:r1 (low word first) and takes an
+        // even-numbered register pair, so it is read with the same rule the
+        // printf family uses (see ExpandPrintf::next64).
         const std::string fmt(GuestStr(a2));  // copy: later GuestStr calls reuse scratch
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 3;  // next arg: r3 first (a0-a2 consumed: prio,tag,fmt)
@@ -2659,6 +2687,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 return v;
             };
+            // Double argument: an even-numbered register pair (r0:r1,
+            // r2:r3, ...), else an 8-byte aligned stack slot.
+            auto next_double = [&]() -> double {
+                double d = 0;
+                if (ai < 4) {
+                    const int idx = (ai + 1) & ~1;
+                    if (idx < 4) {
+                        ai = static_cast<std::uint32_t>(idx + 2);
+                        std::uint32_t w[2] = {gargs[idx], gargs[idx + 1]};
+                        std::memcpy(&d, w, 8);
+                        return d;
+                    }
+                }
+                stack = (stack + 7u) & ~7u;
+                if (CheckRange(stack, 8, false)) {
+                    std::memcpy(&d, H(stack), 8);
+                }
+                stack += 8;
+                return d;
+            };
             char tmp[64];
             switch (*p) {
             case 's': {
@@ -2684,7 +2732,24 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             case 'c':
                 out += (char)(next_arg() & 0xFF);
                 break;
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G': {
+                // Was missing: the conversion fell into the default branch,
+                // which neither printed the value NOR consumed the argument,
+                // so every later argument was read from the wrong place.
+                const double d = next_double();
+                std::snprintf(tmp, sizeof(tmp), "%g", d);
+                out += tmp;
+                break;
+            }
             default:
+                // Consume the argument anyway: leaving it in place shifted
+                // every following argument by one slot.
+                next_arg();
                 out += '%';
                 out += *p ? *p : '%';
                 break;

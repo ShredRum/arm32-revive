@@ -575,3 +575,68 @@ for each of them: `Tag_FP_arch: VFPv3`, `Tag_ABI_HardFP_use: Deprecated`
 `Tag_ABI_VFP_args`. All three import the same eight math functions
 (sqrt, atan, sin, cos, floor, fmod, pow, tan), so both the O(1) dispatch and
 the guest-side sqrt thunk apply to each.
+
+### 2026-10-20 (night) — the four remaining harness defects from the audit, fixed
+
+The audit had flagged four defects in the shared host code that are NOT on the
+gameplay path. Measured import lists of the three guests (objdump -T) decide
+who is actually affected:
+
+    seasons: acos __android_log_print asin atan atan2 ceil cos cosh exp floor
+             fmod frexp ldexp log10 modf pow rint sin sinh sqrt tan tanh
+    space:   (same set as seasons)
+    rio:     ... + log1p, scalbnl, remquo, remainder, vsscanf, cbrt, exp2,
+             expm1, hypot, lgamma, nearbyint, tgamma, acosh, asinh, atanh
+
+So `fma` is imported by nobody; `log1p`/`scalbnl`/`remquo`/`vsscanf` only by
+Rio (and `vsscanf` has 0 call sites even there -- the symbol is a leftover).
+
+Fixes (host-side; the guest .so is untouched):
+
+1. `fma` read its third double from `r2:r3`, i.e. the SECOND argument again
+   (`fma(x,y,y)`). AAPCS32 gives a double-word argument an EVEN-numbered
+   register pair, so the third double of `fma(double,double,double)` is in
+   `r4:r5`. Now read from `r4:r5`.
+2. `remquo` wrote the `int *quo` through `r2` -- the low word of the second
+   double, i.e. an unmapped guest address, so the call hit the harness'
+   "BAD guest pointer" halt. The third argument is in `r4`; now written there,
+   which also stops the second double from being clobbered.
+3. `log1p` and `scalbnl` were not implemented at all: they fell through to
+   the generic import tail (`Ret(regs, 0)`), which returns the double 0.0 and
+   prints nothing outside the diagnostic layer. Both are now computed by the
+   host libm (`log1p(x)`, and `scalbn` for the long-double variant, which is
+   the same on ARM32).
+4. `__android_log_print` had no `%f/%e/%g` case, and its `default` branch did
+   not consume the argument -- so a float conversion left the double in the
+   argument stream and EVERY later argument was read one slot too early. It
+   now formats the double (even-numbered register pair, else an 8-byte
+   aligned stack slot -- the same rule `ExpandPrintf::next64` uses) and
+   consumes the argument in the `default` branch. This handler only formats
+   the guest's own log text, so it never affected game data.
+5. `vsscanf` was handled as `sscanf`, i.e. the va_list pointer itself was
+   taken as the first variadic argument. It now reads the arguments from the
+   va_list area. The layout was taken from the compiler, not assumed: a test
+   compiled with the same NDK the guest was built with disassembles to
+   `str r0, [sp, #0x14]` (the va_list holds ONE pointer to the argument
+   area), a 4-byte `va_arg` reading at the pointer and advancing it by 4, and
+   an 8-byte `va_arg` aligning the pointer to 8, reading, and advancing by 8.
+   The struct is 8 bytes, so AAPCS32 passes it in memory, i.e. on the stack at
+   the callee's entry SP -- the SP the import sees, because the guest reaches
+   the import through a PLT stub that does not touch SP.
+
+Device verification (prod APKs, diagnostics off, all three on the same host
+library, installed stripped `libabhost.so` md5
+`3211191fb276a9f73ada14e7a5921f77`):
+
+| title | apk md5 | death.log | log | screen |
+|---|---|---|---|---|
+| Rio | `b286375b8e2133c68ff16f69f5637ca7` | 0 B | no LOUD/ERROR/STUCK | in a level (score 8180) |
+| Seasons | `4bde731cfe1d1cddc55d210b3e9ab905` | 0 B | only the known build-id LOUD | in a level (score 22870) |
+| Space | `bd48b37238012f024fe8f3654acd9c2f` | 0 B | only the known build-id LOUD | in a level (score 18450) |
+
+TypeSafe Jev gate on this diff: 6/6 claims verified (0 contradicted,
+0 unsupported; the two that first came back unsupported were re-verified with
+the before/after code). The patch review returns `escalate` with correctness
+1.57 (confidence 0.35), spec_match 1.85 (0.78), test_gap 1.31 (0.43),
+blast_radius 1.95 (0.94) -- the reviewer does not independently confirm the
+ABI reasoning from the diff alone; the reasoning is spelled out above.

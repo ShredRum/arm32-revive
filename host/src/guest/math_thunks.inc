@@ -124,7 +124,7 @@
     // double -> double
     if (n == "acos" || n == "asin" || n == "atan" || n == "cbrt" || n == "ceil" || n == "cos" ||
         n == "cosh" || n == "erf" || n == "erfc" || n == "exp" || n == "exp2" || n == "expm1" ||
-        n == "floor" || n == "log" || n == "log10" || n == "log2" || n == "rint" ||
+        n == "floor" || n == "log" || n == "log10" || n == "log2" || n == "log1p" || n == "rint" ||
         n == "nearbyint" || n == "round" || n == "trunc" || n == "sin" || n == "sinh" ||
         n == "sqrt" || n == "tan" || n == "tanh" || n == "tgamma" || n == "lgamma" ||
         n == "acosh" || n == "asinh" || n == "atanh") {
@@ -161,6 +161,10 @@
             r = log10(xd);
         } else if (n == "log2") {
             r = log2(xd);
+        } else if (n == "log1p") {
+            // Was missing: the import fell through to the generic tail and
+            // silently returned 0.0 instead of log(1+x) (Rio imports it).
+            r = log1p(xd);
         } else if (n == "rint" || n == "nearbyint") {
             r = rint(xd);
         } else if (n == "round") {
@@ -242,7 +246,11 @@
         } else if (n == "remainder") {
             r = remainder(xd, yd);
         } else {
-            r = fma(xd, yd, f64(regs[2], regs[3]));
+            // AAPCS32: a double-word argument takes an EVEN-numbered register
+            // pair. fma takes three doubles, so the third one follows r2:r3 in
+            // the next even pair, r4:r5 -- reading it from r2:r3 (as this did)
+            // silently used the SECOND argument as the addend.
+            r = fma(xd, yd, f64(regs[4], regs[5]));
         }
         ret64(r);
         return;
@@ -304,7 +312,9 @@
         return;
     }
     // double,int -> double
-    if (n == "ldexp" || n == "scalbn" || n == "scalbln") {
+    if (n == "ldexp" || n == "scalbn" || n == "scalbln" || n == "scalbnl") {
+        // scalbnl (long double variant) is the same on ARM32: long double ==
+        // double. It was missing and silently returned 0.0 (Rio imports it).
         ret64(ldexp(xd, static_cast<int>(a2)));
         return;
     }
@@ -378,23 +388,28 @@
         return;
     }
     if (n == "remquo" || n == "remquof") {
+        // AAPCS32: the third argument (int *quo) follows the two doubles
+        // (r0:r1 and r2:r3) in the next core register, r4. Reading it from
+        // r2 (as this did) pointed at the low word of the second double --
+        // an unmapped guest address, i.e. a loud "BAD guest pointer" halt.
+        const std::uint32_t qp = regs[4];
         if (n == "remquo") {
-            if (!CheckRange(a2, 4, true)) {
+            if (!CheckRange(qp, 4, true)) {
                 goto bad_ptr;
             }
             int q = 0;
             double r = remquo(xd, yd, &q);
             std::uint32_t qu = static_cast<std::uint32_t>(q);
-            std::memcpy(H(a2), &qu, 4);
+            std::memcpy(H(qp), &qu, 4);
             ret64(r);
         } else {
-            if (!CheckRange(a2, 4, true)) {
+            if (!CheckRange(qp, 4, true)) {
                 goto bad_ptr;
             }
             int q = 0;
             float r = remquof(x, y, &q);
             std::uint32_t qu = static_cast<std::uint32_t>(q);
-            std::memcpy(H(a2), &qu, 4);
+            std::memcpy(H(qp), &qu, 4);
             Ret(regs, b32(r));
         }
         return;
