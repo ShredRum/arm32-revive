@@ -395,6 +395,13 @@ std::string ImportNameAt(std::uint32_t pc) {
     if (idx >= 0 && idx < static_cast<std::int64_t>(g_mod->imports.size())) {
         return g_mod->imports[idx].name;
     }
+    // Guest-side VFP thunks (sqrt) live outside the 4-byte slot area; find the
+    // import by the address the guest actually branches to.
+    for (const abr::Import& im : g_mod->imports) {
+        if (im.call_va != 0 && im.call_va == pc) {
+            return im.name;
+        }
+    }
     return {};
 }
 

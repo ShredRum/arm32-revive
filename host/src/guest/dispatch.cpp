@@ -1461,6 +1461,64 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
     return out;
 }
 
+// Fast path for the math imports a guest calls in tight loops.
+//
+// The identity was resolved once at load time (Import::fast_math), so a call
+// costs one switch instead of walking the ~200 name comparisons in
+// CallImport. That chain used to dominate the call: Seasons' boot ran a
+// guest-side sort whose comparator called sqrt millions of times, and the
+// name lookup cost more than the libm call itself.
+//
+// The values and the softfp convention are exactly the ones
+// math_thunks.inc uses for the same functions: the double arrives in
+// r0:r1 (low word first) and the result leaves in r0:r1.
+void Runtime::CallFastMath(std::uint8_t id, Regs& regs, std::uint32_t a0, std::uint32_t a1,
+                           std::uint32_t a2, std::uint32_t a3) {
+    auto f64_of = [](std::uint32_t lo, std::uint32_t hi) {
+        double v = 0;
+        std::uint32_t w[2] = {lo, hi};
+        std::memcpy(&v, w, 8);
+        return v;
+    };
+    auto ret64 = [&](double v) {
+        std::uint32_t w[2] = {0, 0};
+        std::memcpy(w, &v, 8);
+        Ret(regs, w[0], w[1]);
+    };
+    const double xd = f64_of(a0, a1);
+    const double yd = f64_of(a2, a3);
+    double r = 0;
+    switch (static_cast<FastMath>(id)) {
+    case FastMath::Sqrt:
+        r = sqrt(xd);
+        break;
+    case FastMath::Atan:
+        r = atan(xd);
+        break;
+    case FastMath::Sin:
+        r = sin(xd);
+        break;
+    case FastMath::Cos:
+        r = cos(xd);
+        break;
+    case FastMath::Floor:
+        r = floor(xd);
+        break;
+    case FastMath::Fmod:
+        r = fmod(xd, yd);
+        break;
+    case FastMath::Pow:
+        r = pow(xd, yd);
+        break;
+    case FastMath::Tan:
+        r = tan(xd);
+        break;
+    default:
+        return;  // not a fast-math id: the caller falls back to the chain
+    }
+    ret64(r);
+}
+
 void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
@@ -1495,6 +1553,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             seen_imports.push_back(n);
             std::printf("[import] first call: %s\n", n.c_str());
         }
+    }
+
+    // Fast path first (after the diagnostic bookkeeping above, so the
+    // "first call" audit still sees these imports): the math functions the
+    // guest hammers in loops are dispatched by their load-time id instead of
+    // the import-name chain below.
+    if (imp.fast_math != 0) {
+        CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
+        return;
     }
 
     // --- memory management ---

@@ -342,6 +342,15 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         return fail("tramp map failed");
     }
     std::uint32_t next_tramp = kTrampBase;
+    // Guest-side VFP thunks live in the upper part of the trampoline page so
+    // the 4-byte svc slots keep their layout (the STUCK diagnostics map a pc
+    // in the slot area back to an import name by slot arithmetic).
+    std::uint32_t next_vfp_thunk = kTrampBase + kTrampSize - 0x1000;
+    // vmov d0,r0,r1 ; vsqrt.f64 d0,d0 ; vmov r0,r1,d0 ; bx lr
+    static const std::uint8_t kFastSqrtThunk[16] = {
+        0x10, 0x0b, 0x41, 0xec, 0xc0, 0x0b, 0xb1, 0xee,
+        0x10, 0x0b, 0x51, 0xec, 0x1e, 0xff, 0x2f, 0xe1,
+    };
     auto emit_tramp = [&](std::uint32_t swi) -> std::uint32_t {
         const std::uint32_t va = next_tramp;
         next_tramp += 4;
@@ -366,7 +375,31 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         Import imp;
         imp.name = name;
         imp.is_function = is_func;
+        imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
         imp.tramp_va = emit_tramp(idx + 1);  // swi = idx+1
+        imp.call_va = imp.tramp_va;
+        if (name == "sqrt") {
+            // Guest-side VFP thunk: the call is answered by the guest's own
+            // ARM32 code (vsqrt.f64), so it never leaves the JIT -- no SVC, no
+            // host libm, no import dispatch at all. Seasons' boot ran a sort
+            // whose comparator called sqrt millions of times; every one of
+            // those paid a full host round trip.
+            //
+            // The bytes are the NDK's own codegen for `sqrt(double)` under
+            // -mfloat-abi=softfp (assembled, not hand-encoded):
+            //   ec410b10  vmov   d0, r0, r1   ; d0 = the double (r0 = low word)
+            //   eeb10bc0  vsqrt.f64 d0, d0
+            //   ec510b10  vmov   r0, r1, d0   ; r0:r1 = the result
+            //   e12fff1e  bx     lr
+            // Same softfp convention as the host path (double in r0:r1, low
+            // word first) and IEEE-correctly rounded, like the native device's
+            // own VFP sqrt. d0 is caller-saved in the base PCS, so clobbering
+            // it is safe.
+            const std::uint32_t va = next_vfp_thunk;
+            next_vfp_thunk += sizeof(kFastSqrtThunk);
+            std::memcpy(mem_.host(va), kFastSqrtThunk, sizeof(kFastSqrtThunk));
+            imp.call_va = va;
+        }
         out.imports.push_back(std::move(imp));
         import_index.emplace(name, idx);
         return idx;
@@ -411,7 +444,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                     return true;
                 }
                 const std::uint32_t idx = get_import(name, true);
-                return write32(r_off, out.imports[idx].tramp_va);
+                return write32(r_off, out.imports[idx].call_va);
             }
             case kAbs32: {
                 Elf32_Sym sym;
@@ -430,7 +463,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                 }
                 if (ELF32_ST_TYPE(sym.st_info) == STT_FUNC) {
                     const std::uint32_t idx = get_import(name, true);
-                    return write32(r_off, cur + out.imports[idx].tramp_va);
+                    return write32(r_off, cur + out.imports[idx].call_va);
                 }
                 const std::uint32_t idx = get_import(name, false);
                 // Data object address unknown yet (dispatcher assigns guest
@@ -537,6 +570,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     if (next_tramp > kTrampBase + kTrampSize) {
         return fail("tramp page overflow");
     }
+    // The guest-side VFP thunks live in the top of the page; the 4-byte svc
+    // slots must not reach them (a guest with thousands of imports would).
+    if (next_tramp > next_vfp_thunk) {
+        return fail("tramp page overflow: svc slots reached the VFP thunk area");
+    }
 
     if (!mem_.Protect(kTrampBase, kTrampSize, PROT_READ | PROT_EXEC)) {
         return fail("tramp protect failed");
@@ -576,6 +614,9 @@ bool ElfLoader::ResolveData(LoadedModule& mod, std::uint32_t import_idx, std::ui
         std::memcpy(mem_.host(pd.loc_va), &v, 4);
     }
     mod.imports[import_idx].tramp_va = guest_addr;
+    // Data imports use the slot as their guest address, so call_va must
+    // follow it (call_va is "the address the guest branches to").
+    mod.imports[import_idx].call_va = guest_addr;
     return true;
 }
 

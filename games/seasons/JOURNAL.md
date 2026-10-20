@@ -469,3 +469,109 @@ Tooling note: the host library's `.bss` layout moved with this build
 harness rebuild, and the `HARNESS_WATCHPC` counter reset trick must use the
 current offset (and the current `libabhost.so` base, which changes when the
 APK is reinstalled).
+
+## 2026-10-20 (night) — boot speed: import dispatch (A) + guest-side VFP sqrt (B)
+
+Measured cause of the slow boot (prod log, before): one `nativeUpdate` call
+blocked **33.7 s** ("STUCK update #9"); the STUCK sampler put 1526 of 2000
+samples inside the *sqrt* import trampoline, with `lr=004cc06c` (a guest-side
+sort whose comparator calls sqrt).
+
+Why the call was so expensive: `Runtime::CallImport` resolved every import
+by walking a chain of ~194 `n == "..."` string comparisons, and the math
+block sits at the very END of that chain (`math_thunks.inc` was included at
+line 5087). One `sqrt` cost ~209 string compares -- more than the libm call
+itself. The guest imports exactly fmod, cos, sin, floor, sqrt, pow, atan, tan.
+
+Fix A (host, behaviour-preserving): the identity of those math imports is
+resolved ONCE at load time (`Import::fast_math`, `FastMathForName`), and
+`Runtime::CallFastMath` dispatches them with a switch. Same libm calls, same
+softfp convention (double in r0:r1, low word first) as `math_thunks.inc`.
+
+Fix B (host, no guest patch): the guest's `sqrt` import is answered by
+**guest-side ARM32 code** instead of an SVC into the host -- a 16-byte thunk
+in the trampoline page:
+
+    ec410b10  vmov   d0, r0, r1     ; d0 = the double (r0 = low word)
+    eeb10bc0  vsqrt.f64 d0, d0
+    ec510b10  vmov   r0, r1, d0     ; r0:r1 = the result
+    e12fff1e  bx     lr
+
+The bytes are the NDK's own codegen for `sqrt(double)` under
+`-mfloat-abi=softfp` (assembled with the same NDK that built the guest, then
+disassembled back to check the operand order -- it is the toolchain's
+convention, not a guess). The call now never leaves the JIT: no SVC, no host
+libm, no import dispatch. `Import::call_va` is the address the guest
+branches to (== `tramp_va` unless a VFP thunk is used); the 4-byte svc slots
+keep their layout so the STUCK diagnostics still map a pc to an import name.
+
+Evidence after A+B (diag build, HARNESS_DIAG=1):
+- the log has **no** `STUCK update` line at all; the largest gap between
+  nativeUpdate stamps is 17.3 s and is 244 normal frames (~70 ms each);
+- **zero** host-side sqrt calls (`[call] ... sqrt(` and `[import] first call:
+  sqrt` -> 0 hits) -- the VFP thunk is the path actually taken;
+- the other math imports still go to the host, now through the O(1) dispatch;
+- the user reports the load is visibly faster.
+
+Robustness guards added: the svc slots may not grow into the VFP thunk area
+(load fails loudly instead of overlapping), and `ResolveData` keeps
+`call_va` in sync for data imports.
+
+Prod build with A+B: `games/seasons/work/apk_signed.apk`
+md5 `550b3195c1abc278c33218add0c0d599`, installed stripped
+`libabhost.so` md5 `19de988ed91ab4e5ab5ca16b52c96027`.
+
+Note: every harness rebuild moves the host lib's `.bss`, so the read-only
+device tools hardcode `G_MEM` (currently `0x431dc8`) and must be re-synced;
+the `HARNESS_WATCHPC` counter-reset trick needs the current offset and the
+current `libabhost.so` base (it changes when the APK is reinstalled).
+
+### 2026-10-20 (night) — A+B verified: level numbers are bit-identical to the JSON
+
+Regression check on the level the user loaded ("Hammier Things" #3 =
+`Tutorial_bomb`, from the decrypted `episodesLatest.json`: levels =
+Tutorial_red, Tutorial_terence, Tutorial_bomb, ...). The level JSON was
+decrypted from the APK (AES-256-CBC + LZMA) and compared field by field
+with the live guest Lua state:
+
+| field | JSON | live Lua |
+|---|---|---|
+| BoomBoxSpawnRect top/right/left/bottom | -75.6951 / 113.45 / 34.2515 / -11.4584 | identical |
+| castleCameraData.iphone sx / px / py | 0.316265 / 908.021 / -754.826 | identical |
+| castleCameraData.iphone left/right/top/bottom | -609.694 / 2425.74 / -1766.64 / 256.984 | identical |
+| castleCameraData.iphone screen | 960x640 | identical |
+| castleCameraData.ipad sx / px / py | 0.432764 / 1203.34 / -828.318 | identical |
+| castleCameraData.ipad left/right/top/bottom | 20.2469 / 2386.43 / -1715.64 / 59.0017 | identical |
+| castleCameraData.ipad screen | 1024x768 | identical |
+
+`castleCameraData.android` is absent from this level's JSON; the live value
+(sx=0.5336972, px=908.021, py=-754.826, 2248x1080) is the game's
+runtime-synthesized android profile and is finite. On the pre-fix build the
+same fields were 0 / inf / -0 / nan.
+
+TypeSafe Jev gate on the A+B diff with that evidence: 6/6 claims verified
+(0 contradicted, 0 unsupported; 4 auto, 2 review). The patch review itself
+returns `escalate` with correctness 1.64 (confidence 0.47) and test_gap 1.05
+(confidence 0.59) — the residual concern is the **blast radius**: the fast
+path and the VFP thunk live in the shared harness, so Rio/Space inherit them
+too (they are also ARM32 softfp, so the thunk is valid for them, but they
+have not been re-run since this change).
+
+### 2026-10-20 (night) — blast radius closed: Rio and Space re-run on the same lib
+
+A+B live in the shared harness, so every title inherits them. All three were
+built from the same host library and verified on the device:
+
+| title | APK | installed stripped `libabhost.so` | log | death.log | screen |
+|---|---|---|---|---|---|
+| Rio | `games/rio/work/apk_signed.apk` md5 `8fd50a01b60c634729723e0d42a83cc8` | `19de988ed91ab4e5ab5ca16b52c96027` | no LOUD/ERROR at all (Rio's image carries the pinned build-id) | 0 B | level select, played by the user |
+| Space | `games/space/work/apk_signed.apk` md5 `fbf1b8885187c035e3a9ea69ab83d850` | `19de988ed91ab4e5ab5ca16b52c96027` | only the known `LOUD build-id mismatch` (Space's image has no build-id note, like Seasons) | 0 B | main menu renders |
+| Seasons | `games/seasons/work/apk_signed.apk` md5 `550b3195c1abc278c33218add0c0d599` | `19de988ed91ab4e5ab5ca16b52c96027` | clean | 0 B | level 3, numbers bit-identical to the JSON |
+
+All three guests are the same ABI, which is what makes the VFP thunk valid
+for each of them: `Tag_FP_arch: VFPv3`, `Tag_ABI_HardFP_use: Deprecated`
+(base PCS -> a double arrives in r0:r1 with the low word first),
+`Tag_ABI_FP_number_model: IEEE 754`, `Tag_ABI_FP_denormal: Needed`, and no
+`Tag_ABI_VFP_args`. All three import the same eight math functions
+(sqrt, atan, sin, cos, floor, fmod, pow, tan), so both the O(1) dispatch and
+the guest-side sqrt thunk apply to each.

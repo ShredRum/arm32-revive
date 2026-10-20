@@ -339,6 +339,11 @@ public:
 private:
     using Regs = std::array<std::uint32_t, 16>;
     void CallImport(std::uint32_t idx, Regs& regs);
+    // Fast path for the math imports the guest calls in tight loops; the id is
+    // resolved at load time (Import::fast_math) so the per-call dispatch costs
+    // one switch instead of the import-name chain.
+    void CallFastMath(std::uint8_t id, Regs& regs, std::uint32_t a0, std::uint32_t a1,
+                      std::uint32_t a2, std::uint32_t a3);
     void CallJni(std::uint32_t fn, Regs& regs);
     void OnKuser(std::uint32_t idx, Regs& regs);
     void KuserSetFlags(bool ok);
