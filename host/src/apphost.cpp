@@ -20,6 +20,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <functional>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -379,6 +380,24 @@ long long WallMs() {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// Name a guest PC on the import trampoline page.  The first import sits at
+// kTrampBase + 8 (slots 0/1 are halt/once), so import idx = slot - 2.  The
+// async PC read may land either on the svc (tramp) or one word after it, so
+// callers print both this and the pc-4 name instead of guessing.
+std::string ImportNameAt(std::uint32_t pc) {
+    if (!g_mod || pc < abr::kTrampBase + 8 || pc >= g_mod->jni_tramp_base) {
+        return {};
+    }
+    if (((pc - abr::kTrampBase) & 3u) != 0) {
+        return {};
+    }
+    const std::int64_t idx = static_cast<std::int64_t>((pc - abr::kTrampBase) / 4) - 2;
+    if (idx >= 0 && idx < static_cast<std::int64_t>(g_mod->imports.size())) {
+        return g_mod->imports[idx].name;
+    }
+    return {};
+}
+
 void Watchdog() {
     long long reported = 0;
     unsigned last_corrupt = 0;
@@ -439,16 +458,18 @@ void Watchdog() {
                 }
             }
             const std::uint32_t pc = pcs[2];
+            const std::uint32_t lr = uj->Regs()[14];
+            const std::uint32_t sp = uj->Regs()[13];
+            const std::string in0 = ImportNameAt(pc);
+            const std::string in4 = ImportNameAt(pc - 4);
             std::string where = "other";
             std::string what = "";
             if (pc == g_mod->halt_va) {
                 where = "HALT (returned?)";
-            } else if (pc >= abr::kTrampBase + 4 && pc < g_mod->jni_tramp_base && ((pc - abr::kTrampBase) % 4 == 0)) {
-                const std::size_t ii = (pc - abr::kTrampBase) / 4 - 1;
+            } else if (!in0.empty() || !in4.empty()) {
                 where = "import-svc";
-                if (ii < g_mod->imports.size()) {
-                    what = g_mod->imports[ii].name;
-                }
+                what = "pc=" + (in0.empty() ? std::string("?") : in0) + " pc-4=" +
+                       (in4.empty() ? std::string("?") : in4);
             } else if (pc >= g_mod->jni_tramp_base && pc < abr::kTrampBase + abr::kTrampSize) {
                 where = "jni-svc";
                 what = "fn#" + std::to_string((pc - g_mod->jni_tramp_base) / 4);
@@ -456,8 +477,62 @@ void Watchdog() {
                 where = "guest-code (spin?)";
             }
             const bool stable = (pcs[0] == pcs[1] && pcs[1] == pcs[2]);
-            Log("STUCK upc=%08x tid=%d %s %s %s", pc, g_upd_tid.load(), where.c_str(),
-                what.c_str(), stable ? "STABLE" : "wandering");
+            Log("STUCK upc=%08x tid=%d %s %s lr=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x %s",
+                pc, g_upd_tid.load(), where.c_str(), what.c_str(), lr, sp, uj->Regs()[0],
+                uj->Regs()[1], uj->Regs()[2], uj->Regs()[3], stable ? "STABLE" : "wandering");
+            // One short PC/LR histogram per stuck update sequence.  The async
+            // PC alone alternates between the svc slot and its caller; the
+            // histogram names the actual loop and its call sites.
+            static int sampled_seq = -1;
+            const int seq = g_upd_entry_n.load();
+            if (seq != sampled_seq) {
+                sampled_seq = seq;
+                std::unordered_map<std::uint32_t, unsigned> ph, lh;
+                for (int i = 0; i < 2000; i++) {
+                    ph[uj->Regs()[15]]++;
+                    lh[uj->Regs()[14]]++;
+                    usleep(1000);
+                }
+                auto top = [](const std::unordered_map<std::uint32_t, unsigned>& m) {
+                    std::vector<std::pair<unsigned, std::uint32_t>> v;
+                    v.reserve(m.size());
+                    for (const auto& kv : m) {
+                        v.emplace_back(kv.second, kv.first);
+                    }
+                    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+                        return a.first != b.first ? a.first > b.first : a.second < b.second;
+                    });
+                    if (v.size() > 12) {
+                        v.resize(12);
+                    }
+                    return v;
+                };
+                for (const auto& e : top(ph)) {
+                    const std::string n0 = ImportNameAt(e.second);
+                    const std::string n4 = ImportNameAt(e.second - 4);
+                    Log("STUCKSAMPLE pc %08x x%u %s", e.second, e.first,
+                        !n0.empty() ? ("pc=" + n0 + (n4.empty() ? "" : " pc-4=" + n4)).c_str()
+                                    : (g_rt->IsCodeAddress(e.second & ~1u) ? "guest-code" : "other"));
+                }
+                for (const auto& e : top(lh)) {
+                    Log("STUCKSAMPLE lr %08x x%u %s", e.second, e.first,
+                        g_rt->IsCodeAddress(e.second & ~1u) ? "guest-code" : "other");
+                }
+                // Return addresses on the guest stack: a cheap frame-chain
+                // substitute.  Only scan ranges we know are mapped.
+                if (g_mem && ((sp >= abr::kHeapBase && sp < abr::kHeapBase + abr::kHeapSize) ||
+                              (sp >= abr::kStackBase && sp < abr::kStackTop))) {
+                    unsigned shown = 0;
+                    for (std::uint32_t off = 0; off < 0x4000 && shown < 32; off += 4) {
+                        std::uint32_t v = 0;
+                        std::memcpy(&v, g_mem->host(sp + off), 4);
+                        if (g_rt->IsCodeAddress(v & ~std::uint32_t(1))) {
+                            Log("STUCK stack+%04x=%08x", off, v);
+                            shown++;
+                        }
+                    }
+                }
+            }
         }
         // Hang forensics: recent malloc/free history around the wedge.
         g_rt->DumpEventRing();
@@ -680,6 +755,17 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     if (st->in_guest.load()) {
         Log("REENTER %s while %s active -- dropping frame", name, st->in_name);
         return 1;
+    }
+    // Surface-size witnesses (2026-10-20, Play worldScale=0 triage). The guest
+    // Lua camera code consumes screenWidth/screenHeight from these two calls;
+    // a zero here makes worldScale unrecoverably zero. Diagnostic only.
+    if (DiagOn() && (std::strstr(name, "nativeInit") || std::strstr(name, "nativeResize"))) {
+        va_list ap2;
+        va_copy(ap2, ap);
+        const int sw = va_arg(ap2, int);
+        const int sh = va_arg(ap2, int);
+        va_end(ap2);
+        std::printf("[screen] %s(%d,%d)\n", name, sw, sh);
     }
     // RATE telemetry (2026-10-14, tap-freeze triage): uncapped entry stamp
     // for the 3 frame-path methods. Answers pump-alive vs pump-dead without

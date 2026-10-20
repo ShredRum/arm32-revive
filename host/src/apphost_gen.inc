@@ -188,10 +188,34 @@ extern "C" void Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onSendAppR
 extern "C" void Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onShareCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_rcs_socialnetwork_SocialManagerWrapper_onShareCallback", "(JLcom/rovio/rcs/socialnetwork/SocialServiceResponse;I)V", env, thiz, a0, a1, a2); return;
 }
+extern "C" void Java_com_rovio_fusion_HockeyAppWrapper_setUpBreakpad(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_HockeyAppWrapper_setUpBreakpad", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
 extern "C" void Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteMessage(JNIEnv* env, jobject thiz, jobject a0) {
     abr::AppHost_Call("Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteMessage", "(Ljava/lang/String;)V", env, thiz, a0); return;
 }
 extern "C" void Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteRegistrationID(JNIEnv* env, jobject thiz, jobject a0) {
     abr::AppHost_Call("Java_com_rovio_fusion_RemoteNotificationsClientWrapper_announceRemoteRegistrationID", "(Ljava/lang/String;)V", env, thiz, a0); return;
 }
-// GEN_COUNT=65
+extern "C" void Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback(JNIEnv* env, jobject thiz, jlong a0, jlong a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback", "(JJII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayer_announceOnPause(JNIEnv* env, jobject thiz, jlong a0, jfloat a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayer_announceOnPause", "(JF)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayer_announceOnResume(JNIEnv* env, jobject thiz, jlong a0, jfloat a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayer_announceOnResume", "(JF)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayer_onExtraButtonClicked(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayer_onExtraButtonClicked", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayer_onPlay(JNIEnv* env, jobject thiz, jlong a0, jfloat a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayer_onPlay", "(JF)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayer_onVideoStarted(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayer_onVideoStarted", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_VideoPlayerBridge_onVideoEnded(JNIEnv* env, jobject thiz, jlong a0, jboolean a1, jint a2, jfloat a3, jfloat a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayerBridge_onVideoEnded", "(JZIFF)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+// GEN_COUNT=73

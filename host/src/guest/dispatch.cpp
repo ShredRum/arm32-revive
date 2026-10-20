@@ -166,6 +166,8 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     AddMapping(kJniTableBase, kJniTableSize, PROT_READ | PROT_WRITE);
     mem_.Map(kGuestDataBase, kGuestDataSize, PROT_READ | PROT_WRITE);
     AddMapping(kGuestDataBase, kGuestDataSize, PROT_READ | PROT_WRITE);
+    // ARM32 kuser helper page: present before any guest instruction runs.
+    InitUserHelpers();
     // Trampoline page is mapped by the loader; track it as RX here.
     AddMapping(kTrampBase, kTrampSize, PROT_READ | PROT_EXEC);
     // NOTE: InitDataImports() is called by the harness AFTER module segments
@@ -1130,8 +1132,21 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
         return;  // keep running, do NOT halt
     }
     if (swi == kSwiHalt) {
+        // `svc #0` is BOTH our generic halt trampoline and the ARM EABI raw
+        // syscall. Distinguish by PC: the trampoline lives at mod_.halt_va and
+        // arrives there via `bl`; a guest syscall is issued somewhere in the
+        // module. Treating the latter as a halt killed breakpad's sigaltstack.
+        if (mod_.halt_va != 0 && regs[15] - 4 != mod_.halt_va) {
+            OnGuestSyscall(regs);
+            return;
+        }
         halt_count++;
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+        return;
+    }
+    // Must precede the JNI range: kSwiKuserBase > kSwiJniBase.
+    if (swi >= kSwiKuserBase && swi < kSwiKuserBase + 8u) {
+        OnKuser(swi - kSwiKuserBase, regs);
         return;
     }
     if (swi >= kSwiJniBase) {
@@ -1250,11 +1265,39 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         st.stack += 4;
         return v;
     };
-    // Variadic doubles follow the BASE standard: 8 bytes in core words / stack.
+    // Variadic double-word arguments (double, long long) follow AAPCS32:
+    // they occupy an EVEN-numbered core register pair (r0:r1, r2:r3, ...);
+    // if the next free register is odd-numbered the argument is passed on
+    // the stack instead, at an 8-byte aligned address. Low word first.
+    // Reading two consecutive words regardless of parity silently swapped
+    // halves of every variadic double -> the guest's own number->text
+    // formatting (libc++ num_put -> vsprintf) produced "inf"/"0"/"nan" and
+    // the level's fractional fields came out garbage (integers survived).
     auto next64 = [&]() -> std::uint64_t {
-        const std::uint64_t lo = next32();
-        const std::uint64_t hi = next32();
-        return lo | (hi << 32);
+        if (st.via_va) {
+            // va_list position: a double-word sits at an 8-byte aligned slot.
+            st.stack = (st.stack + 7u) & ~7u;
+            std::uint64_t v = 0;
+            if (st.stack != 0 && CheckRange(st.stack, 8, false)) {
+                std::memcpy(&v, H(st.stack), 8);
+            }
+            st.stack += 8;
+            return v;
+        }
+        const int idx = (st.ai + 1) & ~1;  // round the next register up to even
+        if (idx < 4) {
+            st.ai = idx + 2;
+            return static_cast<std::uint64_t>(st.gargs[idx]) |
+                   (static_cast<std::uint64_t>(st.gargs[idx + 1]) << 32);
+        }
+        // Core registers exhausted: the argument is on the stack, 8-byte aligned.
+        st.stack = (st.stack + 7u) & ~7u;
+        std::uint64_t v = 0;
+        if (CheckRange(st.stack, 8, false)) {
+            std::memcpy(&v, H(st.stack), 8);
+        }
+        st.stack += 8;
+        return v;
     };
 
     std::string out;
@@ -2584,6 +2627,56 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    if (n == "__android_log_write") {
+        // No printf spec: (prio, tag, text). Same sink as log_print.
+        const std::string tag(GuestStr(a1));
+        const std::string text(GuestStr(a2));
+        std::printf("[glog] %s: %s\n", tag.c_str(), text.c_str());
+        Ret(regs, static_cast<std::uint32_t>(text.size()));
+        return;
+    }
+    if (n == "printf" || n == "vprintf") {
+        // Host stdout (the game gated its own logging off, but a crash-time
+        // path may call it). GuestFmtArgs consumes r1-r3 then stack args.
+        const std::string fmt(GuestStr(a0));
+        GuestFmtArgs st{};
+        st.gargs[0] = a0;
+        st.gargs[1] = a1;
+        st.gargs[2] = a2;
+        st.gargs[3] = a3;
+        if (n == "printf") {
+            st.ai = 1;
+            st.stack = regs[13];
+        } else {
+            st.via_va = true;
+            st.ai = 1;
+            st.stack = a1;
+        }
+        const std::string out = ExpandPrintf(fmt, st);
+        std::fwrite(out.data(), 1, out.size(), stdout);
+        Ret(regs, static_cast<std::uint32_t>(out.size()));
+        return;
+    }
+    if (n == "uname") {
+        // Breakpad stores this in the minidump; machine must look like the
+        // guest ABI (armv7l), the rest is informational. struct utsname on
+        // arm32 bionic is 6 fields x 65 bytes.
+        if (!CheckRange(a0, 390, true)) {
+            goto bad_ptr;
+        }
+        {
+            char u[390] = {};
+            std::strncpy(u + 0, "Linux", 64);
+            std::strncpy(u + 65, "localhost", 64);
+            std::strncpy(u + 130, "3.10.0", 64);
+            std::strncpy(u + 195, "#1 SMP PREEMPT", 64);
+            std::strncpy(u + 260, "armv7l", 64);
+            std::strncpy(u + 325, "localdomain", 64);
+            std::memcpy(H(a0), u, 390);
+        }
+        Ret(regs, 0);
+        return;
+    }
     // --- printf family writing into GUEST buffers ---
     // Space's engine imports these; the stub tail used to make them silent
     // no-ops, so every buffer it formatted (its Lua error text, symbol names,
@@ -3121,6 +3214,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return files_hostbase_ + g.substr(at + 6);
                 }
             }
+            // Package data root: breakpad (HockeyApp) builds its minidump path
+            // as dirname(FILES_PATH)/hockeyapp_errors_XXXXXX, i.e.
+            // /data/data/<pkg>/... — one level ABOVE the files dir, so the
+            // /files rule above does not match. Map it to parent(files host).
+            if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
+                                             g.compare(0, 11, "/data/user/") == 0)) {
+                std::size_t pk = std::string::npos;
+                if (g.compare(0, 11, "/data/data/") == 0) {
+                    pk = g.find('/', 11);
+                } else {
+                    const std::size_t u = g.find('/', 11);  // after the user id
+                    if (u != std::string::npos) {
+                        pk = g.find('/', u + 1);  // after the package
+                    }
+                }
+                if (pk != std::string::npos) {
+                    return std::filesystem::path(files_hostbase_).parent_path().string() +
+                           g.substr(pk);
+                }
+            }
             // Bare relative names (no leading '/'): the game opens seeds like
             // "highscores.lua" CWD-relative (original CWD = files dir). Route
             // to the files dir (fopen fails gracefully if missing — same as
@@ -3319,6 +3432,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
+            if (n == "fclose") {
+                // The guest's std streams point into __sF; closing them must
+                // not shut down the host's own stdout/stderr. Flush and report
+                // success (bionic fclose on a standard stream does close the fd,
+                // but on Android that only affects the process's own copy --
+                // the host bridge's stderr must stay open for LOUD diagnostics).
+                if (f == stdout || f == stderr || f == stdin) {
+                    std::fflush(f);
+                    Ret(regs, 0);
+                    return;
+                }
+            }
             int r = (n == "fclose") ? std::fclose(f) : std::fflush(f);
             if (n == "fclose") {
                 std::lock_guard<std::mutex> io(io_mutex_);
@@ -3451,7 +3576,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return;
         }
-        if (n == "fgets" || n == "fputs" || n == "fputc" || n == "getc") {
+        if (n == "fgets" || n == "fputs" || n == "fputc" || n == "putc" || n == "getc" ||
+            n == "ungetc") {
             if (n == "fgets") {
                 FILE* f = file_of(a2);
                 if (!f || a1 == 0 || !CheckRange(a0, a1, true)) {
@@ -3468,10 +3594,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
-            FILE* f = file_of(n == "fputs" ? a1 : a0);
+            // getc(FILE*) has the handle in a0; fputs/fputc/putc/ungetc put it
+            // in a1 (C signature: value first, stream last). The old code keyed
+            // fputc on a0, so every fputc call was a silent no-op.
+            FILE* f = file_of(n == "getc" ? a0 : a1);
             if (!f) {
-                Ret(regs, (n == "fputs") ? static_cast<std::uint32_t>(-1)
-                                         : static_cast<std::uint32_t>(-1));
+                Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
             if (n == "fputs") {
@@ -3482,11 +3610,35 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(std::fputs(GuestStr(a0), f)));
                 return;
             }
-            if (n == "fputc") {
+            if (n == "fputc" || n == "putc") {
                 Ret(regs, static_cast<std::uint32_t>(std::fputc((int)a0, f)));
                 return;
             }
+            if (n == "ungetc") {
+                Ret(regs, static_cast<std::uint32_t>(std::ungetc((int)a0, f)));
+                return;
+            }
             Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
+            return;
+        }
+        if (n == "fprintf") {
+            // fprintf(stream=a0, fmt=a1, ...): handle is FIRST here.
+            FILE* f = file_of(a0);
+            if (!f || !CheckRange(a1, 1, false)) {
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            const std::string fmt(GuestStr(a1));  // copy: GuestStr reuses scratch
+            GuestFmtArgs st{};
+            st.gargs[0] = a0;
+            st.gargs[1] = a1;
+            st.gargs[2] = a2;
+            st.gargs[3] = a3;
+            st.ai = 2;  // first vararg core reg (r2)
+            st.stack = regs[13];
+            const std::string out = ExpandPrintf(fmt, st);
+            const std::size_t w = std::fwrite(out.data(), 1, out.size(), f);
+            Ret(regs, static_cast<std::uint32_t>(w));
             return;
         }
         if (n == "fdopen") {
@@ -3560,6 +3712,56 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             g);
             }
             Ret(regs, g);
+            return;
+        }
+        if (n == "mkstemp") {
+            // Breakpad's descriptor writer creates the dump file with
+            // mkstemp(dirname(FILES_PATH) + "/hockeyapp_errors_XXXXXX").
+            const std::string hp = map_path(a0);
+            if (!need_host(hp, "mkstemp")) {
+                return;
+            }
+            ensure_parent(hp);
+            std::vector<char> tmpl(hp.begin(), hp.end());
+            tmpl.push_back('\0');
+            const int fd = ::mkstemp(tmpl.data());
+            if (fd < 0) {
+                SetGuestErrno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            // The kernel rewrites only the six trailing 'X'. Copy those six
+            // characters back into the guest buffer; the host prefix may be
+            // longer (harness) or shorter, so the full path must not go in.
+            if (hp.size() >= 6 && hp.compare(hp.size() - 6, 6, "XXXXXX") == 0 &&
+                CheckRange(a0, static_cast<std::uint32_t>(hp.size() + 1), true)) {
+                std::memcpy(H(a0 + hp.size() - 6), tmpl.data() + hp.size() - 6, 6);
+            }
+            const std::uint32_t g = alloc_guest_fd(fd);
+            if (g == 0xFFFFFFFFu) {
+                ::close(fd);
+                SetGuestErrno(EMFILE);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (DiagOn()) {
+                std::printf("[files][t%u] mkstemp(\"%s\") -> fd %u\n", GuestTid(), tmpl.data(), g);
+            }
+            Ret(regs, g);
+            return;
+        }
+        if (n == "ftruncate") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                SetGuestErrno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            const int r = ::ftruncate(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)));
+            if (r != 0) {
+                SetGuestErrno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
         if (n == "close" || n == "fsync") {
@@ -4344,7 +4546,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
-            n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd") {
+            n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd" ||
+            n == "pathconf") {
             if (n == "getcwd") {
                 const std::string cwd = files_hostbase_.empty() ? "/" : files_hostbase_;
                 if (a1 == 0 || !CheckRange(a0, cwd.size() + 1, true)) {
@@ -4353,6 +4556,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 std::memcpy(H(a0), cwd.c_str(), cwd.size() + 1);
                 Ret(regs, a0);
+                return;
+            }
+            if (n == "pathconf") {
+                // Faithful host query. This MUST NOT be a 0 stub: the engine
+                // sizes its path/dirent buffers from _PC_PATH_MAX (=4) and
+                // would otherwise overflow a 24-byte heap block on the second
+                // run (once cloud_fs/ already exists and the scan proceeds).
+                const std::string hp = map_path(a0);
+                if (!need_host(hp, "pathconf")) {
+                    return;
+                }
+                errno = 0;
+                const long r = ::pathconf(hp.c_str(), static_cast<int>(a1));
+                if (r < 0) {
+                    SetGuestErrno(errno);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             const std::string hp = map_path(a0);
@@ -6008,7 +6230,11 @@ void Runtime::InitDataImports() {
     const std::uint32_t var_guard = GuestMalloc(4);
     const std::uint32_t var_lower = GuestMalloc(4);
     const std::uint32_t var_upper = GuestMalloc(4);
-    if (!var_ctype || !var_guard || !var_lower || !var_upper) {
+    const std::uint32_t var_page = GuestMalloc(4);
+    // bionic std streams: __sF[3], sizeof(FILE)=84 on this arm32 ABI (stderr is
+    // &__sF[2] == base+168; verified at call sites 0x5d4270 and 0x586dc8).
+    const std::uint32_t sF = GuestMalloc(3 * 84);
+    if (!var_ctype || !var_guard || !var_lower || !var_upper || !var_page || !sF) {
         std::printf("[data] LOUD var alloc failed -- halting\n");
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
@@ -6025,11 +6251,33 @@ void Runtime::InitDataImports() {
     // single-level patch fed [table]=0xFFFF as base -> "__1" key garbage).
     std::memcpy(H(var_lower), &lower_va, 4);
     std::memcpy(H(var_upper), &upper_va, 4);
+    // __page_size is a bionic object (GLOB_DAT), not a function. Breakpad's
+    // LSS reads it for page rounding; bionic's linker sets it to the real
+    // page size (4096 on arm32 Android).
+    const std::uint32_t page_size = 4096;
+    std::memcpy(H(var_page), &page_size, 4);
+    // __sF: bind the three bionic std streams to the host's. The GOT slot must
+    // hold the ARRAY BASE (the guest does a single deref: ldr rX,[got]; add
+    // rX,rX,#168), unlike the pointer-cell variables above.
+    std::memset(H(sF), 0, 3 * 84);
+    {
+        FILE* streams[3] = {stdin, stdout, stderr};
+        for (int i = 0; i < 3; i++) {
+            const std::uint32_t a = sF + static_cast<std::uint32_t>(i) * 84;
+            const std::uint16_t fd16 = static_cast<std::uint16_t>(i);  // _file @ +14
+            std::memcpy(H(a + 14), &fd16, 2);
+            std::lock_guard<std::mutex> io(io_mutex_);
+            file_map_[a] = HostFile{streams[i]};
+            fd_map_[static_cast<std::uint32_t>(i)] = fileno(streams[i]);
+        }
+    }
     const Slot slots[] = {
         {"_ctype_", var_ctype},
         {"__stack_chk_guard", var_guard},
         {"_tolower_tab_", var_lower},
         {"_toupper_tab_", var_upper},
+        {"__page_size", var_page},
+        {"__sF", sF},
     };
     for (const Slot& s : slots) {
         const std::uint32_t idx = find_import(s.name);
@@ -6052,6 +6300,206 @@ void Runtime::InitDataImports() {
             patched++;
         }
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);
+    }
+}
+
+// ---- ARM32 kuser helper page ----
+// The kernel exposes four helpers at fixed VAs in the high vector page. Old
+// bionic/libgcc code branches to them directly (Seasons' static GNU libstdc++
+// does this for __kuser_memory_barrier). We cannot execute the kernel's bytes:
+// map the page ourselves, put one `svc` at each entry, and emulate the helper
+// in the host. Every other word is the same trap so a bogus entry cannot run
+// zeroes as `andeq r0,r0,r0` and walk off into garbage.
+void Runtime::InitUserHelpers() {
+    if (!mem_.ok() ||
+        !mem_.Map(kUserHelperBase, kUserHelperSize, PROT_READ | PROT_WRITE)) {
+        std::fprintf(stderr, "[kuser] LOUD map %08x failed\n", kUserHelperBase);
+        std::abort();
+    }
+    auto* p = reinterpret_cast<std::uint32_t*>(mem_.host(kUserHelperBase));
+    const std::uint32_t trap = 0xEF000000u | (kSwiKuserBad & 0x00FFFFFFu);
+    for (std::uint32_t i = 0; i < kUserHelperSize / 4; i++) {
+        p[i] = trap;
+    }
+    auto put_svc = [&](std::uint32_t va, std::uint32_t swi) {
+        p[(va - kUserHelperBase) / 4] = 0xEF000000u | (swi & 0x00FFFFFFu);
+    };
+    put_svc(kUserCmpxchg64, kSwiKuserCmpxchg64);
+    put_svc(kUserBarrier, kSwiKuserBarrier);
+    put_svc(kUserCmpxchg, kSwiKuserCmpxchg);
+    put_svc(kUserGetTls, kSwiKuserGetTls);
+    p[(kUserTlsSlot - kUserHelperBase) / 4] = 0;                  // software TLS value
+    p[(kUserVersion - kUserHelperBase) / 4] = kUserVersionValue;  // 5 helpers
+
+    if (!mem_.Protect(kUserHelperBase, kUserHelperSize, PROT_READ | PROT_EXEC)) {
+        std::fprintf(stderr, "[kuser] LOUD protect %08x failed\n", kUserHelperBase);
+        std::abort();
+    }
+    AddMapping(kUserHelperBase, kUserHelperSize, PROT_READ | PROT_EXEC);
+    std::printf("[kuser] page %08x mapped RX (barrier/cmpxchg/cmpxchg64/get_tls)\n",
+                kUserHelperBase);
+}
+
+void Runtime::KuserSetFlags(bool ok) {
+    std::uint32_t cpsr = ActiveJit()->Cpsr();
+    cpsr &= ~std::uint32_t(0xF0000000u);           // N Z C V
+    cpsr |= ok ? 0x60000000u : 0x80000000u;        // success: Z|C; failure: N
+    ActiveJit()->SetCpsr(cpsr);
+}
+
+void Runtime::OnKuser(std::uint32_t idx, Regs& regs) {
+    const std::uint64_t nth = kuser_hits_[idx % 5].fetch_add(1, std::memory_order_relaxed);
+    if (nth == 0 && DiagOn()) {
+        std::printf("[kuser] first idx=%u r0=%08x r1=%08x r2=%08x lr=%08x tid=%u\n", idx,
+                    regs[0], regs[1], regs[2], regs[14], GuestTid());
+    }
+    switch (idx) {
+    case 0:  // __kuser_memory_barrier: no register/flag changes
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        Ret(regs, regs[0], regs[1]);
+        return;
+    case 1: {  // __kuser_cmpxchg: r0=old, r1=new, r2=ptr; r0=0/-1, C=success
+        const std::uint32_t p = regs[2];
+        if ((p & 3u) != 0 || !CheckRange(p, 4, true)) {
+            std::printf("[kuser] LOUD cmpxchg bad ptr=%08x pc=%08x lr=%08x -- halting\n", p,
+                        regs[15] - 4, regs[14]);
+            stop_step_ = true;
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        std::uint32_t expected = regs[0];
+        const std::uint32_t desired = regs[1];
+        const bool ok = __atomic_compare_exchange_n(
+            reinterpret_cast<std::uint32_t*>(H(p)), &expected, desired, false,
+            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        KuserSetFlags(ok);
+        Ret(regs, ok ? 0u : 0xFFFFFFFFu, regs[1]);
+        return;
+    }
+    case 2: {  // __kuser_cmpxchg64: r0=&old, r1=&new, r2=ptr
+        const std::uint32_t oldp = regs[0], newp = regs[1], p = regs[2];
+        if ((p & 7u) != 0 || !CheckRange(oldp, 8, false) || !CheckRange(newp, 8, false) ||
+            !CheckRange(p, 8, true)) {
+            std::printf("[kuser] LOUD cmpxchg64 bad ptr=%08x old=%08x new=%08x pc=%08x -- halting\n",
+                        p, oldp, newp, regs[15] - 4);
+            stop_step_ = true;
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        std::uint64_t oldv = 0, newv = 0;
+        std::memcpy(&oldv, H(oldp), 8);
+        std::memcpy(&newv, H(newp), 8);
+        const bool ok = __atomic_compare_exchange_n(
+            reinterpret_cast<std::uint64_t*>(H(p)), &oldv, newv, false,
+            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        KuserSetFlags(ok);
+        Ret(regs, ok ? 0u : 0xFFFFFFFFu, regs[1]);
+        return;
+    }
+    case 3: {  // __kuser_get_tls: kernel returns the software TLS word (0 here)
+        std::uint32_t tls = 0;
+        std::memcpy(&tls, H(kUserTlsSlot), 4);
+        Ret(regs, tls, regs[1]);
+        return;
+    }
+    default:  // 0xffff0f80 or any non-entry word in the page
+        std::printf("[kuser] LOUD unimplemented entry idx=%u pc=%08x lr=%08x -- halting\n", idx,
+                    regs[15] - 4, regs[14]);
+        stop_step_ = true;
+        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        return;
+    }
+}
+
+// Raw ARM EABI syscall from guest code (`svc #0`, number in r7). The bundled
+// breakpad LSS does not go through libc imports, so only the calls reached on
+// the startup path are emulated; anything else is a LOUD halt, never a fake 0.
+// ARM error return convention: r0 = -errno (guest errno is set by LSS itself).
+void Runtime::OnGuestSyscall(Regs& regs) {
+    const std::uint32_t nr = regs[7];
+    const std::uint32_t r0 = regs[0], r1 = regs[1];
+    if (DiagOn()) {
+        const std::uint64_t bit = nr < 63 ? (std::uint64_t(1) << nr) : (std::uint64_t(1) << 63);
+        if ((syscall_seen_.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            std::printf("[syscall] first nr=%u r0=%08x r1=%08x r2=%08x lr=%08x tid=%u\n", nr, r0,
+                        r1, regs[2], regs[14], GuestTid());
+        }
+    }
+    switch (nr) {
+    case 3:    // read(fd, buf, count)
+    case 4: {  // write(fd, buf, count)
+        int hfd = -1;
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(r0);
+            if (it != fd_map_.end()) {
+                hfd = it->second;
+            }
+        }
+        if (hfd < 0) {
+            regs[0] = static_cast<std::uint32_t>(-EBADF);
+            return;
+        }
+        const bool is_write = (nr == 4);
+        if (!CheckRange(r1, regs[2], !is_write)) {
+            regs[0] = static_cast<std::uint32_t>(-EFAULT);
+            return;
+        }
+        const ssize_t n = is_write ? ::write(hfd, H(r1), regs[2]) : ::read(hfd, H(r1), regs[2]);
+        regs[0] = (n < 0) ? static_cast<std::uint32_t>(-errno) : static_cast<std::uint32_t>(n);
+        return;
+    }
+    case 6: {  // close(fd)
+        int hfd = -1;
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(r0);
+            if (it != fd_map_.end()) {
+                hfd = it->second;
+                fd_map_.erase(it);
+            }
+        }
+        if (hfd < 0) {
+            regs[0] = static_cast<std::uint32_t>(-EBADF);
+            return;
+        }
+        regs[0] = (::close(hfd) == 0) ? 0 : static_cast<std::uint32_t>(-errno);
+        return;
+    }
+    case 186: {  // sigaltstack(const stack_t* ss, stack_t* old)
+        // stack_t (arm32): { void* ss_sp; int ss_flags; size_t ss_size; } = 12B.
+        // We do not deliver guest signals, so the alternate stack is inert;
+        // report "disabled" as the previous state, like a kernel would on the
+        // first call, and accept a valid new stack. This is the only raw
+        // syscall hit during breakpad's start-up.
+        if (r1 != 0) {
+            if (!CheckRange(r1, 12, true)) {
+                regs[0] = static_cast<std::uint32_t>(-EFAULT);
+                return;
+            }
+            const std::uint32_t old[3] = {0, 2 /*SS_DISABLE*/, 0};
+            std::memcpy(H(r1), old, 12);
+        }
+        if (r0 != 0 && !CheckRange(r0, 12, false)) {
+            regs[0] = static_cast<std::uint32_t>(-EFAULT);
+            return;
+        }
+        regs[0] = 0;
+        return;
+    }
+    case 20:  // getpid
+        regs[0] = static_cast<std::uint32_t>(::getpid());
+        return;
+    case 224:  // gettid
+        regs[0] = GuestTid();
+        return;
+    default:
+        std::printf("[syscall] LOUD unimplemented nr=%u r0=%08x r1=%08x r2=%08x pc=%08x "
+                    "lr=%08x -- halting\n",
+                    nr, r0, r1, regs[2], regs[15] - 4, regs[14]);
+        stop_step_ = true;
+        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        return;
     }
 }
 

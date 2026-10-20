@@ -36,4 +36,28 @@ inline constexpr std::uint32_t kSwiHalt = 0;
 inline constexpr std::uint32_t kSwiOnce = 0x200000u;  // pthread_once init returned
 inline constexpr std::uint32_t kSwiJniBase = 0x100000u;
 
+// ARM32 kernel-user helper page (high vector page). Old bionic/libgcc code
+// calls these fixed kernel VAs directly; the guest never maps them itself.
+// Seasons is the first title that needs one (its static GNU libstdc++ calls
+// 0xffff0fa0 through a function-pointer table). The whole page is emulated:
+// known entries get svc trampolines, every other word is a LOUD trap.
+inline constexpr std::uint32_t kUserHelperBase = 0xFFFF0000u;
+inline constexpr std::uint32_t kUserHelperSize = 0x00001000u;
+inline constexpr std::uint32_t kUserCmpxchg64 = 0xFFFF0F60u;
+inline constexpr std::uint32_t kUserBarrier = 0xFFFF0FA0u;
+inline constexpr std::uint32_t kUserCmpxchg = 0xFFFF0FC0u;
+inline constexpr std::uint32_t kUserGetTls = 0xFFFF0FE0u;
+inline constexpr std::uint32_t kUserTlsSlot = 0xFFFF0FF0u;
+inline constexpr std::uint32_t kUserVersion = 0xFFFF0FFCu;
+inline constexpr std::uint32_t kUserVersionValue = 5u;
+
+// Kuser SVC numbers: above kSwiJniBase (0x100000) and kSwiOnce (0x200000),
+// so OnSvc must check this range BEFORE the JNI range.
+inline constexpr std::uint32_t kSwiKuserBase = 0x300000u;
+inline constexpr std::uint32_t kSwiKuserBarrier = kSwiKuserBase + 0u;
+inline constexpr std::uint32_t kSwiKuserCmpxchg = kSwiKuserBase + 1u;
+inline constexpr std::uint32_t kSwiKuserCmpxchg64 = kSwiKuserBase + 2u;
+inline constexpr std::uint32_t kSwiKuserGetTls = kSwiKuserBase + 3u;
+inline constexpr std::uint32_t kSwiKuserBad = kSwiKuserBase + 4u;
+
 }  // namespace abr

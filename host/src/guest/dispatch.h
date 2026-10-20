@@ -239,6 +239,11 @@ public:
     // Game indexes bytes (ldrb) — verified at the 0x45C17E ctype lookup.
     void InitDataImports();
 
+    // ARM32 kuser helper page: mapped RX at 0xffff0000 with svc trampolines
+    // for the four kernel helpers and a LOUD trap everywhere else. Called once
+    // from the Runtime ctor; the page lives outside every other arena.
+    void InitUserHelpers();
+
     // Real guest threads (pthread_create milestone): each worker gets its own
     // Dynarmic Jit sharing GuestMemory + this Runtime. ActiveJit() routes all
     // callback-side jit_ uses to the calling thread's Jit (main falls back to
@@ -265,6 +270,12 @@ public:
     // G1.2: monotonic diag counter; only ever read in diag/harness dumps, so
     // relaxed is enough (never an ordering dependency).
     std::atomic<std::uint64_t> svc_count{0};
+    // Kuser entries 0..4 (barrier/cmpxchg/cmpxchg64/get_tls/bad). Relaxed:
+    // only used to print the first hit of each entry under DiagOn().
+    std::atomic<std::uint64_t> kuser_hits_[5] = {};
+    // Raw-syscall numbers seen (bit i for nr i, bit 63 = "other/none").
+    // Diagnostic only: under DiagOn() the first hit prints once.
+    std::atomic<std::uint64_t> syscall_seen_{0};
     // Last import entered (any thread): stuck-update watchdog reads these
     // (no strings here - index resolved against mod_.imports at dump time).
     std::atomic<std::uint32_t> last_svc_idx_{0xFFFFFFFFu};
@@ -329,6 +340,11 @@ private:
     using Regs = std::array<std::uint32_t, 16>;
     void CallImport(std::uint32_t idx, Regs& regs);
     void CallJni(std::uint32_t fn, Regs& regs);
+    void OnKuser(std::uint32_t idx, Regs& regs);
+    void KuserSetFlags(bool ok);
+    // Raw guest `svc #0` (ARM EABI, r7 = syscall number). The bundled LSS in
+    // breakpad issues these directly; they must not be mistaken for kSwiHalt.
+    void OnGuestSyscall(Regs& regs);
   public:
     // Public for the RealGL backend (same-module forwarding).
     void Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1 = 0);

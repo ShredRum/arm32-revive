@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 id           = "seasons"
 title        = "Angry Birds Seasons"
-status       = "planned"
+status       = "shipped"        # shipped | in-progress | planned; boots, menu, Play and gameplay verified against the native reference
 strategy     = "jit"
 
 [apk]
@@ -22,16 +22,25 @@ abi    = "armeabi-v7a"
 lib    = "libAngryBirdsSeasonsFull.so"
 size   = 8528904
 sha256 = "8183b73d9e2873e0bd3c661acbfef7e6eeef40c3403916e98830f97a9e239baf"
+md5    = "ab9e86a786a871e600e0450f935b083e"
+# No GNU build-id note (only .note.gnu.gold-version): CheckGuestBuildId() LOUDs
+# and continues; IsPinnedGuest() is false, so no Rio VAs/hooks apply.
+build_id = "none"
+imports  = 321      # undefined; 6 pending data (rio/space: 5)
+init     = 143      # DT_INIT_ARRAY entries (572 B / 4); harness: 142 (one null)
+# GNU libstdc++ is statically linked here (unlike rio/space libc++), so the
+# guest calls the ARM32 kuser helper page: init #93 -> 0xffff0fa0 (barrier).
 
 [host]
 abi          = "arm64-v8a"
 lib          = "libabhost.so"
 jni_package  = "com.rovio.fusion"
 jni_exports  = 72                # NOTE: includes HockeyAppWrapper (breakpad)
+jni_onload   = 0x12c50c
 
 [strip]
 libs = ["libjs.so", "libadcolony.so"]
 
 [tree]
-smali_lib_name_orig = "AngryBirdsSeasonsFull"   # EXPECTED; verify at first decode
-smali_patch_verified = false
+smali_lib_name_orig = "AngryBirdsSeasonsFull"   # Gen.smali:16, verified at decode
+smali_patch_verified = true

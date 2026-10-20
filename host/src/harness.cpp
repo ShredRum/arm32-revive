@@ -30,6 +30,11 @@ constexpr unsigned kWatchdogSeconds = 60;
 volatile int g_current_init = -1;
 volatile bool g_running = false;
 std::uint32_t g_snap_region[64] = {};
+// Load-time value of the literal-pool word the init loop watches. The old
+// check compared against a Rio-specific constant (0x2200990d), which made
+// every non-Rio title print "[corrupt]" after every init even though the
+// image was intact. Baseline must come from the loaded image itself.
+std::uint32_t g_snap_4de210 = 0;
 // HARNESS_LOGINAT1: forged account shared from the LOGINAT block (same ctx
 // twice, device order: initiation, then r1=1 registration).
 std::uint32_t g_login_acct = 0;
@@ -705,6 +710,7 @@ int main(int argc, char** argv) {
         std::printf("[snap] VA 00672010 after load = %08x (base=%p)\n", v, (void*)mem.base());
         std::uint32_t w = 0;
         std::memcpy(&w, mem.host(0x4de210), 4);
+        g_snap_4de210 = w;
         std::printf("[snap] VA 004de210 after load = %08x\n", w);
         for (int i = 0; i < 64; i++) {
             std::memcpy(&g_snap_region[i], mem.host(0x672000 + i * 4), 4);
@@ -822,7 +828,13 @@ int main(int argc, char** argv) {
     if (const char* e = std::getenv("HARNESS_DEFER")) {
         defer = std::atoi(e);
     }
-    if (!std::getenv("HARNESS_FORCE22")) {
+    if (!std::getenv("HARNESS_FORCE22") && mod.init_array.size() > 22 &&
+        mod.init_array[22] == 0x5885Cu) {
+        // Park ONLY the known dead-by-construction stub (`b 0x1AEB24` at Rio's
+        // pinned VA 0x5885C). Other images have a real initializer at index 22
+        // (Seasons 0x3BFD0 runs 434 svcs of work) and must execute it. Mirrors
+        // apphost's pinned+address test, minus the build-id requirement so an
+        // unpinned copy of the same stub is still parked.
         skip[22] = true;
     }
     // Execution order: file order, with `defer` moved last (dependency probe).
@@ -920,8 +932,9 @@ int main(int argc, char** argv) {
         {
             std::uint32_t w = 0;
             std::memcpy(&w, mem.host(0x4de210), 4);
-            if (w != 0x2200990du) {
-                std::printf("[corrupt] VA 004de210 = %08x after init #%zu\n", w, k);
+            if (w != g_snap_4de210) {
+                std::printf("[corrupt] VA 004de210 = %08x after init #%zu (load=%08x)\n", w, k,
+                            g_snap_4de210);
             }
         }
         if (hr == Dynarmic::HaltReason::UserDefined1) {

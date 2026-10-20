@@ -242,7 +242,7 @@
 | 4 | воспроизводимая процедура порта | ◐ `scripts/prepare-tree.sh <id>` |
 
 Игры серии (все подлинные Rovio, один сертификат `3bf28170…`, все только
-armeabi-v7a+x86 → нужен порт): `rio` ✅, `seasons` (6.6.2), `space` (2.2.14),
+armeabi-v7a+x86 → нужен порт): `rio` ✅, `seasons` ✅ (6.6.2), `space` (2.2.14),
 `star-wars` (1.5.13 premium iap), `star-wars-ii` (1.9.25). У всех тот же
 JNI-фреймворк `com.rovio.fusion` (62–74 экспорта против 63 у Rio) и те же
 мёртвые `libjs.so`/`libadcolony.so` (побайтово идентичны — проверено sha256).
