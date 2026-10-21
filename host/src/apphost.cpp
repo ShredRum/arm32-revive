@@ -1652,6 +1652,11 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // image VA: only that image has the stub at that address).
     std::size_t ok = 0;
     for (std::size_t k = 0; k < g_mod->init_array.size(); k++) {
+        if (g_mod->init_array[k] == 0) {
+            // A NULL slot of the guest's DT_INIT_ARRAY: kept in the vector so
+            // the indices match the guest's, but there is nothing to run.
+            continue;
+        }
         if (pinned && g_mod->init_array[k] == 0x5885Cu) {
             Log("[init] #%zu @0005885c PARKED (dead-by-construction)", k);
             ok++;

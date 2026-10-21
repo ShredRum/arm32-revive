@@ -220,7 +220,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     if (!dynph) {
         return fail("no PT_DYNAMIC");
     }
-    std::uint32_t strtab = 0, symtab = 0, hash = 0;
+    std::uint32_t strtab = 0, strsz = 0, symtab = 0, hash = 0;
     std::uint32_t rel = 0, relsz = 0, jmprel = 0, pltrelsz = 0;
     std::uint32_t init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
     for (std::uint32_t off = 0;; off += 8) {
@@ -232,6 +232,9 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         switch (dyn.d_tag) {
             case DT_STRTAB:
                 strtab = dyn.d_un.d_ptr;
+                break;
+            case DT_STRSZ:
+                strsz = dyn.d_un.d_val;
                 break;
             case DT_SYMTAB:
                 symtab = dyn.d_un.d_ptr;
@@ -314,8 +317,15 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         if (!base) {
             return false;
         }
-        // Bound the scan to avoid runaway on corrupt tables.
-        for (std::uint32_t i = 0; i < 4096; i++) {
+        // Bound the scan to avoid runaway on corrupt tables, and to the
+        // string table itself: the read was not range-checked, so a corrupt
+        // name_off could read past the mapped segment (the guest address
+        // space is PROT_NONE outside the mapped parts -- a host SIGSEGV).
+        if (name_off >= strsz) {
+            return false;
+        }
+        const std::uint32_t limit = std::min<std::uint32_t>(4096, strsz - name_off);
+        for (std::uint32_t i = 0; i < limit; i++) {
             char c = static_cast<char>(base[name_off + i]);
             if (c == '\0') {
                 name.assign(reinterpret_cast<char*>(base + name_off), i);
@@ -340,6 +350,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
     }
     out.defined = std::move(defined);
+    // The bias is read by the relocation handling below; it must be set
+    // BEFORE that (it used to be assigned at the very end of Load(), so the
+    // relocations read a field that had not been written yet -- the default
+    // happened to be 0, which is the only value the loader ever uses).
+    out.bias = 0;
 
     // Trampoline page: map writable, emit, then protect RX.
     if (!mem_.Map(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE)) {
@@ -584,23 +599,23 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         return fail("tramp protect failed");
     }
 
+    // The NULL entries are KEPT (as 0) so that the index of an entry here
+    // is the index it has in the guest's DT_INIT_ARRAY. Dropping them shifted
+    // every later index -- the "PARKED #22" check and the HARNESS_SKIP
+    // index then addressed the wrong function. The init loops skip the 0.
     for (std::uint32_t i = 0; i < init_arraysz; i += 4) {
         std::uint32_t fn = 0;
         if (!read32(init_array + i, fn)) {
             return fail("init_array unreadable");
         }
-        if (fn != 0 && fn != 0xFFFFFFFFu) {
-            out.init_array.push_back(fn);
-        }
+        out.init_array.push_back(fn == 0xFFFFFFFFu ? 0 : fn);
     }
     for (std::uint32_t i = 0; i < fini_arraysz; i += 4) {
         std::uint32_t fn = 0;
         if (!read32(fini_array + i, fn)) {
             return fail("fini_array unreadable");
         }
-        if (fn != 0 && fn != 0xFFFFFFFFu) {
-            out.fini_array.push_back(fn);
-        }
+        out.fini_array.push_back(fn == 0xFFFFFFFFu ? 0 : fn);
     }
 
     out.path = path;

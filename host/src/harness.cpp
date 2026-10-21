@@ -848,6 +848,11 @@ int main(int argc, char** argv) {
         order.push_back((std::size_t)defer);
     }
     for (std::size_t k : order) {
+        if (mod.init_array[k] == 0) {
+            // A NULL slot of the guest's DT_INIT_ARRAY: kept in the vector so
+            // the indices match the guest's, but there is nothing to run.
+            continue;
+        }
         if (skip[k]) {
             const bool parked = (k == 22 && !std::getenv("HARNESS_FORCE22"));
             std::printf("[init] #%zu @%08x %s\n", k, mod.init_array[k],

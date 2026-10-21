@@ -1351,3 +1351,32 @@ device the live Lua state of Tutorial_red is bit-identical to the level
 JSON (46 fields) and to the fingerprint of the 59ff106 build, all
 markers 0, death.log 0 B, and Rio and Space were re-run on the same
 library.
+
+### 2026-10-22 — batch 10: the loader's own traps (bias, string table, init indices)
+
+Three more of the audit's loader findings, each re-checked against the code
+before touching it:
+
+- **`out.bias` was READ before it was ASSIGNED**: the relocation handling
+  (four places) uses `out.bias`, but the field was only written at the very
+  end of `Load()`. The default happened to be 0, which is the only value
+  the loader uses, so nothing was visibly wrong -- but the read was of a
+  field nobody had written yet. It is now set before the relocations.
+- **The string-table scan was not range-checked**: `get_name` bounded the
+  scan to 4096 bytes but read `base[name_off + i]` without checking that
+  the offset is inside the table -- a corrupt name_off could read past the
+  mapped segment, and the guest address space is PROT_NONE outside the
+  mapped parts, so that is a host SIGSEGV. The scan is now bounded by
+  DT_STRSZ as well. (The audit's "unbounded scan" was itself outdated: the
+  4096 bound was already there.)
+- **The NULL entries of DT_INIT_ARRAY were dropped**, so the index of an
+  entry in the harness' vector was no longer the index it has in the
+  guest's table -- the "PARKED #22" check and the HARNESS_SKIP index then
+  addressed the wrong function. The NULLs are kept (as 0) and the init
+  loops skip them. For the three current guests the table has no NULL
+  slot, so the init counts are unchanged (54/54, 142/142, 67/67).
+
+Verified: the native harness init counts are unchanged; on the device the
+live Lua state of Tutorial_red is bit-identical to the level JSON (46
+fields) and to the fingerprint of the 59ff106 build, all markers 0,
+death.log 0 B, and Rio and Space were re-run on the same library.
