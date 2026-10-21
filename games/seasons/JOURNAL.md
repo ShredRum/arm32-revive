@@ -1215,3 +1215,35 @@ unchanged.
 Verification: the unit test (51 checks) passes, the native harness init
 counts are unchanged (Rio 54/54, Seasons 142/142, Space 67/67), and the
 device boots clean with the usual markers at zero and death.log empty.
+
+### 2026-10-22 — batch 6: the six GL imports the guests really call
+
+The audit listed six GL imports that the harness answered with "success"
+without doing anything. Measured on the guests' own disassembly first --
+all six are called, by all three titles:
+
+    glBindFramebuffer          x3     glBindRenderbuffer       x2
+    glFramebufferRenderbuffer  x1     glFramebufferTexture2D   x1
+    glRenderbufferStorage      x1     glGetUniformfv           x5-6
+
+So the games' framebuffer path (a render target + a depth/stencil
+renderbuffer, then drawing into it) never happened: the calls returned
+"ok" and the game drew into whatever was bound before.
+
+Implemented in the real GL backend (host/src/guest/realgl.cpp):
+
+- `glBindFramebuffer`, `glBindRenderbuffer`, `glFramebufferRenderbuffer`,
+  `glRenderbufferStorage` are forwarded to the host's GLES2 (the fifth
+  argument of glFramebufferTexture2D -- the level -- comes from the
+  guest's stack, like the other multi-argument GL calls).
+- `glGetUniformfv` needed care: **GLES2 has no count argument** (the
+  uniform's type gives the number of floats), and the values have to be
+  written into the GUEST's buffer -- a host pointer would be read as guest
+  memory and the uniforms would stay garbage. The handler asks the driver
+  for the uniform's size with glGetActiveUniform, range-checks the guest
+  buffer and copies exactly that many floats into it.
+
+Verification: the native harness init counts are unchanged (the native
+build has no real GL context, so this path is exercised on the device
+only); on the device the game boots, the menu renders correctly, and the
+usual markers stay at zero with death.log empty.

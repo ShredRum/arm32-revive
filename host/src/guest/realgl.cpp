@@ -590,6 +590,74 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
+    if (n == "glBindFramebuffer" || n == "glBindRenderbuffer") {
+        // The guests DO use framebuffers (measured: glBindFramebuffer x3,
+        // glBindRenderbuffer x2 per guest); before this the calls fell into
+        // the generic tail, which answered "success" without doing
+        // anything, so the game rendered into nothing.
+        if (n == "glBindFramebuffer") {
+            glBindFramebuffer((GLenum)a0, (GLuint)a1);
+        } else {
+            glBindRenderbuffer((GLenum)a0, (GLuint)a1);
+        }
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%u) ok\n", tag, a0, a1);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glFramebufferRenderbuffer") {
+        // (target, attachment, renderbuffertarget, renderbuffer)
+        glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%04x,%04x,%u) ok\n", tag, a0, a1, a2, a3);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glFramebufferTexture2D") {
+        // (target, attachment, textarget, texture, level) -- the level is
+        // the first stack word.
+        const std::uint32_t level = Stk(r, sp, 0);
+        glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            std::printf("%s(%04x,%04x,%04x,%u,%u) ok\n", tag, a0, a1, a2, a3, level);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glRenderbufferStorage") {
+        // (target, internalformat, width, height)
+        glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%04x,%u,%u) ok\n", tag, a0, a1, a2, a3);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glGetUniformfv") {
+        // glGetUniformfv(program, location, params): GLES2 has no count
+        // (the uniform's type gives it), so ask the driver how many floats
+        // the uniform holds and write exactly that many into the GUEST's
+        // buffer -- a host pointer would be read as guest memory by the
+        // game, and the uniforms would stay garbage.
+        GLint size = 0;
+        GLenum type = 0;
+        GLint len = 0;
+        glGetActiveUniform((GLuint)a0, (GLint)a1, 1, &len, &size, &type, nullptr);
+        if (size <= 0 || size > 256) {
+            std::printf("%s LOUD uniform loc=%u size=%d type=%04x\n", tag, a1, size, type);
+            r->Ret(regs, 0);
+            return true;
+        }
+        if (!r->CheckRange(a2, (std::size_t)size * 4, true)) {
+            std::printf("%s LOUD params %08x out of range\n", tag, a2);
+            r->Ret(regs, 0);
+            return true;
+        }
+        std::vector<GLfloat> vals((std::size_t)size, 0.0f);
+        glGetUniformfv((GLuint)a0, (GLint)a1, vals.data());
+        std::memcpy(r->H(a2), vals.data(), (std::size_t)size * 4);
+        if (EnvOn("HARNESS_GLDRAWLOG")) {
+            std::printf("%s(%u,%u) size=%d type=%04x ok\n", tag, a0, a1, size, type);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
     if (n == "glBindTexture") {
         if (a0 == 0x0DE1u && active_tex_ < 8) {
             bound_tex2d_[active_tex_] = a1;
