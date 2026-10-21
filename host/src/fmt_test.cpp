@@ -24,6 +24,7 @@
 #include <string>
 
 #include "guest/dispatch.h"
+#include "guest/bsd_random.h"
 #include "guest/elf_loader.h"
 #include "guest/guest_memory.h"
 
@@ -94,6 +95,8 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_mutex_destroy", true, 0, 0, 0});  // 10
     mod.imports.push_back(abr::Import{"pthread_mutex_unlock", true, 0, 0, 0});   // 11
     mod.imports.push_back(abr::Import{"gethostname", true, 0, 0, 0});         // 12
+    mod.imports.push_back(abr::Import{"srand", true, 0, 0, 0});            // 13
+    mod.imports.push_back(abr::Import{"rand", true, 0, 0, 0});            // 14
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -480,6 +483,31 @@ int main() {
         const char* s = reinterpret_cast<const char*>(rt.H<std::uint8_t>(kHost));
         Expect("gethostname returns 0", std::to_string(n), "0");
         Expect("gethostname nul-terminated", std::to_string(s[0] != '\0' ? 1 : 0), "1");
+    }
+
+    // --- the BSD random() generator must agree with the host's random()
+    //     (same core as bionic's: bionic's rand() IS random()).
+    {
+        abr::BsdRandom rng;
+        ::srandom(1);
+        bool same = true;
+        for (int i = 0; i < 32; i++) {
+            if (rng.Next() != static_cast<std::int32_t>(::random())) {
+                same = false;
+                break;
+            }
+        }
+        Expect("bsd random matches the host's random()", same ? "same" : "different", "same");
+    }
+    {
+        // And the dispatcher must answer rand()/srand() from it.
+        const std::uint32_t seed[4] = {12345, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 13, seed);  // srand(12345)
+        const std::uint32_t args[4] = {0, 0, 0, 0};
+        const std::uint32_t a = abr::RuntimeTestAccess::Call(rt, 14, args);  // rand()
+        const std::uint32_t b = abr::RuntimeTestAccess::Call(rt, 14, args);  // rand()
+        Expect("rand() is in range", std::to_string(a < 0x80000000u ? 1 : 0), "1");
+        Expect("rand() advances", std::to_string(a != b ? 1 : 0), "1");
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);

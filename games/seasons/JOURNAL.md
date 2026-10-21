@@ -1247,3 +1247,31 @@ Verification: the native harness init counts are unchanged (the native
 build has no real GL context, so this path is exercised on the device
 only); on the device the game boots, the menu renders correctly, and the
 usual markers stay at zero with death.log empty.
+
+### 2026-10-22 — batch 7: the RNG is no longer a crutch
+
+The harness answered `rand`/`random`/`srand`/`srandom` from the **drand48**
+LCG, because the drand48 constants happened to be at hand. That is a
+different generator: the drand48 constants describe `srand48`/`lrand48`/
+`drand48`, NOT `rand`.
+
+What bionic actually does (AOSP `libc/bionic/rand.cpp`): `rand()` IS
+`random()` and `srand()` IS `srandom()`, and bionic's `random()` is the
+BSD TYPE_3 generator (degree 31, trinomial x**31 + x**3 + 1) -- the same
+core glibc uses, so the sequences agree across libc implementations.
+
+`host/src/guest/bsd_random.h` is a direct port of the Berkeley source
+(@(#)random.c 5.5 (Berkeley) 7/6/88) as reworked by glibc: the reference
+state table, the Park-Miller seeding of `srandom`, the 10*deg warm-up
+iterations and the trinomial step. The drand48 family keeps its own LCG
+(unchanged).
+
+Why it matters (and why it was not done earlier): without ANY randomness
+the game is watchable but wrong -- every bird jumps in lockstep and blinks
+together. The custom generator fixed that; matching a device's exact
+sequence was a separate, later question, and the sequence itself only
+drives animation phase, blink thresholds and interval picks.
+
+Verification: the unit test compares the generator against the HOST's
+`random()` (same core as bionic's) after `srandom(1)` -- the sequences are
+identical -- and checks the dispatcher answers `rand`/`srand` from it.

@@ -4,6 +4,7 @@
 #include <jni.h>  // real-Java delegation (product host only)
 #endif
 
+#include "guest/bsd_random.h"
 #include "realgl.h"
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
@@ -5733,9 +5734,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(o));
         return;
     }
-    if (n == "srand48" || n == "srand" || n == "srandom" || n == "rand" || n == "random" ||
-        n == "lrand48" || n == "mrand48" || n == "drand48" || n == "erand48" ||
-        n == "jrand48" || n == "nrand48") {
+    if (n == "rand" || n == "random" || n == "srand" || n == "srandom") {
+        // bionic's rand() IS random() and srand() IS srandom() (AOSP
+        // libc/bionic/rand.cpp), and bionic's random() is the BSD TYPE_3
+        // generator -- see guest/bsd_random.h. The drand48 LCG that used to
+        // answer these calls is a DIFFERENT generator (its constants only
+        // describe srand48/lrand48/drand48), so the guests' sequences were
+        // not a device's.
+        static abr::BsdRandom rng;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "srand" || n == "srandom") {
+            rng.Seed(a0);
+            Ret(regs, 0);
+            return;
+        }
+        Ret(regs, static_cast<std::uint32_t>(rng.Next()));
+        return;
+    }
+    if (n == "srand48" || n == "lrand48" || n == "mrand48" || n == "drand48" ||
+        n == "erand48" || n == "jrand48" || n == "nrand48") {
         // Real 48-bit LCG (was stub->0: EVERY lrand48() returned 0, so all
         // per-bird animation phases / blink thresholds / interval picks
         // collapsed to one value -> synchronous jumps + every-frame blinks).
@@ -5752,7 +5769,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return rng_x;
         };
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (n == "srand48" || n == "srand" || n == "srandom") {
+        if (n == "srand48") {
             rng_x = ((std::uint64_t)(a0 & 0xFFFFFFFFu) << 16) | 0x330Eull;
             rng_seeded = true;
             (void)rng_seeded;
