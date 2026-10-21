@@ -887,3 +887,109 @@ anymore (next: find out what those frames do).
   true for the `HARNESS_WATCHPC` counter offset, and the `libabhost.so`
   base changes when the APK is reinstalled (read it from
   `/proc/<pid>/maps`).
+
+## 2026-10-21 (night) — batch 1: the variadic ABI of the printf family, re-derived
+
+The audit's printf findings were treated as hypotheses and re-checked from
+scratch (no blind trust). Four of them were wrong or imprecise; the real
+defects are narrower and now proven.
+
+### Ground truth (measured, not remembered)
+
+The guests are **GCC/arm-linux-gnueabi (base PCS)** builds. Proven by
+compiling with the NDK clang in the guests' ABI and reading the code:
+
+    clang -mabi=apcs-gnu -march=armv7-a -mfloat-abi=softfp -O0 -c abi.c
+    # caller:  vmov r1, r2, d16      <- a double-word goes to the NEXT TWO
+    #                                   core registers; r1 is NOT skipped
+    # default (AAPCS32): vmov r2, r3, d16   <- r1 IS skipped (even pair)
+    # callee:  va_start -> ONE pointer (a 4-byte va_list) to the area
+    #          va_arg 4-byte: read AT the pointer, pointer += 4
+    #          va_arg 8-byte: read AT the pointer, pointer += 8 (NO shift;
+    #                          the CALLER aligns the 8-byte slots)
+
+The guests' own code agrees (`add r3, sp, #20` + `bl vsnprintf@plt`: the
+va_list is a pointer in r3, i.e. one word).
+
+### What the audit got wrong
+
+- **"%z/%j/%t => 32-bit mode"**: only `z` (size_t) and `t` (ptrdiff_t) are
+  4 bytes on this ILP32 guest. `j` is `intmax_t` = `long long` = **8 bytes**
+  and stays 8 bytes. (But `%jd` was not read *correctly* before: the old
+  code took it from an AAPCS32 even register pair, so it was right only when
+  an even pair was free. The old-code run of the new unit test shows
+  `%jd from r1:r2` coming out as 287454020.) The guests' formats were
+  counted directly (`%j` appears only with float conversions, `%z`/`%td`
+  with integers).
+- **"the default branch must consume an argument"**: the guests use no
+  unknown conversion at all (measured over all three guests), and glibc
+  prints an invalid conversion verbatim without consuming an argument, so
+  the existing behaviour was right.
+- **"LDREX/STREX can lose an update"**: `Runtime::ExclusiveWrite`
+  (dispatch.h) is a real compare-and-swap (read, compare with `expected`,
+  write only on a match), so the classic lost update cannot happen.
+  Dynarmic's monitor never clears another processor's exclusive on a plain
+  store, but the CAS covers that. Downgraded to a note.
+- **"Ret() pollutes the FPSCR with the CPSR flags"**: the CPSR's NZCV and
+  the FPSCR's condition flags are different registers; the harness does not
+  touch the FPSCR. (Whether the IT state survives is still open: on ARM an
+  exception entry clears ITSTATE, so "breaking" it may be correct.)
+
+### Real defects fixed (host side; the guest .so is untouched)
+
+1. **`%zu`/`%td` read 8 bytes instead of 4** (`ExpandPrintf`). The 4-byte
+   argument was read through the 8-byte path, so the value was garbage AND
+   the next argument was eaten (a `%s` after it could read a wild pointer).
+   15 `%z` sites per guest; the HTTP layer's messages ("Rewinding stream by
+   : %zu bytes on url %s") are exactly that shape.
+2. **`%h`/`%hh` did not narrow the printed value** (14 sites per guest:
+   `%hu` x12, `%ho` x2).
+3. **`%n` validated 4 bytes and then wrote 8** (the width now follows the
+   length modifier: hh 1, h 2, ll/j 8, else 4).
+4. **`sscanf`'s `%lld`/`%jd` wrote FOUR bytes into the guest's 8-byte slot**
+   (only half of the value). The old mapping lumped `ll/j/z/t` together;
+   per C99 7.21.6.2 the destination width follows the modifier:
+   hh 1, h 2, none/l/z/t 4, ll/j 8, and `%f` is a float (4) while
+   `%lf`/`%Lf` are doubles (8). (`%zu`/`%td` were already 4 and stayed 4.)
+   Found by the jev gate of the first attempt of this batch, which flagged
+   the claim as unsupported; the code had been changed under a wrong
+   premise there.
+5. **`vsscanf` took the va_list from the entry SP** — the guests pass it
+   in r2 (`a2`), because their va_list is one word, not an 8-byte struct.
+   (This was my own bug from 1d32093; the "struct in memory" reading came
+   from an NDK-clang AAPCS32 experiment, not from the guests' ABI.)
+6. **The 8-byte argument slot was chosen by the AAPCS32 even-pair rule**
+   (`(ai+1) & ~1`), which skips r1. The guests' base PCS does not skip it.
+   The rule was introduced with the 2026-10-20 variadic-double fix; the
+   decisive part of that fix was the va_list path, the level numbers do not
+   depend on the even rule (proved by the device check below: the level's
+   46 numbers stay bit-identical).
+
+### Verification
+
+- **New unit test** `host/src/fmt_test.cpp` (target `fmt_test`): drives the
+  real `Runtime::ExpandPrintf` over a mapped guest page and checks the
+  variadic ABI cases (%zu/%td/%jd/%lld/%ld/%hu/%hhu/%hd/%f/%n/%hn, the
+  va_list path, the register and stack layouts), and the real `sscanf`
+  dispatcher through a test-only friend bridge for the destination widths
+  (%d %d, %lld, %jd, %hd, %hhu, %zu, %f, %lf). 24 checks, ALL OK.
+  `Runtime::Ret` grew a null-JIT guard because the unit test drives the
+  dispatcher without a JIT (in every real run a JIT is attached).
+- **Native harness** (the guests' init functions): unchanged --
+  Rio 54/54 svc=948 halts=53, Seasons 142/142 svc=3072 halts=142,
+  Space 67/67 svc=1329 halts=67.
+- **Device** (Pixel 1, Android 7.1.2, SSH): Seasons boots to the menu and
+  into Tutorial_red; the live Lua state is **bit-identical to the level
+  JSON** (46 fields, `check_level_vs_json.py`) and **byte-identical to the
+  fingerprint captured from the previous build** (`state_baseline_59ff106`
+  vs the new run); no LOUD/HEAPCORRUPT/CHUNKD/USAGE_ERROR/STUCK, death.log
+  0 B. Rio and Space were re-run on the same library (shared harness =
+  shared blast radius): menus render, 0 markers, death.log 0 B.
+
+### Still open
+
+- The `va_list` path rounds the cursor up to 8 before an 8-byte read. That
+  is right for the guests' stack areas (the caller aligns the slots) but
+  not for a forwarded register save area (base PCS lays those out densely).
+  Not exercised by the guests' reachable code; needs a live measurement of
+  a forwarded va_list before it is touched.

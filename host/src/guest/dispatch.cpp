@@ -1024,10 +1024,17 @@ void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
     // (our guest is unprivileged), NZCV/GE preserved from handler time
     // (thunks never intentionally set flags).
     const std::uint32_t lr = regs[14];
-    std::uint32_t cpsr = ActiveJit()->Cpsr();
+    Dynarmic::A32::Jit* jit = ActiveJit();
+    if (jit == nullptr) {
+        // No JIT attached: the unit test drives the dispatcher directly and
+        // there is no CPSR to restore. (In every real run a JIT is set.)
+        regs[15] = lr & ~std::uint32_t(1);
+        return;
+    }
+    std::uint32_t cpsr = jit->Cpsr();
     cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
            ((lr & 1u) ? std::uint32_t(0x20) : std::uint32_t(0));
-    ActiveJit()->SetCpsr(cpsr);
+    jit->SetCpsr(cpsr);
     regs[15] = lr & ~std::uint32_t(1);
 }
 
@@ -1284,11 +1291,20 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
             st.stack += 8;
             return v;
         }
-        const int idx = (st.ai + 1) & ~1;  // round the next register up to even
-        if (idx < 4) {
-            st.ai = idx + 2;
-            return static_cast<std::uint64_t>(st.gargs[idx]) |
-                   (static_cast<std::uint64_t>(st.gargs[idx + 1]) << 32);
+        // These guests are GCC/arm-linux-gnueabi (BASE PCS) builds: an
+        // 8-byte argument takes the NEXT TWO core registers (r1:r2, r2:r3,
+        // ...) — there is NO even-pair rule. That rule belongs to AAPCS32,
+        // which the NDK's default (aapcs) clang uses and which is why the
+        // old code was wrong: with -mabi=apcs-gnu the caller emits
+        // `vmov r1, r2, d16` (r1 NOT skipped), with the default ABI it emits
+        // `vmov r2, r3, d16`. Low word first.
+        // If fewer than two registers are left, the argument is on the stack
+        // at an 8-byte aligned address (the CALLER aligns it).
+        if (st.ai + 2 <= 4) {
+            const std::uint32_t lo = st.gargs[st.ai];
+            const std::uint32_t hi = st.gargs[st.ai + 1];
+            st.ai += 2;
+            return static_cast<std::uint64_t>(lo) | (static_cast<std::uint64_t>(hi) << 32);
         }
         // Core registers exhausted: the argument is on the stack, 8-byte aligned.
         st.stack = (st.stack + 7u) & ~7u;
@@ -1358,24 +1374,54 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
                 }
             }
         }
-        int lmod = 0;  // 0 = int, 1 = long(32-bit here), 2 = long long, 3 = size_t
+        // Length modifier. The guest is a 32-bit ARM build (ILP32, base PCS):
+        //     int / long / ptrdiff_t / size_t = 4 bytes
+        //     long long / intmax_t             = 8 bytes
+        //     long double                      = double (8 bytes)
+        // `abits` is the width of the ARGUMENT in the variadic area; `trunc`
+        // how many bits of the value survive (the guest promotes short/char
+        // to int before the call, so those arguments are still 4 bytes wide
+        // and only the PRINTED value is narrowed); `nbytes` is the width %n
+        // writes.
+        int abits = 32;  // width of the argument
+        int trunc = 0;   // 0 none, 8 char, 16 short
+        int nbytes = 4;  // width written by %n
         while (fi < fmt.size()) {
             const char L = fmt[fi];
             if (L == 'h') {
                 fi++;
+                trunc = 16;
+                nbytes = 2;
                 if (fi < fmt.size() && fmt[fi] == 'h') {
                     fi++;
+                    trunc = 8;
+                    nbytes = 1;
                 }
             } else if (L == 'l') {
                 fi++;
-                lmod = (lmod >= 1) ? 2 : 1;
                 if (fi < fmt.size() && fmt[fi] == 'l') {
                     fi++;
-                    lmod = 2;
+                    abits = 64;  // long long
+                } else {
+                    abits = 32;  // long
                 }
-            } else if (L == 'L' || L == 'z' || L == 'j' || L == 't') {
+                nbytes = abits / 8;
+            } else if (L == 'L') {
                 fi++;
-                lmod = 2;
+                abits = 64;  // long double == double here
+                nbytes = 8;
+            } else if (L == 'z') {
+                fi++;
+                abits = 32;  // size_t
+                nbytes = 4;
+            } else if (L == 't') {
+                fi++;
+                abits = 32;  // ptrdiff_t
+                nbytes = 4;
+            } else if (L == 'j') {
+                fi++;
+                abits = 64;  // intmax_t
+                nbytes = 8;
             } else {
                 break;
             }
@@ -1391,7 +1437,18 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         switch (conv) {
         case 'd':
         case 'i': {
-            const long long v = (lmod >= 2) ? (long long)next64() : (long long)(std::int32_t)next32();
+            long long v;
+            if (abits == 64) {
+                v = static_cast<long long>(next64());
+            } else {
+                std::int32_t w = static_cast<std::int32_t>(next32());
+                if (trunc == 8) {
+                    w = static_cast<std::int8_t>(w);
+                } else if (trunc == 16) {
+                    w = static_cast<std::int16_t>(w);
+                }
+                v = w;
+            }
             std::snprintf(buf, sizeof(buf), ("%" + spec + "lld").c_str(), v);
             out += buf;
             break;
@@ -1400,8 +1457,18 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         case 'o':
         case 'x':
         case 'X': {
-            const unsigned long long v = (lmod >= 2) ? (unsigned long long)next64()
-                                                      : (unsigned long long)next32();
+            unsigned long long v;
+            if (abits == 64) {
+                v = static_cast<unsigned long long>(next64());
+            } else {
+                std::uint32_t w = static_cast<std::uint32_t>(next32());
+                if (trunc == 8) {
+                    w = static_cast<std::uint8_t>(w);
+                } else if (trunc == 16) {
+                    w = static_cast<std::uint16_t>(w);
+                }
+                v = w;
+            }
             std::snprintf(buf, sizeof(buf), ("%" + spec + "ll" + conv).c_str(), v);
             out += buf;
             break;
@@ -1440,13 +1507,23 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         }
         case 'n': {
             const std::uint32_t p = next32();
-            if (p != 0 && CheckRange(p, 4, true)) {
-                if (lmod >= 2) {
+            // %n writes the number of characters written so far; the width
+            // follows the length modifier (hh 1, h 2, ll/j 8, else 4). The
+            // range check must match the width actually written: it used to
+            // validate 4 bytes and then write 8.
+            if (p != 0 && CheckRange(p, nbytes, true)) {
+                if (nbytes == 8) {
                     const std::uint64_t n = out.size();
                     std::memcpy(H(p), &n, 8);
-                } else {
+                } else if (nbytes == 4) {
                     const std::uint32_t n = (std::uint32_t)out.size();
                     std::memcpy(H(p), &n, 4);
+                } else if (nbytes == 2) {
+                    const std::uint16_t n = (std::uint16_t)out.size();
+                    std::memcpy(H(p), &n, 2);
+                } else {
+                    const std::uint8_t n = (std::uint8_t)out.size();
+                    std::memcpy(H(p), &n, 1);
                 }
             }
             break;
@@ -2002,23 +2079,31 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 2;  // first vararg: r2
         std::uint32_t stack = regs[13];
-        // vsscanf(str, fmt, va_list): the va_list is an 8-byte struct
-        // {void *area} that AAPCS32 passes in MEMORY (a composite type
-        // larger than 4 bytes goes to the stack), so the callee finds it at
-        // its entry SP -- which is the SP we see here, because the guest
-        // reaches us through a PLT stub that does not touch SP. The area
-        // holds the variadic arguments back to back: 4-byte slots, and an
-        // 8-byte slot is 8-byte aligned (clang's ARM32 va_start layout: the
-        // callee saves r1-r3 and the caller's stack arguments follow
-        // contiguously). Treating vsscanf as sscanf -- as this did -- took
-        // the va_list pointer itself as the first variadic argument.
+        // vsscanf(str, fmt, va_list): these guests are GCC/arm-linux-gnueabi
+        // builds (base PCS), where a va_list is a single word -- a POINTER to
+        // a flat argument area -- and it arrives in a core register, not in
+        // memory. vsscanf has two named arguments (str, fmt), so the area
+        // pointer is the third argument: r2 == a2. The area holds the
+        // variadic arguments back to back: a 4-byte argument is read AT the
+        // pointer (pointer += 4); an 8-byte one is also read AT the pointer
+        // (pointer += 8) -- the CALLER aligns the 8-byte slots, the consumer
+        // does not shift the pointer.
+        //
+        // Ground truth (not from memory): the guests' own code does
+        // `add r3, sp, #20` + `bl vsnprintf@plt`, and a -mabi=apcs-gnu
+        // compile (clang, the same toolchain the audit used) shows va_start
+        // storing a single pointer to the register save area and va_arg
+        // reading at that pointer and advancing by 4 (int) / 8 (double-word).
+        // The earlier "an 8-byte struct passed in memory at the entry SP"
+        // reading was wrong: it came from an NDK-clang AAPCS32 experiment,
+        // not from the guests' actual ABI.
         const bool via_va = (n == "vsscanf");
         std::uint32_t va_area = 0;
         if (via_va) {
-            if (!CheckRange(stack, 4, false)) {
+            va_area = a2;
+            if (!CheckRange(va_area, 4, false)) {
                 goto bad_ptr;
             }
-            std::memcpy(&va_area, H(stack), 4);
         }
         auto next_ptr = [&]() -> std::uint32_t {
             std::uint32_t v = 0;
@@ -2085,24 +2170,42 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 width = width * 10 + (fmt[fi] - '0');
                 fi++;
             }
-            int len = 0;  // 0 none, 1 hh, 2 h, 3 l, 4 ll/j/z/t, 5 L
+            // The DESTINATION width follows the length modifier (C99 7.21.6.2):
+            //   integers: hh 1, h 2, none/l/z/t 4, ll/j 8
+            //   floats:   none 4 (float*), l/L 8 (double* / long double*)
+            // The old mapping lumped ll/j/z/t into one bucket and wrote
+            // FOUR bytes for all of them, so %lld and %jd filled only half
+            // of the guest's long long / intmax_t; size_t and ptrdiff_t (4
+            // bytes on this ILP32 guest) happened to be right.
+            int len = 4;   // integer destination width in bytes
+            int flen = 4;  // float destination width in bytes
             if (fi < fmt.size() && (fmt[fi] == 'h' || fmt[fi] == 'l' || fmt[fi] == 'L' ||
                                     fmt[fi] == 'j' || fmt[fi] == 'z' || fmt[fi] == 't')) {
                 char lc = fmt[fi++];
-                if (lc == 'h' && fi < fmt.size() && fmt[fi] == 'h') {
-                    fi++;
-                    len = 1;
-                } else if (lc == 'h') {
-                    len = 2;
-                } else if (lc == 'l' && fi < fmt.size() && fmt[fi] == 'l') {
-                    fi++;
-                    len = 4;
+                if (lc == 'h') {
+                    if (fi < fmt.size() && fmt[fi] == 'h') {
+                        fi++;
+                        len = 1;
+                    } else {
+                        len = 2;
+                    }
                 } else if (lc == 'l') {
-                    len = 3;
+                    if (fi < fmt.size() && fmt[fi] == 'l') {
+                        fi++;
+                        len = 8;  // long long
+                    } else {
+                        len = 4;  // long
+                    }
+                    flen = 8;  // %lf -> double*
                 } else if (lc == 'L') {
-                    len = 5;
+                    len = 8;
+                    flen = 8;  // %Lf -> long double* (== double here)
+                } else if (lc == 'z' || lc == 't') {
+                    len = 4;  // size_t / ptrdiff_t are 4 bytes on this guest
+                    flen = 8;
                 } else {
-                    len = 4;
+                    len = 8;  // j: intmax_t
+                    flen = 8;
                 }
             }
             if (fi >= fmt.size()) {
@@ -2316,12 +2419,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         }
                         long long sv = neg ? -(long long)uv : (long long)uv;
                         bool is_signed = (conv == 'd' || conv == 'i');
-                        if (len == 4 || (len == 3)) {
-                            // guest long = 32-bit: narrow.
-                            std::int32_t w32 = is_signed ? (std::int32_t)sv : (std::int32_t)uv;
-                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
-                                std::memcpy(H(dp), &w32, 4);
-                                }
+                        if (len == 8) {
+                            // long long / intmax_t: the guest's slot is 8 bytes.
+                            if (is_signed) {
+                                long long w64 = sv;
+                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                    std::memcpy(H(dp), &w64, 8);
+                                    }
+                            } else {
+                                unsigned long long w64 = uv;
+                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                    std::memcpy(H(dp), &w64, 8);
+                                    }
+                            }
                         } else if (len == 1) {
                             std::int8_t w8 =
                                 is_signed ? (std::int8_t)sv : (std::int8_t)(std::uint8_t)uv;
@@ -2334,12 +2444,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             if (dp && ClampHeapWrite(dp, 2, "sscanf-num") >= 2 && CheckRange(dp, 2, true)) {
                                 std::memcpy(H(dp), &w16, 2);
                                 }
-                        } else if (len == 0 && !is_signed && conv == 'p') {
+                        } else if (!is_signed && conv == 'p') {
+                            // %p writes an int*.
                             std::int32_t w32 = (std::int32_t)uv;
                             if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &w32, 4);
                                 }
-                        } else if (len == 0) {
+                        } else {
+                            // int / long / size_t / ptrdiff_t: 4 bytes.
                             if (is_signed) {
                                 std::int32_t w32 = (std::int32_t)sv;
                                 if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
@@ -2349,18 +2461,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                 std::uint32_t wu = (std::uint32_t)uv;
                                 if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &wu, 4);
-                                    }
-                            }
-                        } else {  // 64-bit (ll/j/z/t): same size both ABIs.
-                            if (is_signed) {
-                                long long w64 = sv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
-                                    std::memcpy(H(dp), &w64, 8);
-                                    }
-                            } else {
-                                unsigned long long w64 = uv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
-                                    std::memcpy(H(dp), &w64, 8);
                                     }
                             }
                         }
@@ -2396,8 +2496,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 } else {
                     ii += pos;
                     if (!suppress) {
-                        if (len == 3 || len == 4 || len == 5) {
-                            // %lf (guest long double == double, 8B).
+                        if (flen == 8) {
+                            // %lf / %Lf: the guest's slot is a double (8B).
                             if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
                                 std::memcpy(H(dp), &dv, 8);
                                 }

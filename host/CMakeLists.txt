@@ -25,6 +25,10 @@ target_link_libraries(smoke_a32 PRIVATE dynarmic)
 add_executable(cbnz_test src/cbnz_test.cpp)
 target_link_libraries(cbnz_test PRIVATE dynarmic)
 
+# Unit test for the guest printf formatter (variadic ABI of the guests).
+add_executable(fmt_test src/fmt_test.cpp)
+target_link_libraries(fmt_test PRIVATE guest)
+
 # distv: Dynarmic-based disassembler for the game .so.
 add_executable(distv src/distv.cpp)
 target_link_libraries(distv PRIVATE dynarmic)

@@ -338,6 +338,8 @@ public:
 
 private:
     using Regs = std::array<std::uint32_t, 16>;
+    // Test-only bridge to the private import dispatcher (host/src/fmt_test.cpp).
+    friend struct RuntimeTestAccess;
     void CallImport(std::uint32_t idx, Regs& regs);
     // Fast path for the math imports the guest calls in tight loops; the id is
     // resolved at load time (Import::fast_math) so the per-call dispatch costs
