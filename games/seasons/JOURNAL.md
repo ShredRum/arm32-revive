@@ -993,3 +993,63 @@ va_list is a pointer in r3, i.e. one word).
   not for a forwarded register save area (base PCS lays those out densely).
   Not exercised by the guests' reachable code; needs a live measurement of
   a forwarded va_list before it is touched.
+
+## 2026-10-21 (night) — batch 2: the libc imports the guests actually call
+
+The audit listed "unhandled imports" as a class. Each one was re-checked
+against the guests' own disassembly first (the PLT stub of every import was
+resolved and its call sites counted), because an import that exists in the
+PLT is not necessarily called. Call sites per guest:
+
+| import | Seasons | Space | Rio | before |
+|---|---|---|---|---|
+| `strcoll` | 3 | 3 | 0 | tail -> 0 ("equal") |
+| `memmem` | 6 | 6 | 2 | tail -> 0 (NULL) |
+| `setjmp` / `longjmp` | 3 / 1 | 3 / 1 | 3 / 0 | tail -> 0 / no-op |
+| `statfs` | 1 | 1 | 1 | tail -> 0 ("success", buffer untouched) |
+| `sysconf` | 2 | 1 | 1 | tail -> 0 |
+| `getpid` | 7 | 1 | 1 | tail -> 0 |
+| `syscall` | 5 | 0 | 0 | tail -> 0 |
+
+Fixed in this batch: `strcoll`, `memmem`, `sysconf`, `getpid` and the raw
+`syscall` wrapper.
+
+- **strcoll**: the guest puts itself into the "C" locale (it calls
+  `setlocale("C")` itself), where the collation IS the byte order, so the C
+  library's `strcoll` in the harness' locale is exactly the guest's answer.
+  Before, the comparator always said "equal", so an ordered container keyed
+  by strings resolved to the wrong entry.
+- **memmem**: returns a guest address. Note `std::search` returns `last1`
+  (not nullptr) when there is no match -- the first version of this fix
+  returned the end of the haystack as if it were a hit; the unit test caught
+  it. The same test caught that the argument order
+  (haystack, haylen, needle, needlelen) had been mixed up.
+- **sysconf**: the `_SC_*` values are the Linux ones on both ABIs, so the
+  host's answer is the guest's.
+- **getpid**: the host's pid.
+- **syscall**: the guests' call sites pass only two numbers -- 224
+  (`gettid`, four sites) and 268 (`tgkill`, one site). `gettid` now answers
+  the guest thread's id instead of 0. `tgkill` is the guest signalling
+  ITSELF (pid = getpid, tid = gettid); the harness has no per-guest-thread
+  signal delivery and the guest's `sigaction` is a no-op, so delivering the
+  signal would take the whole app down instead of reaching the guest's own
+  handler -- it keeps answering "success", as the tail did. Any other
+  number is refused with -ENOSYS instead of a silent 0.
+
+`statfs` and `setjmp`/`longjmp` are not in this batch: `statfs` needs the
+guest's `struct statfs` layout and the mapping of the guest's path to the
+host directory, and `setjmp`/`longjmp` has to resume the guest at the saved
+point. Both are prepared (the guest's jmp_buf is a stack buffer of 8..24
+bytes into a 268..284 byte frame, and `longjmp` is called with the value 1).
+
+### Verification
+
+- **Unit test** `host/src/fmt_test.cpp`: 34 checks, ALL OK -- the printf
+  family, the sscanf destination widths, and now `strcoll`, `memmem`,
+  `sysconf`, `getpid` and `syscall` driven through the real dispatcher.
+- **Native harness**: unchanged (Rio 54/54, Seasons 142/142, Space 67/67).
+- **Device** (Pixel 1, Android 7.1.2): Seasons boots, reaches the menu and
+  Tutorial_red; the live Lua state is bit-identical to the level JSON (46
+  fields) and byte-identical to the fingerprint of the 59ff106 build; no
+  LOUD/HEAPCORRUPT/CHUNKD/USAGE_ERROR/STUCK, death.log 0 B. Rio and Space
+  were re-run on the same library: menus render, 0 markers, death.log 0 B.

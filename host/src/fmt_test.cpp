@@ -65,8 +65,13 @@ constexpr std::uint32_t kOut = 0x10003000;      // %n destination
 int main() {
     abr::GuestMemory mem;
     abr::LoadedModule mod;
-    // One import so the dispatcher can be reached for sscanf.
-    mod.imports.push_back(abr::Import{"sscanf", true, 0, 0, 0});
+    // Imports so the dispatcher can be reached for the libc calls below.
+    mod.imports.push_back(abr::Import{"sscanf", true, 0, 0, 0});    // 0
+    mod.imports.push_back(abr::Import{"strcoll", true, 0, 0, 0});  // 1
+    mod.imports.push_back(abr::Import{"memmem", true, 0, 0, 0});    // 2
+    mod.imports.push_back(abr::Import{"sysconf", true, 0, 0, 0});   // 3
+    mod.imports.push_back(abr::Import{"getpid", true, 0, 0, 0});    // 4
+    mod.imports.push_back(abr::Import{"syscall", true, 0, 0, 0});   // 5
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -307,6 +312,73 @@ int main() {
             double d = 0;
             std::memcpy(&d, rt.H<std::uint8_t>(kDst), 8);
             Expect("sscanf %lf (double, 8 bytes)", std::to_string(d), "1.500000");
+        }
+    }
+
+    // --- the libc calls the guests actually make (they used to fall into
+    //     the generic tail, which answers 0 for everything).
+    {
+        const std::uint32_t kS1 = 0x10006000;
+        const std::uint32_t kS2 = 0x10006100;
+        const std::uint32_t kHay = 0x10006200;
+        const std::uint32_t kNdl = 0x10006300;
+        put(kS1, "abc");
+        put(kS2, "abd");
+        auto call = [&](std::uint32_t idx, const std::uint32_t args[4]) {
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        {
+            const std::uint32_t args[4] = {kS1, kS2, 0, 0};
+            const std::int32_t r = (std::int32_t)call(1, args);
+            Expect("strcoll abc<abd", std::to_string(r < 0 ? -1 : (r > 0 ? 1 : 0)), "-1");
+        }
+        {
+            const std::uint32_t args[4] = {kS1, kS1, 0, 0};
+            const std::int32_t r = (std::int32_t)call(1, args);
+            Expect("strcoll abc==abc", std::to_string(r), "0");
+        }
+        {
+            const std::uint32_t args[4] = {kS2, kS1, 0, 0};
+            const std::int32_t r = (std::int32_t)call(1, args);
+            Expect("strcoll abd>abc", std::to_string(r > 0 ? 1 : (r < 0 ? -1 : 0)), "1");
+        }
+        {
+            put(kHay, "0123456789abcdef");
+            put(kNdl, "456");
+            const std::uint32_t args[4] = {kHay, 16, kNdl, 3};
+            const std::uint32_t r = call(2, args);
+            Expect("memmem found", std::to_string(r - kHay), "4");
+        }
+        {
+            put(kNdl, "xyz");
+            const std::uint32_t args[4] = {kHay, 16, kNdl, 3};
+            Expect("memmem missing", std::to_string(call(2, args)), "0");
+        }
+        {
+            // _SC_PAGESIZE is 30 in Linux.
+            const std::uint32_t args[4] = {30, 0, 0, 0};
+            const std::uint32_t r = call(3, args);
+            Expect("sysconf _SC_PAGESIZE", std::to_string(r != 0 ? 1 : 0), "1");
+        }
+        {
+            const std::uint32_t args[4] = {0, 0, 0, 0};
+            Expect("getpid nonzero", std::to_string(call(4, args) != 0 ? 1 : 0), "1");
+        }
+        {
+            // syscall(224) = gettid.
+            const std::uint32_t args[4] = {224, 0, 0, 0};
+            Expect("syscall gettid", std::to_string(call(5, args)), "1");
+        }
+        {
+            // syscall(268) = tgkill: the guest signals itself; report success.
+            const std::uint32_t args[4] = {268, 0, 0, 0};
+            Expect("syscall tgkill", std::to_string(call(5, args)), "0");
+        }
+        {
+            // An unknown number is refused instead of silently answering 0.
+            const std::uint32_t args[4] = {4242, 0, 0, 0};
+            const std::int32_t r = (std::int32_t)call(5, args);
+            Expect("syscall unknown -> -ENOSYS", std::to_string(r), "-38");
         }
     }
 

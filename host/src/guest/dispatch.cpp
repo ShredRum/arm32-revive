@@ -1700,6 +1700,78 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, out);
         return;
     }
+    // --- libc odds and ends the guests actually call -------------------
+    // Measured on the guests' disassembly (Seasons): strcoll x3, memmem x6,
+    // sysconf x2, getpid x7, syscall x5 (224 gettid x4, 268 tgkill x1).
+    // Before this they all fell into the generic tail, which answers 0 --
+    // "the two strings are equal", "not found", "0 bytes", "thread id 0".
+    if (n == "strcoll") {
+        // The guest puts itself into the "C" locale (it calls setlocale("C")
+        // itself), where the collation is the byte order -- so the C
+        // library's strcoll in the harness' own locale is the guest's
+        // answer. (GuestStr hands out a shared scratch buffer, so both
+        // strings have to be copied before the second call.)
+        const std::string sa(GuestStr(a0));
+        const std::string sb(GuestStr(a1));
+        Ret(regs, static_cast<std::uint32_t>(std::strcoll(sa.c_str(), sb.c_str())));
+        return;
+    }
+    if (n == "memmem") {
+        // memmem(haystack, haylen, needle, needlelen) returns a POINTER
+        // into the haystack -- a guest address here.
+        if (!CheckRange(a0, a1, false) || !CheckRange(a2, a3, false)) {
+            goto bad_ptr;
+        }
+        if (a3 == 0) {
+            Ret(regs, a0);
+            return;
+        }
+        if (a3 > a1) {
+            Ret(regs, 0);
+            return;
+        }
+        const std::uint8_t* hay = H<const std::uint8_t>(a0);
+        const std::uint8_t* ndl = H<const std::uint8_t>(a2);
+        const std::uint8_t* hit = std::search(hay, hay + a1, ndl, ndl + a3);
+        // std::search returns last1 (not nullptr) when there is no match.
+        if (hit == hay + a1) {
+            Ret(regs, 0);
+            return;
+        }
+        Ret(regs, static_cast<std::uint32_t>(a0 + (hit - hay)));
+        return;
+    }
+    if (n == "sysconf") {
+        // The guest asks for the page size and friends. The _SC_* values
+        // are the Linux ones on both ABIs, so the host's answer is the
+        // guest's.
+        Ret(regs, static_cast<std::uint32_t>(::sysconf(static_cast<int>(a0))));
+        return;
+    }
+    if (n == "getpid") {
+        Ret(regs, static_cast<std::uint32_t>(::getpid()));
+        return;
+    }
+    if (n == "syscall") {
+        // The raw syscall() wrapper. The guests' call sites pass only two
+        // numbers (measured on the Seasons disassembly): 224 = gettid and
+        // 268 = tgkill.
+        if (a0 == 224) {  // __NR_gettid
+            Ret(regs, GuestTid());
+            return;
+        }
+        if (a0 == 268) {  // __NR_tgkill
+            // The guest signals ITSELF (pid = getpid, tid = gettid). The
+            // harness has no per-guest-thread signal delivery, and the
+            // guest's sigaction is a no-op, so a delivered signal would take
+            // the whole app down instead of reaching the guest's handler.
+            // Report success, like the generic tail did.
+            Ret(regs, 0);
+            return;
+        }
+        Ret(regs, static_cast<std::uint32_t>(-ENOSYS));
+        return;
+    }
     // --- raw memory (host implementations over translated pointers) ---
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host.
