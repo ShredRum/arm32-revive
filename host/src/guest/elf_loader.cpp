@@ -133,7 +133,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
         const std::uint32_t page = 0x1000;
         const std::uint32_t rstart = AlignDown(ph.p_vaddr, page);
-        const std::uint32_t rend = AlignDown(ph.p_vaddr + ph.p_memsz, page);
+        // The END rounds UP, like glibc's _dl_protect_relro: the page that
+        // holds the last byte of the RELRO is protected too. Rounding it
+        // down (as this did) left that page unguarded -- a guest write
+        // there would not have been refused.
+        const std::uint32_t rend = AlignUp(ph.p_vaddr + ph.p_memsz, page);
         if (rend > rstart) {
             out.relro_start = rstart;
             out.relro_size = rend - rstart;

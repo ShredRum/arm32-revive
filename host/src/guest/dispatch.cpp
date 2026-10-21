@@ -960,22 +960,28 @@ int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
 const char* Runtime::GuestStr(std::uint32_t guest) {
     // Thread-local scratch: worker threads share this Runtime; a shared
     // std::string here corrupted the host heap under concurrency (found via
-    // gdb backtrace into unordered_map). Bounded 511+NUL, immediate use only.
-    thread_local static char scratch[512];
-    std::uint32_t n = 0;
-    // Bounded + access-checked: never let a wild guest pointer kill the host.
-    for (std::uint32_t i = 0; i < 511; i++) {
-        if (!CheckAccess(guest + i, 1, false, false)) {
-            break;
-        }
-        char c = *H<char>(guest + i);
-        if (c == '\0') {
-            break;
-        }
-        scratch[n++] = c;
+    // gdb backtrace into unordered_map). Immediate use only.
+    // The bound was 511 bytes, which silently cut a long guest string -- the
+    // printf family then rendered a truncated string AND reported the
+    // truncated length. It is now a generous sanity limit.
+    thread_local static std::string scratch;
+    scratch.clear();
+    if (!CheckAccess(guest, 1, false, false)) {
+        return scratch.c_str();
     }
-    scratch[n] = '\0';
-    return scratch;
+    constexpr std::size_t kMax = 1u << 16;
+    std::size_t n = 0;
+    while (n < kMax) {
+        if (!CheckAccess(guest + static_cast<std::uint32_t>(n), 1, false, false)) {
+            break;
+        }
+        if (*H<char>(guest + static_cast<std::uint32_t>(n)) == '\0') {
+            break;
+        }
+        ++n;
+    }
+    scratch.assign(reinterpret_cast<const char*>(H<char>(guest)), n);
+    return scratch.c_str();
 }
 
 // Validates a guest range before host-side bulk access. Halts cleanly on violation.
@@ -1255,7 +1261,8 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
     CallImport(idx, regs);
 }
 
-std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
+std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
+                                 std::size_t* total_out) {
     auto next32 = [&]() -> std::uint32_t {
         std::uint32_t v = 0;
         if (st.via_va) {
@@ -1274,14 +1281,15 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         st.stack += 4;
         return v;
     };
-    // Variadic double-word arguments (double, long long) follow AAPCS32:
-    // they occupy an EVEN-numbered core register pair (r0:r1, r2:r3, ...);
-    // if the next free register is odd-numbered the argument is passed on
-    // the stack instead, at an 8-byte aligned address. Low word first.
-    // Reading two consecutive words regardless of parity silently swapped
-    // halves of every variadic double -> the guest's own number->text
-    // formatting (libc++ num_put -> vsprintf) produced "inf"/"0"/"nan" and
-    // the level's fractional fields came out garbage (integers survived).
+    // Variadic double-word arguments (double, long long) in these BASE PCS
+    // guests take the NEXT TWO core registers (r1:r2, r2:r3, ...): there
+    // is no even-pair rule (that is AAPCS32 -- the NDK's default ABI, which
+    // is NOT what these guests were built with). If fewer than two
+    // registers are left, the argument is on the stack. Low word first.
+    // Reading the wrong pair swapped the halves of every variadic double
+    // -> the guest's own number->text formatting (libc++ num_put ->
+    // vsprintf) produced "inf"/"0"/"nan" and the level's fractional fields
+    // came out garbage (the integers survived).
     auto next64 = [&]() -> std::uint64_t {
         if (st.via_va) {
             // va_list position: a double-word sits at an 8-byte aligned slot.
@@ -1318,12 +1326,25 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         return v;
     };
 
+    // C99: snprintf returns the number of characters that WOULD have been
+    // written, and the guests size their own buffers from that number. The
+    // old expansion stopped at 4096 and reported the TRUNCATED length, so a
+    // guest could cut its own buffer short. The text is still bounded (a
+    // sanity limit on memory), but the length is counted past the bound.
+    constexpr std::size_t kMaxExpand = 1u << 20;
     std::string out;
+    std::size_t total = 0;
+    auto emit = [&](const char* p, std::size_t n) {
+        if (out.size() < kMaxExpand) {
+            out.append(p, std::min(n, kMaxExpand - out.size()));
+        }
+        total += n;
+    };
     std::size_t fi = 0;
-    while (fi < fmt.size() && out.size() < 4096) {
+    while (fi < fmt.size() && out.size() < kMaxExpand) {
         const char c = fmt[fi++];
         if (c != '%') {
-            out += c;
+            emit(&c, 1);
             continue;
         }
         if (fi >= fmt.size()) {
@@ -1332,7 +1353,7 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
         }
         if (fmt[fi] == '%') {
             fi++;
-            out += '%';
+            emit("%", 1);
             continue;
         }
         std::string flags;
@@ -1435,7 +1456,14 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
             break;
         }
         const char conv = fmt[fi++];
-        char buf[512];
+        // The rendered conversion can be long (a %s of any length), so the
+        // buffer is sized for it: the old fixed 512 bytes silently cut a
+        // long string.
+        std::size_t need = 512;
+        if (conv == 's') {
+            need = 512;
+        }
+        std::vector<char> buf(need);
         switch (conv) {
         case 'd':
         case 'i': {
@@ -1451,8 +1479,8 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
                 }
                 v = w;
             }
-            std::snprintf(buf, sizeof(buf), ("%" + spec + "lld").c_str(), v);
-            out += buf;
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + "lld").c_str(), v);
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         }
         case 'u':
@@ -1471,15 +1499,15 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
                 }
                 v = w;
             }
-            std::snprintf(buf, sizeof(buf), ("%" + spec + "ll" + conv).c_str(), v);
-            out += buf;
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + "ll" + conv).c_str(), v);
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         }
         case 'p': {
-            std::snprintf(buf, sizeof(buf), ("%" + spec + "llx").c_str(),
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + "llx").c_str(),
                           (unsigned long long)next32());
-            out += "0x";
-            out += buf;
+            emit("0x", 2);
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         }
         case 'f':
@@ -1493,18 +1521,23 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
             const std::uint64_t bits = next64();
             double d = 0;
             std::memcpy(&d, &bits, 8);
-            std::snprintf(buf, sizeof(buf), ("%" + spec + conv).c_str(), d);
-            out += buf;
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + conv).c_str(), d);
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         }
         case 'c':
-            std::snprintf(buf, sizeof(buf), ("%" + spec + "c").c_str(), (int)(next32() & 0xFF));
-            out += buf;
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + "c").c_str(), (int)(next32() & 0xFF));
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         case 's': {
             const char* s = GuestStr(next32());
-            std::snprintf(buf, sizeof(buf), ("%" + spec + "s").c_str(), s ? s : "");
-            out += buf;
+            const std::string sv = s ? s : "";
+            // The width can pad the result, so the buffer has to fit the
+            // string AND the padding.
+            const std::size_t wpad = width.empty() ? 0 : static_cast<std::size_t>(std::atoll(width.c_str()));
+            buf.assign(sv.size() + wpad + 64, 0);
+            std::snprintf(buf.data(), buf.size(), ("%" + spec + "s").c_str(), sv.c_str());
+            emit(buf.data(), std::strlen(buf.data()));
             break;
         }
         case 'n': {
@@ -1515,27 +1548,32 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st) {
             // validate 4 bytes and then write 8.
             if (p != 0 && CheckRange(p, nbytes, true)) {
                 if (nbytes == 8) {
-                    const std::uint64_t n = out.size();
+                    const std::uint64_t n = total;
                     std::memcpy(H(p), &n, 8);
                 } else if (nbytes == 4) {
-                    const std::uint32_t n = (std::uint32_t)out.size();
+                    const std::uint32_t n = (std::uint32_t)total;
                     std::memcpy(H(p), &n, 4);
                 } else if (nbytes == 2) {
-                    const std::uint16_t n = (std::uint16_t)out.size();
+                    const std::uint16_t n = (std::uint16_t)total;
                     std::memcpy(H(p), &n, 2);
                 } else {
-                    const std::uint8_t n = (std::uint8_t)out.size();
+                    const std::uint8_t n = (std::uint8_t)total;
                     std::memcpy(H(p), &n, 1);
                 }
             }
             break;
         }
         default:
-            out += '%';
-            out += spec;
-            out += conv;
+            // An invalid conversion is printed verbatim (like glibc) and
+            // consumes no argument.
+            emit("%", 1);
+            emit(spec.c_str(), spec.size());
+            emit(&conv, 1);
             break;
         }
+    }
+    if (total_out) {
+        *total_out = total;
     }
     return out;
 }
@@ -2887,112 +2925,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "__android_log_print") {
-        // Expand guest printf-style args (ARM APCS: r0-r3 then stack) so the
-        // game's own diagnostics (e.g. "Parsing JSON failed! Reason: ...")
-        // become visible. Supports %s %d %i %u %x %X %p %c %f %e %g %% (+l
-        // ignored). A double arrives in r0:r1 (low word first) and takes an
-        // even-numbered register pair, so it is read with the same rule the
-        // printf family uses (see ExpandPrintf::next64).
+        // Expand guest printf-style args so the game's own diagnostics (e.g.
+        // "Parsing JSON failed! Reason: ...") become visible. This used to
+        // carry its OWN formatter, which had diverged from the printf
+        // family: it printed %f/%e/%g as %g, printed %p without the 0x,
+        // ignored the length modifiers and the flags/width/precision, and
+        // read a double from an AAPCS32 EVEN register pair -- while these
+        // guests are base PCS, where a double takes the next two words.
+        // One formatter now: Runtime::ExpandPrintf.
         const std::string fmt(GuestStr(a2));  // copy: later GuestStr calls reuse scratch
-        std::uint32_t gargs[4] = {a0, a1, a2, a3};
-        std::uint32_t ai = 3;  // next arg: r3 first (a0-a2 consumed: prio,tag,fmt)
-        std::uint32_t stack = regs[13];
-        std::string out;
-        for (const char* p = fmt.c_str(); *p && out.size() < 8192; p++) {
-            if (*p != '%') {
-                out += *p;
-                continue;
-            }
-            p++;
-            if (*p == '%') {
-                out += '%';
-                continue;
-            }
-            if (*p == 'l') {
-                p++;  // ignore length modifier
-            }
-            auto next_arg = [&]() -> std::uint32_t {
-                std::uint32_t v = 0;
-                if (ai < 4) {
-                    v = gargs[ai++];
-                } else {
-                    if (CheckRange(stack, 4, false)) {
-                        std::memcpy(&v, H(stack), 4);
-                    }
-                    stack += 4;
-                }
-                return v;
-            };
-            // Double argument: an even-numbered register pair (r0:r1,
-            // r2:r3, ...), else an 8-byte aligned stack slot.
-            auto next_double = [&]() -> double {
-                double d = 0;
-                if (ai < 4) {
-                    const int idx = (ai + 1) & ~1;
-                    if (idx < 4) {
-                        ai = static_cast<std::uint32_t>(idx + 2);
-                        std::uint32_t w[2] = {gargs[idx], gargs[idx + 1]};
-                        std::memcpy(&d, w, 8);
-                        return d;
-                    }
-                }
-                stack = (stack + 7u) & ~7u;
-                if (CheckRange(stack, 8, false)) {
-                    std::memcpy(&d, H(stack), 8);
-                }
-                stack += 8;
-                return d;
-            };
-            char tmp[64];
-            switch (*p) {
-            case 's': {
-                std::uint32_t s = next_arg();
-                out += GuestStr(s);
-                break;
-            }
-            case 'd':
-            case 'i':
-                std::snprintf(tmp, sizeof(tmp), "%d", (int)next_arg());
-                out += tmp;
-                break;
-            case 'u':
-                std::snprintf(tmp, sizeof(tmp), "%u", next_arg());
-                out += tmp;
-                break;
-            case 'x':
-            case 'X':
-            case 'p':
-                std::snprintf(tmp, sizeof(tmp), "%x", next_arg());
-                out += tmp;
-                break;
-            case 'c':
-                out += (char)(next_arg() & 0xFF);
-                break;
-            case 'f':
-            case 'F':
-            case 'e':
-            case 'E':
-            case 'g':
-            case 'G': {
-                // Was missing: the conversion fell into the default branch,
-                // which neither printed the value NOR consumed the argument,
-                // so every later argument was read from the wrong place.
-                const double d = next_double();
-                std::snprintf(tmp, sizeof(tmp), "%g", d);
-                out += tmp;
-                break;
-            }
-            default:
-                // Consume the argument anyway: leaving it in place shifted
-                // every following argument by one slot.
-                next_arg();
-                out += '%';
-                out += *p ? *p : '%';
-                break;
-            }
-        }
+        GuestFmtArgs st{};
+        st.gargs[0] = a0;
+        st.gargs[1] = a1;
+        st.gargs[2] = a2;
+        st.gargs[3] = a3;
+        st.ai = 3;  // r0-r2 are prio, tag and fmt; the variadic part starts at r3
+        st.stack = regs[13];
+        std::size_t total = 0;
+        const std::string out = ExpandPrintf(fmt, st, &total);
         std::printf("[glog] %s\n", out.c_str());
-        Ret(regs, 0);
+        Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
     if (n == "__android_log_write") {
@@ -3020,9 +2972,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             st.ai = 1;
             st.stack = a1;
         }
-        const std::string out = ExpandPrintf(fmt, st);
+        std::size_t total = 0;
+        const std::string out = ExpandPrintf(fmt, st, &total);
         std::fwrite(out.data(), 1, out.size(), stdout);
-        Ret(regs, static_cast<std::uint32_t>(out.size()));
+        Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
     if (n == "uname") {
@@ -3068,7 +3021,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         st.ai = sized ? 3 : 2;                              // first vararg core reg
         st.via_va = via_va;
         st.stack = via_va ? (sized ? a3 : a2) : regs[13];   // va_list or stack args
-        const std::string out = ExpandPrintf(fmt, st);
+        std::size_t total = 0;
+        const std::string out = ExpandPrintf(fmt, st, &total);
         if (cap > 0 && CheckRange(dst, 1, true)) {
             const std::size_t w = std::min<std::size_t>(out.size(), (std::size_t)cap - 1);
             if (CheckRange(dst, w + 1, true)) {
@@ -3076,7 +3030,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 H(dst)[w] = 0;
             }
         }
-        Ret(regs, static_cast<std::uint32_t>(out.size()));
+        // C99: the return value is the length that WOULD have been written,
+        // not the number of characters that fit.
+        Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
     // --- sleeps: honest (PLAN item 8) --------------------------------------
@@ -5705,8 +5661,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
             return;
         }
-        // strftime(a0=buf, a1=max, a2=fmt, a3=tm*): bounded.
-        std::uint32_t cap = a1 > 256u ? 256u : a1;
+        // strftime(a0=buf, a1=max, a2=fmt, a3=tm*): the guest's buffer is
+        // a1 bytes. The old code clamped that to 256, so a longer result
+        // was silently cut; the cap is now only a sanity bound.
+        std::uint32_t cap = a1 > 4096u ? 4096u : a1;
         std::int32_t f[9] = {};
         if (CheckRange(a3, 36, false)) {
             for (int i = 0; i < 9; i++) {
@@ -5723,14 +5681,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         ht.tm_wday = f[6];
         ht.tm_yday = f[7];
         ht.tm_isdst = f[8];
-        char tmp[256] = {};
-        const std::size_t o =
-            std::strftime(tmp, sizeof(tmp), GuestStr(a2), &ht);
+        std::vector<char> tmp(cap ? cap : 1);
+        const std::size_t o = std::strftime(tmp.data(), tmp.size(), GuestStr(a2), &ht);
         if (o == 0 || o + 1 > cap || !CheckRange(a0, o + 1, true)) {
             Ret(regs, 0);
             return;
         }
-        std::memcpy(H(a0), tmp, o + 1);
+        std::memcpy(H(a0), tmp.data(), o + 1);
         Ret(regs, static_cast<std::uint32_t>(o));
         return;
     }

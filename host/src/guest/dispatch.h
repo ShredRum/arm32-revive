@@ -107,8 +107,11 @@ public:
     };
     // Expand a guest printf/format string (C99 subset; unknown specs stay
     // literal). Shared by __android_log_print and the snprintf family so the
-    // engine's own text is never silently empty.
-    std::string ExpandPrintf(const std::string& fmt, GuestFmtArgs& st);
+    // engine's own text is never silently empty. total_out (optional)
+    // receives the length the expansion WOULD have -- C99's snprintf
+    // semantics, which the guests use to size their own buffers.
+    std::string ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
+                             std::size_t* total_out = nullptr);
 
     // dlmalloc corruption tripwire count + guest pc at first trip (see
     // AbrHeapCorruptionHook). Polled by the watchdog.

@@ -1312,3 +1312,42 @@ were already closed. All of it was re-checked before touching anything:
 Verification: all three APKs build with the profile-driven paths, install
 and run on the device with 0 markers and death.log 0 B, and the host
 library is bit-identical to the one that passed the golden level check.
+
+### 2026-10-22 — batch 9: the latent traps (printf buffers, log formatter, RELRO, strftime)
+
+The audit's "latent traps" tier: defects that are not triggered by the
+guests' current code, but that would bite on the next level, the next
+string or the next build.
+
+- **The printf family had a 4096-character expansion cap and reported the
+  TRUNCATED length.** C99 says snprintf returns the number of characters
+  that WOULD have been written, and the guests size their own buffers
+  from that number -- so a long expansion could make the guest cut its
+  own buffer. The expansion is now bounded only by a sanity limit (1 MiB)
+  and the length is counted past it.
+- **Every conversion was rendered through a fixed 512-byte buffer**, so a
+  long %s was silently cut. The buffer is now sized for the conversion.
+- **GuestStr itself stopped at 511 bytes**, so even the text of a long
+  string was truncated before it reached the formatter. Its scratch is now
+  a thread-local std::string with a 64 KiB sanity bound.
+- **__android_log_print had its own, divergent formatter**: it printed
+  %f/%e/%g as %g, printed %p without the 0x, ignored the length
+  modifiers and the flags/width/precision, and read a double from an
+  AAPCS32 EVEN register pair -- while these guests are base PCS, where a
+  double takes the next two words. It now uses the shared
+  Runtime::ExpandPrintf: one formatter for the whole harness.
+- **The RELRO end was rounded DOWN**, so the page holding the last byte
+  of the RELRO was not protected and a guest write there was not refused.
+  glibc's _dl_protect_relro rounds it UP; the harness does the same now.
+- **strftime clamped the guest's buffer to 256 bytes** regardless of the
+  size the guest asked for, so a longer result was cut. The size is now
+  the guest's, with a 4 KiB sanity bound.
+
+Verified: the unit test grew to 56 checks (ALL OK) -- the new ones cover
+the C99 length of snprintf (a 600-character %s must return 600 and write
+cap-1 characters) and the BSD random sequence; the native harness init
+counts are unchanged and the runs are not slower (67/96/67 ms); on the
+device the live Lua state of Tutorial_red is bit-identical to the level
+JSON (46 fields) and to the fingerprint of the 59ff106 build, all
+markers 0, death.log 0 B, and Rio and Space were re-run on the same
+library.
