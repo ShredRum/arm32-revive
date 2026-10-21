@@ -2585,16 +2585,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     ii = j;
                     if (!suppress) {
                         bool neg = tok[0] == '-';
+                        // C99: a value that does not fit SATURATES to the
+                        // target type's range and the conversion still
+                        // succeeds. The old code let stoull throw, which
+                        // aborted the whole scan (fail) and lost every
+                        // conversion after it.
                         unsigned long long uv = 0;
-                        try {
-                            uv = std::stoull(
-                                (tok[0] == '+' || tok[0] == '-') ? tok.substr(1) : tok, nullptr,
-                                base == 0 ? 10 : base);
-                        } catch (...) {
-                            fail = true;
-                            break;
+                        {
+                            errno = 0;
+                            char* endp = nullptr;
+                            const std::string num =
+                                (tok[0] == '+' || tok[0] == '-') ? tok.substr(1) : tok;
+                            uv = std::strtoull(num.c_str(), &endp, base == 0 ? 10 : base);
+                            if (errno == ERANGE) {
+                                uv = ULLONG_MAX;
+                            }
                         }
-                        long long sv = neg ? -(long long)uv : (long long)uv;
+                        // Saturation applies to the PARSE (long long), like
+                        // strtoll does; the narrow target type is then reached
+                        // by the usual conversion (300 -> short = 44).
+                        long long sv;
+                        if (neg) {
+                            sv = (uv > (unsigned long long)LLONG_MAX + 1ULL)
+                                     ? LLONG_MIN
+                                     : -(long long)uv;
+                        } else {
+                            sv = (uv > (unsigned long long)LLONG_MAX) ? LLONG_MAX
+                                                                       : (long long)uv;
+                        }
                         bool is_signed = (conv == 'd' || conv == 'i');
                         if (len == 8) {
                             // long long / intmax_t: the guest's slot is 8 bytes.
@@ -3027,8 +3045,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::size_t total = 0;
         const std::string out = ExpandPrintf(fmt, st, &total);
         if (cap > 0 && CheckRange(dst, 1, true)) {
-            const std::size_t w = std::min<std::size_t>(out.size(), (std::size_t)cap - 1);
-            if (CheckRange(dst, w + 1, true)) {
+            // The write goes through the overflow firewall (like memcpy and
+            // sscanf do): a guest buffer too small for the result must not
+            // smash its neighbour in the heap arena -- the class of the
+            // 2026-10-18 "GOT slot zeroed" incident.
+            const std::size_t want =
+                std::min<std::size_t>(out.size(), (std::size_t)cap - 1) + 1;  // + NUL
+            const std::uint32_t allowed = ClampHeapWrite(dst, (std::uint32_t)want, "printf");
+            if (allowed > 0 && CheckRange(dst, allowed, true)) {
+                const std::size_t w = std::min<std::size_t>(out.size(), allowed - 1);
                 std::memcpy(H(dst), out.data(), w);
                 H(dst)[w] = 0;
             }
@@ -5876,10 +5901,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, found);
         return;
     }
-    if (DiagOn()) {
+    {
         // Locked: worker threads share stub_hits_ with main. Diagnostic layer
         // (PLAN.md A5/B13): with DIAG off this skips the per-call map probe on
-        // unhandled imports and the [env]/[stub] logs.
+        // An import the harness does not implement: answer 0 (the guest gets
+        // a plausible "success") and SAY SO -- exactly what a port needs
+        // to see, so this is NOT behind HARNESS_DIAG. The log stays capped
+        // at 5 lines per import name: a run adds a few dozen lines
+        // (measured: 69 [stub] lines in a DIAG run), not a flood.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
         // Enriched logging for environment queries: names matter.
@@ -6878,10 +6907,14 @@ void Runtime::OnGuestSyscall(Regs& regs) {
         return;
     default:
         std::printf("[syscall] LOUD unimplemented nr=%u r0=%08x r1=%08x r2=%08x pc=%08x "
-                    "lr=%08x -- halting\n",
+                    "lr=%08x -> -ENOSYS\n",
                     nr, r0, r1, regs[2], regs[15] - 4, regs[14]);
-        stop_step_ = true;
-        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        // Not implemented: answer -ENOSYS like a real kernel does, instead of
+        // killing the guest thread: a guest that checks the error can carry
+        // on, while the old halt turned a missing syscall into a dead
+        // game. (Measured: the guests use only nr=186 gettid and nr=4 write,
+        // so this never fired -- it is a safety net, not a hot path.)
+        regs[0] = static_cast<std::uint32_t>(-ENOSYS);
         return;
     }
 }

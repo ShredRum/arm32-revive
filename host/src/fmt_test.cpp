@@ -559,6 +559,22 @@ int main() {
         Expect("snprintf wrote cap-1 chars", std::to_string(written.size()), "15");
     }
 
+    // --- sscanf: a value that does not fit must saturate, not abort the scan.
+    {
+        const std::uint32_t kIn = 0x10006900;
+        const std::uint32_t kFmt = 0x10006a00;
+        const std::uint32_t kDst = 0x10006b00;
+        put(kIn, "99999999999999999999");
+        put(kFmt, "%lld");
+        const std::uint32_t args[4] = {kIn, kFmt, kDst, 0};
+        const std::uint32_t n = abr::RuntimeTestAccess::Call(rt, 0, args);  // sscanf
+        std::int64_t v = 0;
+        std::memcpy(&v, rt.H<std::uint8_t>(kDst), 8);
+        Expect("sscanf of an out-of-range number still converts", std::to_string(n), "1");
+        Expect("sscanf saturated to LLONG_MAX",
+               std::to_string(v == 9223372036854775807LL ? 1 : 0), "1");
+    }
+
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

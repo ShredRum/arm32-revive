@@ -689,6 +689,12 @@ bool ZipExtractStored(const std::string& apk, const std::string& inner, const st
     std::fclose(o);
     std::fclose(f);
     Log("zip extracted %s (%uB)", inner.c_str(), hit.usize - left);
+    if (left != 0) {
+        // A short read leaves a TRUNCATED file behind; the next boot would
+        // take it for the guest and load a broken image. Remove it.
+        std::remove(out.c_str());
+        Log("zip extract FAILED (%uB missing) -- removed the partial file", left);
+    }
     return left == 0;
 }
 

@@ -11,6 +11,7 @@
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -964,7 +965,21 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     }
     // --- queries: REAL driver answers in real mode ---
     if (n == "glGetString") {
-        const char* s = (const char*)glGetString((GLenum)a0);
+        // HARNESS_GLVENDOR / HARNESS_GLRENDERER override the driver's
+        // strings. The guest has renderer-keyed logic (its texture quirk
+        // tables), so the era-correct name matters: without the override the
+        // guest sees this device's GPU and may take a different path than
+        // on the phone the game shipped for.
+        const char* s = nullptr;
+        if (a0 == GL_VENDOR) {
+            const char* e = std::getenv("HARNESS_GLVENDOR");
+            s = e ? e : (const char*)glGetString(GL_VENDOR);
+        } else if (a0 == GL_RENDERER) {
+            const char* e = std::getenv("HARNESS_GLRENDERER");
+            s = e ? e : (const char*)glGetString(GL_RENDERER);
+        } else {
+            s = (const char*)glGetString((GLenum)a0);
+        }
         std::uint32_t out = 0;
         if (s) {
             // One stable guest slot per name: the guest keeps the pointer, and

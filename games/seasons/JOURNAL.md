@@ -1432,3 +1432,74 @@ claims returns 2/2 VERIFIED (probability 1.00). The earlier "contradicted"
 and "unsupported" verdicts were about the EVIDENCE PACKAGE, not about the
 code: the same claims went from "contradicted" to "verified" once the
 before-state and the failing-case runs were supplied.
+
+### 2026-10-22 — batch 12: the rest of the audit, as decided
+
+The remaining findings were decided one by one and are closed here.
+
+**Done**
+
+- **The printf family writes through the overflow firewall now.** The
+  firewall (`ClampHeapWrite`) already guarded memcpy, memmove, memset,
+  strcpy and sscanf, but the snprintf family wrote straight into the
+  guest's buffer: a guest buffer too small for the result smashed its
+  neighbour in the heap arena -- the class of the 2026-10-18 "GOT slot
+  zeroed" incident. (The firewall clamps at the CHUNK boundary, which is
+  the dlmalloc layout, not at the payload boundary; there is no unit test
+  for the clamp, the device gate covers the path.)
+- **The GL vendor/renderer strings can be overridden in the REAL path
+  too.** The app always enables the real GL backend (apphost.cpp sets
+  HARNESS_REALGL=1), so `glGetString` returned THIS device's GPU name --
+  and the guest has renderer-keyed logic (its texture quirk tables), so it
+  may take a different branch than on the phone the game shipped for.
+  HARNESS_GLVENDOR / HARNESS_GLRENDERER now apply there as well.
+- **An unknown EABI syscall answers -ENOSYS instead of halting the
+  guest.** The old behaviour killed the guest thread, turning a missing
+  syscall into a dead game; a guest that checks the error can carry on.
+  (Measured: the guests use only nr=186 gettid and nr=4 write, so this
+  never fired -- it is a safety net, not a hot path.)
+- **A failed seed extraction no longer leaves a truncated file behind.**
+  A short read used to break out of the copy loop and leave the partial
+  file on disk; the next boot would take it for the guest and load a
+  broken image. The partial file is now removed.
+- **sscanf saturates instead of aborting the scan.** An out-of-range
+  number used to make `stoull` throw, which failed the WHOLE scan and
+  lost every conversion after it. The parse now saturates at the long
+  long range (like strtoll) and the narrow target type is reached by the
+  usual conversion (300 -> short = 44).
+- **An import the harness does not implement now says so in the PRODUCTION
+  log**, not only under HARNESS_DIAG: that is exactly what a port needs
+  to see. The log stays capped at 5 lines per import name, so a run adds a
+  few dozen lines -- measured on the device: the production log is 30642
+  bytes per run (it is recreated at every start, it does not accumulate) and
+  94 of its lines are these diagnostics.
+
+**Decided NOT to change (documented here so the next pass does not
+re-open them by accident)**
+
+- `ensure_parent` (the file bridge creates missing directories) STAYS: it
+  masks a guest save-path bug, but removing it is expensive and could
+  regress the saves. This is a deliberate difference from the device.
+- The fake GL shim stays as it is: the real backend is always on in the
+  app, and the guest's worker threads legitimately have no GL context --
+  halting there would kill the game. The code already says
+  "[realgl] android: no current ctx -> fake" (three times at most).
+- `sigaction` / `__cxa_atexit`: the guest's signal handlers cannot be run
+  from a host signal handler (and the guest's own sigaction is a no-op
+  here), so the guest has no crash reporter of its own; running guest
+  code at unmount time is the same class of risk.
+- RELRO under HARNESS_FASTMEM=1: with fastmem (the default) the RELRO
+  write guard is off, so the 2026-10-18 incident is still possible.
+  fastmem buys speed; the guard costs it. Left as is.
+- An OOB read past an asset is the GUEST's bug, not the harness': the port
+  simply has a bigger arena (1 GB) and does not fault where the device
+  would.
+- The glGetString cache and the diagnostic hygiene (svc_count on the hot
+  path, the mutex-owner map in production, last_svc under DIAG only) are
+  micro-optimisations with no behavioural effect.
+
+**Verification**: the unit test has 61 checks and passes (new ones: the
+sscanf saturation and the out-of-range conversion still counting); the
+native harness init counts are unchanged; the production log stays at
+~30 KB per run with the new diagnostics in it; the device shows no
+LOUD/HEAPCORRUPT/CHUNKD/STUCK and death.log 0 B.
