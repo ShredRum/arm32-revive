@@ -84,6 +84,11 @@ struct LoadedModule {
     std::vector<std::uint8_t> build_id;  // GNU build-id (NOTE desc; empty if absent)
     std::unordered_map<std::string, std::uint32_t> defined;  // DEFINED sym name -> st_value (for apphost Java_* lookup)
 };
+// Bind a data import to a guest address (see the definition in
+// elf_loader.cpp). Free function so the runtime can use it too.
+bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import_idx,
+                       std::uint32_t guest_addr);
+
 
 class ElfLoader {
 public:
@@ -93,7 +98,6 @@ public:
     bool Load(const char* path, LoadedModule& out, std::string& err);
 
     // Patches all pending ABS32 refs of a data import to addend+guest_addr.
-    bool ResolveData(LoadedModule& mod, std::uint32_t import_idx, std::uint32_t guest_addr);
 
 private:
     GuestMemory& mem_;

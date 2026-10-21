@@ -605,13 +605,21 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     return true;
 }
 
-bool ElfLoader::ResolveData(LoadedModule& mod, std::uint32_t import_idx, std::uint32_t guest_addr) {
+// Bind a data import to a guest address: patch every GOT slot that refers
+// to it and point the import itself at that address. A data import has no
+// call target -- its "trampoline" address is a code address the guest must
+// never dereference as data. The caller range-checks the slots first.
+bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import_idx,
+                       std::uint32_t guest_addr) {
+    if (import_idx >= mod.imports.size()) {
+        return false;
+    }
     for (const auto& pd : mod.pending_data) {
         if (pd.import_idx != import_idx) {
             continue;
         }
         const std::uint32_t v = pd.addend + guest_addr;
-        std::memcpy(mem_.host(pd.loc_va), &v, 4);
+        std::memcpy(mem.host(pd.loc_va), &v, 4);
     }
     mod.imports[import_idx].tramp_va = guest_addr;
     // Data imports use the slot as their guest address, so call_va must

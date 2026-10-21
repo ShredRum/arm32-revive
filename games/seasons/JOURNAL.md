@@ -1179,3 +1179,39 @@ on the real libc's "0 on success".
 - **Device**: Seasons starts clean (4/4 starts after the fix, no
   cURL/abort, no markers, death.log 0 B); the level check and the other
   two titles are the final gate.
+
+### 2026-10-22 — batch 5: the loader's data imports get a coverage guard
+
+The audit found that the addresses of the guests' DATA imports came from a
+hard-coded list of six names, and that `ElfLoader::ResolveData` (the
+function meant to bind them) was dead code. A data import that is not one
+of the six therefore kept the address of its TRAMPOLINE -- a code address
+in the trampoline page -- and the guest would have read a pointer into
+code as data, silently.
+
+Measured first: the guests have exactly SIX data imports, and they are
+exactly the six the runtime binds (`_ctype_`, `__stack_chk_guard`,
+`_tolower_tab_`, `_toupper_tab_`, `__page_size`, `__sF`) -- so today
+there is no hole. The fix is the guard for tomorrow:
+
+- `Runtime::InitDataImports` now checks that every data import was bound.
+  An uncovered one is LOUDly reported and bound to a zero page (a valid,
+  readable address) instead of a trampoline address, so the game keeps
+  running and the operator sees the message.
+- `ElfLoader::ResolveData` became the free function
+  `ResolveDataImport(memory, module, idx, addr)` and is now actually
+  used by the runtime, so the dead code is gone.
+
+Negative test (the guard was exercised by temporarily dropping
+`__page_size` from the six):
+
+    [data] LOUD uncovered data import "__page_size" -> zero page 10000a80
+            (the guest expected a real libc object)
+    init done: 142/142 clean
+
+and with the six restored the line is gone and the init counts are
+unchanged.
+
+Verification: the unit test (51 checks) passes, the native harness init
+counts are unchanged (Rio 54/54, Seasons 142/142, Space 67/67), and the
+device boots clean with the usual markers at zero and death.log empty.

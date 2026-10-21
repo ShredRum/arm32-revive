@@ -6623,6 +6623,26 @@ void Runtime::InitDataImports() {
         {"__page_size", var_page},
         {"__sF", sF},
     };
+    // Bind a data import to a guest address: patch every GOT slot that
+    // refers to it and point the import itself at the address (a data
+    // import has no call target -- its "trampoline" is a bogus address the
+    // guest must never dereference).
+    auto bind_data_import = [&](std::uint32_t idx, std::uint32_t addr) -> bool {
+        for (const PendingData& pd : mod_.pending_data) {
+            if (pd.import_idx != idx) {
+                continue;
+            }
+            if (!CheckRange(pd.loc_va, 4, true)) {
+                std::printf("[data] LOUD import %u loc %08x out of range -- halting\n", idx,
+                            pd.loc_va);
+                stop_step_ = true;
+                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                return false;
+            }
+        }
+        return ResolveDataImport(mem_, mod_, idx, addr);
+    };
+    std::vector<std::uint32_t> covered;
     for (const Slot& s : slots) {
         const std::uint32_t idx = find_import(s.name);
         if (idx == 0xFFFFFFFFu) {
@@ -6644,6 +6664,33 @@ void Runtime::InitDataImports() {
             patched++;
         }
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);
+        covered.push_back(idx);
+    }
+    // Coverage guard: a data import that is NOT one of the six above would
+    // keep the address of its TRAMPOLINE (a code address in the trampoline
+    // page) and the guest would read a pointer into code as data. The
+    // guests have exactly the six data imports today (measured), so this
+    // never fires -- but a new .so or a new bionic symbol would otherwise
+    // fail silently. Bind such an import to a zero page instead, and say
+    // so loudly.
+    for (std::uint32_t i = 0; i < mod_.imports.size(); i++) {
+        if (mod_.imports[i].is_function) {
+            continue;
+        }
+        if (std::find(covered.begin(), covered.end(), i) != covered.end()) {
+            continue;
+        }
+        const std::uint32_t page = GuestMalloc(4096);
+        if (!page || !bind_data_import(i, page)) {
+            std::printf("[data] LOUD uncovered data import %s -- cannot bind\n",
+                        mod_.imports[i].name.c_str());
+            stop_step_ = true;
+            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            return;
+        }
+        std::printf("[data] LOUD uncovered data import \"%s\" -> zero page %08x "
+                    "(the guest expected a real libc object)\n",
+                    mod_.imports[i].name.c_str(), page);
     }
 }
 
