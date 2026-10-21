@@ -688,3 +688,45 @@ Digest values: Rio `980fad194cc6aefa56b4860965cefcf1de83dbb84c4d06a56c219327fe06
 (the same value the build-id pin's comment already names), Seasons
 `8183b73d9e2873e0bd3c661acbfef7e6eeef40c3403916e98830f97a9e239baf`, Space
 `cc11a1e9d5d18cc04cd57a08802f03f2e5a5cd869f0e056d8ba92e695fb6b1ce`.
+
+### 2026-10-21 — installable on modern Android: targetSdk 22 -> 26
+
+Symptom on a recent Android: `INSTALL_FAILED_DEPRECATED_SDK_VERSION: App
+package must target at least SDK version 24, but found 22`. Android 14/15
+refuse to install a package that targets below 24.
+
+Seasons was the odd one out -- the profile already carried the fact:
+
+| title | min_sdk | target_sdk (before) | target_sdk (now) |
+|---|---|---|---|
+| rio | 16 | 26 | 26 |
+| **seasons** | 16 | **22** | **26** |
+| space | 16 | 26 | 26 |
+| star-wars, star-wars-ii | 16 | 26 | 26 |
+
+The value 22 came from Rovio's own APK (the original 6.6.2 shipped with
+targetSdk 22, so the original game cannot be installed on Android 14+ either).
+26 was chosen over the bare minimum 24 because the sibling titles already run
+at 26 with the same `com.rovio.fusion` framework and the same ad/social SDKs,
+so the platform behaviour delta is the one this codebase already ships
+(runtime permissions for GET_ACCOUNTS, file:// Uri exposure on API 24+,
+notification channels on 26+).
+
+Mechanism (scripts/build-apk.sh): the profile is now AUTHORITATIVE for the
+SDK levels, not just a record. Two findings were needed:
+
+- apktool v3 takes the SDK levels from the **decoded manifest**, not from
+  `apktool.yml`'s `sdkInfo` (which it only records) -- patching `apktool.yml`
+  alone changed nothing in the built APK;
+- the decoded manifest of these titles carries **no** `<uses-sdk>` element at
+  all, so the build inserts one (or replaces it) with the profile's
+  `min_sdk`/`target_sdk` before running apktool. `apktool.yml`'s record is
+  kept in sync as well.
+
+Verified: `aapt2 dump badging` on the built Seasons APK reports
+`targetSdkVersion:'26'` (it was '22'), and rio/space still report '26' with
+the same mechanism (the build logs "manifest uses-sdk inserted/-> min 16 /
+target 26"). On the test device (API 25) the rebuilt Seasons boots to the
+menu with the guest fingerprint verified ("[guest] sha256 OK 8183b73d...")
+and death.log 0 B. The install on an API 34/35 device is the acceptance test
+and can only be run on such a device.

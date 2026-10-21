@@ -19,6 +19,7 @@ PROF=(python3 scripts/profile.py "$GAME")
 PKG="$("${PROF[@]}" apk.package)"
 GUEST_LIB="$("${PROF[@]}" guest.lib)"
 GUEST_SHA="$("${PROF[@]}" guest.sha256)"
+TARGET_SDK="$("${PROF[@]}" apk.target_sdk)"
 
 TREE="games/$GAME/work/apk_prod"
 UNS="games/$GAME/work/apk_unsigned.apk"
@@ -76,6 +77,34 @@ fi
 
 echo "== stripping host lib =="
 llvm-strip "$LIB_SRC" -o "$LIB_DST"
+
+echo "== target sdk =="
+# The profile is authoritative for the SDK levels. apktool v3 takes them from
+# the DECODED manifest, not from apktool.yml's sdkInfo (which it only records),
+# so the values are written into the manifest itself. Seasons shipped with
+# targetSdk 22 and Android 14+ then refuses to install the package
+# ("INSTALL_FAILED_DEPRECATED_SDK_VERSION: App package must target at least SDK
+# version 24, but found 22"); the sibling titles already target 26.
+MIN_SDK="$("${PROF[@]}" apk.min_sdk)"
+python3 - "$TREE/AndroidManifest.xml" "$MIN_SDK" "$TARGET_SDK" << 'PYEOF'
+import re
+import sys
+
+path, min_sdk, target_sdk = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+tag = f'<uses-sdk android:minSdkVersion="{min_sdk}" android:targetSdkVersion="{target_sdk}"/>'
+if re.search(r"<uses-sdk\b[^>]*>", text):
+    text = re.sub(r"<uses-sdk\b[^>]*/>", tag, text, count=1)
+    print(f"manifest uses-sdk -> min {min_sdk} / target {target_sdk}")
+else:
+    cut = text.find(">", text.find("<manifest")) + 1
+    text = text[:cut] + "\n    " + tag + text[cut:]
+    print(f"manifest uses-sdk inserted (min {min_sdk} / target {target_sdk})")
+open(path, "w").write(text)
+PYEOF
+# Keep apktool's record in sync with the manifest (it is metadata only).
+sed -i "s/^\([[:space:]]*minSdkVersion:[[:space:]]*\).*/\1$MIN_SDK/" "$TREE/apktool.yml"
+sed -i "s/^\([[:space:]]*targetSdkVersion:[[:space:]]*\).*/\1$TARGET_SDK/" "$TREE/apktool.yml"
 
 echo "== apktool b =="
 # Guest fingerprint: the packaging step writes the guest .so's SHA-256 next to

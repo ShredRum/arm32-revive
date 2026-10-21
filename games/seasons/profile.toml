@@ -12,7 +12,12 @@ package      = "com.rovio.angrybirdsseasons"
 version_name = "6.6.2"
 version_code = 6620
 min_sdk      = 16
-target_sdk   = 22
+# 22 as shipped by Rovio: Android 14+ refuses to install a package that
+# targets below 24 ("INSTALL_FAILED_DEPRECATED_SDK_VERSION: App package must
+# target at least SDK version 24, but found 22"). Raised to 26 -- the value the
+# sibling titles (rio, space, star-wars) already use, so the platform
+# behaviour delta is the one this codebase already ships.
+target_sdk   = 26
 original     = "original/angry-birds-seasons-6-6-2.apk"
 signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
 signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
