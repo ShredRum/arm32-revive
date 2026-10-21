@@ -23,6 +23,7 @@
 #include <set>
 #include <arpa/inet.h>
 #include <sys/mman.h>
+#include <sys/vfs.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -1772,6 +1773,41 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(-ENOSYS));
         return;
     }
+    // --- setjmp / longjmp -----------------------------------------------
+    // The jmp_buf belongs to the guest, but its LAYOUT is ours: the guest
+    // only ever hands the pointer back to longjmp. The guests keep the
+    // buffer on their stack (add r0, sp, #8..#24 inside a 268..284 byte
+    // frame) and call longjmp(buf, 1).
+    // Saved: r4-r11 (callee-saved), sp and the return address -- 10 words =
+    // 40 bytes, far below the guest's buffer. The guest is softfp, so there
+    // are no VFP registers to preserve (d0-d7 are caller-saved in AAPCS32).
+    if (n == "setjmp" || n == "_setjmp" || n == "sigsetjmp" || n == "__sigsetjmp") {
+        if (!CheckRange(a0, 40, true)) {
+            goto bad_ptr;
+        }
+        std::uint32_t* buf = H<std::uint32_t>(a0);
+        for (int i = 0; i < 8; i++) {
+            buf[i] = regs[4 + i];  // r4..r11
+        }
+        buf[8] = regs[13];        // sp
+        buf[9] = regs[14];        // lr: where the guest continues after longjmp
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "longjmp" || n == "_longjmp" || n == "siglongjmp") {
+        if (!CheckRange(a0, 40, false)) {
+            goto bad_ptr;
+        }
+        const std::uint32_t* buf = H<const std::uint32_t>(a0);
+        for (int i = 0; i < 8; i++) {
+            regs[4 + i] = buf[i];
+        }
+        regs[13] = buf[8];  // sp
+        regs[14] = buf[9];  // the saved return address: Ret() jumps there
+        // C99: longjmp(env, 0) must still make setjmp return 1.
+        Ret(regs, a1 != 0 ? a1 : 1);
+        return;
+    }
     // --- raw memory (host implementations over translated pointers) ---
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host.
@@ -3456,103 +3492,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // maps use brief io_mutex_ holds at each touch; blocking syscalls always
     // run unlocked. files_prefix_/hostbase_ are startup-immutable (no lock).
     {
-        auto map_path = [&](std::uint32_t gp) -> std::string {
-            const std::string g(GuestStr(gp));
-            if (g == "/dev/null" || g == "/dev/zero" || g == "/dev/urandom") {
-                return g;
-            }
-            if (g == "/dev/alarm") {
-                return "/dev/null";  // Android alarm driver: no host equivalent;
-                                     // timer ioctls are stubbed, sink is fine
-            }
-            // Read-only host passthrough for /sys (CPU topology: the game
-            // sizes thread pools from /sys/devices/system/cpu) and /proc
-            // (cpuinfo/meminfo reads). Host values are fine for bring-up
-            // (sizing/info only). Writes to these trees fail on the host
-            // side naturally (read-only fs semantics), which is correct.
-            // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
-            // stack reads them (observed: worker fopen("/etc/hosts") while
-            // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
-            // synthetic hosts (see below) instead of the host file.
-            if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
-                g == "/etc/resolv.conf") {
-                return g;
-            }
-            if (g == "/etc/hosts") {
-                if (EnvOn("HARNESS_HOSTSHACK")) {
-                    // Synthetic hosts for DNS-hack experiments (no system
-                    // change: only this guest path is virtualized).
-                    static std::string hackpath;
-                    if (hackpath.empty()) {
-                        hackpath = files_hostbase_ + "/synth.hosts";
-                        FILE* hf = std::fopen(hackpath.c_str(), "r");
-                        if (!hf) {
-                            hf = std::fopen(hackpath.c_str(), "w");
-                            if (hf) {
-                                std::fputs("127.0.0.1 localhost\n127.0.0.2 cloud.rovio.com\n",
-                                           hf);
-                                std::fclose(hf);
-                            }
-                        } else {
-                            std::fclose(hf);
-                        }
-                    }
-                    std::printf("[files] hosts HACK -> %s\n", hackpath.c_str());
-                    return hackpath;
-                }
-                return g;
-            }
-            if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
-                !files_hostbase_.empty()) {
-                return files_hostbase_ + g.substr(files_prefix_.size());
-            }
-            // Any guest path shaped /data/{data,user/<N>}/<pkg>/files<rest> is
-            // this app's files dir. We host exactly one guest, so the package
-            // component need not be known here: the offline harness has no
-            // cmdline package (its SetFilesDir prefix is a caller choice), and
-            // on a real device the guest can only reach its own package's dir.
-            if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                             g.compare(0, 11, "/data/user/") == 0)) {
-                const std::size_t at = g.find("/files");
-                if (at != std::string::npos && (g.size() == at + 6 || g[at + 6] == '/')) {
-                    return files_hostbase_ + g.substr(at + 6);
-                }
-            }
-            // Package data root: breakpad (HockeyApp) builds its minidump path
-            // as dirname(FILES_PATH)/hockeyapp_errors_XXXXXX, i.e.
-            // /data/data/<pkg>/... — one level ABOVE the files dir, so the
-            // /files rule above does not match. Map it to parent(files host).
-            if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                             g.compare(0, 11, "/data/user/") == 0)) {
-                std::size_t pk = std::string::npos;
-                if (g.compare(0, 11, "/data/data/") == 0) {
-                    pk = g.find('/', 11);
-                } else {
-                    const std::size_t u = g.find('/', 11);  // after the user id
-                    if (u != std::string::npos) {
-                        pk = g.find('/', u + 1);  // after the package
-                    }
-                }
-                if (pk != std::string::npos) {
-                    return std::filesystem::path(files_hostbase_).parent_path().string() +
-                           g.substr(pk);
-                }
-            }
-            // Bare relative names (no leading '/'): the game opens seeds like
-            // "highscores.lua" CWD-relative (original CWD = files dir). Route
-            // to the files dir (fopen fails gracefully if missing — same as
-            // device semantics). "data/*" stays unmapped (asset API serves it;
-            // PC runs prove the game never fopens data/* directly).
-            if (!g.empty() && g[0] != '/' && g.compare(0, 5, "data/") != 0 &&
-                !files_hostbase_.empty()) {
-                return files_hostbase_ + "/" + g;
-            }
-            static std::uint64_t unmapped_hits = 0;
-            if (++unmapped_hits <= 5) {
-                std::printf("[files] unmapped guest path \"%s\"%s\n", g.c_str(),
-                            unmapped_hits == 5 ? " (quiet henceforth)" : "");
-            }
-            return std::string();
+        auto map_path = [this](std::uint32_t gp) -> std::string {
+            return MapGuestPath(gp);
         };
         auto need_host = [&](const std::string& h, const char* what) -> bool {
             if (!h.empty()) {
@@ -3685,6 +3626,39 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             w32(80, (std::uint32_t)st.st_ctime);
             w32(84, (std::uint32_t)0);
             w64(88, (std::uint64_t)st.st_ino);
+            return true;
+        };
+        auto fill_statfs = [&](std::uint32_t dst, const struct statfs& st) -> bool {
+            // The guest's struct statfs (bionic ARM32) is 16 words = 64 bytes:
+            // f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree,
+            // f_fsid (2 words), f_namelen, f_frsize, f_flags, f_spare[4].
+            // The host's struct statfs has a different size (and, on glibc, a
+            // different field width), so the words are copied one by one.
+            if (!CheckRange(dst, 64, true)) {
+                return false;
+            }
+            std::uint8_t* p = H<std::uint8_t>(dst);
+            std::memset(p, 0, 64);
+            auto w32 = [&](std::size_t o, std::uint64_t v) {
+                const std::uint32_t w = static_cast<std::uint32_t>(v);
+                std::memcpy(p + o, &w, 4);
+            };
+            w32(0, (std::uint64_t)st.f_type);
+            w32(4, (std::uint64_t)st.f_bsize);
+            w32(8, (std::uint64_t)st.f_blocks);
+            w32(12, (std::uint64_t)st.f_bfree);
+            w32(16, (std::uint64_t)st.f_bavail);
+            w32(20, (std::uint64_t)st.f_files);
+            w32(24, (std::uint64_t)st.f_ffree);
+            // f_fsid is two 32-bit words; glibc names the array __val and
+            // bionic names it val, so copy the bytes.
+            std::uint32_t fsid[2] = {0, 0};
+            std::memcpy(fsid, &st.f_fsid, sizeof(fsid));
+            w32(28, (std::uint64_t)fsid[0]);
+            w32(32, (std::uint64_t)fsid[1]);
+            w32(36, (std::uint64_t)st.f_namelen);
+            w32(40, (std::uint64_t)st.f_frsize);
+            w32(44, (std::uint64_t)st.f_flags);
             return true;
         };
         if (n == "fopen") {
@@ -4888,6 +4862,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (n == "stat") {
                 struct stat st {};
                 if (::stat(hp.c_str(), &st) != 0 || !fill_stat(a1, st)) {
+                    SetGuestErrno(errno);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                Ret(regs, 0);
+                return;
+            }
+            if (n == "statfs") {
+                // statfs(path, buf): the guest asks how much room its data
+                // directory has. The generic tail answered "success" and left
+                // the buffer untouched, so the guest decided on stack garbage.
+                struct statfs st {};
+                if (::statfs(hp.c_str(), &st) != 0 || !fill_statfs(a1, st)) {
                     SetGuestErrno(errno);
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
@@ -12382,5 +12369,108 @@ void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
     rt_->stop_step_ = true;
     rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
 }
+
+// Map a guest path to the host path (file bridge). Extracted from the
+// file-bridge block so that other imports (statfs) can use it too.
+std::string Runtime::MapGuestPath(std::uint32_t gp) {
+
+        const std::string g(GuestStr(gp));
+        if (g == "/dev/null" || g == "/dev/zero" || g == "/dev/urandom") {
+            return g;
+        }
+        if (g == "/dev/alarm") {
+            return "/dev/null";  // Android alarm driver: no host equivalent;
+                                 // timer ioctls are stubbed, sink is fine
+        }
+        // Read-only host passthrough for /sys (CPU topology: the game
+        // sizes thread pools from /sys/devices/system/cpu) and /proc
+        // (cpuinfo/meminfo reads). Host values are fine for bring-up
+        // (sizing/info only). Writes to these trees fail on the host
+        // side naturally (read-only fs semantics), which is correct.
+        // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
+        // stack reads them (observed: worker fopen("/etc/hosts") while
+        // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
+        // synthetic hosts (see below) instead of the host file.
+        if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
+            g == "/etc/resolv.conf") {
+            return g;
+        }
+        if (g == "/etc/hosts") {
+            if (EnvOn("HARNESS_HOSTSHACK")) {
+                // Synthetic hosts for DNS-hack experiments (no system
+                // change: only this guest path is virtualized).
+                static std::string hackpath;
+                if (hackpath.empty()) {
+                    hackpath = files_hostbase_ + "/synth.hosts";
+                    FILE* hf = std::fopen(hackpath.c_str(), "r");
+                    if (!hf) {
+                        hf = std::fopen(hackpath.c_str(), "w");
+                        if (hf) {
+                            std::fputs("127.0.0.1 localhost\n127.0.0.2 cloud.rovio.com\n",
+                                       hf);
+                            std::fclose(hf);
+                        }
+                    } else {
+                        std::fclose(hf);
+                    }
+                }
+                std::printf("[files] hosts HACK -> %s\n", hackpath.c_str());
+                return hackpath;
+            }
+            return g;
+        }
+        if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
+            !files_hostbase_.empty()) {
+            return files_hostbase_ + g.substr(files_prefix_.size());
+        }
+        // Any guest path shaped /data/{data,user/<N>}/<pkg>/files<rest> is
+        // this app's files dir. We host exactly one guest, so the package
+        // component need not be known here: the offline harness has no
+        // cmdline package (its SetFilesDir prefix is a caller choice), and
+        // on a real device the guest can only reach its own package's dir.
+        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
+                                         g.compare(0, 11, "/data/user/") == 0)) {
+            const std::size_t at = g.find("/files");
+            if (at != std::string::npos && (g.size() == at + 6 || g[at + 6] == '/')) {
+                return files_hostbase_ + g.substr(at + 6);
+            }
+        }
+        // Package data root: breakpad (HockeyApp) builds its minidump path
+        // as dirname(FILES_PATH)/hockeyapp_errors_XXXXXX, i.e.
+        // /data/data/<pkg>/... — one level ABOVE the files dir, so the
+        // /files rule above does not match. Map it to parent(files host).
+        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
+                                         g.compare(0, 11, "/data/user/") == 0)) {
+            std::size_t pk = std::string::npos;
+            if (g.compare(0, 11, "/data/data/") == 0) {
+                pk = g.find('/', 11);
+            } else {
+                const std::size_t u = g.find('/', 11);  // after the user id
+                if (u != std::string::npos) {
+                    pk = g.find('/', u + 1);  // after the package
+                }
+            }
+            if (pk != std::string::npos) {
+                return std::filesystem::path(files_hostbase_).parent_path().string() +
+                       g.substr(pk);
+            }
+        }
+        // Bare relative names (no leading '/'): the game opens seeds like
+        // "highscores.lua" CWD-relative (original CWD = files dir). Route
+        // to the files dir (fopen fails gracefully if missing — same as
+        // device semantics). "data/*" stays unmapped (asset API serves it;
+        // PC runs prove the game never fopens data/* directly).
+        if (!g.empty() && g[0] != '/' && g.compare(0, 5, "data/") != 0 &&
+            !files_hostbase_.empty()) {
+            return files_hostbase_ + "/" + g;
+        }
+        static std::uint64_t unmapped_hits = 0;
+        if (++unmapped_hits <= 5) {
+            std::printf("[files] unmapped guest path \"%s\"%s\n", g.c_str(),
+                        unmapped_hits == 5 ? " (quiet henceforth)" : "");
+        }
+        return std::string();
+    }
+
 
 }  // namespace abr

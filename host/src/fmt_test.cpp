@@ -30,6 +30,7 @@
 namespace abr {
 // Test-only bridge to the private import dispatcher (see dispatch.h).
 struct RuntimeTestAccess {
+    using RegsView = std::array<std::uint32_t, 16>;
     // Call the dispatcher with the given argument registers; returns r0.
     static std::uint32_t Call(Runtime& rt, std::uint32_t idx, const std::uint32_t args[4]) {
         Runtime::Regs regs{};
@@ -38,6 +39,20 @@ struct RuntimeTestAccess {
         regs[2] = args[2];
         regs[3] = args[3];
         rt.CallImport(idx, regs);
+        return regs[0];
+    }
+    // Same, with the caller's register file in and the result out.
+    static std::uint32_t Call(Runtime& rt, std::uint32_t idx, const std::uint32_t args[4],
+                              const RegsView& in, RegsView* out) {
+        Runtime::Regs regs = in;
+        regs[0] = args[0];
+        regs[1] = args[1];
+        regs[2] = args[2];
+        regs[3] = args[3];
+        rt.CallImport(idx, regs);
+        if (out) {
+            *out = regs;
+        }
         return regs[0];
     }
 };
@@ -72,6 +87,8 @@ int main() {
     mod.imports.push_back(abr::Import{"sysconf", true, 0, 0, 0});   // 3
     mod.imports.push_back(abr::Import{"getpid", true, 0, 0, 0});    // 4
     mod.imports.push_back(abr::Import{"syscall", true, 0, 0, 0});   // 5
+    mod.imports.push_back(abr::Import{"setjmp", true, 0, 0, 0});   // 6
+    mod.imports.push_back(abr::Import{"longjmp", true, 0, 0, 0});  // 7
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -379,6 +396,53 @@ int main() {
             const std::uint32_t args[4] = {4242, 0, 0, 0};
             const std::int32_t r = (std::int32_t)call(5, args);
             Expect("syscall unknown -> -ENOSYS", std::to_string(r), "-38");
+        }
+    }
+
+    // --- setjmp / longjmp: the jmp_buf is the guest's, the layout is ours.
+    {
+        const std::uint32_t kBuf = 0x10006400;
+        auto hex = [](std::uint32_t v) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "0x%08x", v);
+            return std::string(b);
+        };
+        abr::RuntimeTestAccess::RegsView in{};
+        in[4] = 0x11111111u;
+        in[5] = 0x22222222u;
+        in[13] = 0x33333333u;  // sp
+        in[14] = 0x44444445u;  // lr (odd => the Thumb bit)
+        abr::RuntimeTestAccess::RegsView out{};
+        const std::uint32_t args[4] = {kBuf, 0, 0, 0};
+        const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 6, args, in, &out);
+        Expect("setjmp returns 0", std::to_string(r), "0");
+        {
+            std::uint32_t saved[10];
+            std::memcpy(saved, rt.H<std::uint8_t>(kBuf), 40);
+            Expect("setjmp saved r4", hex(saved[0]), "0x11111111");
+            Expect("setjmp saved r5", hex(saved[1]), "0x22222222");
+            Expect("setjmp saved sp", hex(saved[8]), "0x33333333");
+            Expect("setjmp saved lr", hex(saved[9]), "0x44444445");
+        }
+        {
+            // longjmp restores the callee-saved registers, the stack pointer
+            // and makes the guest continue at the saved return address.
+            in[4] = 0;
+            in[13] = 0;
+            in[14] = 0;
+            const std::uint32_t args2[4] = {kBuf, 1, 0, 0};
+            const std::uint32_t r2 = abr::RuntimeTestAccess::Call(rt, 7, args2, in, &out);
+            Expect("longjmp value", std::to_string(r2), "1");
+            Expect("longjmp restores r4", hex(out[4]), "0x11111111");
+            Expect("longjmp restores r5", hex(out[5]), "0x22222222");
+            Expect("longjmp restores sp", hex(out[13]), "0x33333333");
+            Expect("longjmp resumes at the saved lr", hex(out[15]), "0x44444444");
+        }
+        {
+            // C99: longjmp(env, 0) must still make setjmp return 1.
+            const std::uint32_t args3[4] = {kBuf, 0, 0, 0};
+            Expect("longjmp 0 -> 1", std::to_string(abr::RuntimeTestAccess::Call(rt, 7, args3, in, &out)),
+                   "1");
         }
     }
 

@@ -1053,3 +1053,45 @@ bytes into a 268..284 byte frame, and `longjmp` is called with the value 1).
   fields) and byte-identical to the fingerprint of the 59ff106 build; no
   LOUD/HEAPCORRUPT/CHUNKD/USAGE_ERROR/STUCK, death.log 0 B. Rio and Space
   were re-run on the same library: menus render, 0 markers, death.log 0 B.
+
+### 2026-10-21 (night) — batch 3: setjmp/longjmp and statfs
+
+Two more of the audit's unhandled imports, both with the guest's own usage
+measured first.
+
+**setjmp / longjmp.** The guests call setjmp 3 times each (Seasons, Space,
+Rio) and longjmp once (Seasons, Space). The guest keeps the jmp_buf on its
+own stack (`add r0, sp, #8 / #12 / #24` inside a 268..284 byte frame) and
+calls `longjmp(buf, 1)`, so the buffer has plenty of room and the value the
+setjmp must produce is 1.
+
+The jmp_buf belongs to the guest but its LAYOUT is ours -- the guest only
+ever hands the pointer back to longjmp. The harness now saves r4-r11, sp and
+the return address (10 words = 40 bytes) and, on longjmp, restores them and
+continues the guest at the saved return address with r0 = the longjmp value
+(C99: longjmp(env, 0) still has to make setjmp return 1). Before, the
+generic tail answered 0 for both: the guest's non-local exit never happened
+and it continued with a half-initialised state.
+
+The guests are softfp, so there are no VFP registers to preserve (d0-d7 are
+caller-saved in AAPCS32).
+
+**statfs.** All three guests call it once. The generic tail answered
+"success" and left the guest's `struct statfs` untouched, so the guest
+decided how much room its data directory had on stack garbage. The harness
+now maps the guest's path through the file bridge's rule (that mapping was
+extracted into `Runtime::MapGuestPath` so both the bridge and statfs can
+use it) and fills the guest's bionic-ARM32 `struct statfs` (16 words = 64
+bytes) field by field -- the host's own struct statfs has a different size
+(and, on glibc, different field widths), so a memcpy would be wrong.
+
+### Verification
+
+- **Unit test**: 44 checks, ALL OK -- now including setjmp/longjmp (the
+  saved words, the restore, the resume address, the C99 zero case).
+- **Native harness**: unchanged (Rio 54/54, Seasons 142/142, Space 67/67).
+- **Device**: Seasons boots, reaches the menu and Tutorial_red; the live
+  Lua state is bit-identical to the level JSON (46 fields) and to the
+  fingerprint of the 59ff106 build; no LOUD/HEAPCORRUPT/CHUNKD/
+  USAGE_ERROR/STUCK, death.log 0 B. Rio and Space re-run on the same
+  library: 0 markers, death.log 0 B.

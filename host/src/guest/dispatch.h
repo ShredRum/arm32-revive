@@ -226,6 +226,8 @@ public:
     // directory (harness: <project>/work/files). FILE*/DIR* are opaque guest
     // handles (guest-heap blocks); fds are small ints >= 100.
     void SetFilesDir(const std::string& guest_prefix, const std::string& host_base);
+    // Map a guest path to the host path (the file bridge's rule).
+    std::string MapGuestPath(std::uint32_t guest_path);
     void SetApkPath(const std::string& path);
 
     // __gnu_Unwind_Find_exidx: binary search of .ARM.exidx (prel31), returns
