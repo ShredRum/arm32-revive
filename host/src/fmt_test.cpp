@@ -89,6 +89,11 @@ int main() {
     mod.imports.push_back(abr::Import{"syscall", true, 0, 0, 0});   // 5
     mod.imports.push_back(abr::Import{"setjmp", true, 0, 0, 0});   // 6
     mod.imports.push_back(abr::Import{"longjmp", true, 0, 0, 0});  // 7
+    mod.imports.push_back(abr::Import{"pthread_mutex_init", true, 0, 0, 0});     // 8
+    mod.imports.push_back(abr::Import{"pthread_mutex_lock", true, 0, 0, 0});     // 9
+    mod.imports.push_back(abr::Import{"pthread_mutex_destroy", true, 0, 0, 0});  // 10
+    mod.imports.push_back(abr::Import{"pthread_mutex_unlock", true, 0, 0, 0});   // 11
+    mod.imports.push_back(abr::Import{"gethostname", true, 0, 0, 0});         // 12
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -444,6 +449,37 @@ int main() {
             Expect("longjmp 0 -> 1", std::to_string(abr::RuntimeTestAccess::Call(rt, 7, args3, in, &out)),
                    "1");
         }
+    }
+
+    // --- a mutex that is destroyed while held must not be freed: the owner
+    //     map is filled only AFTER a lock succeeds, so a destroy in that
+    //     window would leave the holder with a dangling futex.
+    {
+        const std::uint32_t kMutex = 0x10006500;
+        const std::uint32_t init[4] = {kMutex, 0, 0, 0};
+        const std::uint32_t lock[4] = {kMutex, 0, 0, 0};
+        const std::uint32_t destroy[4] = {kMutex, 0, 0, 0};
+        const std::uint32_t unlock[4] = {kMutex, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 8, init);
+        Expect("mutex lock", std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
+        abr::RuntimeTestAccess::Call(rt, 10, destroy);  // must be skipped
+        Expect("mutex unlock after a skipped destroy",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
+        Expect("mutex lock after a skipped destroy",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
+    }
+
+    // --- gethostname: POSIX semantics -- 0 on success, the NAME in the
+    //     buffer. The guest uses the return value as a pointer, so a
+    //     non-zero answer makes it dereference a small integer.
+    {
+        const std::uint32_t kHost = 0x10006600;
+        std::memset(rt.H<std::uint8_t>(kHost), 0, 64);
+        const std::uint32_t args[4] = {kHost, 64, 0, 0};
+        const std::uint32_t n = abr::RuntimeTestAccess::Call(rt, 12, args);
+        const char* s = reinterpret_cast<const char*>(rt.H<std::uint8_t>(kHost));
+        Expect("gethostname returns 0", std::to_string(n), "0");
+        Expect("gethostname nul-terminated", std::to_string(s[0] != '\0' ? 1 : 0), "1");
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);

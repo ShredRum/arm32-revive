@@ -1095,3 +1095,87 @@ bytes) field by field -- the host's own struct statfs has a different size
   fingerprint of the 59ff106 build; no LOUD/HEAPCORRUPT/CHUNKD/
   USAGE_ERROR/STUCK, death.log 0 B. Rio and Space re-run on the same
   library: 0 markers, death.log 0 B.
+
+### 2026-10-21/22 (night) — batch 4: the host's own safety, and a startup abort found the hard way
+
+Batch 4 covers the audit's "our environment" tier plus three small libc
+imports. It also produced the session's worst debugging session: a
+**startup abort** (black screen) that turned out to be MY new code.
+
+**The abort.** On the device the game died during nativeInit with
+
+    episodes:resetEpisodeTables adding cloud episodes
+    [glog] Uncaught exception (N3net20HttpRequestExceptionE):
+    Unable to open a cURL easy handle
+    [svc] FATAL abort() called -- halting
+
+The bisect (each candidate installed and started as a FRESH install,
+because the abort showed up right after `pm install -r`):
+
+    baseline 83d31ac (28 starts)        clean
+    batch 4, mutex change only           clean
+    batch 4, mutex + errno              clean
+    batch 4, without the watchdog change ABORTS   (watchdog innocent)
+    batch 4, without the gethostname    clean
+    batch 4, gethostname -> 0            clean   (the fix)
+
+**Root cause.** My new `gethostname` handler answered with the LENGTH of
+the name (9 for "localhost"), but POSIX gethostname returns **0 on
+success**. The guest uses that return value AS A POINTER:
+
+    buf[len] = 0;
+    r = gethostname(buf, len);
+    if (r != 0) return (char*)r;     <- dereferenced!
+    p = strchr(buf, '.');
+
+So the guest dereferenced address 9, its cURL init died, and the game
+aborted before the menu. The handler now follows POSIX (0 on success,
+-1 on error, the name in the buffer). Space and Rio never call
+gethostname at all (measured on their disassembly), so the trap was
+Seasons-only.
+
+**Lesson for the rest of the plan: the guest's expectations for an
+import have to be read from the guest's OWN call sites, not from the C
+standard alone.** The guest violates the POSIX contract here and relies
+on the real libc's "0 on success".
+
+**What batch 4 changes**
+
+- **The stuck-update watchdog can no longer take the host down.** It
+  scanned `sp .. sp+0x4000` while only checking that `sp` itself was
+  mapped; the guest address space is one PROT_NONE 4 GB reservation with
+  the parts mapped on demand, so a read past the end of the stack (or
+  into a hole of the heap arena) was a host SIGSEGV. The scan now asks
+  the runtime's CheckRange for every word. (The watchdog runs regardless
+  of HARNESS_DIAG, i.e. also in the shipping build.)
+- **pthread_mutex_destroy can no longer free a held mutex.** The owner
+  map is filled only AFTER a lock succeeds, so a destroy in that window
+  freed a mutex another thread was holding or waiting for. The destroy
+  now also refuses when a lock is in flight (the pending-lock witness)
+  and when a trylock says the mutex is taken -- in both cases the mutex
+  is kept (leaked) and stays in the map, so the guest keeps its object.
+- **fread/fwrite report a short transfer to the guest** (errno), so
+  "wrote 0 of N" is no longer indistinguishable from a full write.
+- **gethostname** follows POSIX (see above).
+
+**Not implemented on purpose**
+
+- `getauxval`: the AUXV belongs to a PROCESS, and the guest is a
+  library, not the process we run in. The host's AT_PHDR / AT_ENTRY /
+  AT_HWCAP are addresses and CPU bits of OUR address space and mean
+  nothing to the guest. Only the process-independent values (AT_PAGESZ,
+  AT_CLKTCK) could be answered; the generic tail's 0 is left in place
+  rather than handing the guest a pointer into our address space.
+- `sigaction`: the guest's signal handlers cannot be run from a host
+  signal handler, and delivering the signal to the wrong thread would
+  take the whole app down (the guest's own sigaction is a no-op). The
+  audit's "implement or refuse loudly" is left as a documented gap.
+
+**Verification**
+
+- **Unit test** `host/src/fmt_test.cpp`: 51 checks, ALL OK -- now also
+  the mutex destroy-while-held case and the gethostname contract.
+- **Native harness**: unchanged (Rio 54/54, Seasons 142/142, Space 67/67).
+- **Device**: Seasons starts clean (4/4 starts after the fix, no
+  cURL/abort, no markers, death.log 0 B); the level check and the other
+  two titles are the final gate.

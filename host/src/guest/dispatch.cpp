@@ -1808,6 +1808,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, a1 != 0 ? a1 : 1);
         return;
     }
+    // --- libc odds and ends the guests actually call -------------------
+    // --- libc odds and ends the guests actually call -------------------
+    if (n == "gethostname") {
+        // gethostname(buf, len): POSIX returns 0 on SUCCESS and -1 on error
+        // (bionic truncates and NUL-terminates the name). The guest uses
+        // the return value AS A POINTER in one place ("if (r != 0) return
+        // (char*)r"), so answering with the length -- as a first revision of
+        // this handler did -- made it dereference 9 and the game's HTTP init
+        // died with "Unable to open a cURL easy handle".
+        if (a1 == 0) {
+            Ret(regs, static_cast<std::uint32_t>(-1));
+            return;
+        }
+        std::string name = "localhost";
+        char host[256];
+        if (::gethostname(host, sizeof(host)) == 0 && host[0] != '\0') {
+            name = host;
+        }
+        const std::size_t n = std::min<std::size_t>(name.size(), (std::size_t)a1 - 1);
+        if (!CheckRange(a0, n + 1, true)) {
+            goto bad_ptr;
+        }
+        std::memcpy(H(a0), name.data(), n);
+        H(a0)[n] = 0;
+        Ret(regs, 0);
+        return;
+    }
     // --- raw memory (host implementations over translated pointers) ---
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host.
@@ -3758,6 +3785,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                "fread");
             const std::uint32_t wn = a1 ? wbytes / a1 : 0;
             std::size_t got = std::fread(H(a0), a1, wn, f);
+            if (got < wn && wn == a2) {
+                SetGuestErrno(errno ? errno : EIO);
+            }
             if (wn < a2) {
                 static int frc = 0;
                 if (frc < 10) {
@@ -3812,7 +3842,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 std::printf("%s\n", nb > show ? " ..." : "");
             }
-            Ret(regs, static_cast<std::uint32_t>(std::fwrite(H(a0), a1, a2, f)));
+            const std::size_t wrote = std::fwrite(H(a0), a1, a2, f);
+            if (wrote < a2) {
+                SetGuestErrno(errno ? errno : EIO);
+            }
+            Ret(regs, static_cast<std::uint32_t>(wrote));
             return;
         }
         if (n == "fseek" || n == "fseeko" || n == "ftell" || n == "ftello" || n == "rewind") {
@@ -5966,7 +6000,26 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
                 if (held) {
                     return 0;
                 }
+                // A lock that is IN FLIGHT is not in the owner map yet (the
+                // owner is recorded only after the lock succeeds), and a
+                // thread waiting for this mutex would then wait on a freed
+                // one. The pending-lock witness covers the waiter; the
+                // trylock covers a thread that holds the mutex but has not
+                // recorded it yet. Either way: keep the mutex (leak it) and
+                // leave it in the map, so the guest keeps the same object.
+                if (pend_lock_obj_.load() == obj) {
+                    std::printf("[mutex] DESTROY-PENDING obj=%08x -- skipped (leak)\n", obj);
+                    return 0;
+                }
                 m = it->second;
+                if (pthread_mutex_trylock(m) != 0) {
+                    // Still held by someone: pthread_mutex_destroy on a held
+                    // mutex is undefined, and freeing it would leave the
+                    // holder with a dangling futex. Leak it.
+                    std::printf("[mutex] DESTROY-HELD obj=%08x -- skipped (leak)\n", obj);
+                    return 0;
+                }
+                pthread_mutex_unlock(m);
                 mutex_map_.erase(it);
             }
             if (m) {
