@@ -41,14 +41,20 @@ if [ "$DIAG" = 1 ]; then
         exit 1
     fi
 fi
+# The profile is the single source of truth for the ABIs and the file names
+# (they used to be hardcoded here while the profile carried its own copies --
+# two places to keep in sync).
+HOST_ABI="$("${PROF[@]}" host.abi)"
+HOST_LIB="$("${PROF[@]}" host.lib)"
+GUEST_ABI="$("${PROF[@]}" guest.abi)"
 LIB_SRC=host/build-android/libabhost.so
-LIB_DST="$TREE/lib/arm64-v8a/libabhost.so"
+LIB_DST="$TREE/lib/$HOST_ABI/$HOST_LIB"
 # OUT_NAME=apk_fill.apk writes the signed artifact under a distinct name
 # without touching the prod/diag defaults.
 if [ -n "${OUT_NAME:-}" ] && [ "$DIAG" != 1 ]; then
     OUT="games/$GAME/work/$OUT_NAME"
 fi
-GUEST="$TREE/assets/guestlib/armeabi-v7a/$GUEST_LIB"
+GUEST="$TREE/assets/guestlib/$GUEST_ABI/$GUEST_LIB"
 APKTOOL=tools/apktool_3.0.3.jar
 BT=tools/android-sdk/build-tools/35.0.0
 KS="${KS:-keys/debug.keystore}"
@@ -77,6 +83,17 @@ fi
 
 echo "== stripping host lib =="
 llvm-strip "$LIB_SRC" -o "$LIB_DST"
+# The profile's strip.libs: the guest's own libraries, if the tree still has
+# them (Seasons links everything statically, so there is nothing to strip
+# there). Stripped in place, when present.
+for l in $("${PROF[@]}" strip.libs); do
+    for d in "$TREE/lib/$GUEST_ABI" "$TREE/lib/armeabi"; do
+        if [ -f "$d/$l" ]; then
+            llvm-strip "$d/$l"
+            echo "  stripped $d/$l"
+        fi
+    done
+done
 
 echo "== target sdk =="
 # The profile is authoritative for the SDK levels. apktool v3 takes them from

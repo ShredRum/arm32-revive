@@ -9,6 +9,9 @@ strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
 
 [apk]
 package      = "com.rovio.angrybirdsrio"
+# The port keeps the ORIGINAL APK's version (the manifest is not
+# rewritten), so these two are the reference value, not something
+# the build applies.
 version_name = "2.6.13"
 version_code = 2676
 min_sdk      = 16

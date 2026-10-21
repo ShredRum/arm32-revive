@@ -37,6 +37,10 @@ MD5="$(md5sum "$LIB_DST" | cut -d' ' -f1)"
 cat <<EOF
 
 --- device half (run by hand) --------------------------------------------
+# NOTE: the ORIGINAL Rovio app has the same package name but a different
+# signer, so "pm install -r" over it fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE. Uninstall it first
+# ("pm uninstall <pkg>") -- that also removes ITS save data, not ours.
 scp -P $SSH_PORT "$APK_OUT" $DEV:$APK_NAME
 ssh -p $SSH_PORT $DEV "sudo pm install -r /data/data/com.termux/files/home/$APK_NAME; pm path $PKG"
 # ALWAYS verify the INSTALLED lib (the app dir alternates -1/-2; the path above

@@ -9,6 +9,9 @@ strategy     = "jit"
 
 [apk]
 package      = "com.rovio.angrybirdsspaceHD"
+# The port keeps the ORIGINAL APK's version (the manifest is not
+# rewritten), so these two are the reference value, not something
+# the build applies.
 version_name = "2.2.14"
 version_code = 221400
 min_sdk      = 16

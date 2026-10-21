@@ -45,10 +45,14 @@ def smali_natives(game):
                 smali_nat.setdefault(meth, {})[cls] = (ret, 'static' in flags)
     return smali_nat
 
-J2C = {'I': 'jint', 'F': 'jfloat', 'Z': 'jboolean', 'B': 'jbyte',
-       'S': 'jshort', 'C': 'jchar', 'J': 'jlong'}
-R2C = {'V': 'void', 'I': 'jint', 'Z': 'jboolean', 'B': 'jbyte',
-       'S': 'jshort', 'C': 'jchar', 'J': 'jlong'}
+# 'D' (double) and 'F' (float) must be mapped: without them a native
+# method that takes a double fell into the "anything else" branch below and
+# was typed as jobject. No guest has such a native today (measured: no 'D'
+# in any of the 197 signatures), but the mapping has to be right.
+J2C = {'I': 'jint', 'F': 'jfloat', 'D': 'jdouble', 'Z': 'jboolean',
+       'B': 'jbyte', 'S': 'jshort', 'C': 'jchar', 'J': 'jlong'}
+R2C = {'V': 'void', 'I': 'jint', 'D': 'jdouble', 'Z': 'jboolean',
+       'B': 'jbyte', 'S': 'jshort', 'C': 'jchar', 'J': 'jlong'}
 
 def split_args(sig):
     out = []

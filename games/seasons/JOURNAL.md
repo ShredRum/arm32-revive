@@ -1275,3 +1275,40 @@ drives animation phase, blink thresholds and interval picks.
 Verification: the unit test compares the generator against the HOST's
 `random()` (same core as bionic's) after `srandom(1)` -- the sequences are
 identical -- and checks the dispatcher answers `rand`/`srand` from it.
+
+### 2026-10-22 — batch 8: the profile becomes the single source of truth
+
+The audit found that several profile fields were never applied (the paths
+were hardcoded in the build scripts) and that some other items it listed
+were already closed. All of it was re-checked before touching anything:
+
+- **Now wired into the build** (`scripts/build-apk.sh`): `guest.abi`,
+  `host.abi` and `host.lib` decide where the guest and the host library
+  go, and `strip.libs` strips the guest's own libraries when the tree
+  still has them (Seasons links everything statically, so there is nothing
+  to strip there). The profile and the build can no longer disagree.
+- **`apk.version_name` / `apk.version_code`**: the port keeps the ORIGINAL
+  APK's version (the manifest is not rewritten), so these two are the
+  reference value, not something the build applies. They are now labelled
+  as such in the three profiles instead of looking like dead settings.
+- **`deploy.sh`**: the device instructions now say that the original Rovio
+  app has to be uninstalled first (same package name, different signer =>
+  INSTALL_FAILED_UPDATE_INCOMPATIBLE), and that this also drops ITS save
+  data.
+- **`AGENTS.md`**: a note that the build is NOT byte-reproducible (the
+  library carries a __DATE__/__TIME__ build marker), so the lib's md5
+  changes on every rebuild and only the BEHAVIOUR may be compared.
+- **`host/gen_apphost.py`**: a JNI argument of type 'D' (double) fell into
+  the "anything else" branch and was typed as `jobject`. The mapping now
+  knows 'D' (jdouble) and 'F' (jfloat). It is latent -- no title has a
+  native with a double (197 signatures checked) -- and regenerating the
+  committed forwarder file with --union produces a byte-identical result.
+  (The audit pointed at scripts/gen_apphost.py; the file is host/.)
+- **Already closed, verified**: `scripts/profile.py` does fail on a
+  table-valued key (it checks `isinstance(node, dict)` per path step), and
+  the stale `assets/guestlib/guestlib/...` doNotCompress entry is gone from
+  all three trees.
+
+Verification: all three APKs build with the profile-driven paths, install
+and run on the device with 0 markers and death.log 0 B, and the host
+library is bit-identical to the one that passed the golden level check.

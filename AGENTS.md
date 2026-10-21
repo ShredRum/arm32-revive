@@ -44,6 +44,14 @@
   Signing changed from v1-only (jarsigner) to v1+v2+v3 (apksigner, build-tools
   35.0.0) now that apksigner is present; the key/alias are unchanged, so the
   certificate identity -- and `pm install -r` -- are unchanged.
+- REPRODUCIBILITY: the APK is content-reproducible but NOT byte-reproducible
+  (apktool stamps the zip entries) and the host library is not byte-
+  reproducible either: it carries a build marker (__DATE__/__TIME__, printed
+  as "build marker ..." in apphost.log). So the lib's md5 changes on EVERY
+  rebuild -- compare the BEHAVIOUR (the golden level check, the markers,
+  death.log), never the md5 of a freshly built lib. A rebuilt lib that is
+  installed over a running app also changes the .bss layout, which moves
+  the offsets the read-only analysis tools use (see the G_MEM caveat).
 - DIAGNOSTICS: exactly one switch, HARNESS_DIAG (real env OR files/abflags.txt,
   read at boot; "" / "-" / "0" / "off" / "false" = OFF). It arms the pc probes,
   the WATCHPC hook, the per-call / per-frame traces and the hot-path logs. OFF
