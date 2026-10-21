@@ -730,3 +730,160 @@ target 26"). On the test device (API 25) the rebuilt Seasons boots to the
 menu with the guest fingerprint verified ("[guest] sha256 OK 8183b73d...")
 and death.log 0 B. The install on an API 34/35 device is the acceptance test
 and can only be run on such a device.
+
+## 2026-10-21 — code audit (6 read-only passes) and the plan
+
+Six read-only audits of the shared harness, one per area: build/packaging,
+the printf family, the import/ABI layer, the loader/relocations, the
+runtime/JIT boundary, and the host-side shims (GL/audio/files/JNI). Each
+auditor used the **jev** tools (`jev_classify` for triage, `jev_verify` per
+headline claim); in three cases a jev classification was overridden by a
+direct measurement. Nothing in the repo was modified by them; their
+reproducible checkers are kept in
+`games/seasons/work/analysis_2026-10-21/audit/<area>/` (gitignored).
+
+### CORRECTION to commit 1d32093 (the vsscanf va_list)
+
+That commit claims "a va_list is an 8-byte struct ... passed in memory, at
+the callee's entry SP". **That is wrong for these guests.** The guests are
+GCC/arm-linux-gnueabi builds (base PCS), where `__builtin_va_list` is a
+single word -- a POINTER to a flat argument area -- and it arrives in a
+core register. Ground truth from the guests themselves:
+
+    libAngryBirdsSpace.so / libAngryBirdsSeasonsFull.so:
+        add r3, sp, #20      ; the area pointer
+        ldr r2, [sp, #0x10]  ; the format
+        bl  vsnprintf@plt    ; r3 = the area pointer (3 named args -> r3)
+
+and for `vsscanf(str, fmt, ap)` (2 named args) it is therefore **r2 = a2**.
+The base-PCS `va_arg` expansion (compiled with `-mabi=apcs-gnu`, the
+equivalent variant) is: 4-byte arg -> read at the pointer, pointer += 4;
+8-byte arg -> read at the pointer, pointer += 8 -- **the caller** aligns a
+double slot, the consumer does not shift the pointer.
+
+Consequences: `vsscanf` must take the area pointer from `a2`, not from the
+entry SP (currently wrong; the import has 0 call sites in all three
+guests, so nothing observable breaks today). The via_va reader in
+`ExpandPrintf::next64` additionally rounds the pointer up to 8, which the
+base PCS does not do -- for compiler-built areas that rounding is a no-op,
+so it is harmless today, but it is a deviation (see the printf audit's D2).
+
+### Tier 1 -- live, they change game data
+
+| import / path | guest call sites | what happens | fix |
+|---|---|---|---|
+| `strcoll` unhandled | seasons 0x58d904/0x5900e0/0x590148, space 0x4010dc/0x4038b8/0x403920 | the comparator always says "equal" -> an ordered container keyed by strings resolves to the WRONG entry (the VFS scheme map) | handle it (one line) |
+| `setjmp`/`longjmp` unhandled | seasons 0x4683c0/0x4728a0/0x474694/0x474598, space 0x36cf80/0x377460/0x379158/0x379254, rio 0x2cd9cc/0x2d47f0/0x2d4a8c | the guest's non-local exit never happens; it continues with a half-initialised state | save r4-r11/sp/pc into the guest's `jmp_buf` and restore them |
+| `memmem` unhandled | rio 0x3a6ed8/0x3a6f10, seasons 0x5b10cc..0x5b15d0, space 0x4aa5bc..0x4aaac0 | always NULL -> the guest's marker scanner never finds its marker | implement, return the guest address |
+| `syscall`/`getpid` unhandled | seasons 0x5b3a2c/0x5b3bd8/0x5b3d58 (`gettid`), 0x5b3d6c (`tgkill`) | every guest thread id is 0; the "abort this thread" signal is never delivered | implement `gettid`/`tgkill`, else `-ENOSYS` |
+| `statfs` unhandled | rio 0x2c5f68 | "success" with an UNINITIALISED buffer -> the free-space decision runs on stack garbage | fill the guest's `struct statfs` or return `-ENOSYS` |
+| `sysconf` unhandled | rio 0x5ab20, seasons x2 | 0 where a positive constant is expected (hypothesis about the constant) | delegate the known `_SC_*` to the host |
+| printf `%zu`/`%zd`/`%jd`/`%td` | 22 live guest formats (PNG loader, "Rewinding stream by : %zu") | read as 64-bit although the guest's `size_t` is 4 bytes -> garbage AND the next argument is eaten | `z`/`j`/`t` must select a 32-bit mode |
+| printf `%hd`/`%hhd`/`%hu` | 9 live `%hu` (HTTP headers) | not truncated | narrow to int8/int16 |
+| printf `default` branch | -- | does not consume the argument -> every later argument shifts by one slot (the same bug fixed in the log formatter) | `next32()` in `default` |
+| printf `snprintf` return | -- | the expansion stops at 4096 chars, so the returned length is not the C99 "would have written" length, and the guest sizes its OWN buffer from it | keep counting past the cap |
+| printf `%n` with a 64-bit length | -- | writes 8 bytes after validating 4 | validate 8 when the length is 64-bit |
+| printf -> guest memory | -- | the printf family writes without the heap-overflow firewall (`ClampHeapWrite` exists for sscanf only) -> a small guest buffer is smashed silently | route the write through `ClampHeapWrite` |
+| file bridge `ensure_parent` | all | missing directories are CREATED, so a guest save-path bug is masked in the port and becomes lost progress on a device | drop it (except for the seed extractor) |
+| `fread`/`fwrite` errno | all | the guest never learns about ENOSPC: "wrote 0 of N" plus a stale errno | `SetGuestErrno` on a short result |
+| `AAsset_getBuffer` for a compressed asset | all | never returns NULL -> the guest's compressed-asset branch is dead in the port | return NULL, implement `AAsset_read` |
+| GL vendor/renderer strings | all | taken from the REAL device (2019+) instead of the prepared era-correct ones -> the guest's renderer-keyed decisions differ from the reference | honour `HARNESS_GLVENDOR/GLRENDERER` in the real backend too |
+| `rand`/`random`/`srand` | all | share drand48's LCG -> a different sequence than on a device | give them bionic's TYPE_3 state |
+| loader `ResolveData` | -- | DEAD CODE: the data-import addresses come from a hard-coded 6-name list, so any new `STT_OBJECT` silently gets a trampoline-page address | assert full coverage; use `ResolveData` |
+| `LDREX`/`STREX` | seasons: 18.7k sites | emulated as an unsynchronised CAS, and main vs worker threads use DIFFERENT monitors -> a lost update is possible | one shared `ExclusiveMonitor` for all JITs |
+| 22 EABI syscalls | seasons: 16 of 22 unimplemented | a LOUD halt of the guest thread; `open`/`lseek` sit in GAME code | `-ENOSYS` instead of halt, then implement what is needed |
+| 6 GL imports | guest calls them | "success" without work; `glGetUniformfv` writes through a pointer -> uniforms stay uninitialised | implement them in `realgl.cpp` |
+| the fake GL shim | guest has worker threads | reachable in PROD on a thread without an EGL context -> a "compiled" shader that never compiled | with REALGL on and no context: LOUD halt, not a fake success |
+| `gethostname`/`sysconf`/`getauxval`/`sigaction`/`__cxa_atexit` | all | "success" without work (no crash handler of the guest, no atexit flush, empty host name) | implement or refuse loudly |
+| the generic import tail | -- | 44-46 `gl*` and ~20 other imports land in `Ret(regs,0)` | make the tail LOUD for unknown names |
+
+### Tier 2 -- risks to OUR host (not to the game)
+
+- the stuck-update watchdog can SIGSEGV the host: it scans `sp..sp+0x4000` while only checking that `sp` itself is mapped, and it runs **regardless of HARNESS_DIAG** (i.e. in the shipping build). Clamp the scan to the mapped region and check each page.
+- `pthread_mutex_destroy` can free a host mutex another thread holds (the owner is recorded AFTER the lock succeeds) -> host UAF.
+- `Ret()` (called on EVERY import) round-trips the whole CPSR through Dynarmic's public `Cpsr()/SetCpsr()`, which **drops the IT state** and writes the CPSR's NZCV into the FPSCR. Rebuild only mode+T.
+- `HARNESS_FASTMEM=1` is ON by default and bypasses the RELRO write guard completely -> the 2026-10-18 incident ("GOT slot 0x6FFE28 zeroed") is still possible.
+- a failed seed extraction leaves a TRUNCATED file on disk; the next boot treats it as valid -> the guest parses its own corrupt data forever. Unlink on failure.
+- an OOB read past an asset is not trapped (the guest heap is a 1 GB arena) -> invisible in the port, would crash on a device.
+
+### Tier 3 -- latent traps (not triggered today)
+
+AAPCS32 rule C.6 ("NCRN := r4": after a double landed on the stack, all later arguments come from the stack) is not applied in the variadic reader; the printf buffers are cut at 511 (`%s` and the format string), 512 (render) and 4096 (expansion); `sscanf %lld` writes 4 bytes into an 8-byte slot; an overflowing number aborts an sscanf conversion instead of clamping; `strftime` clamps `maxlen` to 256; `scalbln`/`scalbnl` ignore their third argument; the RELRO end is rounded down (glibc rounds up); `get_name` scans the string table unbounded; `out.bias` is read before it is assigned and `Load()` is not re-entrant; `DT_INIT_ARRAY` nulls are dropped, which renumbers the vector the harness indexes; the 16-byte VFP-thunk area has no upper bound; `__android_log_print` has a SECOND, divergent formatter (no flags/width/precision, one `l` max) and `dispatch.h` wrongly claims the code is shared; that formatter prints `%f` as `%g` and `%p` without `0x`; the REENTER guard returns 1 for every dropped frame; a native the guest does not export is a silent no-op; `/proc/self/environ` is visible to the guest; the fake-GL logging is not gated; `glGetString(GL_EXTENSIONS)` is re-copied in full on every call (101 calls/session x 3.6 KB); `last_svc` is only updated under diag; `kuser_hits_` aliases counters 5/6/7 onto 0/1/2; the mutex-owner map is maintained in the shipping build; `svc_count` is a contended atomic on the hottest path; the watchdog reads the update thread's live JIT registers (a race, so a STUCK report can name a PC that never existed).
+
+### Tier 4 -- build and documentation
+
+- a MISSING guest library is only a warning -> the build goes on to package and SIGN the APK, so a foreign guest can ship inside our package (and the harness has no fingerprint to compare against either). Refuse.
+- the fingerprint is written from the profile constant, not from the bytes that are packaged, and a stale fingerprint file is never removed.
+- the targetSdk rule can print "success" and change nothing (it only replaced the self-closing `<uses-sdk .../>` form).
+- the profile's `version_name`/`version_code`, `guest.abi`, `host.abi`, `host.lib` and `strip.libs` are never applied -- the paths are hardcoded in the scripts.
+- a stale `assets/guestlib/guestlib/armeabi-v7a/guest.sha256` entry sits in all three trees' `apktool.yml` (left over from an earlier revision of the script) -- it breaks the "prepare-tree.sh reproduces the tree" invariant in AGENTS.md.
+- the APK is content-reproducible but NOT byte-reproducible (apktool stamps every entry with the build time), so a rebuild can never be verified by hash.
+- `deploy.sh` does not say that the ORIGINAL Rovio app has to be uninstalled first (a different signer -> INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+- `profile.py` returns a dict for a table key instead of failing; `gen_apphost.py` would type a `double` parameter as `jobject` (dormant: no `D` in any of the 197 signatures).
+- the guest-image identity check fails OPEN when the fingerprint asset is missing, empty or not STORED (now that every shipped APK carries it, that should be fatal).
+
+### Checked and clean (so the reader knows the boundaries)
+
+every slot of `math_thunks.inc` against AAPCS32 and clang; the even-register
+rule for variadic doubles; the import trampoline/SVC plumbing and
+`Runtime::Ret` (it does not touch r4-r11); ALL relocations re-derived by an
+independent implementation (20 902 / 21 531 / 15 361, 0 mismatches); every
+PLT stub traced to its own GOT slot (314/314, 308/308, 332/332); unique
+addresses for data imports; no overlap in the trampoline page; the guest-side
+`sqrt` VFP thunk is ABI-correct; the guest memory model and its bounds; the
+asset bridge (bytes, NULL when missing, LOUD on a bad handle); the file
+bridge (path mapping, append/truncate, errno in `open`); the audio path; all
+73 JNI forwarders against the smali `native` declarations of all three
+titles (0 mismatches) and their marshalling against the guest's own reads;
+the clock; the locale; the `lrand48` sequence (identical to a device for
+the same seed). NOT audited: the socket bridge, `pthread_once` hijack, the
+unwinder, the dlmalloc port, the ETC1/texture decode in `realgl.cpp`.
+
+### Plan
+
+- **Batch 1 (live data):** the unhandled imports of tier 1, the printf
+  semantics, `vsscanf` from `a2`, the file/errno/asset items, `rand`,
+  `ResolveData`, the build guards (missing guest = fatal, fingerprint from
+  the bytes, the SDK rule for both `<uses-sdk>` forms).
+- **Batch 2 (our host):** the watchdog scan, the mutex-destroy UAF, `Ret()`
+  without the CPSR round trip, one shared exclusive monitor, RELRO under
+  fastmem, the seed extraction, the asset OOB.
+- **Batch 3 (latent traps):** rule C.6, the printf buffers, `sscanf %lld`,
+  the overflow clamp, `strftime`, `scalbln`, the loader bounds, one
+  formatter instead of two, the `glGetString` cache, the diagnostic hygiene.
+- **Batch 4 (docs):** the dead profile fields, the stale `doNotCompress`
+  entry, the reproducibility note, the deploy note, `profile.py`,
+  `gen_apphost.py`.
+
+Every batch: build -> install -> device check (the level's numbers must stay
+bit-identical to the level JSON, death.log 0, all three titles playable) ->
+`jev_gate` with the claims and the evidence -> commit. Nothing is committed
+before its device check.
+
+Open decisions: (a) how much of batches 1-4 to take on at once; (b) whether
+the wrong va_list claim in commit 1d32093 is corrected by rewriting that
+commit and moving its tag, or by a new commit that states the correction
+(the tree was left with the original history, i.e. the second option);
+(c) host libm (arm64) vs the guest's own bionic-arm32 libm: the host's is
+fast but can differ by 1 ULP -- recommended to leave as is and note it;
+(d) the Seasons speed-up: after the sqrt fix the boot still spends ~17 s in
+244 frames of ~70 ms, which is per-frame guest work, not the import path
+anymore (next: find out what those frames do).
+
+### State of the tree
+
+- commits: `4f45461` (A+B: import dispatch by id + guest-side VFP sqrt),
+  `9806c5f` (guest identity by SHA-256), `1d32093` (AAPCS32 argument
+  slots), `5f2a93c` (profile-authoritative SDK levels).
+- tags: `works-2026-10-20-seasons-playable` (first working Seasons),
+  `works-2026-10-20-seasons-fastboot` (A+B),
+  `works-2026-10-21-seasons-hardened` (audit fixes),
+  `works-2026-10-21-targetsdk26` (installable on Android 14+).
+- the device is currently unreachable over SSH (connection refused), so no
+  install/verify round is possible right now.
+- CAVEAT: every harness rebuild moves the host lib's .bss, so the
+  read-only tools' hardcoded `G_MEM` goes stale ("g_base is null"). Re-sync
+  with `nm -C host/build-android/libabhost.so | grep -w g_mem`; the same is
+  true for the `HARNESS_WATCHPC` counter offset, and the `libabhost.so`
+  base changes when the APK is reinstalled (read it from
+  `/proc/<pid>/maps`).
