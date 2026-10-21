@@ -29,6 +29,16 @@ target_link_libraries(cbnz_test PRIVATE dynarmic)
 add_executable(fmt_test src/fmt_test.cpp)
 target_link_libraries(fmt_test PRIVATE guest)
 
+# Mini-zip reader for the app's own base.apk (the guest .so and the seeds).
+# Its own module so the native unit test can reach the extraction.
+add_library(zipfile STATIC src/zipfile.cpp)
+target_include_directories(zipfile PUBLIC src)
+
+# Unit test for the zip extraction (the seed path: a short read must not
+# leave a truncated file behind).
+add_executable(zip_test src/zip_test.cpp)
+target_link_libraries(zip_test PRIVATE zipfile)
+
 # distv: Dynarmic-based disassembler for the game .so.
 add_executable(distv src/distv.cpp)
 target_link_libraries(distv PRIVATE dynarmic)
@@ -81,7 +91,7 @@ target_compile_options(guest PRIVATE -g)
 # Product host (Android only): real Java drives guest Java_* under Dynarmic.
 if(ANDROID)
     add_library(abhost SHARED src/apphost.cpp)
-    target_link_libraries(abhost PRIVATE guest log)
+    target_link_libraries(abhost PRIVATE guest log zipfile)
 endif()
 
 # Harness-only real-GLES compile check (PC GPU validation of game shaders).

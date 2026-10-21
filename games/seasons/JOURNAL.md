@@ -1503,3 +1503,73 @@ sscanf saturation and the out-of-range conversion still counting); the
 native harness init counts are unchanged; the production log stays at
 ~30 KB per run with the new diagnostics in it; the device shows no
 LOUD/HEAPCORRUPT/CHUNKD/STUCK and death.log 0 B.
+
+### 2026-10-22 — batch 13: the two claims the jev gate called "unsupported"
+
+The gate over batches 11-12 (7 verified / 0 contradicted / 2 unsupported)
+left two claims without direct proof. Both are closed here with a
+reproducible test, not with a measurement alone.
+
+**1. "An unknown EABI syscall answers -ENOSYS instead of halting the guest"**
+
+- New unit test (host/src/fmt_test.cpp): the raw syscall path is called with
+  an unknown number (999) -> r0 = -ENOSYS and the guest thread is NOT
+  stopped; a positive control (getpid) still answers normally.
+  Before-proof: with the old code (halt) the test process dies with
+  **exit 139** -- the old branch called ActiveJit()->HaltExecution(), which
+  took the whole thread down. With the fix: ALL OK.
+- The claim "the guests only ever use a couple of numbers" is now a direct
+  measurement of my own, not an inference: with HARNESS_DIAG on (the flag
+  file files/abflags.txt, removed again right after the run) the device log
+  shows the complete set of raw syscall numbers:
+    Seasons: nr=186 r0=0 r1=0084f000 r2=1   (sigaltstack)
+             nr=4   r0=64 r1=1100baac r2=5c (write)
+    Rio:     no raw syscall at all (DIAG confirmed active: 397 DIAG markers)
+    Space:   no raw syscall at all (DIAG confirmed active)
+  So the default branch really is a safety net, not a hot path.
+- CORRECTION OF RECORD: the commit message of 96acf7f says "nr=186 gettid".
+  That is wrong. The NDK's own ARM32 EABI table
+  (asm/unistd-eabi.h: __NR_sigaltstack = 186, __NR_gettid = 224,
+  __NR_tgkill = 268) proves 186 is sigaltstack -- which is what the CODE
+  implements and what the arguments show (r0 = the new stack = 0,
+  r1 = the old stack pointer). The code was right, the message was not.
+  The history is not rewritten; the correction lives here.
+
+**2. "A failed seed extraction no longer leaves a truncated file behind"**
+
+- The mini-zip reader moved out of apphost.cpp into its own module
+  (host/src/zipfile.h / host/src/zipfile.cpp, a static lib `zipfile`
+  linked into abhost and into the new test). Only the logger became a
+  callback (the app registers its own Log at startup); the reader itself is
+  the same code, moved verbatim.
+- New unit test (host/src/zip_test.cpp) builds REAL zips (a local header, a
+  central directory, an EOCD -- written by the test, not a fixture) and
+  checks:
+    * a good zip is extracted, byte for byte (64 bytes, content compared);
+    * a zip whose central directory claims 4096 bytes while the file carries
+      64 makes the extraction FAIL and leaves NO file behind.
+  Before-proof: with the std::remove() removed the second check fails
+  ("the partial file is removed" -> 0); with it: ALL OK. The failure mode
+  this protects is real: without the removal the next boot takes the
+  truncated (or empty) file for the guest and loads a broken image.
+- On the device the extraction goes through the new module and still works
+  ("zip extracted assets/guestlib/armeabi-v7a/libAngryBirdsSeasonsFull.so
+  (8528904B)"), all markers 0, death.log 0 B.
+
+**The final gate of the batch (the final build, md5 167f1c08...)**
+
+- The golden check: the live Lua state of Tutorial_red is bit-identical to
+  the level JSON (46 fields) AND byte-identical to the fingerprint of the
+  baseline build 59ff106 (85 lines, no differences at all).
+- All three titles on the device: every marker 0 (HEAPCORRUPT, HEAPASSERT,
+  CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL), death.log 0 B.
+- The production log: 30516 bytes per run (it is recreated at every start,
+  so it does not accumulate), of which 94 lines are the new import
+  diagnostics; Rio 34900, Space 42346 bytes.
+- fmt_test 65 checks ALL OK, zip_test 6 checks ALL OK, the native harness
+  init counts unchanged (54/55, 142/143, 67/68).
+- The jev gate over this batch: 8 verified, 0 contradicted, 0 unsupported
+  (the two claims that were unsupported in the previous round are now
+  verified), 3 needs_review -- the three are measurements the gate cannot
+  check from the diff alone (the device gate numbers, the native counters
+  and the correction of record), all of them quoted from the real output.

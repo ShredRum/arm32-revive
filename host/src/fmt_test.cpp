@@ -42,6 +42,22 @@ struct RuntimeTestAccess {
         rt.CallImport(idx, regs);
         return regs[0];
     }
+    // The raw EABI syscall path (svc #0, the number in r7): what the guest's
+    // own libc-free code (the bundled breakpad) uses. Reports r0 and whether
+    // the guest thread was stopped.
+    static std::uint32_t GuestSyscall(Runtime& rt, std::uint32_t nr, std::uint32_t r0,
+                                      std::uint32_t r1, std::uint32_t r2, bool* stopped) {
+        Runtime::Regs regs{};
+        regs[7] = nr;
+        regs[0] = r0;
+        regs[1] = r1;
+        regs[2] = r2;
+        rt.OnGuestSyscall(regs);
+        if (stopped) {
+            *stopped = rt.stop_step_;
+        }
+        return regs[0];
+    }
     // Same, with the caller's register file in and the result out.
     static std::uint32_t Call(Runtime& rt, std::uint32_t idx, const std::uint32_t args[4],
                               const RegsView& in, RegsView* out) {
@@ -573,6 +589,28 @@ int main() {
         Expect("sscanf of an out-of-range number still converts", std::to_string(n), "1");
         Expect("sscanf saturated to LLONG_MAX",
                std::to_string(v == 9223372036854775807LL ? 1 : 0), "1");
+    }
+
+    // --- an unknown EABI syscall must answer -ENOSYS like a kernel does and
+    //     must NOT stop the guest thread (the old code halted it, which turned
+    //     a missing syscall into a dead game).
+    {
+        bool stopped = false;
+        const std::uint32_t r =
+            abr::RuntimeTestAccess::GuestSyscall(rt, /*nr=*/999, 0, 0, 0, &stopped);
+        Expect("unknown syscall answers -ENOSYS",
+               std::to_string(r == static_cast<std::uint32_t>(-ENOSYS) ? 1 : 0), "1");
+        Expect("unknown syscall does not stop the guest",
+               std::to_string(stopped ? 0 : 1), "1");
+    }
+    // Positive control: a syscall the harness implements still answers.
+    {
+        bool stopped = false;
+        const std::uint32_t r =
+            abr::RuntimeTestAccess::GuestSyscall(rt, /*nr=*/20 /*getpid*/, 0, 0, 0, &stopped);
+        Expect("known syscall (getpid) still answers", std::to_string(r > 0 ? 1 : 0), "1");
+        Expect("known syscall does not stop the guest",
+               std::to_string(stopped ? 0 : 1), "1");
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
