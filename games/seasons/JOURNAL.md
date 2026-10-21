@@ -1380,3 +1380,55 @@ Verified: the native harness init counts are unchanged; on the device the
 live Lua state of Tutorial_red is bit-identical to the level JSON (46
 fields) and to the fingerprint of the 59ff106 build, all markers 0,
 death.log 0 B, and Rio and Space were re-run on the same library.
+
+### 2026-10-22 — batch 11: the two gaps the jev gate found
+
+The jev_gate of batches 1-10 verified 13 of the 15 claims and flagged the
+two host-safety fixes as the only ones WITHOUT a test that demonstrates the
+failure they prevent. Both gaps are closed now.
+
+**The watchdog scan (host SIGSEGV).** The scan lived in apphost.cpp, which
+the unit test cannot reach, so it was moved into the runtime as
+`Runtime::ScanStackForReturnAddresses` and the apphost calls that. The new
+test scans at the last mapped word of the heap arena, where the next page
+is PROT_NONE. With the CheckRange guard in place the scan stops after two
+words; **with the guard removed the test dies with SIGSEGV (exit 139)** --
+the host crash the audit described, reproduced on demand.
+
+**pthread_mutex_destroy (the race).** The owner is recorded only AFTER the
+lock succeeds, so a destroy inside that window freed a mutex another thread
+held or was waiting for. Two changes:
+
+- The pending-lock witness is now cleared only AFTER the owner is
+  recorded, so a destroy in that window still sees a lock in flight and
+  refuses. (A trylock alone does not help: the guest's mutexes are
+  recursive, so the owning thread's trylock SUCCEEDS.)
+- The destroy refuses in three cases: the owner map says held, a lock is in
+  flight, or a trylock says the mutex is taken. The refusals are counted
+  (`mutex_destroy_skipped_`).
+
+The new test reproduces the window deterministically: a test-only flag
+makes the harness skip the owner recording (and keep the pending witness
+set), so the destroy lands exactly in the window. With the guards the
+destroy is refused (the counter grows) and the mutex stays usable; **with
+the guards removed the test fails**.
+
+**Performance.** The printf expansion used to render every conversion
+through a fixed stack buffer; it now sizes the buffer for the conversion
+(a long %s was silently cut), and the buffer is a thread-local vector, so
+the logging path does not allocate per conversion. The native harness runs
+in 65/98/68 ms (before: 67/96/67 ms) -- no measurable change.
+
+**A visible side effect:** the init counter now reads 142/143 instead of
+142/142. The DT_INIT_ARRAY of the guests has one NULL slot, which the
+loader used to drop; it is now kept (as 0) so the indices match the
+guest's table, and the init loops skip it. The number of init functions
+actually run is unchanged (142).
+
+**The gate, closed.** The jev_gate of the ten previous batches verified
+13 of 15 claims and flagged exactly these two as the ones without a
+failing-case proof. With the proofs added, a jev_verify of the two
+claims returns 2/2 VERIFIED (probability 1.00). The earlier "contradicted"
+and "unsupported" verdicts were about the EVIDENCE PACKAGE, not about the
+code: the same claims went from "contradicted" to "verified" once the
+before-state and the failing-case runs were supplied.

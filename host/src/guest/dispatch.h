@@ -231,6 +231,34 @@ public:
     void SetFilesDir(const std::string& guest_prefix, const std::string& host_base);
     // Map a guest path to the host path (the file bridge's rule).
     std::string MapGuestPath(std::uint32_t guest_path);
+
+    // How many pthread_mutex_destroy calls were REFUSED because the mutex
+    // was held (or a lock was in flight). Diagnostic + test hook.
+    unsigned mutex_destroy_skipped_ = 0;
+
+    // TEST ONLY: do not record the owner after a successful lock. It
+    // simulates the window between the lock succeeding and the owner being
+    // recorded -- the window pthread_mutex_destroy has to survive. False in
+    // every real run.
+    bool test_skip_mutex_owner_ = false;
+
+    // A return address found on the guest stack.
+    struct StackHit {
+        std::uint32_t off = 0;
+        std::uint32_t value = 0;
+    };
+    struct StackScan {
+        unsigned words_read = 0;  // how many words were actually read
+        unsigned hits = 0;        // return addresses found
+    };
+    // Scan [sp, sp+max_bytes) of the guest stack for return addresses.
+    // Only words inside the MAPPED region are read: the guest address space
+    // is one PROT_NONE 4GB reservation with the parts mapped on demand, so a
+    // read past the end of the stack (or into a hole of the heap arena)
+    // would take the HOST down with SIGSEGV. The scan stops at the first
+    // unmapped word.
+    StackScan ScanStackForReturnAddresses(std::uint32_t sp, std::uint32_t max_bytes,
+                                         StackHit* hits, unsigned hit_cap);
     void SetApkPath(const std::string& path);
 
     // __gnu_Unwind_Find_exidx: binary search of .ARM.exidx (prel31), returns

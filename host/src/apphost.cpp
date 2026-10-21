@@ -530,23 +530,14 @@ void Watchdog() {
                 // substitute.  Only scan ranges we know are mapped.
                 if (g_mem && ((sp >= abr::kHeapBase && sp < abr::kHeapBase + abr::kHeapSize) ||
                               (sp >= abr::kStackBase && sp < abr::kStackTop))) {
-                    unsigned shown = 0;
-                    for (std::uint32_t off = 0; off < 0x4000 && shown < 32; off += 4) {
-                        std::uint32_t v = 0;
-                        // The scan must not read outside the mapped region:
-                        // the guest address space is one PROT_NONE 4GB
-                        // reservation with the parts mapped on demand, so a
-                        // read past the end of the stack (or into a hole of
-                        // the heap arena) would take the HOST down with
-                        // SIGSEGV. CheckRange knows the real mappings.
-                        if (!g_rt->CheckRange(sp + off, 4, false)) {
-                            break;
-                        }
-                        std::memcpy(&v, g_mem->host(sp + off), 4);
-                        if (g_rt->IsCodeAddress(v & ~std::uint32_t(1))) {
-                            Log("STUCK stack+%04x=%08x", off, v);
-                            shown++;
-                        }
+                    // The scan only reads mapped words (the guest address
+                    // space is one PROT_NONE 4GB reservation: a read past
+                    // the end of the stack would take the HOST down).
+                    abr::Runtime::StackHit hits[32];
+                    const abr::Runtime::StackScan sc =
+                        g_rt->ScanStackForReturnAddresses(sp, 0x4000, hits, 32);
+                    for (unsigned i = 0; i < sc.hits; i++) {
+                        Log("STUCK stack+%04x=%08x", hits[i].off, hits[i].value);
                     }
                 }
             }

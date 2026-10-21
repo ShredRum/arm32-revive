@@ -473,6 +473,40 @@ int main() {
                std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
     }
 
+    // --- pthread_mutex_destroy in the window between the lock succeeding and
+    //     the owner being recorded: the destroy must still not free the
+    //     mutex, and the mutex must stay usable afterwards.
+    {
+        const std::uint32_t kM = 0x10006800;
+        const std::uint32_t init[4] = {kM, 0, 0, 0};
+        const std::uint32_t lock[4] = {kM, 0, 0, 0};
+        const std::uint32_t destroy[4] = {kM, 0, 0, 0};
+        const std::uint32_t unlock[4] = {kM, 0, 0, 0};
+        rt.test_skip_mutex_owner_ = true;  // the owner is NOT recorded
+        abr::RuntimeTestAccess::Call(rt, 8, init);
+        abr::RuntimeTestAccess::Call(rt, 9, lock);
+        const unsigned before = rt.mutex_destroy_skipped_;
+        abr::RuntimeTestAccess::Call(rt, 10, destroy);  // must be refused
+        Expect("the raced destroy was refused",
+               std::to_string(rt.mutex_destroy_skipped_ > before ? 1 : 0), "1");
+        Expect("mutex usable after a raced destroy",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
+        Expect("mutex unlock after a raced destroy",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
+        rt.test_skip_mutex_owner_ = false;
+    }
+
+    // --- the stuck-update scan must not read past the mapped region: the
+    //     guest address space is one PROT_NONE 4GB reservation, so a read
+    //     past the end of the heap would SIGSEGV the host.
+    {
+        const std::uint32_t sp = abr::kHeapBase + abr::kHeapSize - 8;
+        abr::Runtime::StackHit hits[8];
+        const abr::Runtime::StackScan sc = rt.ScanStackForReturnAddresses(sp, 0x4000, hits, 8);
+        Expect("stack scan reads only mapped words",
+               std::to_string(sc.words_read <= 2 ? 1 : 0), "1");
+    }
+
     // --- gethostname: POSIX semantics -- 0 on success, the NAME in the
     //     buffer. The guest uses the return value as a pointer, so a
     //     non-zero answer makes it dereference a small integer.

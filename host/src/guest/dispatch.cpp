@@ -1458,12 +1458,13 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
         const char conv = fmt[fi++];
         // The rendered conversion can be long (a %s of any length), so the
         // buffer is sized for it: the old fixed 512 bytes silently cut a
-        // long string.
-        std::size_t need = 512;
-        if (conv == 's') {
-            need = 512;
+        // long string. The buffer is REUSED across conversions (a
+        // thread_local vector, not a fresh allocation per conversion: this
+        // is the logging path and it is called often).
+        thread_local static std::vector<char> buf;
+        if (buf.size() < 512) {
+            buf.resize(512);
         }
-        std::vector<char> buf(need);
         switch (conv) {
         case 'd':
         case 'i': {
@@ -1535,7 +1536,9 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
             // The width can pad the result, so the buffer has to fit the
             // string AND the padding.
             const std::size_t wpad = width.empty() ? 0 : static_cast<std::size_t>(std::atoll(width.c_str()));
-            buf.assign(sv.size() + wpad + 64, 0);
+            if (buf.size() < sv.size() + wpad + 64) {
+                buf.resize(sv.size() + wpad + 64);
+            }
             std::snprintf(buf.data(), buf.size(), ("%" + spec + "s").c_str(), sv.c_str());
             emit(buf.data(), std::strlen(buf.data()));
             break;
@@ -5967,6 +5970,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
                         std::printf("[mutex] DESTROY-HELD obj=%08x holder=%u depth=%d "
                                     "-- skipped (leak)\n",
                                     obj, oit->second.first, oit->second.second);
+                        mutex_destroy_skipped_++;
                     } else {
                         mutex_owner_.erase(obj);
                     }
@@ -5983,6 +5987,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
                 // leave it in the map, so the guest keeps the same object.
                 if (pend_lock_obj_.load() == obj) {
                     std::printf("[mutex] DESTROY-PENDING obj=%08x -- skipped (leak)\n", obj);
+                    mutex_destroy_skipped_++;
                     return 0;
                 }
                 m = it->second;
@@ -5991,6 +5996,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
                     // mutex is undefined, and freeing it would leave the
                     // holder with a dangling futex. Leak it.
                     std::printf("[mutex] DESTROY-HELD obj=%08x -- skipped (leak)\n", obj);
+                    mutex_destroy_skipped_++;
                     return 0;
                 }
                 pthread_mutex_unlock(m);
@@ -6021,10 +6027,22 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         pend_lock_obj_ = obj;
         pend_lock_tid_ = GuestTid();
         const int r = pthread_mutex_lock(m);
-        pend_lock_obj_ = 0;
-        pend_lock_tid_ = 0;
         if (r == 0) {
-            MutexNoteLocked(obj, GuestTid());
+            // The owner is recorded WHILE the pending witness is still set,
+            // and the witness is cleared only afterwards: a destroy in the
+            // window between the lock succeeding and the owner being
+            // recorded then still sees a lock in flight and refuses.
+            if (test_skip_mutex_owner_) {
+                // TEST ONLY: leave the pending witness set and record no
+                // owner -- the exact window the destroy has to survive.
+            } else {
+                MutexNoteLocked(obj, GuestTid());
+                pend_lock_obj_ = 0;
+                pend_lock_tid_ = 0;
+            }
+        } else {
+            pend_lock_obj_ = 0;
+            pend_lock_tid_ = 0;
         }
         return static_cast<std::uint32_t>(r);
     }
@@ -12446,6 +12464,28 @@ void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
 
 // Map a guest path to the host path (file bridge). Extracted from the
 // file-bridge block so that other imports (statfs) can use it too.
+Runtime::StackScan Runtime::ScanStackForReturnAddresses(std::uint32_t sp,
+                                                         std::uint32_t max_bytes,
+                                                         StackHit* hits, unsigned hit_cap) {
+    StackScan res;
+    for (std::uint32_t off = 0; off < max_bytes; off += 4) {
+        if (!CheckRange(sp + off, 4, false)) {
+            break;  // the mapped region ends here
+        }
+        std::uint32_t v = 0;
+        std::memcpy(&v, H(sp + off), 4);
+        res.words_read++;
+        if (res.hits < hit_cap && IsCodeAddress(v & ~std::uint32_t(1))) {
+            if (hits) {
+                hits[res.hits].off = off;
+                hits[res.hits].value = v;
+            }
+            res.hits++;
+        }
+    }
+    return res;
+}
+
 std::string Runtime::MapGuestPath(std::uint32_t gp) {
 
         const std::string g(GuestStr(gp));
