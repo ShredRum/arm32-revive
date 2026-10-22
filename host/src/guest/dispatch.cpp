@@ -9107,8 +9107,33 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, v);
         return;
     }
+    case 49:  // CallIntMethod(V/A)(env, obj, method, ...) -> jint
+    case 50:
+    case 51: {
+        // The Int family. It was "never hit" until the Star Wars II (Amazon
+        // build) called CallIntMethodV during its shutdown -- and the
+        // unimplemented branch HALTED the guest, which took the app down
+        // with it. Same shape as the Long family below: the mock env has no
+        // way to run an arbitrary Java method, so the answer is the offline
+        // default 0 (the same convention as the Boolean family, which
+        // answers false, and the Long family, which answers 0).
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        const char* vtag = (fn == 49) ? "" : ((fn == 50) ? "V" : "A");
+        if (DiagOn()) {
+            std::printf("[jni] CallIntMethod%s %s -> 0\n", vtag, mdesc.c_str());
+        }
+        Ret(regs, 0, 0);  // jint 0
+        return;
+    }
     case 52:  // CallLongMethod(V/A)(env, obj, method, ...) -> jlong
-    case 53:   // (verified vs NDK jni.h; instance-int is 49/50/51, never hit)
+    case 53:   // (verified vs NDK jni.h)
     case 54: {
         std::string mdesc = "?";
         {
@@ -9534,7 +9559,20 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     default:
         break;
     }
-    std::printf("[svc] LOUD unimplemented JNI fn#%u from pc=%08x -- halting\n", fn, regs[15] - 4);
+    // Name the method when we can: the descriptor is in the mock's method
+    // table (a2), and every implemented case logs it the same way.
+    {
+        std::string mdesc = "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        std::printf("[svc] LOUD unimplemented JNI fn#%u (%s) from pc=%08x -- halting\n", fn,
+                    mdesc.c_str(), regs[15] - 4);
+    }
     stop_step_ = true;
     ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
 }

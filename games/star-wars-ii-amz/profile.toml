@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Star Wars II (Amazon Appstore build)
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum).
+#
+# This is the "asset pack" build found on web.archive: the same game
+# (versionCode 192500) but with the Rovio CONTENT SERVICE data shipped inside
+# the APK, so it can bootstrap offline. The regular 1.9.25 build waits for
+# that data from a backend that no longer exists and shows its own
+# "loading failed" screen -- our port of it reproduces the original's screen
+# byte for byte, so the difference between the two titles is content, not
+# the port.
+#
+# It is a SEPARATE title id on purpose: it installs side by side with the
+# regular build (different package name) and keeps both experiments alive.
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "star-wars-ii-amz"
+title        = "Angry Birds Star Wars II (Amazon build, asset pack)"
+status       = "in-progress"
+strategy     = "jit"
+
+[apk]
+package      = "com.rovio.angrybirdsstarwarsii.ads.amz"
+version_name = "1.9.25"
+version_code = 192500
+min_sdk      = 16
+target_sdk   = 26
+original     = "original/angry-birds-star-wars-ii-1-9-25-amz-assetpack.apk"
+# Signed by the Android test key (Amazon re-signed the app for its store),
+# not by Rovio -- we re-sign with our own key anyway.
+signer_dn    = "EMAILADDRESS=android@android.com, CN=Android, OU=Android, O=Android, L=Mountain View, ST=California, C=US"
+signer_sha256 = "a40da80a59d170caa950cf15c18c454d47a39b26989d8b640ecd745ba71bf5dc"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsStarWarsII.so"
+size   = 7989612
+sha256 = "4269b18c29b254a63f94c791ffaae8d8e55479747cf5408f21949c670217ad81"
+md5    = "b5a6cd44c062d9b40f651846aed6f72f"
+imports  = 319      # undefined symbols (2 fewer than the regular build: no atoi/tmpfile)
+init     = 144      # DT_INIT_ARRAY entries (0x240 B / 4); harness: 143 (one null)
+# No GNU build-id (verified 2026-10-22).
+# The asset key K_g is the SAME as in the regular build (it is a hardcoded
+# constant of the source): verified by decrypting this build's assets with
+# it (40/40 files, LZMA magic + valid Lua/JSON). The registry key K_r is the
+# engine-shared one.
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+jni_exports  = 74      # 5 of them are the Amazon payment provider (new to the union)
+
+[strip]
+# This build ships no libjs.so / libadcolony.so (the Amazon build has no
+# Flurry/AdColony natives), so there is nothing to strip.
+libs = []
+
+[tree]
+# NOTE: this build loads its native library under the name WITHOUT the "lib"
+# prefix ("AngryBirdsStarWarsII"), unlike the regular build
+# ("libAngryBirdsStarWarsII"). The patch target is the same file
+# (smali/com/rovio/fusionapp/Gen.smali, the <clinit> that fills
+# Gen.library_name).
+smali_lib_name_orig = "AngryBirdsStarWarsII"
+smali_patch_verified = false

@@ -224,4 +224,19 @@ extern "C" void Java_com_rovio_fusion_CameraWrapper_nativeCameraStatus(JNIEnv* e
 extern "C" void Java_com_rovio_fusion_CameraWrapper_nativeProcessFrame(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2, jint a3) {
     abr::AppHost_Call("Java_com_rovio_fusion_CameraWrapper_nativeProcessFrame", "(J[BII)V", env, thiz, a0, a1, a2, a3); return;
 }
-// GEN_COUNT=75
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jboolean a2) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse", "(J[Lcom/amazon/device/iap/model/Product;Z)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone", "(J)V", env, thiz, a0); return;
+}
+// GEN_COUNT=80
