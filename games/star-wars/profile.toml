@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 id           = "star-wars"
 title        = "Angry Birds Star Wars HD (premium iap)"
-status       = "planned"
+status       = "in-progress"
 strategy     = "jit"
 
 [apk]
@@ -22,6 +22,11 @@ abi    = "armeabi-v7a"
 lib    = "libAngryBirdsStarWars.so"
 size   = 7869668
 sha256 = "10c050d8b53a89290058ad1dc79e98169e423f6dae852e2998cb9eb9be9b5b2c"
+md5    = "2123f821b827bbd383ad974fe87fa0c4"
+imports  = 315      # undefined symbols (313 identical to Seasons)
+init     = 97       # DT_INIT_ARRAY entries (0x184 B / 4)
+# No GNU build-id (verified 2026-10-22): CheckGuestBuildId() LOUDs and
+# continues, IsPinnedGuest() is false.
 
 [host]
 abi          = "arm64-v8a"
@@ -33,9 +38,13 @@ jni_exports  = 71
 libs = ["libjs.so", "libadcolony.so"]
 
 [tree]
-smali_lib_name_orig = "AngryBirdsStarWars"   # EXPECTED; verify at first decode
-smali_patch_verified = false
+smali_lib_name_orig = "AngryBirdsStarWars"   # verified at the decode (2026-10-22)
+smali_patch_verified = true
 
 [notes]
 # Premium/IAP build -> licensing checks expected. Port LAST of the series
 # (or treat as an experiment), see AGENTS.md strategy note.
+# 2026-10-22: started anyway (the user's call). The tree, the JNI bridge and
+# the first APK are DONE; the device run has not happened yet (the device was
+# off). The IAP lock is the open unknown -- star-wars-ii (the .ads build) is
+# the fallback. See JOURNAL.md.
