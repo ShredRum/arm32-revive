@@ -114,6 +114,10 @@ int main() {
     mod.imports.push_back(abr::Import{"srand", true, 0, 0, 0});            // 13
     mod.imports.push_back(abr::Import{"rand", true, 0, 0, 0});            // 14
     mod.imports.push_back(abr::Import{"snprintf", true, 0, 0, 0});         // 15
+    mod.imports.push_back(abr::Import{"btowc", true, 0, 0, 0});            // 16
+    mod.imports.push_back(abr::Import{"wctob", true, 0, 0, 0});            // 17
+    mod.imports.push_back(abr::Import{"wctype", true, 0, 0, 0});            // 18
+    mod.imports.push_back(abr::Import{"getauxval", true, 0, 0, 0});        // 19
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -611,6 +615,56 @@ int main() {
         Expect("known syscall (getpid) still answers", std::to_string(r > 0 ? 1 : 0), "1");
         Expect("known syscall does not stop the guest",
                std::to_string(stopped ? 0 : 1), "1");
+    }
+
+    // --- the wide-character ctype: the guests build their OWN classification
+    //     tables from these answers at init (measured in the Star Wars guest:
+    //     a 256-entry btowc table and a 16-entry wctype table), so a wrong
+    //     answer poisons those tables silently.
+    {
+        const std::uint32_t a[4] = {'A', 0, 0, 0};
+        Expect("btowc of a printable byte", std::to_string(abr::RuntimeTestAccess::Call(rt, 16, a)), "65");
+        const std::uint32_t b[4] = {200, 0, 0, 0};
+        Expect("btowc(200) is WEOF",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 16, b)), "4294967295");
+        const std::uint32_t c[4] = {'x', 0, 0, 0};
+        Expect("wctob of a printable wide char",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 17, c)), "120");
+        const std::uint32_t d[4] = {300, 0, 0, 0};
+        Expect("wctob(300) is EOF",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 17, d)), "4294967295");
+        // The class bits are the BSD ones: U=1 L=2 N=4 S=8 P=16 C=32 B=64 X=128
+        // (hex digit). The values must equal the BYTE table's, so that the
+        // guest's own tables agree with the one it reads through _ctype_.
+        const std::uint32_t up[4] = {'A', 0, 0, 0};
+        Expect("wctype('A') is upper|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, up)), "129");
+        const std::uint32_t lo[4] = {'a', 0, 0, 0};
+        Expect("wctype('a') is lower|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, lo)), "130");
+        const std::uint32_t dg[4] = {'5', 0, 0, 0};
+        Expect("wctype('5') is digit|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, dg)), "132");
+        const std::uint32_t sp[4] = {' ', 0, 0, 0};
+        Expect("wctype(' ') is space|blank", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, sp)), "72");
+        const std::uint32_t hi[4] = {0x80, 0, 0, 0};
+        Expect("wctype(0x80) is unknown", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, hi)), "0");
+    }
+
+    // --- getauxval: the guest tests the HWCAP bit 12 (FAST_MULT) to decide
+    //     whether it may use the fast multiply instructions. We claim NO
+    //     features, so the guest stays on its supported fallback path -- the
+    //     behaviour every shipped title has had since the port started
+    //     (measured: the native baselines do not move).
+    {
+        const std::uint32_t hw[4] = {16 /*AT_HWCAP*/, 0, 0, 0};
+        const std::uint32_t hwcap = abr::RuntimeTestAccess::Call(rt, 19, hw);
+        Expect("getauxval(AT_HWCAP) claims no features", std::to_string(hwcap), "0");
+        Expect("getauxval(AT_HWCAP) has no FAST_MULT",
+               std::to_string((hwcap >> 12) & 1u), "0");
+        const std::uint32_t ps[4] = {6 /*AT_PAGESZ*/, 0, 0, 0};
+        Expect("getauxval(AT_PAGESZ) is the page size",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps) > 0 ? 1 : 0), "1");
+        const std::uint32_t h2[4] = {26 /*AT_HWCAP2*/, 0, 0, 0};
+        Expect("getauxval(AT_HWCAP2) is zero",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, h2)), "0");
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);

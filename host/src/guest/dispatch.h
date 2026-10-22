@@ -710,6 +710,9 @@ private:
     bool apk_indexed_ = false;
     std::unordered_map<std::uint32_t, HostAsset> asset_map_;  // guest AAsset* -> buf
     std::uint32_t next_asset_mgr_ = 1;
+    // getauxval(AT_PLATFORM) answers a POINTER, so the string lives in the
+    // guest's memory (allocated once, cached here).
+    std::uint32_t platform_va_ = 0;
     std::unordered_map<std::uint32_t, std::uint32_t> asset_mgr_map_;  // mgr -> 1
     std::unordered_map<std::uint32_t, std::uint32_t> jni_array_lens_;  // handle -> len
 

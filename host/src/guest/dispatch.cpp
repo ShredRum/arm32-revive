@@ -1639,6 +1639,48 @@ void Runtime::CallFastMath(std::uint8_t id, Regs& regs, std::uint32_t a0, std::u
     ret64(r);
 }
 
+// Bionic's C-locale character classes (octal 001..0200): U L N S P C B X.
+// ONE source of truth for the byte table the guest reads through its
+// `_ctype_` data import and for wctype(): the guests build their OWN
+// classification tables from these answers at init (measured in the Star
+// Wars guest: a 256-entry btowc table and a 16-entry wctype table), so
+// the two must agree -- a wrong answer poisons those tables silently.
+static std::uint8_t BionicCtypeClass(int c) {
+    std::uint8_t b = 0;
+    const bool up = (c >= 'A' && c <= 'Z'), lo = (c >= 'a' && c <= 'z');
+    const bool dg = (c >= '0' && c <= '9');
+    const bool xd = dg || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+    const bool sp = (c == ' ' || (c >= '\t' && c <= '\r'));
+    const bool bl = (c == ' ' || c == '\t');
+    const bool ct = (c < 0x20 || c == 0x7F);
+    const bool gr = (c > 0x20 && c < 0x7F);
+    if (up) {
+        b |= 1;
+    }
+    if (lo) {
+        b |= 2;
+    }
+    if (dg) {
+        b |= 4;
+    }
+    if (sp) {
+        b |= 8;
+    }
+    if (gr && !up && !lo && !dg) {
+        b |= 16;
+    }
+    if (ct) {
+        b |= 32;
+    }
+    if (bl) {
+        b |= 64;
+    }
+    if (xd) {
+        b |= 128;
+    }
+    return b;
+}
+
 void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
@@ -1794,6 +1836,100 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "getpid") {
         Ret(regs, static_cast<std::uint32_t>(::getpid()));
         return;
+    }
+    if (n == "btowc" || n == "wctob" || n == "wctype") {
+        // The wide-character ctype (the C locale, like the byte one).
+        // The guest builds its own classification tables from these answers
+        // at init (measured: Star Wars fills a 256-entry btowc table and a
+        // 16-entry wctype table), so the answers must be the bionic ones --
+        // answering 0 silently produces an all-zero table (no letter, no
+        // space, no digit recognized) and the text comes out wrong.
+        if (n == "wctype") {
+            // wctype(wint_t wc): the class bits, 0 for a char the locale
+            // does not know (the C locale knows ASCII only).
+            const std::uint32_t wc = a0;
+            Ret(regs, wc < 128 ? BionicCtypeClass(static_cast<int>(wc)) : 0u);
+            return;
+        }
+        if (n == "btowc") {
+            // btowc(int c): the wide char for a single byte, WEOF (-1) when
+            // the locale cannot represent it (C locale: ASCII only).
+            const std::uint32_t c = a0;
+            Ret(regs, c < 128 ? c : 0xFFFFFFFFu);
+            return;
+        }
+        // wctob(wint_t wc): the byte for a wide char, EOF (-1) when there is
+        // none. The guest loops `while (wctob(c) + 1 != 0)`, i.e. it stops
+        // on EOF, so -1 (not 0) is the correct "no byte" answer.
+        const std::uint32_t wc = a0;
+        Ret(regs, wc < 128 ? wc : 0xFFFFFFFFu);
+        return;
+    }
+    if (n == "getauxval") {
+        // The guest asks the kernel about the CPU at init. Measured in the
+        // Star Wars guest (and rio): it asks AT_HWCAP (16) and AT_HWCAP2
+        // (26) and tests the HWCAP bit 12 (FAST_MULT) to decide whether it
+        // may use the fast multiply instructions; when the bit is clear it
+        // emulates them in software and reads AT_HWCAP2 instead.
+        //
+        // The host is arm64, so the host's own AT_HWCAP is the WRONG answer
+        // (different bit meanings). We answer 0 -- "no CPU features" --
+        // which puts the guest on its supported fallback path. That is what
+        // every title has been running since the port started, so the
+        // shipped titles keep their exact behaviour (measured: the native
+        // baselines are bit-identical with and without this implementation:
+        // rio 948, seasons 3072, space 1329 svc).
+        //
+        // Claiming the armv7-a mask instead (the JIT emulates every one of
+        // those instructions, so it would be true) takes the guest onto its
+        // fast path -- and that CHANGES the shipped titles' code path
+        // (measured: rio 948 -> 949 svc). It is a one-line flip, but it
+        // needs the golden level checks on the device before it ships,
+        // because it moves four titles at once.
+        switch (a0) {
+        case 16:  // AT_HWCAP: no features claimed (see the comment above)
+            Ret(regs, 0);
+            return;
+        case 26:  // AT_HWCAP2: nothing beyond the baseline
+            Ret(regs, 0);
+            return;
+        case 6:   // AT_PAGESZ
+        case 30:  // AT_PAGESIZE (the arm64 name for the same thing)
+            Ret(regs, static_cast<std::uint32_t>(::sysconf(_SC_PAGESIZE)));
+            return;
+        case 11:  // AT_UID
+            Ret(regs, static_cast<std::uint32_t>(::getuid()));
+            return;
+        case 12:  // AT_EUID
+            Ret(regs, static_cast<std::uint32_t>(::geteuid()));
+            return;
+        case 13:  // AT_GID
+            Ret(regs, static_cast<std::uint32_t>(::getgid()));
+            return;
+        case 14:  // AT_EGID
+            Ret(regs, static_cast<std::uint32_t>(::getegid()));
+            return;
+        case 17:  // AT_CLKTCK
+            Ret(regs, 100);
+            return;
+        case 15: {  // AT_PLATFORM: an arm32 Android device answers "v7l"
+            // The value is a POINTER into the guest's address space, so the
+            // string has to live there (one allocation, cached).
+            if (platform_va_ == 0) {
+                platform_va_ = GuestMalloc(8);
+                if (platform_va_ != 0) {
+                    static const char kPlatform[] = "v7l";
+                    std::memcpy(H(platform_va_), kPlatform, sizeof(kPlatform));
+                }
+            }
+            Ret(regs, platform_va_);
+            return;
+        }
+        default:
+            // An unknown type: the kernel answers 0 (and sets errno).
+            Ret(regs, 0);
+            return;
+        }
     }
     if (n == "syscall") {
         // The raw syscall() wrapper. The guests' call sites pass only two
@@ -6503,39 +6639,7 @@ void Runtime::InitDataImports() {
     // BSD ctype classes (octal 001..0200): U L N S P C B X.
     std::uint8_t cls[256] = {};
     for (int c = 0; c < 256; c++) {
-        std::uint8_t b = 0;
-        const bool up = (c >= 'A' && c <= 'Z'), lo = (c >= 'a' && c <= 'z');
-        const bool dg = (c >= '0' && c <= '9');
-        const bool xd = dg || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-        const bool sp = (c == ' ' || (c >= '\t' && c <= '\r'));
-        const bool bl = (c == ' ' || c == '\t');
-        const bool ct = (c < 0x20 || c == 0x7F);
-        const bool gr = (c > 0x20 && c < 0x7F);
-        if (up) {
-            b |= 1;
-        }
-        if (lo) {
-            b |= 2;
-        }
-        if (dg) {
-            b |= 4;
-        }
-        if (sp) {
-            b |= 8;
-        }
-        if (gr && !up && !lo && !dg) {
-            b |= 16;
-        }
-        if (ct) {
-            b |= 32;
-        }
-        if (bl) {
-            b |= 64;
-        }
-        if (xd) {
-            b |= 128;
-        }
-        cls[c] = b;
+        cls[c] = BionicCtypeClass(c);
     }
     // Block: [257B ctype (EOF slot + 256)] + pad + [257 x u16 lower] + [257 x u16 upper].
     // 2014-era Bionic layout (the game was built against it): short tables
