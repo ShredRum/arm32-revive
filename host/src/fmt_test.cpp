@@ -649,16 +649,16 @@ int main() {
     }
 
     // --- getauxval: the guest tests the HWCAP bit 12 (FAST_MULT) to decide
-    //     whether it may use the fast multiply instructions. We claim NO
-    //     features, so the guest stays on its supported fallback path -- the
-    //     behaviour every shipped title has had since the port started
-    //     (measured: the native baselines do not move).
+    //     whether it may use the fast multiply instructions. We claim the
+    //     armv7-a baseline (the JIT emulates those instructions, so the
+    //     claim is true), and the device golden check proves the fast path
+    //     computes the same thing: Seasons' Tutorial_red state is
+    //     bit-identical to the 59ff106 fingerprint with the mask and with 0.
     {
         const std::uint32_t hw[4] = {16 /*AT_HWCAP*/, 0, 0, 0};
         const std::uint32_t hwcap = abr::RuntimeTestAccess::Call(rt, 19, hw);
-        Expect("getauxval(AT_HWCAP) claims no features", std::to_string(hwcap), "0");
-        Expect("getauxval(AT_HWCAP) has no FAST_MULT",
-               std::to_string((hwcap >> 12) & 1u), "0");
+        Expect("getauxval(AT_HWCAP) has FAST_MULT", std::to_string((hwcap >> 12) & 1u), "1");
+        Expect("getauxval(AT_HWCAP) has VFP", std::to_string((hwcap >> 1) & 1u), "1");
         const std::uint32_t ps[4] = {6 /*AT_PAGESZ*/, 0, 0, 0};
         Expect("getauxval(AT_PAGESZ) is the page size",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps) > 0 ? 1 : 0), "1");

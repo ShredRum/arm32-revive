@@ -230,3 +230,39 @@ blocker.
 - The first launch needs NO seeds: the game created `bi_data.lua`,
   `cacert.pem`, `settings.lua` and `fusion.registry` by itself on the device
   (the same file names Rio's seeds carry).
+
+### 2026-10-22 (night) — the AT_HWCAP question, answered by measurement
+
+The open question was what `getauxval(AT_HWCAP)` should answer. The guest
+tests the bit 12 (FAST_MULT) and takes its fast-multiply path when the bit
+is set, emulating the multiply in software when it is not. We were answering
+0 ("no CPU features"), which is a supported configuration but not what a
+real armv7 phone says.
+
+The A/B, both on the device, Seasons' Tutorial_red as the probe:
+
+| | AT_HWCAP | золотая сверка | отпечаток (85 строк) | svc |
+|---|---|---|---|---|
+| B0 | 0 (fallback) | 46/46 == JSON | == 59ff106 побайтово | 3072 |
+| B1 | маска armv7-a | 46/46 == JSON | == 59ff106 побайтово, == B0 | 3073 |
+
+So the mask DOES move the guest onto another code path (the native counters
+shift by one svc per title: rio 948 -> 949, seasons 3072 -> 3073,
+space 1329 -> 1330, Star Wars 2319 -> 2320), and the RESULT is unchanged:
+the live state is bit-identical to the 59ff106 fingerprint and to the level
+JSON. The fast path computes the same thing, so the JIT's emulation of those
+DSP multiplies is right.
+
+Decision: answer the armv7-a baseline. It is true (the JIT emulates those
+instructions), it keeps the guests on the path they normally run, and the
+golden check proves it changes nothing observable.
+
+The same round also settled the wide-ctype fix for the shipped titles: B0
+already carries it (the new tables), and B0 is byte-identical to 59ff106 --
+so the fix is behaviour-neutral for Seasons while it repairs the tables of
+the guests that need them (Star Wars).
+
+After the change, all four titles were re-run on the device with the final
+library (md5 31d1759d): every marker 0, death.log 0 B, the production logs
+36.5 / 29.7 / 40.9 / 21.8 KB, Star Wars down to 61 lines of import
+diagnostics.

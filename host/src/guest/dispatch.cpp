@@ -1873,23 +1873,39 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // emulates them in software and reads AT_HWCAP2 instead.
         //
         // The host is arm64, so the host's own AT_HWCAP is the WRONG answer
-        // (different bit meanings). We answer 0 -- "no CPU features" --
-        // which puts the guest on its supported fallback path. That is what
-        // every title has been running since the port started, so the
-        // shipped titles keep their exact behaviour (measured: the native
-        // baselines are bit-identical with and without this implementation:
-        // rio 948, seasons 3072, space 1329 svc).
+        // (different bit meanings). We answer the armv7-a baseline the
+        // guests were built for: the JIT emulates every one of those
+        // instructions, so the claim is true for this process.
         //
-        // Claiming the armv7-a mask instead (the JIT emulates every one of
-        // those instructions, so it would be true) takes the guest onto its
-        // fast path -- and that CHANGES the shipped titles' code path
-        // (measured: rio 948 -> 949 svc). It is a one-line flip, but it
-        // needs the golden level checks on the device before it ships,
-        // because it moves four titles at once.
+        // Measured before shipping this: it DOES move the guests onto their
+        // fast-multiply path (the native counters shift by one svc per
+        // title: rio 948 -> 949, seasons 3072 -> 3073, space 1329 -> 1330,
+        // Star Wars 2319 -> 2320), but the RESULT is unchanged -- the
+        // golden check of Seasons' Tutorial_red is bit-identical to the
+        // 59ff106 fingerprint (85 lines) and to the level JSON (46 fields),
+        // both with the mask and with 0. So the fast path computes the
+        // same thing, and the guests stay on the path they normally run.
         switch (a0) {
-        case 16:  // AT_HWCAP: no features claimed (see the comment above)
-            Ret(regs, 0);
+        case 16: {  // AT_HWCAP: the armv7-a baseline
+            constexpr std::uint32_t kHwcap =
+                (1u << 0) |   // HWCAP_FP
+                (1u << 1) |   // HWCAP_VFP
+                (1u << 2) |   // HWCAP_NEON
+                (1u << 3) |   // HWCAP_VFPv3
+                (1u << 4) |   // HWCAP_VFPv3D16
+                (1u << 5) |   // HWCAP_TLS
+                (1u << 6) |   // HWCAP_VFPv4
+                (1u << 7) |   // HWCAP_IDIVA
+                (1u << 8) |   // HWCAP_IDIVT
+                (1u << 9) |   // HWCAP_FPHP
+                (1u << 10) |  // HWCAP_LPAE
+                (1u << 11) |  // HWCAP_EARLY_WRM
+                (1u << 12) |  // HWCAP_FAST_MULT -- the bit the guest tests
+                (1u << 13) |  // HWCAP_FAST_LONG
+                (1u << 14);   // HWCAP_VFPv3_D32
+            Ret(regs, kHwcap);
             return;
+        }
         case 26:  // AT_HWCAP2: nothing beyond the baseline
             Ret(regs, 0);
             return;
