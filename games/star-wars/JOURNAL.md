@@ -162,3 +162,71 @@ stays 0 until the checks can be run. Decision point, documented here.
 - The IAP lock: still unverified (does a level actually start?).
 - The asset keys: the subagent is still hunting them in the Ghidra
   pseudocode; every key must be proven by a live decrypt.
+
+## 2026-10-22 (night, part 3) — the keys (found, and independently re-verified)
+
+The engine's keys are hardcoded, not device-bound. They are recorded here
+because this journal is the single log (treat the section as private; the
+copy for the tooling lives in `work/KEYS.md`, which is gitignored).
+
+### K_g — the game assets (levels, scripts, catalog) — PER GAME
+
+- ASCII (32 B): `An8t3mn8U6spiQ0zHHr3a1loDrRa3mtE`
+- Hex: `416e3874336d6e38553673706951307a4848723361316c6f44725261336d7445`
+- Source: the hardcoded 32-byte filler `FUN_000519e4` @ 0x519e4 -> the AES key
+  setup `FUN_00427404` @ 0x427404 -> `FUN_00426604` @ 0x426604 ->
+  `FUN_004c91dc` @ 0x4c91dc -> the key schedule `FUN_004c9284` @ 0x4c9284
+  (sbox 0x7b9184, rcon 0x7b9284). The factory is called from 0x5bfc8,
+  0x8fd10 (the level loader), 0x90cb4, 0x912b4, 0x99d08. The decrypt path:
+  `FUN_004274dc` @ 0x4274dc -> the CBC chain `FUN_004d73ec` @ 0x4d73ec
+  (`memset(auStack_6c,0,0x40)` => a zero IV) -> `FUN_004d0e9c` @ 0x4d0e9c.
+- Mode: AES-256-CBC, zero IV, PKCS#7. Container: the 9-byte magic
+  `89 4c 5a 4d 41 0d 0a 1a 0a` ("LZMA-alone"), then an LZMA-alone stream
+  (props 5d, dict 64 KB); the plaintext is Lua 5.1 bytecode with 4-byte
+  floats.
+- **Re-verified by me (not only by the subagent that found it):**
+  `assets/data/levels/MainMenu.lua` (1840 B) -> the magic
+  `894c5a4d410d0a1a0a` -> LZMA -> 4294 B of Lua bytecode (header
+  `1b 4c 75 61`); `assets/data/catalog.json` (752 B) -> JSON (27 entries,
+  the first "Mighty Falcon Small bundle"); `assets/data/scripts/options.lua`
+  -> a raw Lua value stream WITHOUT the LZMA magic (the one exception to the
+  "by magic" check); **604/604** of the APK's encrypted assets decrypt (603
+  LZMA+Lua, 1 without LZMA), 0 failures.
+- The asset key is PER GAME (Rio's K_g and Seasons' K_a are different) --
+  the user's guess was right.
+
+### K_2 — the purchase tables (gamepurchases / eaglepurchases / episodepurchases)
+
+- ASCII (32 B): `e83Tph0R3aZ2jGK6eS91uLvQpL33vzNi`
+- Hex: `653833547068305233615a326a474b3665533931754c7651704c3333767a4e69`
+- Source: `FUN_00051b94` @ 0x51b94; the factory is reached at 0x92598
+  (decrypt), 0x9cf14 / 0x9d1a4 (encrypt), 0x69f94
+  (GameLua::prepareRovioChannel).
+- Status: static evidence + a guest round-trip (71 B of JSON -> 80 B of
+  ciphertext -> back). NOT confirmed against a file: this class is not in the
+  APK (0 of 1653 assets) -- the tables are created/downloaded at runtime.
+
+### K_r — the registry (fusion.registry) — SHARED with Rio and Seasons
+
+- Hex (32 B): `3a7d2e0379e64985a01fa80104d5d77da1bc7ae70363248e7ac9c0ad5f4660ea`
+- AES-256-CBC, zero IV, app-fixed. Source: `FUN_003a8590` @ 0x3a8590
+  (encrypt), `FUN_003a8944` @ 0x3a8944 (decrypt).
+- **Re-verified by me on THIS game's own registry** (pulled from the device
+  after the first run): 96 B ->
+  `{"ads":{"installTracker":null},"pf::LocalNotifications::sm_pendingNotifications":null}`
+  plus the Crypto++ pad; the control (the asset key) gives garbage.
+
+### The IAP lock does NOT block the port
+
+The decrypted scripts settle it: `game.lua` carries the strings "is
+unlocked", "is unlocked, first episode is unlocked" and "is locked, none of
+the bonus levels is open", and there is a `levelOrder_free.lua` next to
+`levelOrder.lua`. So the FIRST episode is unlocked without any purchase --
+the premium content is a content matter (a purchase table), not a porting
+blocker.
+
+### Also measured
+
+- The first launch needs NO seeds: the game created `bi_data.lua`,
+  `cacert.pem`, `settings.lua` and `fusion.registry` by itself on the device
+  (the same file names Rio's seeds carry).
