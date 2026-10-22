@@ -115,3 +115,56 @@ STORED with the profile's sha256, signed v1+v2+v3 with the local key.
   The wide-ctype defect was found by reading the guest's disassembly; a
   differential dump would catch that whole class at once, for every future
   title, instead of one disassembly at a time.
+
+## 2026-10-22 (day) — the device gate, and the "Loading failed" screen explained
+
+**The device gate (the new library, md5 b93eeb5e)**: all five titles
+installed and ran on the device with every marker 0 (HEAPCORRUPT,
+HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL), death.log 0 B.
+
+**The user installed the port on a real phone and got "Загрузка не удалась.
+Пожалуйста, попробуйте позже"** ("Loading failed, please try later"). The
+user had not tested the original, so the question was: is this our bug?
+
+**It is not. The original does exactly the same -- and our port reproduces it
+pixel for pixel.**
+
+- The ORIGINAL arm7 APK (installed on the device, run under the Android
+  translator) shows the same error screen.
+- The guest's own log lines are the SAME, in the same order, with the same
+  errno values, in both:
+    Failed to open .../files/fusion.registry with errno 00000002
+    Registry load failed because the file seems to be corrupted: ... errno 2
+    Failed to open .../files/highscores.lua / settings.lua / bi_data.lua
+    Failed to open .../files/gamepurchases.lua / eaglepurchases.lua /
+                   episodepurchases.lua
+    Failed to open .../files/DiskCache/CrossPromotion/catalog.json
+    Failed to open .../files/assets_service/ShopData
+    Failed to open .../files/assets_service/RewardData
+    Failed to open .../files/assets_service/CameraData  (twice)
+    Failed to open .../files/assets_service/UpdateData
+  (On a fresh install these "No such file" lines are NORMAL: the game creates
+  its own first-launch files.)
+- The SCREENSHOTS of the error are byte-for-byte identical: both PNGs are
+  1 419 424 B with md5 790e5748409ed9d0a3e1f560b5b10a33.
+- The first frame: the original "Displayed +3s226ms", our port ~2.9-3.2 s.
+
+**What the error actually is.** The game wants the Rovio CONTENT SERVICE data
+(`assets_service/ShopData`, `RewardData`, `CameraData`, `UpdateData` and the
+cross-promotion catalogue) -- files the Rovio backend used to deliver. That
+backend for these 2015 titles is gone, so the game cannot get them and shows
+its own "loading failed" screen. With internet (the user's phone) the server
+answers with an error instead of the files; without internet (the sandbox)
+the files are simply absent. Either way it is the GAME's path, and our port
+reproduces it exactly -- which is the point of the port: the same behaviour
+as the original, not a better one.
+
+⇒ The first-launch file creation, the encryption of the assets, the level
+catalogue (741/741 assets decrypt) and the bridge are all working; what is
+missing is content the original cannot get either. Making the game playable
+offline would mean shipping the service data, i.e. content the backend no
+longer serves -- a content question, not a port question.
+
+**Still open**: the golden check of Seasons' Tutorial_red on the new library
+(it changed: two new JNI forwarders and the JNI marshalling padding
+removed) -- it needs the level to be entered once.
