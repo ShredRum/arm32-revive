@@ -77,9 +77,16 @@ so the next title does not need a DIAG run to identify the caller.
   quests) and the same first-launch file creation.
 - The "SIGNED OUT" screen belongs to the Amazon-signed ORIGINAL, not to our
   port: it is the game's Rovio-account wall (the device has no account). Our
-  port's first run never reached that point (it halted earlier). Whether the
-  same wall appears in our port after the offline prompt is dismissed is
-  still to be checked.
+  port's first run never reached that point (it halted on the missing Int
+  family).
+- After the fix our port sits stably in the MAIN MENU (shop, settings,
+  Toons.TV, the currency counter) with the guest's own offline prompt on top
+  ("get free characters by turning your internet connection on" + TRY AGAIN).
+  The account wall does NOT appear in our port on the same offline device, so
+  our port actually gets further than the original there: the content service
+  did not answer for either of them, but only the original stops at the
+  account wall. With internet (a real phone) the content fetch is the thing
+  to watch.
 
 **Still open**
 
