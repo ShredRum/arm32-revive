@@ -1573,3 +1573,47 @@ reproducible test, not with a measurement alone.
   verified), 3 needs_review -- the three are measurements the gate cannot
   check from the diff alone (the device gate numbers, the native counters
   and the correction of record), all of them quoted from the real output.
+
+### 2026-10-22 — boot speed measured against the ORIGINAL arm7 on the same device
+
+The suspicion was "Seasons' loading hangs on our side". Measured, not guessed.
+
+**The experiment.** Same device, same guest .so (the original's
+`lib/armeabi-v7a/libAngryBirdsSeasonsFull.so`, 8 528 904 B -- byte-identical
+to the one we ship as an asset), same Java, same assets, same APK structure.
+Only the EXECUTION ENGINE differs: our Dynarmic + host harness vs the
+device's ARM translator running the original APK. The original additionally
+loads libjs.so and libadcolony.so, so it does MORE native work.
+
+**Numbers** (the prod build, no DIAG; the stopwatch is the user's, +-1 s):
+
+| | our port | original (arm7, translator) |
+|---|---|---|
+| first frame (the logo), objective | +2.95 s (`am start -W` TotalTime 2947 ms; Displayed +2s975 / +2s947) | +4.21 s / +4.19 s (Displayed) |
+| logo -> menu, stopwatch | 18-19 s, 20 s, 21 s | 16 s, 17.5 s |
+| process start -> menu | ~22-24 s | ~20-21.5 s |
+
+**Our own overhead, from logcat** (the whole native startup = 351 ms):
+- the guest .so unpacked from the APK: +115 ms (8.5 MB WRITTEN ON EVERY
+  START -- apphost.cpp:1360);
+- the guest's SHA-256: +40 ms (8.5 MB re-read and hashed on every start --
+  apphost.cpp:1393);
+- DT_INIT_ARRAY (142 functions): +177 ms.
+
+**Verdict: there is nothing to optimize here.** Our overhead is 0.35 s out
+of ~20 s (1.8%); everything else is the guest's own work (unpacking the
+assets, building the level) executed by the JIT. The original -- with the
+translator's own overhead and two extra native libraries -- lands within the
+stopwatch's noise of ours (16-17.5 s vs 18-21 s), and it reaches the logo
+1.25 s LATER than we do. So Dynarmic is on par with the Android ARM
+translator on this workload; the residual ~1-2 s is not worth a JIT rewrite.
+
+The only piece that is "ours" and could be removed is the 155 ms of the
+per-start unpack + hash (don't re-unpack when the file is already there, or
+mmap the STORED entry straight out of the APK). That is 0.8% of the load,
+so it was left alone.
+
+Notes: the original was installed and removed again for the measurement, so
+the guest's saved data was wiped (agreed) -- the golden level check needs
+Tutorial_red to be entered once more. The original's first launch also
+showed the Play Protect scan dialog (outside the timed window).
