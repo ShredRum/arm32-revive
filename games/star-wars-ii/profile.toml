@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 id           = "star-wars-ii"
 title        = "Angry Birds Star Wars II"
-status       = "planned"
+status       = "in-progress"
 strategy     = "jit"
 
 [apk]
@@ -22,6 +22,10 @@ abi    = "armeabi-v7a"
 lib    = "libAngryBirdsStarWarsII.so"
 size   = 8296812
 sha256 = "b7152ac92f260e0d41fa7edd7045e40c0269dec070fef111247a181c6f02737d"
+md5    = "ea0b182d82b72a3ca4cfd68f4b35b48b"
+imports  = 321      # undefined symbols (only ceilf/powf are new vs Seasons)
+init     = 144      # DT_INIT_ARRAY entries (0x240 B / 4); harness: 143 (one null)
+# No GNU build-id (verified 2026-10-22).
 
 [host]
 abi          = "arm64-v8a"
@@ -33,5 +37,5 @@ jni_exports  = 74                # NOTE: includes CameraWrapper (telepods/QR)
 libs = ["libjs.so", "libadcolony.so"]
 
 [tree]
-smali_lib_name_orig = "AngryBirdsStarWarsII"   # EXPECTED; verify at first decode
-smali_patch_verified = false
+smali_lib_name_orig = "AngryBirdsStarWarsII"   # verified at the decode (2026-10-22)
+smali_patch_verified = true

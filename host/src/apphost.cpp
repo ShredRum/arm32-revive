@@ -726,10 +726,22 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             vacache[name] = va;
         }
     }
-    // AAPCS words: mock env + wrapped thiz (guest only ever sees 32-bit
-    // mock handles; real 64-bit pointers never enter guest regs/fields),
-    // then sig-driven (J 8-aligned + split, F via double promotion,
+    // The guest's register words: mock env + wrapped thiz (the guest only
+    // ever sees 32-bit mock handles; real 64-bit pointers never enter guest
+    // regs/fields), then sig-driven (J split in two, F via double promotion,
     // I/Z/B/S/C ints, L/[ wrapped).
+    //
+    // NO 8-byte alignment padding for the 64-bit arguments: the guests are
+    // built with the BASE procedure call standard (arm-linux-gnueabi), where
+    // a 64-bit argument may sit in an odd-numbered register pair. That is
+    // not theory: the guest's own variadic printf was measured taking a
+    // double in the NEXT TWO registers, with no even-pair padding
+    // (2026-10-20, the variadic-ABI work). The AAPCS32 rule we used here
+    // before was wrong for the base variant; it only ever showed up on the
+    // methods where a 64-bit argument follows a 32-bit one -- exactly one
+    // method per title (com/rovio/rcs/core/Utils.handleReferrerValue, the
+    // analytics referrer tracker, never reached offline), which is why it
+    // stayed latent.
     std::vector<std::uint32_t> words;
     words.push_back(g_rt->JniEnv());
     words.push_back(g_rt->WrapObject(thiz));
@@ -738,9 +750,6 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             continue;
         }
         if (*p == 'J') {
-            if (words.size() & 1u) {
-                words.push_back(0);
-            }
             const jlong v = va_arg(ap, jlong);
             words.push_back((std::uint32_t)(std::uint64_t)v);
             words.push_back((std::uint32_t)((std::uint64_t)v >> 32));
@@ -751,9 +760,6 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             std::memcpy(&w, &f, 4);
             words.push_back(w);
         } else if (*p == 'D') {
-            if (words.size() & 1u) {
-                words.push_back(0);
-            }
             const double d = va_arg(ap, double);
             std::uint64_t u = 0;
             std::memcpy(&u, &d, 8);

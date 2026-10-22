@@ -218,4 +218,10 @@ extern "C" void Java_com_rovio_fusion_VideoPlayer_onVideoStarted(JNIEnv* env, jo
 extern "C" void Java_com_rovio_fusion_VideoPlayerBridge_onVideoEnded(JNIEnv* env, jobject thiz, jlong a0, jboolean a1, jint a2, jfloat a3, jfloat a4) {
     abr::AppHost_Call("Java_com_rovio_fusion_VideoPlayerBridge_onVideoEnded", "(JZIFF)V", env, thiz, a0, a1, a2, a3, a4); return;
 }
-// GEN_COUNT=73
+extern "C" void Java_com_rovio_fusion_CameraWrapper_nativeCameraStatus(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_CameraWrapper_nativeCameraStatus", "(JILjava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_CameraWrapper_nativeProcessFrame(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_CameraWrapper_nativeProcessFrame", "(J[BII)V", env, thiz, a0, a1, a2, a3); return;
+}
+// GEN_COUNT=75
