@@ -4590,8 +4590,9 @@ OFF; `scripts/build-lib.sh --diag` configures `host/build-android-diag` and
 `host/src/guest/diag_counters.h`; every field/increment/dump is inside
 `#ifdef ABR_DIAG_COUNTERS`. The product watchdog prints one line every 30 s:
 `heap=used/peak jni_str=used/high jni_obj=used/high maps=str,obj,rev,fwd
-wrapg newg delg fd=live,next,free,file localtime=allocs/bytes
-assets=open/bytes,peak tls errno=slots/free,next threads svc`. A contested
+utf=live,allocs/releases wrapg newg delg fd=live,next,free,file
+localtime=allocs/bytes assets=open/bytes,peak tls errno=slots/free,next
+threads svc`. A contested
 runtime mutex prints `[counters] SKIPPED (runtime mutex contested)` rather
 than wedging the watchdog; 9/15 level samples printed, the rest skipped. The
 existing JNI/fd capacity checks still print LOUD unconditionally.
@@ -4640,7 +4641,7 @@ Full journal: `games/seasons/JOURNAL.md`.
 
 Do not bundle these. Order by the measured slope.
 
-- [ ] `GetStringUTFChars`: call the real `ReleaseStringUTFChars` immediately
+- [x] `GetStringUTFChars`: call the real `ReleaseStringUTFChars` immediately
   after copying; track guest copies separately from mock strings; free a
   tracked guest copy in the host `ReleaseStringUTFChars` and erase its map
   entry. Test with a real-wrapped string on device; verify the mock-string
@@ -4672,6 +4673,28 @@ Acceptance per fix:
 - [ ] Counter slope before/after on the diagnostic build.
 - [ ] Shipping build unchanged in behavior; device gate; Seasons golden.
 - [ ] One commit per fix, with the measurement in the message.
+
+`GetStringUTFChars` closure (2026-10-24):
+- [x] The real-wrapped path now copies into the guest heap, inserts the
+  pointer into `jni_utf_chars_` (not `jni_strings_`), and calls ART's
+  `ReleaseStringUTFChars` immediately. The host `ReleaseStringUTFChars`
+  erases that entry and calls `GuestFree`; mock jstrings still return their
+  own handle and keep their registry entry.
+- [x] Native `fmt_test` checks the mock path returns the same pointer and
+  survives Release, and that a tracked guest copy is freed and erased.
+- [x] Device diag lib md5 `8b6df948e6a276ffda8dc2298cd54451`, stripped
+  `95905b60dacb4da1d4db370efb914b6d`, APK
+  `e3c090404e9eb7ac840fd6b4a7f92265`, marker `Oct 24 2026 08:46:58`,
+  installed. Seasons level counters showed `utf=1,2/1` (two real-wrapped
+  allocations, one host release, one copy still held by the guest) with
+  `jni_str=620` and `maps=str=63` unchanged over 70 s. The two real-wrapped
+  calls prove the path ran; the release counter proves the host cleanup.
+  All markers 0, `death.log` 0 B.
+- [x] The remaining post-launch `jni_str`/`maps=str` growth comes from
+  `JniNewString` mock jstring objects, not from the real-wrapped
+  `GetStringUTFChars` path; it is measured separately and not folded into
+  this fix.
+- [x] One commit, measurement in the message.
 
 `fclose` closure (2026-10-24):
 - [x] Native `fmt_test` adds `fopen`/`fclose` imports and a 64-iteration

@@ -626,6 +626,10 @@ private:
     std::unordered_map<std::uint32_t, std::string> jni_objects_;  // handle -> desc
     std::unordered_map<std::uint32_t, std::uint32_t> jni_objclass_;  // obj -> class
     std::unordered_map<std::uint32_t, std::string> jni_strings_;  // jstring -> UTF-8
+    // Guest copies returned by GetStringUTFChars for a real-wrapped ART
+    // string. They are not jstrings, so they must not live in jni_strings_;
+    // ReleaseStringUTFChars frees them. Guarded by mutex_.
+    std::unordered_set<std::uint32_t> jni_utf_chars_;
 
     // File-bridge state. The guest-visible prefix is derived from our own
     // package name (appid.h); SetFilesDir overrides it with what the caller

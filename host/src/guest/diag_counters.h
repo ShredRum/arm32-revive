@@ -28,6 +28,10 @@ struct DiagCounters {
     // ref (Stage E decision).
     std::atomic<std::uint64_t> jni_new_global_refs{0};
     std::atomic<std::uint64_t> jni_delete_global_refs{0};
+    // Real-wrapped GetStringUTFChars: guest copies allocated/released.
+    // live = jni_utf_chars_.size() at dump time.
+    std::atomic<std::uint64_t> utf_allocs{0};
+    std::atomic<std::uint64_t> utf_releases{0};
     // AAsset getBuffer model: peak simultaneously open handles/bytes. The
     // current values are recomputed from asset_map_ at dump time.
     std::uint64_t asset_peak_open = 0;

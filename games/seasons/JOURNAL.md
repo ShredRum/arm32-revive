@@ -1818,3 +1818,28 @@ identical at `fd=16,next=130,free=32655,file=3`; a bird launch (score 70)
 left them unchanged. Stage D's 15-minute level slope was fd 115 -> 169 and
 next 246 -> 316, so this run closes that leak. All markers 0 and `death.log`
 0 B. No other title was run for this fix.
+
+### 2026-10-24 — Stage E: release real-wrapped GetStringUTFChars copies
+
+The real-wrapped JNI string path used to call ART's
+`GetStringUTFChars`, copy the bytes into the guest heap, register the copy in
+`jni_strings_`, and never call `ReleaseStringUTFChars`. It now copies,
+records the pointer in a separate `jni_utf_chars_` set (a `const char*` is not
+a jstring), calls ART's release immediately, and lets the host
+`ReleaseStringUTFChars` erase the set entry and `GuestFree` the guest copy.
+Mock jstrings still return their own handle, so `ReleaseStringUTFChars` leaves
+their `jni_strings_` entry intact. The diagnostic line now shows
+`utf=live,allocs/releases`.
+
+Native `fmt_test` verifies the mock path returns the same pointer and survives
+Release, and that a tracked guest copy is freed and removed. The shipping and
+diag native tests pass.
+
+Device: diag host lib `8b6df948e6a276ffda8dc2298cd54451`, stripped
+`95905b60dacb4da1d4db370efb914b6d`, APK
+`e3c090404e9eb7ac840fd6b4a7f92265`, marker `Oct 24 2026 08:46:58`.
+Seasons reached the saved level; counters showed `utf=1,2/1` (two real
+allocations, one release, one copy still held by the guest), with
+`jni_str=620` and `maps=str=63` unchanged over 70 s. The remaining
+post-launch `jni_str`/`maps` growth is from `JniNewString` mock jstrings,
+not this path. All markers 0 and `death.log` 0 B. No other title was run.

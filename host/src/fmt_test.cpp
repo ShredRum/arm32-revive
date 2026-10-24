@@ -86,6 +86,18 @@ struct RuntimeTestAccess {
     static std::size_t FreeGuestFdCount(Runtime& rt) { return rt.free_guest_fds_.size(); }
     static std::uint32_t NextGuestFd(Runtime& rt) { return rt.next_guest_fd_; }
     static std::uint32_t GuestLiveSize(Runtime& rt, std::uint32_t h) { return rt.LiveIdxFind(h); }
+    static std::uint32_t Jni(Runtime& rt, std::uint32_t fn, const std::uint32_t args[4]) {
+        Runtime::Regs regs{};
+        regs[0] = args[0];
+        regs[1] = args[1];
+        regs[2] = args[2];
+        regs[3] = args[3];
+        rt.CallJni(fn, regs);
+        return regs[0];
+    }
+    static std::size_t JniStringCount(Runtime& rt) { return rt.jni_strings_.size(); }
+    static std::size_t UtfCharCount(Runtime& rt) { return rt.jni_utf_chars_.size(); }
+    static void TrackUtfChars(Runtime& rt, std::uint32_t g) { rt.jni_utf_chars_.insert(g); }
 };
 }  // namespace abr
 
@@ -884,6 +896,37 @@ int main() {
         Expect("one reusable guest fd", std::to_string(abr::RuntimeTestAccess::FreeGuestFdCount(rt)),
                "1");
         std::filesystem::remove(host_file);
+    }
+
+    // --- GetStringUTFChars: a mock jstring returns its own handle and
+    //     ReleaseStringUTFChars must not remove it from jni_strings_. A
+    //     tracked real-wrapped guest copy is freed and erased on Release.
+    {
+        const std::size_t before = abr::RuntimeTestAccess::JniStringCount(rt);
+        const std::uint32_t js = rt.JniNewString("mock-utf");
+        const std::uint32_t get_args[4] = {0, js, 0, 0};
+        const std::uint32_t chars = abr::RuntimeTestAccess::Jni(rt, 169, get_args);
+        Expect("mock GetStringUTFChars returns handle",
+               chars == js ? "1" : "0", "1");
+        Expect("mock jstring registered", std::to_string(abr::RuntimeTestAccess::JniStringCount(rt)),
+               std::to_string(before + 1));
+        const std::uint32_t rel_args[4] = {0, js, chars, 0};
+        abr::RuntimeTestAccess::Jni(rt, 170, rel_args);
+        Expect("mock Release keeps registry",
+               std::to_string(abr::RuntimeTestAccess::JniStringCount(rt)),
+               std::to_string(before + 1));
+
+        const std::uint32_t copy = rt.GuestMalloc(8);
+        std::memcpy(rt.H(copy), "copy", 5);
+        abr::RuntimeTestAccess::TrackUtfChars(rt, copy);
+        Expect("tracked UTF copy present", std::to_string(abr::RuntimeTestAccess::UtfCharCount(rt)),
+               "1");
+        const std::uint32_t rel_copy[4] = {0, 0, copy, 0};
+        abr::RuntimeTestAccess::Jni(rt, 170, rel_copy);
+        Expect("tracked UTF copy freed",
+               std::to_string(abr::RuntimeTestAccess::GuestLiveSize(rt, copy)), "0");
+        Expect("tracked UTF map cleared", std::to_string(abr::RuntimeTestAccess::UtfCharCount(rt)),
+               "0");
     }
 
 #ifdef ABR_DIAG_COUNTERS

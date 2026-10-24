@@ -7697,7 +7697,8 @@ void Runtime::ThreadCensus() {
 void Runtime::DumpDiagCounters() {
     std::uint64_t heap_used = 0, heap_peak = 0;
     std::uint32_t str_used = 0, str_high = 0, obj_used = 0, obj_high = 0;
-    std::size_t n_strings = 0, n_objects = 0, n_rev = 0, n_fwd = 0;
+    std::size_t n_strings = 0, n_objects = 0, n_rev = 0, n_fwd = 0, n_utf = 0;
+    std::uint64_t utf_allocs = 0, utf_releases = 0;
     std::size_t n_tls = 0, n_errno = 0, n_errno_free = 0;
     std::uint32_t errno_next = 0;
     std::uint64_t wrapg = 0, newg = 0, delg = 0;
@@ -7725,6 +7726,9 @@ void Runtime::DumpDiagCounters() {
         n_objects = jni_objects_.size();
         n_rev = obj_rev_.size();
         n_fwd = obj_fwd_.size();
+        n_utf = jni_utf_chars_.size();
+        utf_allocs = diag_.utf_allocs.load(std::memory_order_relaxed);
+        utf_releases = diag_.utf_releases.load(std::memory_order_relaxed);
         n_threads = threads_.size();
         n_tls = tls_map_.size();
         n_errno = errno_slots_.size();
@@ -7763,11 +7767,12 @@ void Runtime::DumpDiagCounters() {
     }
     std::printf(
         "[counters] heap=%llu/%llu jni_str=%u/%u jni_obj=%u/%u "
-        "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu wrapg=%llu newg=%llu delg=%llu "
+        "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu utf=%zu,%llu/%llu wrapg=%llu newg=%llu delg=%llu "
         "%s localtime=%llu/%llu assets=%zu/%llu,peak=%llu/%llu "
         "tls=%zu errno=%zu/%zu,next=%u threads=%zu svc=%llu\n",
         (unsigned long long)heap_used, (unsigned long long)heap_peak, str_used, str_high,
-        obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd,
+        obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd, n_utf,
+        (unsigned long long)utf_allocs, (unsigned long long)utf_releases,
         (unsigned long long)wrapg, (unsigned long long)newg, (unsigned long long)delg, fd,
         (unsigned long long)loc_allocs, (unsigned long long)loc_bytes, n_assets,
         (unsigned long long)asset_bytes, (unsigned long long)asset_peak_open,
@@ -8814,8 +8819,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (jni_strings_.find(a1) == jni_strings_.end()) {
 #ifdef __ANDROID__
             // Product host: entry-wrapped real ART string -> UNWRAP FIRST,
-            // then copy bytes into guest heap (guest-safe 32-bit pointer;
-            // free is a no-op so Release stays trivial).
+            // copy bytes into the guest heap, and release ART's characters
+            // immediately. The guest copy is tracked separately from
+            // jni_strings_ because it is a const char*, not a jstring;
+            // ReleaseStringUTFChars frees it.
             if (void* real = UnwrapObject(a1)) {
                 if (JNIEnv* re = RealEnv()) {
                     const char* p = re->GetStringUTFChars(static_cast<jstring>(real),
@@ -8825,8 +8832,11 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         const std::uint32_t g = GuestMalloc(n + 1);
                         if (g) {
                             std::memcpy(H(g), p, n + 1);
-                            // Intern (caller holds mutex_): see above.
-                            jni_strings_[g] = std::string(p, n);
+                            jni_utf_chars_.insert(g);
+#ifdef ABR_DIAG_COUNTERS
+                            diag_.utf_allocs.fetch_add(1, std::memory_order_relaxed);
+#endif
+                            re->ReleaseStringUTFChars(static_cast<jstring>(real), p);
                             if (a2 && CheckRange(a2, 4, true)) {
                                 const std::uint32_t one = 1;
                                 std::memcpy(H(a2), &one, 4);
@@ -8834,6 +8844,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                             Ret(regs, g);
                             return;
                         }
+                        // Allocation failed: still give ART its buffer back
+                        // before the LOUD unknown-string path.
+                        re->ReleaseStringUTFChars(static_cast<jstring>(real), p);
                     }
                 }
             }
@@ -8935,6 +8948,20 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 170: {  // ReleaseStringUTFChars(env, str, chars) -> void
+        // A guest copy from the real-wrapped GetStringUTFChars path is ours;
+        // free it. Mock jstrings return the handle itself and are not in this
+        // set, so their registry entry stays intact.
+        bool tracked = false;
+        if (a2) {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            tracked = jni_utf_chars_.erase(a2) != 0;
+        }
+        if (tracked) {
+#ifdef ABR_DIAG_COUNTERS
+            diag_.utf_releases.fetch_add(1, std::memory_order_relaxed);
+#endif
+            GuestFree(a2);
+        }
         Ret(regs, 0);  // void JNI: zero r0 (device Dalvik leaves 0; game reads it)
         return;
     }
