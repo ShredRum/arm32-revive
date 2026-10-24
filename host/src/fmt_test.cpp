@@ -147,6 +147,7 @@ int main() {
     mod.imports.push_back(abr::Import{"iswctype", true, 0, 0, 0});         // 20
     mod.imports.push_back(abr::Import{"fopen", true, 0, 0, 0});           // 21
     mod.imports.push_back(abr::Import{"fclose", true, 0, 0, 0});          // 22
+    mod.imports.push_back(abr::Import{"gmtime", true, 0, 0, 0});          // 23
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -896,6 +897,39 @@ int main() {
         Expect("one reusable guest fd", std::to_string(abr::RuntimeTestAccess::FreeGuestFdCount(rt)),
                "1");
         std::filesystem::remove(host_file);
+    }
+
+    // --- localtime/gmtime: the non-_r form owns one per-thread guest
+    //     buffer. Repeated calls must return the same pointer and fill the
+    //     Bionic ARM struct tm layout.
+    {
+        const std::uint32_t kTime = 0x10006200;
+        const std::int32_t zero = 0;
+        std::memcpy(rt.H(kTime), &zero, 4);
+        const std::uint32_t args[4] = {kTime, 0, 0, 0};
+        const std::uint32_t p1 = abr::RuntimeTestAccess::Call(rt, 23, args);
+        const std::uint32_t p2 = abr::RuntimeTestAccess::Call(rt, 23, args);
+        Expect("gmtime returns a static buffer", p1 ? "1" : "0", "1");
+        Expect("gmtime reuses the same pointer", std::to_string(p2), std::to_string(p1));
+        if (p1) {
+            std::int32_t f[9] = {};
+            for (int i = 0; i < 9; i++) {
+                std::memcpy(&f[i], rt.H(p1 + (std::uint32_t)(i * 4)), 4);
+            }
+            std::int32_t off = 0;
+            std::uint32_t zone = 1;
+            std::memcpy(&off, rt.H(p1 + 36), 4);
+            std::memcpy(&zone, rt.H(p1 + 40), 4);
+            Expect("gmtime epoch sec/min/hour", std::to_string(f[0]) + "/" + std::to_string(f[1]) +
+                                                    "/" + std::to_string(f[2]),
+                   "0/0/0");
+            Expect("gmtime epoch date", std::to_string(f[3]) + "/" + std::to_string(f[4]) + "/" +
+                                             std::to_string(f[5]),
+                   "1/0/70");
+            Expect("gmtime epoch weekday/yday", std::to_string(f[6]) + "/" + std::to_string(f[7]),
+                   "4/0");
+            Expect("gmtime gmtoff/zone", std::to_string(off) + "/" + std::to_string(zone), "0/0");
+        }
     }
 
     // --- GetStringUTFChars: a mock jstring returns its own handle and

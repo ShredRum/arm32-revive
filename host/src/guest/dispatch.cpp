@@ -3166,10 +3166,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "localtime_r" || n == "gmtime_r" || n == "localtime" || n == "gmtime") {
         // Bionic ARM struct tm (44B): 9x int + long gmtoff + char* zone.
-        // localtime(time_t*) uses a static buffer (single-thread caveat:
-        // game uses _r here); gmtime same with UTC.
+        // localtime()/gmtime() use a per-thread static buffer: allocate the
+        // guest block once, then return the same pointer on every call. The
+        // _r forms keep writing the caller's buffer.
         const bool is_local = (n[0] == 'l');
         const bool use_static = (n == "localtime" || n == "gmtime");
+        thread_local std::uint32_t static_tm = 0;
         std::int32_t gt = 0;
         if (CheckRange(a0, 4, false)) {
             std::memcpy(&gt, H(a0), 4);
@@ -3182,13 +3184,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         struct tm* ht = is_local ? localtime_r(&tt, &scratch) : gmtime_r(&tt, &scratch);
         std::uint32_t out = a1;
         if (use_static) {
-            out = GuestMalloc(44);
+            if (!static_tm) {
+                static_tm = GuestMalloc(44);
 #ifdef ABR_DIAG_COUNTERS
-            if (out) {
-                diag_.localtime_allocs.fetch_add(1, std::memory_order_relaxed);
-                diag_.localtime_bytes.fetch_add(44, std::memory_order_relaxed);
-            }
+                if (static_tm) {
+                    diag_.localtime_allocs.fetch_add(1, std::memory_order_relaxed);
+                    diag_.localtime_bytes.fetch_add(44, std::memory_order_relaxed);
+                }
 #endif
+            }
+            out = static_tm;
         }
         if (out && CheckRange(out, 44, true) && ht) {
             std::int32_t f[9] = {ht->tm_sec,  ht->tm_min,  ht->tm_hour, ht->tm_mday, ht->tm_mon,
