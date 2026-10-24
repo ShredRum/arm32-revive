@@ -1791,3 +1791,30 @@ flat. A bird launch scored 12530; all markers 0 and `death.log` 0 B. No other
 title was soaked: Seasons is the representative profile, and the user asked
 not to spend 15 minutes per game. The diag build was left installed for
 Stage E.
+
+### 2026-10-24 — Stage E: fclose frees the guest FILE and recycles the fd
+
+The file bridge used to erase only `file_map_` on `fclose`: the 96-byte guest
+`FILE` stayed allocated, `fd_map_` kept the dead guest fd, and
+`next_guest_fd_` grew on every open/close cycle. `HostFile` now records the
+bound guest fd; `fclose` closes the host stream, erases both maps, returns
+the guest block with `GuestFree`, and only then puts the guest fd on a reuse
+list. `fdopen` adopts its existing guest fd instead of allocating a second
+one. Standard streams still take the flush-and-return path. `close(fd)`
+recycles a plain fd immediately, but keeps it reserved while a live `FILE*`
+still references it, so a stale `FILE*` cannot later erase a new mapping.
+
+Native `fmt_test` now imports `fopen`/`fclose` and runs one open/close plus a
+64-iteration loop: `fd_map_` and `file_map_` are flat, `next_guest_fd_`
+stops at 101 and is reused, the guest `FILE` is no longer live, and exactly
+one guest fd is free for reuse. `fmt_test` (shipping and diag), `zip_test`,
+`cbnz_test` and `smoke_a32` pass.
+
+Device: diag host lib `bb16bb4dcf3c2323b5c8fde2172e6fd5`, stripped
+`1f5ad87be4353ec641c79281c5edabc9`, APK
+`0d590777d4dd3b17794ca2669dd0e0e0`, build marker `Oct 24 2026 08:24:50`.
+After loading the saved level and idling 95 s, four counter samples were
+identical at `fd=16,next=130,free=32655,file=3`; a bird launch (score 70)
+left them unchanged. Stage D's 15-minute level slope was fd 115 -> 169 and
+next 246 -> 316, so this run closes that leak. All markers 0 and `death.log`
+0 B. No other title was run for this fix.

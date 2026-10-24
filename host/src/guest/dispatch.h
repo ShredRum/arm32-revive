@@ -634,10 +634,14 @@ private:
     std::string files_hostbase_;  // set by harness (SetFilesDir)
     struct HostFile {
         FILE* f = nullptr;
+        std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*
     };
     std::unordered_map<std::uint32_t, HostFile> file_map_;  // guest FILE* -> host
     std::unordered_map<std::uint32_t, int> fd_map_;         // guest fd -> host fd
     std::uint32_t next_guest_fd_ = 100;
+    // Guest fd numbers released by close/fclose, reusable only after the
+    // host fd has actually been closed. Kept under io_mutex_.
+    std::vector<std::uint32_t> free_guest_fds_;
     // Guest fds opened on /dev/alarm (mapped to /dev/null host-side):
     // their ioctls are served from host clocks (tick source!). Same
     // leaf-lock discipline as fd_map_.

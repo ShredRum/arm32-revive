@@ -3801,23 +3801,69 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return h;
         };
-        // Bind a host FILE*: allocate a guest fd, expose it at Bionic __sFile
-        // offset +14 (_file, ldrsh-loaded inline by guest code for fsync etc.)
-        // and in fd_map_ for fd-based thunks. Returns false on exhaustion.
-        auto bind_file = [&](std::uint32_t h, FILE* f) -> bool {
-            std::uint32_t g = 0;
+        // The guest fd table is a 15-bit namespace (a FILE* carries its fd in
+        // a 16-bit _file field). Reuse only numbers whose host fd is closed
+        // and whose FILE* (if any) is gone; otherwise a stale FILE* could
+        // later erase a new mapping.
+        auto take_guest_fd_locked = [&]() -> std::uint32_t {
+            if (!free_guest_fds_.empty()) {
+                const std::uint32_t g = free_guest_fds_.back();
+                free_guest_fds_.pop_back();
+                return g;
+            }
+            if (next_guest_fd_ >= 0x8000u) {
+                static std::atomic<bool> warned{false};
+                if (!warned.exchange(true)) {
+                    std::printf("[files] LOUD guest fd table exhausted (cap %u)\n", 0x8000u);
+                }
+                return 0xFFFFFFFFu;
+            }
+            return next_guest_fd_++;
+        };
+        auto fd_referenced_by_file_locked = [&](std::uint32_t g) -> bool {
+            for (const auto& kv : file_map_) {
+                if (kv.second.gfd == g) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        auto release_guest_fd_locked = [&](std::uint32_t g) {
+            if (g < 100u || g >= 0x8000u || fd_referenced_by_file_locked(g)) {
+                return;
+            }
+            if (std::find(free_guest_fds_.begin(), free_guest_fds_.end(), g) ==
+                free_guest_fds_.end()) {
+                free_guest_fds_.push_back(g);
+            }
+        };
+        auto discard_file_handle = [&](std::uint32_t h) {
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
-                g = next_guest_fd_++;
-                if (g >= 0x8000) {
-                    static std::atomic<bool> warned{false};
-                    if (!warned.exchange(true)) {
-                        std::printf("[files] LOUD guest fd table exhausted (cap %u)\n", 0x8000u);
+                file_map_.erase(h);
+            }
+            GuestFree(h);
+        };
+        // Bind a host FILE*: allocate/reuse a guest fd (or adopt an existing
+        // fd for fdopen), expose it at Bionic __sFile offset +14 (_file,
+        // ldrsh-loaded inline by guest code for fsync etc.) and in fd_map_ for
+        // fd-based thunks. Returns false on exhaustion.
+        auto bind_file = [&](std::uint32_t h, FILE* f,
+                             std::uint32_t existing_gfd = 0xFFFFFFFFu) -> bool {
+            std::uint32_t g = existing_gfd;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                if (g == 0xFFFFFFFFu) {
+                    g = take_guest_fd_locked();
+                    if (g == 0xFFFFFFFFu) {
+                        return false;
                     }
+                } else if (fd_map_.find(g) == fd_map_.end()) {
                     return false;
                 }
                 fd_map_[g] = fileno(f);
                 file_map_[h].f = f;
+                file_map_[h].gfd = g;
             }
             const std::uint16_t g16 = static_cast<std::uint16_t>(g);
             std::memcpy(H(h + 14), &g16, 2);
@@ -3832,19 +3878,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         };
         auto alloc_guest_fd = [&](int hfd) -> std::uint32_t {
             std::lock_guard<std::mutex> io(io_mutex_);
-            if (next_guest_fd_ >= 0x8000u) {
-                // Same ceiling as bind_file: guest fd numbers must stay
-                // representable (a FILE* carries its fd in a 16-bit _file
-                // field). LOUD once instead of silently truncating; the callers
-                // pass the value straight to the guest, where -1 reads as a
-                // plain "call failed" (no silent aliasing).
-                static std::atomic<bool> warned{false};
-                if (!warned.exchange(true)) {
-                    std::printf("[files] LOUD guest fd table exhausted (cap %u)\n", 0x8000u);
-                }
-                return 0xFFFFFFFFu;
+            const std::uint32_t g = take_guest_fd_locked();
+            if (g == 0xFFFFFFFFu) {
+                return g;
             }
-            const std::uint32_t g = next_guest_fd_++;
             fd_map_[g] = hfd;
             return g;
         };
@@ -3856,6 +3893,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             const int h = it->second;
             fd_map_.erase(it);
+            release_guest_fd_locked(g);
             return h;
         };
         // Guest errno cell write (per-thread slot) + poll wait helper.
@@ -3961,6 +3999,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             if (!bind_file(h, f)) {
                 std::fclose(f);
+                discard_file_handle(h);
                 Ret(regs, 0);
                 return;
             }
@@ -3997,8 +4036,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             int r = (n == "fclose") ? std::fclose(f) : std::fflush(f);
             if (n == "fclose") {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                file_map_.erase(a0);
+                // fclose owns both the host fd and the 96-byte guest FILE.
+                // Erase the fd mapping and only then make the number
+                // reusable; GuestFree must run outside io_mutex_.
+                std::uint32_t gfd = 0xFFFFFFFFu;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    const auto it = file_map_.find(a0);
+                    if (it != file_map_.end()) {
+                        gfd = it->second.gfd;
+                        file_map_.erase(it);
+                    }
+                    if (gfd != 0xFFFFFFFFu) {
+                        fd_map_.erase(gfd);
+                        release_guest_fd_locked(gfd);
+                    }
+                }
+                GuestFree(a0);
             }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
@@ -4216,8 +4270,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (!bind_file(h, f)) {
+            if (!bind_file(h, f, a0)) {
                 std::fclose(f);
+                discard_file_handle(h);
                 Ret(regs, 0);
                 return;
             }
@@ -4238,6 +4293,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             if (!bind_file(h, f)) {
                 std::fclose(f);
+                discard_file_handle(h);
                 Ret(regs, 0);
                 return;
             }
@@ -7648,7 +7704,7 @@ void Runtime::DumpDiagCounters() {
     std::uint64_t loc_allocs = 0, loc_bytes = 0;
     std::size_t n_assets = 0, n_threads = 0;
     std::uint64_t asset_bytes = 0, asset_peak_open = 0, asset_peak_bytes = 0;
-    std::size_t n_fd = 0, n_file = 0;
+    std::size_t n_fd = 0, n_file = 0, n_fd_free = 0;
     std::uint32_t fd_next = 0;
     bool fd_ok = false;
     {
@@ -7691,13 +7747,15 @@ void Runtime::DumpDiagCounters() {
         if (io.owns_lock()) {
             n_fd = fd_map_.size();
             n_file = file_map_.size();
+            n_fd_free = free_guest_fds_.size();
             fd_next = next_guest_fd_;
             fd_ok = true;
         }
     }
     char fd[112];
     if (fd_ok) {
-        const unsigned long long fd_free = fd_next < 0x8000u ? 0x8000u - fd_next : 0;
+        const unsigned long long fd_free =
+            (fd_next < 0x8000u ? 0x8000u - fd_next : 0) + n_fd_free;
         std::snprintf(fd, sizeof(fd), "fd=%zu,next=%u,free=%llu,file=%zu", n_fd, fd_next,
                       fd_free, n_file);
     } else {

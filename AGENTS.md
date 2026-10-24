@@ -4302,7 +4302,7 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 
 ## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
 
-STATUS: **Stages A-D DONE (2026-10-24), Stage E next.** HEAD `f1047e2` was
+STATUS: **Stages A-D DONE (2026-10-24), Stage E in progress (fclose fixed).** HEAD `f1047e2` was
 clean before this entry; Stages A, B, C and D are committed separately with
 their journal and device-gate evidence. This is the canonical checklist for
 the next work; a stage is closed only when every acceptance item is met. Do
@@ -4645,7 +4645,7 @@ Do not bundle these. Order by the measured slope.
   tracked guest copy in the host `ReleaseStringUTFChars` and erase its map
   entry. Test with a real-wrapped string on device; verify the mock-string
   path still returns the original pointer.
-- [ ] `fclose`: free the 96-byte guest `FILE`, erase `fd_map_` entries, and
+- [x] `fclose`: free the 96-byte guest `FILE`, erase `fd_map_` entries, and
   recycle the guest fd only after close. Do not touch the standard streams.
   Add a fopen/fclose loop test and check fd counters.
 - [ ] `localtime`/`gmtime`: use a per-thread 44-byte guest buffer allocated
@@ -4672,6 +4672,24 @@ Acceptance per fix:
 - [ ] Counter slope before/after on the diagnostic build.
 - [ ] Shipping build unchanged in behavior; device gate; Seasons golden.
 - [ ] One commit per fix, with the measurement in the message.
+
+`fclose` closure (2026-10-24):
+- [x] Native `fmt_test` adds `fopen`/`fclose` imports and a 64-iteration
+  loop: `fd_map_`/`file_map_` stay flat, the guest fd number is reused,
+  the 96-byte guest `FILE` is no longer live, and `free_guest_fds_` holds one
+  slot. `fmt_test` (shipping and diag), `zip_test`, `cbnz_test` and
+  `smoke_a32` pass.
+- [x] Device diag lib md5 `bb16bb4dcf3c2323b5c8fde2172e6fd5`, stripped
+  `1f5ad87be4353ec641c79281c5edabc9`, APK
+  `0d590777d4dd3b17794ca2669dd0e0e0`, marker `Oct 24 2026 08:24:50`,
+  installed. Seasons loaded the saved level and sat idle for 95 s: `fd=16,
+  next=130,free=32655,file=3` stayed byte-identical across four samples;
+  after a bird launch (score 70) it was still `fd=16,next=130`. Stage D's
+  level slope was `fd` 115 -> 169 and `next` 246 -> 316, so the leak is
+  closed in this run. All markers 0, `death.log` 0 B.
+- [x] Shipping behavior is the same code path; no shipping APK was rebuilt
+  for this isolated fix. Final Stage G rebuilds and gates all six.
+- [x] One commit, measurement in the message.
 
 ### 144.7 Stage F — variadic ABI proof (outside `eff3de3..HEAD`, P2)
 

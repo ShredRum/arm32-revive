@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -79,6 +80,12 @@ struct RuntimeTestAccess {
         }
         return regs[0];
     }
+    // File-bridge state, test-only (single-threaded fmt_test).
+    static std::size_t FdMapSize(Runtime& rt) { return rt.fd_map_.size(); }
+    static std::size_t FileMapSize(Runtime& rt) { return rt.file_map_.size(); }
+    static std::size_t FreeGuestFdCount(Runtime& rt) { return rt.free_guest_fds_.size(); }
+    static std::uint32_t NextGuestFd(Runtime& rt) { return rt.next_guest_fd_; }
+    static std::uint32_t GuestLiveSize(Runtime& rt, std::uint32_t h) { return rt.LiveIdxFind(h); }
 };
 }  // namespace abr
 
@@ -126,6 +133,8 @@ int main() {
     mod.imports.push_back(abr::Import{"wctype", true, 0, 0, 0});            // 18
     mod.imports.push_back(abr::Import{"getauxval", true, 0, 0, 0});        // 19
     mod.imports.push_back(abr::Import{"iswctype", true, 0, 0, 0});         // 20
+    mod.imports.push_back(abr::Import{"fopen", true, 0, 0, 0});           // 21
+    mod.imports.push_back(abr::Import{"fclose", true, 0, 0, 0});          // 22
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -815,6 +824,66 @@ int main() {
                       w.size(), w[0], w[1], w[2], w[3]);
         Expect("JNI (J)V word stream", got,
                "4:10002000 20003000 55667788 11223344");
+    }
+
+    // --- file bridge: fopen/fclose must free the 96-byte guest FILE, erase
+    //     the fd mapping, and recycle the guest fd. A loop that reuses one
+    //     slot keeps fd_map_/file_map_/next_guest_fd_ flat.
+    {
+        const std::uint32_t kFdPath = 0x10006000;
+        const std::uint32_t kFdMode = 0x10006100;
+        const std::string host_dir = "/tmp/opencode/abr-fdtest";
+        const std::string host_file = host_dir + "/fd-loop.txt";
+        std::filesystem::create_directories(host_dir);
+        std::filesystem::remove(host_file);
+        rt.SetFilesDir("/data/data/abr.test/files", host_dir);
+        put(kFdPath, "/data/data/abr.test/files/fd-loop.txt");
+        put(kFdMode, "w+");
+        const std::uint32_t open_args[4] = {kFdPath, kFdMode, 0, 0};
+
+        const std::size_t fd_before = abr::RuntimeTestAccess::FdMapSize(rt);
+        const std::size_t file_before = abr::RuntimeTestAccess::FileMapSize(rt);
+        const std::uint32_t h = abr::RuntimeTestAccess::Call(rt, 21, open_args);
+        Expect("fopen returns a FILE*", h ? "1" : "0", "1");
+        if (h) {
+            const std::uint32_t cargs[4] = {h, 0, 0, 0};
+            const std::uint32_t cr = abr::RuntimeTestAccess::Call(rt, 22, cargs);
+            Expect("fclose returns 0", std::to_string(static_cast<std::int32_t>(cr)), "0");
+            Expect("guest FILE freed", std::to_string(abr::RuntimeTestAccess::GuestLiveSize(rt, h)),
+                   "0");
+        }
+        const std::size_t fd_after_one = abr::RuntimeTestAccess::FdMapSize(rt);
+        const std::size_t file_after_one = abr::RuntimeTestAccess::FileMapSize(rt);
+        const std::uint32_t next_after_one = abr::RuntimeTestAccess::NextGuestFd(rt);
+        Expect("fd_map_ restored after fclose", std::to_string(fd_after_one),
+               std::to_string(fd_before));
+        Expect("file_map_ restored after fclose", std::to_string(file_after_one),
+               std::to_string(file_before));
+
+        bool loop_ok = true;
+        for (int i = 0; i < 64; i++) {
+            const std::uint32_t lh = abr::RuntimeTestAccess::Call(rt, 21, open_args);
+            if (!lh) {
+                loop_ok = false;
+                break;
+            }
+            const std::uint32_t cargs[4] = {lh, 0, 0, 0};
+            const std::uint32_t cr = abr::RuntimeTestAccess::Call(rt, 22, cargs);
+            if (cr != 0) {
+                loop_ok = false;
+                break;
+            }
+        }
+        Expect("fopen/fclose loop succeeds", loop_ok ? "1" : "0", "1");
+        Expect("fd_map_ flat after loop", std::to_string(abr::RuntimeTestAccess::FdMapSize(rt)),
+               std::to_string(fd_after_one));
+        Expect("file_map_ flat after loop", std::to_string(abr::RuntimeTestAccess::FileMapSize(rt)),
+               std::to_string(file_after_one));
+        Expect("guest fd number reused", std::to_string(abr::RuntimeTestAccess::NextGuestFd(rt)),
+               std::to_string(next_after_one));
+        Expect("one reusable guest fd", std::to_string(abr::RuntimeTestAccess::FreeGuestFdCount(rt)),
+               "1");
+        std::filesystem::remove(host_file);
     }
 
 #ifdef ABR_DIAG_COUNTERS
