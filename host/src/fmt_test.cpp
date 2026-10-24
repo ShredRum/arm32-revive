@@ -751,21 +751,40 @@ int main() {
                std::to_string(abr::JniStringFits(abr::kJniStringStart, 0x100000000ull, &at)), "0");
     }
 
-    // --- getauxval: the guest tests the HWCAP bit 12 (FAST_MULT) to decide
-    //     whether it may use the fast multiply instructions. We claim the
-    //     armv7-a baseline (the JIT emulates those instructions, so the
-    //     claim is true), and the device golden check proves the fast path
-    //     computes the same thing: Seasons' Tutorial_red state is
-    //     bit-identical to the 59ff106 fingerprint with the mask and with 0.
+    // --- getauxval: the measured Star Wars consumer at 0x6708e4..0x6708f0
+    //     tests HWCAP bit 12. On ARM32 that bit is NEON, not FAST_MULT; the
+    //     old test encoded the arm64 label and also mislabelled VFP. Pin the
+    //     real armv7-a mask and the bits that must stay absent.
     {
-        const std::uint32_t hw[4] = {16 /*AT_HWCAP*/, 0, 0, 0};
+        constexpr std::uint32_t kAtHwcap = 16;
+        constexpr std::uint32_t kAtPagesz = 6;
+        constexpr std::uint32_t kAtHwcap2 = 26;
+        const std::uint32_t hw[4] = {kAtHwcap, 0, 0, 0};
         const std::uint32_t hwcap = abr::RuntimeTestAccess::Call(rt, 19, hw);
-        Expect("getauxval(AT_HWCAP) has FAST_MULT", std::to_string((hwcap >> 12) & 1u), "1");
-        Expect("getauxval(AT_HWCAP) has VFP", std::to_string((hwcap >> 1) & 1u), "1");
-        const std::uint32_t ps[4] = {6 /*AT_PAGESZ*/, 0, 0, 0};
+        Expect("getauxval(AT_HWCAP) is the armv7-a mask",
+               std::to_string(hwcap), std::to_string(abr::kArmV7Hwcap));
+        Expect("getauxval(AT_HWCAP) has NEON (bit 12)",
+               std::to_string(hwcap & abr::kHwcapNeon),
+               std::to_string(abr::kHwcapNeon));
+        Expect("getauxval(AT_HWCAP) has FAST_MULT (bit 4)",
+               std::to_string(hwcap & abr::kHwcapFastMult),
+               std::to_string(abr::kHwcapFastMult));
+        Expect("getauxval(AT_HWCAP) has VFP (bit 6)",
+               std::to_string(hwcap & abr::kHwcapVfp),
+               std::to_string(abr::kHwcapVfp));
+        Expect("getauxval(AT_HWCAP) has TLS (bit 15)",
+               std::to_string(hwcap & abr::kHwcapTls),
+               std::to_string(abr::kHwcapTls));
+        Expect("getauxval(AT_HWCAP) excludes FPA",
+               std::to_string(hwcap & abr::kHwcapFpa), "0");
+        Expect("getauxval(AT_HWCAP) excludes LPAE",
+               std::to_string(hwcap & abr::kHwcapLpae), "0");
+        Expect("getauxval(AT_HWCAP) excludes VFPv4",
+               std::to_string(hwcap & abr::kHwcapVfpv4), "0");
+        const std::uint32_t ps[4] = {kAtPagesz, 0, 0, 0};
         Expect("getauxval(AT_PAGESZ) is the page size",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps) > 0 ? 1 : 0), "1");
-        const std::uint32_t h2[4] = {26 /*AT_HWCAP2*/, 0, 0, 0};
+        const std::uint32_t h2[4] = {kAtHwcap2, 0, 0, 0};
         Expect("getauxval(AT_HWCAP2) is zero",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, h2)), "0");
     }

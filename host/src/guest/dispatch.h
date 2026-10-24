@@ -24,6 +24,7 @@
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/interface/halt_reason.h"
 #include "appid.h"
+#include "arm_hwcap.h"
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"

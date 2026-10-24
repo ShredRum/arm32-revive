@@ -4302,8 +4302,8 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 
 ## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
 
-STATUS: **Stages A-B DONE (2026-10-24), Stage C next.** HEAD `7230a14` was
-clean before this entry; Stage A and Stage B are committed separately with
+STATUS: **Stages A-C DONE (2026-10-24), Stage D next.** HEAD `7230a14` was
+clean before this entry; Stages A, B and C are committed separately with
 their journal and device-gate evidence. This is the canonical checklist for
 the next work; a stage is closed only when every acceptance item is met. Do
 not reorder stages without a measured reason and do not mix two stages in one
@@ -4505,28 +4505,52 @@ known offline prompt. APK md5s: Seasons
 ### 144.4 Stage C — real HWCAP bits (P1, honesty/latent)
 
 Tasks:
-- [ ] Define the ARM HWCAP names from the NDK `asm/hwcap.h` (bit 4
-  `FAST_MULT`, 6 `VFP`, 12 `NEON`, 15 `TLS`, etc.). Remove the invented
-  `FP`/`VFPv3_D32` labels.
-- [ ] Decide the mask by JIT support, not by a phone model: set only bits
+- [x] Define the ARM HWCAP names from the NDK `asm/hwcap.h` (bit 4
+  `FAST_MULT`, 6 `VFP`, 12 `NEON`, 15 `TLS`, etc.). `arm_hwcap.h` now owns
+  the full ARM32 list; the invented `FP`/`VFPv3_D32` labels are gone.
+- [x] Decide the mask by JIT support, not by a phone model: set only bits
   whose instructions Dynarmic actually implements and the guest may use.
-  Candidate baseline: `HALF|THUMB|FAST_MULT|VFP|EDSP|NEON|VFPv3|VFPv3D16|TLS`;
-  do not advertise `iWMMXT`, `FPA`, `JAVA`, `CRUNCH`, `THUMBEE`, `26BIT`,
-  `LPAE` unless each is proven. `AT_HWCAP2` remains zero.
-- [ ] Keep `AT_PAGESZ` behavior unchanged.
-- [ ] Fix the comments at `dispatch.cpp:1870-1905` and the tests at
-  `fmt_test.cpp:658-675`: assert actual bit positions, including
-  `NEON == bit 12` and `HWCAP2 == 0`.
-- [ ] Re-run the Seasons A/B with the final mask if the mask changes the
+  Final mask `HALF|THUMB|FAST_MULT|VFP|EDSP|NEON|VFPv3|VFPv3D16|TLS` =
+  `0xF0D6`; Dynarmic implements the ARMv7 integer, VFPv3 and ASIMD paths and
+  the kuser page supplies TLS. `SWP`, `FPA`, `JAVA`, `iWMMXT`, `CRUNCH`,
+  `THUMBEE`, `26BIT`, `LPAE`, `VFPv4`, `IDIV` and `FPHP` stay clear.
+  `AT_HWCAP2` remains zero.
+- [x] Keep `AT_PAGESZ` behavior unchanged; the test still checks the live
+  page size.
+- [x] Fix the old comments and tests: assert actual bit positions with named
+  constants, including `NEON == bit 12` and `HWCAP2 == 0`.
+- [x] Re-run the Seasons A/B with the final mask if the mask changes the
   guest's feature parser; the previous A/B (0 vs fabricated mask) is not a
   proof for the new set.
 
 Acceptance:
-- [ ] Unit tests use named constants, not magic shifts.
-- [ ] Guest `getauxval` call sites still see bit 12 set; no new guest path is
-  claimed without a disassembly/consumer check.
-- [ ] Device gate and golden Seasons; record any svc-count change as expected
-  or investigate it.
+- [x] Unit tests use named constants, not magic shifts.
+- [x] Guest `getauxval` call sites still see bit 12 set; no new guest path is
+  claimed without a disassembly/consumer check. Star Wars `0x6708e4..f0`
+  calls `getauxval(AT_HWCAP)`, shifts left 19 (bit 12), then reads
+  `AT_HWCAP2`; bit 12 stays set.
+- [x] Device gate and golden Seasons; record any svc-count change as expected
+  or investigate it. Native A/B 0 vs final mask: Rio 948 -> 949, Seasons
+  3072 -> 3073, Space 1330, Star Wars 2320 (the measured NEON path); device
+  golden is unchanged.
+
+Closure evidence (2026-10-24): host lib md5
+`69f876d27fd2024429598db08ec66a65` (build marker `Oct 24 2026 07:01:09`),
+stripped lib installed in all six APKs md5
+`0b5aa0400643adb067f5a397f893721b`. `fmt_test` asserts the exact `0xF0D6`
+mask and the named NEON/FAST_MULT/VFP/TLS bits; `zip_test`, `cbnz_test` and
+`smoke_a32` also pass. Device: all six markers 0 and `death.log` 0 B; init
+counts Seasons 143, Rio 55, Space 68, Star Wars 97, Star Wars II 144, Amazon
+144. Seasons Tutorial_red is still 85/85 lines and 46/46 JSON fields
+(`G_MEM` `0x437268`). Rio/Space/Star Wars reach their titles; Star Wars II
+shows its known content-service error and Amazon its known offline prompt.
+APK md5s: Seasons `57bc467453ec39ff7fdbd07ce0296793`, Rio
+`5f9f2e1c593bd9eab78db84446cd76e2`, Space
+`8ef48aad3a8521e995f9c888585566b7`, Star Wars
+`8d40075ba1a3f74d5b2d693f0adec3fc`, Star Wars II
+`f2b123fa435b1df6fe2f38e1d427378a`, Amazon
+`2ddc451035b69a7ca771f74b05012659`. Full journal:
+`games/seasons/JOURNAL.md`.
 
 ### 144.5 Stage D — counters and soak (P1, measurement only)
 

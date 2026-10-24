@@ -1702,3 +1702,45 @@ counts unchanged (Seasons 143, Rio 55, Space 68, Star Wars 97, Star Wars II
 build. Rio, Space and Star Wars reach their titles; Star Wars II shows its
 known content-service error screen and Amazon its known offline prompt. The
 guest `.so` SHA-256 values still match the profiles; no guest was modified.
+
+### 2026-10-24 — Stage C: real ARM32 HWCAP bits
+
+The old HWCAP mask was an arm64-style invention: bit 0 labelled `FP`, bit 1
+`VFP`, bit 2 `NEON`, bit 12 `FAST_MULT`, etc. On ARM32 Linux bit 4 is
+`FAST_MULT`, bit 6 `VFP`, bit 12 `NEON` and bit 15 `TLS`. The new
+`host/src/guest/arm_hwcap.h` defines the full ARM32 list from the NDK
+`arm-linux-androideabi/asm/hwcap.h` and a named mask:
+
+`HALF|THUMB|FAST_MULT|VFP|EDSP|NEON|VFPv3|VFPv3D16|TLS` = `0xF0D6`.
+
+`SWP`, `FPA`, `JAVA`, `iWMMXT`, `CRUNCH`, `THUMBEE`, `26BIT`, `LPAE`,
+`VFPv4`, `IDIV` and `FPHP` are not advertised. `AT_HWCAP2` remains zero and
+`AT_PAGESZ` still returns the live page size. The mask is based on what
+Dynarmic implements plus the kuser TLS page, not on a phone model.
+
+The measured Star Wars consumer is at `0x6708e4`: `movs r0,#0x10`,
+`blx` to the `getauxval` PLT stub at `0x6708e6`, then
+`lsls r0,r0,#0x13` (tests bit 12) and a conditional read of `AT_HWCAP2` at
+`0x6708f0`. Bit 12 is NEON and stays set; the old journal label
+"FAST_MULT" was wrong. The native A/B against a zero mask is +1 svc per
+title: Rio 948 -> 949, Seasons 3072 -> 3073, Space 1330, Star Wars 2320.
+This is the measured NEON path, not a new unverified consumer. The
+shipping build has no svc counter (that is Stage D); this A/B used the native
+harness with the same guest `.so`.
+
+`fmt_test` now asserts the exact `0xF0D6` mask with named constants, the
+NEON/FAST_MULT/VFP/TLS bits, the absence of FPA/LPAE/VFPv4, the unchanged
+`AT_PAGESZ`, and `AT_HWCAP2 == 0`. `fmt_test`, `zip_test`, `cbnz_test` and
+`smoke_a32` pass. Host lib md5
+`69f876d27fd2024429598db08ec66a65` (build marker `Oct 24 2026 07:01:09`),
+stripped lib installed in all six APKs md5
+`0b5aa0400643adb067f5a397f893721b`.
+
+All six APKs were rebuilt and gate-tested: every marker 0 (HEAPCORRUPT,
+HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL), `death.log` 0 B, init
+counts unchanged (Seasons 143, Rio 55, Space 68, Star Wars 97, Star Wars II
+144, Amazon 144). Seasons' Tutorial_red is byte-identical to the 85-line
+baseline and all 46 JSON fields; `G_MEM` remains `0x437268`. Rio, Space and
+Star Wars reach their titles; Star Wars II shows its known content-service
+error screen and Amazon its known offline prompt. The guest `.so` SHA-256
+values still match the profiles; no guest was modified.

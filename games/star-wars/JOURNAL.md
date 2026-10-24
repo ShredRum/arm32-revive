@@ -129,6 +129,12 @@ All four guests import `getauxval`. The Star Wars guest asks for AT_HWCAP
 whether it may use the fast multiply instructions, emulating them in
 software when the bit is clear (0x6708e4).
 
+Correction (2026-10-24, Stage C): ARM32 bit 12 is `NEON`, not `FAST_MULT`.
+The disassembly at `0x6708e4` sets `r0=AT_HWCAP`, calls `getauxval` at
+`0x6708e6`, shifts left 19 (tests bit 12), and on set reads `AT_HWCAP2` at
+`0x6708f0`. The harness now uses the named ARM32 constants from the NDK and
+the final mask `0xF0D6`; see `AGENTS.md` §144.4.
+
 `getauxval` was an unimplemented stub (answer 0). It is now implemented: the
 arch-independent entries (page size, uid/euid/gid/egid, clk_tck, platform
 "v7l" -- a string in the guest's memory) are answered honestly, and
