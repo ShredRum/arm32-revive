@@ -4302,11 +4302,12 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 
 ## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
 
-STATUS: **Stage A DONE (2026-10-24), Stage B next.** HEAD `7230a14` was
-clean before this entry; Stage A is committed separately with its journal and
-device-gate evidence. This is the canonical checklist for the next work; a
-stage is closed only when every acceptance item is met. Do not reorder stages
-without a measured reason and do not mix two stages in one commit.
+STATUS: **Stages A-B DONE (2026-10-24), Stage C next.** HEAD `7230a14` was
+clean before this entry; Stage A and Stage B are committed separately with
+their journal and device-gate evidence. This is the canonical checklist for
+the next work; a stage is closed only when every acceptance item is met. Do
+not reorder stages without a measured reason and do not mix two stages in one
+commit.
 
 ### 144.0 Starting facts, independently re-checked 2026-10-24
 
@@ -4457,27 +4458,49 @@ Tatooine level-select, all markers 0, `death.log` 0 B. Guest SHA unchanged;
 ### 144.3 Stage B — JNI arena bounds (P0, crash safety)
 
 Tasks:
-- [ ] Add named constants for the string and object regions in
-  `dispatch.h`; do not scatter `0x2100`/`0x3000` in new code.
-- [ ] Make `JniNewString` check against the **string-region end**, not the
-  64-KB arena end, including alignment and length overflow.
-- [ ] Add one `JniAllocObjectHandle()` helper that aligns, checks
-  `o + 4 <= kGuestDataBase + kGuestDataSize`, and LOUD-halts on exhaustion.
-  Replace every direct `jni_obj_next_ += 4` site; preserve the checks that
-  already exist and audit the remainder.
-- [ ] Route `GetStaticObjectField` through that helper. Never write the
+- [x] Add named constants for the string and object regions in
+  `dispatch.h`; do not scatter `0x2100`/`0x3000` in new code. The regions are
+  `[kJniStringStart,kJniStringLimit)` and
+  `[kJniObjectStart,kJniObjectLimit)`.
+- [x] Make `JniNewString` check against the **string-region end**, not the
+  64-KB arena end, including alignment and length overflow. `JniStringFits`
+  does the 64-bit arithmetic; the payload is checked before `+1` for the NUL.
+- [x] Add one `bool JniAllocObjectHandle(uint32_t*)` helper that aligns,
+  checks the object-region end, and LOUD-halts on exhaustion. Replace every
+  direct `jni_obj_next_ += 4` site (all eight); no direct bump remains.
+- [x] Route `GetStaticObjectField` through that helper. Never write the
   handle before the bound check.
-- [ ] Add a small pure predicate for the bounds arithmetic and unit-test it at
-  the last valid slot, first invalid slot, and with `UINT32_MAX` inputs.
-- [ ] Keep the failure mode explicit: LOUD message plus `HaltExecution`, not
-  a silent overwrite and not a null handle the game does not check.
+- [x] Add pure `JniStringFits`/`JniObjectHandleFits` predicates and unit-test
+  the last valid slot, first invalid slot, `UINT32_MAX` next/len, and length
+  overflow.
+- [x] Keep the failure mode explicit: LOUD message plus `HaltExecution`; the
+  helper returns false and every caller returns before writing. It does not
+  hand the guest a fabricated null handle.
 
 Acceptance:
-- [ ] `fmt_test` covers the boundary arithmetic.
-- [ ] The affected allocation sites are grep-audited; no unguarded
+- [x] `fmt_test` covers the boundary arithmetic and passes.
+- [x] The affected allocation sites are grep-audited; no unguarded
   `jni_obj_next_ += 4` remains.
-- [ ] Device gate all six titles; no marker, no `death.log`, same init counts.
-- [ ] No behavior change in the golden Seasons check.
+- [x] Device gate all six titles; no marker, no `death.log`, same init counts.
+- [x] No behavior change in the golden Seasons check.
+
+Closure evidence (2026-10-24): host lib md5
+`442a4a70b063cfbe8e34bf3043ca28f6` (build marker `Oct 24 2026 05:51:09`);
+stripped lib installed in all six APKs md5
+`eaa4ed41bfe7ccd1d1dcfdb86cfbdc96`. Native `fmt_test`, `zip_test`,
+`cbnz_test` and `smoke_a32` pass. Device: all six markers 0 and `death.log`
+0 B; init counts Seasons 143, Rio 55, Space 68, Star Wars 97, Star Wars II
+144, Amazon 144. Seasons Tutorial_red is still 85/85 lines and 46/46 JSON
+fields (`G_MEM` re-synced to `0x437268`). Rio/Space/Star Wars reach their
+titles; Star Wars II shows its known content-service error and Amazon its
+known offline prompt. APK md5s: Seasons
+`d4455dc3e438c888f32f428e5b1b725a`, Rio
+`0ab1734fef2ca96bbe6c245e51efbab4`, Space
+`01747c08c03c0fde6d320fc5c8b1cd09`, Star Wars
+`6ebc12a3ab4e8c5da32605bacc46f1c1`, Star Wars II
+`98483671bf932b357338c07ab1cbd6b6`, Amazon
+`44a2d923c4da814b731138e92e52f2d2`. Full journal:
+`games/seasons/JOURNAL.md`.
 
 ### 144.4 Stage C — real HWCAP bits (P1, honesty/latent)
 

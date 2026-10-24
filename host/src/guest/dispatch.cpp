@@ -184,7 +184,7 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // JNIEnv*: guest-data word holding the table VA; string arena after it.
     jni_env_ = kGuestDataBase + 0x2000;
     std::memcpy(H(jni_env_), &jni_table_, 4);
-    jni_str_next_ = kGuestDataBase + 0x2100;
+    jni_str_next_ = kJniStringStart;
     // JavaVM table: 8 slots -> loader-emitted trampolines (swi kSwiJniBase+0x100+i).
     // JNIInvokeInterface order incl. reserved0-2 (NDK r27 jni.h): 3 Destroy,
     // 4 AttachCurrentThread, 5 Detach, 6 GetEnv, 7 AttachAsDaemon.
@@ -195,7 +195,7 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     }
     jvm_ = kGuestDataBase + 0x2004;
     std::memcpy(H(jvm_), &jvm_table_, 4);
-    jni_obj_next_ = kGuestDataBase + 0x3000;  // class/method handle arena
+    jni_obj_next_ = kJniObjectStart;  // class/method handle arena
     // Guest heap: dlmalloc mspace over the fixed arena (no sbrk/mmap escape;
     // exhaustion returns 0 like before). Bionic-era layout (8B align, chunk
     // headers, LIFO reuse) instead of dense bump packing.
@@ -8401,9 +8401,11 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
             }
         }
         if (!ch) {
-            jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-            ch = jni_obj_next_;
-            jni_obj_next_ += 4;
+            if (!JniAllocObjectHandle(&ch)) {
+                // Fatal and already halted. Return true so the caller does not
+                // fall through to the mock NewObject path after the halt.
+                return true;
+            }
             jni_classes_[ch] = cls;
         }
         jni_objclass_[h] = ch;
@@ -8428,24 +8430,90 @@ void Runtime::SetApkPath(const std::string& path) {
     std::printf("[asset] apk \"%s\"\n", path.c_str());
 }
 
+bool JniStringFits(std::uint32_t next, std::size_t len, std::uint32_t* out) {
+    if (next < kJniStringStart) {
+        return false;
+    }
+    // Do the arithmetic in 64 bits: next+3 and next+len must not wrap in the
+    // guest's 32-bit address space.
+    const std::uint64_t aligned = (std::uint64_t(next) + 3u) & ~std::uint64_t(3u);
+    if (aligned > 0xFFFFFFFFu || std::uint64_t(len) > 0xFFFFFFFFu) {
+        return false;
+    }
+    if (aligned + static_cast<std::uint64_t>(len) >
+        static_cast<std::uint64_t>(kJniStringLimit)) {
+        return false;
+    }
+    if (out) {
+        *out = static_cast<std::uint32_t>(aligned);
+    }
+    return true;
+}
+
+bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out) {
+    if (next < kJniObjectStart) {
+        return false;
+    }
+    const std::uint64_t aligned = (std::uint64_t(next) + 3u) & ~std::uint64_t(3u);
+    if (aligned > 0xFFFFFFFFu ||
+        aligned + 4u > static_cast<std::uint64_t>(kJniObjectLimit)) {
+        return false;
+    }
+    if (out) {
+        *out = static_cast<std::uint32_t>(aligned);
+    }
+    return true;
+}
+
+bool Runtime::JniAllocObjectHandle(std::uint32_t* out) {
+    std::uint32_t slot = 0;
+    if (!JniObjectHandleFits(jni_obj_next_, &slot)) {
+        std::printf("[jni] LOUD object-handle arena exhausted next=%08x limit=%08x -- halting\n",
+                    jni_obj_next_, kJniObjectLimit);
+        stop_step_ = true;
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        }
+        return false;
+    }
+    jni_obj_next_ = slot + 4;
+    if (out) {
+        *out = slot;
+    }
+    return true;
+}
+
 std::uint32_t Runtime::NewStringUTF(const char* s) {
     return JniNewString(s ? s : "");
 }
 
 std::uint32_t Runtime::JniNewString(const std::string& s) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const std::size_t len = s.size() + 1;
-    // 4-align the bump pointer; keep inside guest-data (strings are short).
-    jni_str_next_ = (jni_str_next_ + 3) & ~std::uint32_t(3);
-    if (std::uint64_t(jni_str_next_) + len > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
-        std::printf("[jni] LOUD string arena exhausted -- halting\n");
+    // +1 for the NUL. Check the payload before adding one: a size of SIZE_MAX
+    // would wrap len to zero. The region is only 3840 bytes, so anything huge
+    // is a fatal invariant violation, not something to truncate.
+    if (s.size() >= 0xFFFFFFFFu) {
+        std::printf("[jni] LOUD string too large payload=%zu limit=%08x -- halting\n",
+                    s.size(), kJniStringLimit);
         stop_step_ = true;
-        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        }
         return 0;
     }
-    const std::uint32_t out = jni_str_next_;
+    const std::size_t len = s.size() + 1;
+    std::uint32_t out = 0;
+    if (!JniStringFits(jni_str_next_, len, &out)) {
+        std::printf("[jni] LOUD string arena exhausted next=%08x len=%zu limit=%08x -- halting\n",
+                    jni_str_next_, len, kJniStringLimit);
+        stop_step_ = true;
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        }
+        return 0;
+    }
     std::memcpy(H(out), s.c_str(), len);
-    jni_str_next_ += static_cast<std::uint32_t>(len);
+    jni_str_next_ = out + static_cast<std::uint32_t>(len);
     jni_strings_[out] = s;
     return out;  // opaque jstring handle == UTF-8 buffer VA
 }
@@ -8721,9 +8789,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 }
             }
             if (!ch) {
-                jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-                ch = jni_obj_next_;
-                jni_obj_next_ += 4;
+                if (!JniAllocObjectHandle(&ch)) {
+                    return;
+                }
                 jni_classes_[ch] = "java/lang/Object";
             }
             if (a1) {
@@ -8776,13 +8844,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
 #endif
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-        const std::uint32_t o = jni_obj_next_;
-        jni_obj_next_ += 4;
-        if (std::uint64_t(o) + 4 > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
-            std::printf("[jni] LOUD object arena exhausted -- halting\n");
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        std::uint32_t o = 0;
+        if (!JniAllocObjectHandle(&o)) {
             return;
         }
         std::memcpy(H(o), &o, 4);
@@ -8801,9 +8864,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 }
             }
             if (!ch) {
-                jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-                ch = jni_obj_next_;
-                jni_obj_next_ += 4;
+                if (!JniAllocObjectHandle(&ch)) {
+                    return;
+                }
                 jni_classes_[ch] = cname;
             }
             jni_objclass_[o] = ch;
@@ -9026,13 +9089,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-        const std::uint32_t o = jni_obj_next_;
-        jni_obj_next_ += 4;
-        if (std::uint64_t(o) + 4 > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
-            std::printf("[jni] LOUD object arena exhausted -- halting\n");
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        std::uint32_t o = 0;
+        if (!JniAllocObjectHandle(&o)) {
             return;
         }
         std::memcpy(H(o), &o, 4);
@@ -9066,9 +9124,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-        const std::uint32_t o = jni_obj_next_;
-        jni_obj_next_ += 4;
+        std::uint32_t o = 0;
+        if (!JniAllocObjectHandle(&o)) {
+            return;
+        }
         std::memcpy(H(o), &o, 4);
         jni_objects_[o] = "field<" + fdesc + ">";
         if (DiagOn()) {
@@ -9472,13 +9531,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 return;
             }
         }
-        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-        const std::uint32_t h = jni_obj_next_;
-        jni_obj_next_ += 4;
-        if (std::uint64_t(h) + 4 > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
-            std::printf("[jni] LOUD handle arena exhausted -- halting\n");
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        std::uint32_t h = 0;
+        if (!JniAllocObjectHandle(&h)) {
             return;
         }
         std::memcpy(H(h), &h, 4);  // self-marked handle word
@@ -9512,13 +9566,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        jni_obj_next_ = (jni_obj_next_ + 3) & ~std::uint32_t(3);
-        const std::uint32_t c = jni_obj_next_;
-        jni_obj_next_ += 4;
-        if (std::uint64_t(c) + 4 > std::uint64_t(kGuestDataBase) + kGuestDataSize) {
-            std::printf("[jni] LOUD handle arena exhausted -- halting\n");
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        std::uint32_t c = 0;
+        if (!JniAllocObjectHandle(&c)) {
             return;
         }
         std::memcpy(H(c), &c, 4);

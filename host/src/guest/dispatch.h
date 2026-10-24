@@ -57,6 +57,21 @@ inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 // control flow. Kept as one constant so all four UserConfig sites stay in sync.
 inline constexpr bool kJitCycleCounting = false;
 
+// The JNI guest-data arena has two disjoint bump regions. Strings must never
+// grow into the handle table: the old check only looked at kGuestDataSize and
+// let a long enough string overwrite jni_obj_next_'s region.
+inline constexpr std::uint32_t kJniStringStart = kGuestDataBase + 0x2100u;
+inline constexpr std::uint32_t kJniStringLimit = kGuestDataBase + 0x3000u;
+inline constexpr std::uint32_t kJniObjectStart = kJniStringLimit;
+inline constexpr std::uint32_t kJniObjectLimit = kGuestDataBase + kGuestDataSize;
+
+// Pure bounds predicates for the two regions. Exposed for fmt_test: a wrong
+// alignment/overflow rule must fail at the last valid and first invalid slot
+// before any guest write is attempted. `out` receives the aligned address on
+// success and is untouched on failure.
+bool JniStringFits(std::uint32_t next, std::size_t len, std::uint32_t* out);
+bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
+
 // D1 (2026-10-17, PLAN.md): the dlmalloc overflow firewall is OFF by default.
 // Default OFF means no recursive_mutex and no live-block index walk on the
 // memcpy/memmove/memset/strcpy/strcat/fgets/fread paths -- the write proceeds at
@@ -583,10 +598,13 @@ private:
     // outside the ANDROID gate (used by GuestFree/Realloc coherence scans on
     // all targets; stays empty where real arrays never occur).
     std::vector<std::pair<std::uint32_t, std::uint32_t>> array_pool_;
-    std::uint32_t jni_str_next_ = 0;  // bump pointer for interned UTF-8 bytes
+    std::uint32_t jni_str_next_ = 0;  // bump in [kJniStringStart,kJniStringLimit)
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
     std::uint32_t jvm_ = 0;         // guest VA of JavaVM* (word -> jvm_table_)
-    std::uint32_t jni_obj_next_ = 0;  // bump pointer for class/method handles
+    std::uint32_t jni_obj_next_ = 0;  // bump in [kJniObjectStart,kJniObjectLimit)
+    // Allocate one aligned 4-byte object/class/method handle. Caller holds
+    // mutex_. Returns false after LOUD-halting; callers must not write then.
+    bool JniAllocObjectHandle(std::uint32_t* out);
     // Recorded AudioOutput native handle (J) from <init>(JIIII)V, for
     // mixdata arg synthesis (HARNESS_JLAST/JOVR "J").
     std::uint32_t audio_j_lo_ = 0, audio_j_hi_ = 0;

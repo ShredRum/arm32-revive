@@ -1672,3 +1672,33 @@ Device gate (same Pixel 1, Android 7.1.2):
   `10c050d8b53a89290058ad1dc79e98169e423f6dae852e2998cb9eb9be9b5b2c`;
   `readelf -Ws` still shows `wctype`/`iswctype` as `UND`. The guest was not
   modified.
+
+### 2026-10-24 — Stage B: split JNI string and handle arena bounds
+
+The JNI guest-data arena is now enforced as two disjoint bump regions:
+strings `[kJniStringStart,kJniStringLimit)` (`0xF1002100..0xF1003000`) and
+object/class/method handles `[kJniObjectStart,kJniObjectLimit)`
+(`0xF1003000..0xF1010000`). `JniNewString` previously checked only the 64-KB
+arena end, so a long string could overwrite the handle table. It now uses
+`JniStringFits` (64-bit alignment/length arithmetic, payload checked before
+the NUL `+1`) and rejects the string-region end. A new
+`JniAllocObjectHandle` aligns and bounds-checks every handle allocation;
+all eight former `jni_obj_next_ += 4` sites use it, including
+`GetStaticObjectField`, which no longer writes a handle before the check.
+Exhaustion is LOUD plus `HaltExecution`; no caller writes on failure.
+
+Native `fmt_test` covers the last valid/first invalid slot, `UINT32_MAX`
+next/len and length overflow for both regions; `fmt_test`, `zip_test`,
+`cbnz_test` and `smoke_a32` pass. Host lib md5
+`442a4a70b063cfbe8e34bf3043ca28f6` (build marker `Oct 24 2026 05:51:09`),
+stripped lib installed in all six APKs md5
+`eaa4ed41bfe7ccd1d1dcfdb86cfbdc96`.
+
+All six APKs were rebuilt and gate-tested: every marker 0 (HEAPCORRUPT,
+HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL), `death.log` 0 B, init
+counts unchanged (Seasons 143, Rio 55, Space 68, Star Wars 97, Star Wars II
+144, Amazon 144). Seasons' Tutorial_red is still byte-identical to the
+85-line baseline and all 46 JSON fields; `G_MEM` is `0x437268` for this
+build. Rio, Space and Star Wars reach their titles; Star Wars II shows its
+known content-service error screen and Amazon its known offline prompt. The
+guest `.so` SHA-256 values still match the profiles; no guest was modified.

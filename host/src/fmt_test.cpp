@@ -718,6 +718,39 @@ int main() {
         check("iswctype A/type 13", 'A', 13, 0);
     }
 
+    // --- JNI guest-data regions: strings [kJniStringStart,kJniStringLimit),
+    //     object handles [kJniObjectStart,kJniObjectLimit). The allocator must
+    //     reject the first byte past a region before any guest write, and the
+    //     32-bit alignment arithmetic must not wrap at UINT32_MAX.
+    {
+        std::uint32_t at = 0;
+        const std::uint32_t obj_last = abr::kJniObjectLimit - 4;
+        Expect("JNI object last slot",
+               std::to_string(abr::JniObjectHandleFits(obj_last, &at)), "1");
+        Expect("JNI object last addr", std::to_string(at), std::to_string(obj_last));
+        Expect("JNI object first invalid",
+               std::to_string(abr::JniObjectHandleFits(obj_last + 1, &at)), "0");
+        Expect("JNI object at limit",
+               std::to_string(abr::JniObjectHandleFits(abr::kJniObjectLimit, &at)), "0");
+        Expect("JNI object UINT32_MAX",
+               std::to_string(abr::JniObjectHandleFits(0xFFFFFFFFu, &at)), "0");
+
+        const std::uint32_t str_last = abr::kJniStringLimit - 4;
+        Expect("JNI string last slot",
+               std::to_string(abr::JniStringFits(str_last, 4, &at)), "1");
+        Expect("JNI string last addr", std::to_string(at), std::to_string(str_last));
+        Expect("JNI string first invalid",
+               std::to_string(abr::JniStringFits(str_last + 1, 1, &at)), "0");
+        Expect("JNI string cannot enter objects",
+               std::to_string(abr::JniStringFits(abr::kJniStringLimit, 1, &at)), "0");
+        Expect("JNI string UINT32_MAX next",
+               std::to_string(abr::JniStringFits(0xFFFFFFFFu, 1, &at)), "0");
+        Expect("JNI string UINT32_MAX len",
+               std::to_string(abr::JniStringFits(abr::kJniStringStart, 0xFFFFFFFFu, &at)), "0");
+        Expect("JNI string len overflow",
+               std::to_string(abr::JniStringFits(abr::kJniStringStart, 0x100000000ull, &at)), "0");
+    }
+
     // --- getauxval: the guest tests the HWCAP bit 12 (FAST_MULT) to decide
     //     whether it may use the fast multiply instructions. We claim the
     //     armv7-a baseline (the JIT emulates those instructions, so the
