@@ -50,19 +50,24 @@ harness history); this file is the Star Wars II log.
   existing 73 are byte-identical) ⇒ `libabhost.so` changes, so all five
   titles have to be re-run on the device.
 
-**One latent trap found and fixed while looking at this**
+**The ABI trap: measured, and the first conclusion was wrong**
 
-The JNI marshalling padded 64-bit arguments to an 8-byte-aligned register
-pair -- the AAPCS32 rule. The guests are built with the **base** procedure
-call standard (arm-linux-gnueabi), where a 64-bit argument may sit in an
-odd-numbered pair; that is not theory, the guest's own variadic printf was
-measured taking a double in the NEXT TWO registers with no even-pair padding
-(2026-10-20). The padding only ever showed up on the methods where a 64-bit
-argument FOLLOWS a 32-bit one -- exactly one method per title
-(`com/rovio/rcs/core/Utils.handleReferrerValue`, the analytics referrer
-tracker, never reached offline), which is why it stayed latent. The padding
-is removed; every other method's layout is unchanged (their 64-bit
-arguments come first, where no padding was inserted anyway).
+The JNI marshalling must pad 64-bit arguments to an 8-byte boundary (an
+AAPCS32 even register pair, or an 8-byte aligned stack slot). This was
+removed during the first pass on the belief that the guests use the base
+PCS (no even-pair rule) everywhere. The guests' own native entry disproves
+it: `com/rovio/rcs/core/Utils.handleReferrerValue(Ljava/lang/String;JJ)V`
+reads its two longs at `entry_sp+0` and `entry_sp+8` (disassembled in both
+Star Wars II builds). A compiler check with the default
+armv7a-linux-gnueabi ABI emits the same two loads; `-mabi=apcs-gnu` would
+put the first long in `r3`, which the guest does not do. The variadic
+printf reader is a separate path and is not evidence for the native entry.
+
+The padding only matters where a 64-bit argument FOLLOWS a 32-bit one;
+exactly one method in the union has that shape (the referrer tracker above,
+never reached offline), which is why removing it broke nothing on the
+device and stayed latent. It is restored, and `fmt_test` now pins the word
+stream for `(Ljava/lang/String;JJ)V`.
 
 **The keys** (found in the pseudocode, re-verified independently of the
 subagent that found them):
@@ -165,6 +170,11 @@ missing is content the original cannot get either. Making the game playable
 offline would mean shipping the service data, i.e. content the backend no
 longer serves -- a content question, not a port question.
 
-**Still open**: the golden check of Seasons' Tutorial_red on the new library
-(it changed: two new JNI forwarders and the JNI marshalling padding
-removed) -- it needs the level to be entered once.
+**Golden check (after the review)**: the JNI marshalling padding is back (the
+first conclusion was wrong -- see the ABI section above), the library was
+rebuilt, all six titles were re-gated on the device (every marker 0,
+death.log 0 B, init counts unchanged: Seasons 142/143, Rio 54/55, Space
+67/68, Star Wars 96/97, Star Wars II 143/144, the Amazon build 143/144) and
+Seasons' Tutorial_red was entered again: the 85-line live-state fingerprint
+is byte-identical to `state_baseline_59ff106.txt` and the 46 numeric fields
+are bit-identical to `Tutorial_red.json`.

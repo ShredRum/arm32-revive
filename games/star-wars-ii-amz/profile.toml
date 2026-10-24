@@ -62,4 +62,4 @@ libs = []
 # (smali/com/rovio/fusionapp/Gen.smali, the <clinit> that fills
 # Gen.library_name).
 smali_lib_name_orig = "AngryBirdsStarWarsII"
-smali_patch_verified = false
+smali_patch_verified = true

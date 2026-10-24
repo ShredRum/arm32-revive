@@ -35,6 +35,7 @@
 
 #include "apphost.h"
 #include "appid.h"
+#include "jni_call_words.h"
 #include "guest/dispatch.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
@@ -728,20 +729,18 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
     // The guest's register words: mock env + wrapped thiz (the guest only
     // ever sees 32-bit mock handles; real 64-bit pointers never enter guest
-    // regs/fields), then sig-driven (J split in two, F via double promotion,
-    // I/Z/B/S/C ints, L/[ wrapped).
+    // regs/fields), then sig-driven (J split in two with 8-byte alignment,
+    // F via double promotion, I/Z/B/S/C ints, L/[ wrapped).
     //
-    // NO 8-byte alignment padding for the 64-bit arguments: the guests are
-    // built with the BASE procedure call standard (arm-linux-gnueabi), where
-    // a 64-bit argument may sit in an odd-numbered register pair. That is
-    // not theory: the guest's own variadic printf was measured taking a
-    // double in the NEXT TWO registers, with no even-pair padding
-    // (2026-10-20, the variadic-ABI work). The AAPCS32 rule we used here
-    // before was wrong for the base variant; it only ever showed up on the
-    // methods where a 64-bit argument follows a 32-bit one -- exactly one
-    // method per title (com/rovio/rcs/core/Utils.handleReferrerValue, the
-    // analytics referrer tracker, never reached offline), which is why it
-    // stayed latent.
+    // 64-bit arguments take an EVEN core-register pair, or an 8-byte aligned
+    // stack slot when no pair is left. That is measured against the guest's
+    // own native entry, not assumed: Utils.handleReferrerValue
+    // (Ljava/lang/String;JJ)V reads its two longs at entry_sp+0 and +8,
+    // which is exactly where the aligned layout puts the low words. Do not
+    // remove the padding: this is the only method in the union where a
+    // 64-bit argument follows a 32-bit one, and dropping the pad silently
+    // hands the guest the HIGH words (usually zero) instead of the values.
+    // The variadic printf reader is a separate path with its own rule.
     std::vector<std::uint32_t> words;
     words.push_back(g_rt->JniEnv());
     words.push_back(g_rt->WrapObject(thiz));
@@ -751,8 +750,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         }
         if (*p == 'J') {
             const jlong v = va_arg(ap, jlong);
-            words.push_back((std::uint32_t)(std::uint64_t)v);
-            words.push_back((std::uint32_t)((std::uint64_t)v >> 32));
+            AppendJniWord64(words, static_cast<std::uint64_t>(v));
         } else if (*p == 'F') {
             const double d = va_arg(ap, double);
             const float f = (float)d;
@@ -763,8 +761,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
             const double d = va_arg(ap, double);
             std::uint64_t u = 0;
             std::memcpy(&u, &d, 8);
-            words.push_back((std::uint32_t)u);
-            words.push_back((std::uint32_t)(u >> 32));
+            AppendJniWord64(words, u);
         } else if (*p == 'L' || *p == '[') {
             void* o = va_arg(ap, void*);
             words.push_back(g_rt->WrapObject(o));

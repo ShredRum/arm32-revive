@@ -91,7 +91,9 @@ so the next title does not need a DIAG run to identify the caller.
 **Still open**
 
 - The golden check of Seasons' Tutorial_red on the new library (it changed:
-  five JNI forwarders added, the JNI marshalling padding removed) -- it
-  needs the level to be entered once.
+  five JNI forwarders added, and the JNI marshalling padding is back to the
+  golden layout after the review). DONE 2026-10-24: the 85-line live state
+  is byte-identical to `state_baseline_59ff106.txt` and the 46 numeric
+  fields are bit-identical to `Tutorial_red.json`.
 - Whether our port of this build reaches the same place as the original
   after the offline prompt is dismissed.

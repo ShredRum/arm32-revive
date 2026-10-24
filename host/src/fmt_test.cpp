@@ -4,10 +4,10 @@
 // target, so the variadic ABI is:
 //
 //   size_t / unsigned int / int / long / ptrdiff_t  = 4 bytes  -> ONE slot
-//   long long / intmax_t                             = 8 bytes  -> an EVEN
-//                                                       register pair
-//   double                                           = 8 bytes  -> an EVEN
-//                                                       register pair
+//   long long / intmax_t                             = 8 bytes  -> TWO
+//                                                       consecutive slots
+//   double                                           = 8 bytes  -> TWO
+//                                                       consecutive slots
 //   va_list (base PCS)                               = ONE WORD (a pointer
 //                                                       to a flat area); the
 //                                                       consumer reads AT the
@@ -16,13 +16,20 @@
 //                                                       (double-word); the
 //                                                       CALLER aligns.
 //
+// That is the VARIADIC export path (ExpandPrintf). The JNI native ENTRY path
+// is different: there a 64-bit argument takes an AAPCS32 even pair (or an
+// 8-byte aligned stack slot), pinned by the marshalling test near the end and
+// by the guest's own Utils.handleReferrerValue entry.
+//
 // The facts below were established by compiling with -mabi=apcs-gnu and
 // reading the disassembly, not by assumption.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
+#include "jni_call_words.h"
 #include "guest/dispatch.h"
 #include "guest/bsd_random.h"
 #include "guest/elf_loader.h"
@@ -665,6 +672,34 @@ int main() {
         const std::uint32_t h2[4] = {26 /*AT_HWCAP2*/, 0, 0, 0};
         Expect("getauxval(AT_HWCAP2) is zero",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, h2)), "0");
+    }
+
+    // --- JNI native-entry marshalling: a 64-bit argument takes an
+    //     EVEN-numbered core register pair (AAPCS32), or an 8-byte aligned
+    //     stack slot. Pinned by the guest's own
+    //     Utils.handleReferrerValue(Ljava/lang/String;JJ)V, which reads its
+    //     two longs at entry_sp+0 and entry_sp+8; without the pad the guest
+    //     would read the HIGH words there (usually zero). Words 0..3 go to
+    //     r0..r3, the rest to the stack at (index - 4) * 4.
+    {
+        std::vector<std::uint32_t> w = {0x10002000u, 0x20003000u, 0x30004000u};
+        abr::AppendJniWord64(w, 0x1122334455667788ull);
+        abr::AppendJniWord64(w, 0x99AABBCCDDEEFF00ull);
+        char got[128];
+        std::snprintf(got, sizeof got, "%zu:%08x %08x %08x %08x %08x %08x %08x %08x",
+                      w.size(), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        Expect("JNI (String;JJ) word stream", got,
+               "8:10002000 20003000 30004000 00000000 55667788 11223344 ddeeff00 99aabbcc");
+    }
+    {
+        // A 64-bit argument that comes first needs no pad: it lands in r2:r3.
+        std::vector<std::uint32_t> w = {0x10002000u, 0x20003000u};
+        abr::AppendJniWord64(w, 0x1122334455667788ull);
+        char got[64];
+        std::snprintf(got, sizeof got, "%zu:%08x %08x %08x %08x",
+                      w.size(), w[0], w[1], w[2], w[3]);
+        Expect("JNI (J)V word stream", got,
+               "4:10002000 20003000 55667788 11223344");
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);

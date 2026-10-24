@@ -1617,3 +1617,23 @@ Notes: the original was installed and removed again for the measurement, so
 the guest's saved data was wiped (agreed) -- the golden level check needs
 Tutorial_red to be entered once more. The original's first launch also
 showed the Play Protect scan dialog (outside the timed window).
+
+### 2026-10-24 — re-gate on the library with the JNI Int family (and the ABI revert)
+
+The harness gained the JNI Int family (49/50/51: the Amazon Star Wars II
+build called `CallIntMethodV` and the unimplemented branch halted the guest),
+and the 8-byte JNI marshalling padding was restored after a review found the
+removal wrong: the guest's own `Utils.handleReferrerValue(Ljava/lang/String;JJ)V`
+reads its two longs at `entry_sp+0` and `entry_sp+8`, i.e. AAPCS32 even-pair
+layout, not the base-PCS odd pair.
+
+All six titles were rebuilt and re-gated on the device: every marker 0
+(HEAPCORRUPT, HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL), death.log
+0 B, init counts unchanged (Seasons 142/143, Rio 54/55, Space 67/68, Star
+Wars 96/97, Star Wars II 143/144, the Amazon build 143/144).
+
+Seasons' Tutorial_red was entered again on the new library:
+- the 85-line live-state fingerprint is **byte-identical** to
+  `state_baseline_59ff106.txt`;
+- the 46 numeric fields are **bit-identical** to `Tutorial_red.json`
+  (`check_level_vs_json.py`).
