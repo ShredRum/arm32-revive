@@ -17,6 +17,8 @@ struct DiagCounters {
     std::uint32_t jni_obj_high = 0;  // 4-byte handles from kJniObjectStart
     // Guest heap: live bytes (heap_used_) high-water.
     std::uint64_t heap_peak = 0;
+    // Per-thread errno/TLS reaps (bridge worker exit or host thread exit).
+    std::atomic<std::uint64_t> tls_reaps{0};
     // localtime()/gmtime() static-buffer allocations: cumulative calls/bytes.
     // Updated outside mutex_ (CallImport does not hold it), hence atomics.
     std::atomic<std::uint64_t> localtime_allocs{0};

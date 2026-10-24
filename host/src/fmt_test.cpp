@@ -100,6 +100,18 @@ struct RuntimeTestAccess {
     static void TrackUtfChars(Runtime& rt, std::uint32_t g) { rt.jni_utf_chars_.insert(g); }
     static std::size_t AssetMapSize(Runtime& rt) { return rt.asset_map_.size(); }
     static std::size_t LiveCount(Runtime& rt) { return rt.live_idx_.Size(); }
+    static void SeedHostThreadTls(Runtime& rt, std::uint32_t tid, std::uint32_t slot,
+                                  std::uint32_t key, std::uint32_t value) {
+        rt.errno_slots_[tid] = slot;
+        rt.tls_map_[(static_cast<std::uint64_t>(key) << 32) | tid] = value;
+    }
+    static bool HostThreadHasErrno(Runtime& rt, std::uint32_t tid) {
+        return rt.errno_slots_.find(tid) != rt.errno_slots_.end();
+    }
+    static bool HostThreadHasTls(Runtime& rt, std::uint32_t tid, std::uint32_t key) {
+        return rt.tls_map_.find((static_cast<std::uint64_t>(key) << 32) | tid) != rt.tls_map_.end();
+    }
+    static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
 };
 }  // namespace abr
 
@@ -996,6 +1008,30 @@ int main() {
                    "4/0");
             Expect("gmtime gmtoff/zone", std::to_string(off) + "/" + std::to_string(zone), "0/0");
         }
+    }
+
+    // --- host thread exit: ReapHostThread drops the exiting tid's errno and
+    //     TLS state (HostThreadRelease calls it before freeing the stack/JIT).
+    {
+        const std::uint32_t fake_tid = 4242;
+        const std::uint32_t key = 7;
+        const std::uint32_t slot = 0xF1000300u;
+        const std::size_t free_before = abr::RuntimeTestAccess::FreeErrnoCount(rt);
+        abr::RuntimeTestAccess::SeedHostThreadTls(rt, fake_tid, slot, key, 0x12345678u);
+        Expect("host thread state seeded",
+               (abr::RuntimeTestAccess::HostThreadHasErrno(rt, fake_tid) &&
+                abr::RuntimeTestAccess::HostThreadHasTls(rt, fake_tid, key))
+                   ? "1"
+                   : "0",
+               "1");
+        rt.ReapHostThread(fake_tid);
+        Expect("host thread errno reaped",
+               abr::RuntimeTestAccess::HostThreadHasErrno(rt, fake_tid) ? "0" : "1", "1");
+        Expect("host thread tls reaped",
+               abr::RuntimeTestAccess::HostThreadHasTls(rt, fake_tid, key) ? "0" : "1", "1");
+        Expect("host thread errno slot recycled",
+               std::to_string(abr::RuntimeTestAccess::FreeErrnoCount(rt)),
+               std::to_string(free_before + 1));
     }
 
     // --- AAssetManager_open failure: a bad deflate entry must free the

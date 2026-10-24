@@ -1843,3 +1843,40 @@ allocations, one release, one copy still held by the guest), with
 `jni_str=620` and `maps=str=63` unchanged over 70 s. The remaining
 post-launch `jni_str`/`maps` growth is from `JniNewString` mock jstrings,
 not this path. All markers 0 and `death.log` 0 B. No other title was run.
+
+### 2026-10-24 — Stage E: localtime, AAsset failure, host-thread TLS
+
+`localtime()`/`gmtime()` used to allocate a fresh 44-byte guest `struct tm`
+on every non-`_r` call and never free it. The dispatch now keeps one
+`thread_local` guest buffer per host thread, allocates it on first use, and
+returns the same pointer thereafter; `_r` still writes the caller's buffer.
+Native `fmt_test` calls `gmtime(0)` twice and checks the pointer is identical
+and the Bionic 44-byte layout is 1970-01-01 00:00:00 UTC. Device counters went
+from Stage D's `localtime=3/132` to `1/44`.
+
+`AAssetManager_open` allocated `gbuf` before extraction and leaked it on the
+unsupported-method halt path and on the extract-failed NULL path. Both now
+close the APK file and `GuestFree(gbuf)`. A native fixture builds a one-entry
+ZIP that claims deflate but carries a non-deflate payload; the open returns
+NULL, `asset_map_` stays empty, and the live guest-block count returns to its
+pre-open value. No shipping APK is used as the fixture.
+
+`HostThreadRelease` now calls `Runtime::ReapHostThread(st->tid)` before
+freeing the guest stack and deleting the JIT, guarded by `if (g_rt)`. The
+diagnostic line exposes `tls=live/reaps`. Native `fmt_test` seeds a fake tid's
+errno/TLS state, calls `ReapHostThread`, and verifies both entries are gone
+and the errno slot was recycled.
+
+Device: diag host lib `8e3089dee77024970d720ebe5c704e3d`, stripped
+`d565d293586751bdb92fc93699836331`, APK
+`eeec9ef431025dc5d1732e839883f069`, marker `Oct 24 2026 09:03:47`.
+Seasons loaded the saved level: `localtime=1/44`, `tls=3/6`, `errno=5/3`,
+`assets=11`, `fd=16,next=131,free=32655,file=3`, `utf=1,2/1`; all markers 0
+and `death.log` 0 B. No other title was run.
+
+Stage E no-fix decisions: `WrapObject`/real global refs stayed at `wrapg=10`
+and live 10, with newg/delg both advancing, so no refcount change was made.
+`GetMethodID`/field cookies remain uncached because the boot traffic is
+startup-only and no counter shows repeated resolution. The remaining
+`JniNewString` mock-jstring arena growth is separate from the real-wrapped
+`GetStringUTFChars` path and is not a guest allocation fix.

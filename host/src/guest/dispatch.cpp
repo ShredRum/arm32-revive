@@ -7707,6 +7707,7 @@ void Runtime::DumpDiagCounters() {
     std::size_t n_strings = 0, n_objects = 0, n_rev = 0, n_fwd = 0, n_utf = 0;
     std::uint64_t utf_allocs = 0, utf_releases = 0;
     std::size_t n_tls = 0, n_errno = 0, n_errno_free = 0;
+    std::uint64_t tls_reaps = 0;
     std::uint32_t errno_next = 0;
     std::uint64_t wrapg = 0, newg = 0, delg = 0;
     std::uint64_t loc_allocs = 0, loc_bytes = 0;
@@ -7741,6 +7742,7 @@ void Runtime::DumpDiagCounters() {
         n_errno = errno_slots_.size();
         n_errno_free = errno_free_.size();
         errno_next = next_errno_slot_;
+        tls_reaps = diag_.tls_reaps.load(std::memory_order_relaxed);
         wrapg = diag_.wrap_globals;
         newg = diag_.jni_new_global_refs.load(std::memory_order_relaxed);
         delg = diag_.jni_delete_global_refs.load(std::memory_order_relaxed);
@@ -7776,14 +7778,15 @@ void Runtime::DumpDiagCounters() {
         "[counters] heap=%llu/%llu jni_str=%u/%u jni_obj=%u/%u "
         "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu utf=%zu,%llu/%llu wrapg=%llu newg=%llu delg=%llu "
         "%s localtime=%llu/%llu assets=%zu/%llu,peak=%llu/%llu "
-        "tls=%zu errno=%zu/%zu,next=%u threads=%zu svc=%llu\n",
+        "tls=%zu/%llu errno=%zu/%zu,next=%u threads=%zu svc=%llu\n",
         (unsigned long long)heap_used, (unsigned long long)heap_peak, str_used, str_high,
         obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd, n_utf,
         (unsigned long long)utf_allocs, (unsigned long long)utf_releases,
         (unsigned long long)wrapg, (unsigned long long)newg, (unsigned long long)delg, fd,
         (unsigned long long)loc_allocs, (unsigned long long)loc_bytes, n_assets,
         (unsigned long long)asset_bytes, (unsigned long long)asset_peak_open,
-        (unsigned long long)asset_peak_bytes, n_tls, n_errno, n_errno_free, errno_next,
+        (unsigned long long)asset_peak_bytes, n_tls, (unsigned long long)tls_reaps, n_errno,
+        n_errno_free, errno_next,
         n_threads, (unsigned long long)svc_count.load(std::memory_order_relaxed));
 }
 #endif
@@ -7815,11 +7818,20 @@ void Runtime::ReapThreadStack(std::uint32_t tid) {
     ReapThreadTls(tid);
 }
 
+// Product host thread exit: drop the tid's errno/TLS state before the caller
+// frees its guest stack and deletes its JIT.
+void Runtime::ReapHostThread(std::uint32_t tid) {
+    ReapThreadTls(tid);
+}
+
 // G2.6 (2026-10-18): per-tid state must not outlive the thread. Hands the errno
 // slot back for reuse (the pool is finite) and drops the thread's TLS entries
 // (keyed (key<<32)|tid). Idempotent.
 void Runtime::ReapThreadTls(std::uint32_t tid) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+#ifdef ABR_DIAG_COUNTERS
+    diag_.tls_reaps.fetch_add(1, std::memory_order_relaxed);
+#endif
     const auto it = errno_slots_.find(tid);
     if (it != errno_slots_.end()) {
         errno_free_.push_back(it->second);

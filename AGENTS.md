@@ -4302,7 +4302,7 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 
 ## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
 
-STATUS: **Stages A-D DONE (2026-10-24), Stage E in progress (fclose fixed).** HEAD `f1047e2` was
+STATUS: **Stages A-D DONE (2026-10-24), Stage E code fixes DONE; Stage F next.** HEAD `f24dc7f` was
 clean before this entry; Stages A, B, C and D are committed separately with
 their journal and device-gate evidence. This is the canonical checklist for
 the next work; a stage is closed only when every acceptance item is met. Do
@@ -4591,8 +4591,8 @@ OFF; `scripts/build-lib.sh --diag` configures `host/build-android-diag` and
 `#ifdef ABR_DIAG_COUNTERS`. The product watchdog prints one line every 30 s:
 `heap=used/peak jni_str=used/high jni_obj=used/high maps=str,obj,rev,fwd
 utf=live,allocs/releases wrapg newg delg fd=live,next,free,file
-localtime=allocs/bytes assets=open/bytes,peak tls errno=slots/free,next
-threads svc`. A contested
+localtime=allocs/bytes assets=open/bytes,peak tls=live/reaps
+errno=slots/free,next threads svc`. A contested
 runtime mutex prints `[counters] SKIPPED (runtime mutex contested)` rather
 than wedging the watchdog; 9/15 level samples printed, the rest skipped. The
 existing JNI/fd capacity checks still print LOUD unconditionally.
@@ -4649,30 +4649,69 @@ Do not bundle these. Order by the measured slope.
 - [x] `fclose`: free the 96-byte guest `FILE`, erase `fd_map_` entries, and
   recycle the guest fd only after close. Do not touch the standard streams.
   Add a fopen/fclose loop test and check fd counters.
-- [ ] `localtime`/`gmtime`: use a per-thread 44-byte guest buffer allocated
+- [x] `localtime`/`gmtime`: use a per-thread 44-byte guest buffer allocated
   once and reused, matching the C static-buffer contract; `_r` paths keep
   using the caller buffer. Test repeated calls return the same pointer and
   valid fields.
-- [ ] `AAssetManager_open`: `GuestFree(gbuf)` on every extraction failure and
+- [x] `AAssetManager_open`: `GuestFree(gbuf)` on every extraction failure and
   on the bad-method path; verify with a deliberately bad asset in a test
   fixture, not a shipping APK.
-- [ ] `HostThreadRelease`: call `ReapThreadTls` for the exiting tid before
+- [x] `HostThreadRelease`: call `ReapThreadTls` for the exiting tid before
   deleting the JIT/stack; guard the runtime lifetime. Test thread churn with
   counters.
-- [ ] `WrapObject`/global refs: only if Stage D shows growth. Prefer a
-  refcounted mock-to-real mapping with real `DeleteGlobalRef` when the guest
-  calls it; if the guest never calls it, add a LOUD high-water warning rather
-  than a silent cap. Any identity/refcount change needs a dedicated device
-  check because stale mock handles are a correctness risk.
-- [ ] `GetMethodID`/field cookies: add a cache only if counters show repeated
-  resolution. The existing boot logs show startup-only traffic.
-- [ ] Do not "fix" the guest's own allocations; measure them separately.
+- [x] `WrapObject`/global refs: no fix. Stage D `wrapg` stayed at 10 and the
+  live real-global count stayed 10; the guest does call `DeleteGlobalRef`
+  (newg/delg both advanced), so there is no measured slope to chase. A
+  refcounted identity change would be a correctness risk without evidence.
+- [x] `GetMethodID`/field cookies: no cache. The existing boot logs show
+  startup-only traffic, and Stage D has no counter showing repeated
+  resolution; a cache would add identity/lifetime risk without evidence.
+- [x] Do not "fix" the guest's own allocations; measure them separately.
 
 Acceptance per fix:
 - [ ] A unit test or a documented device reproduction.
 - [ ] Counter slope before/after on the diagnostic build.
 - [ ] Shipping build unchanged in behavior; device gate; Seasons golden.
 - [ ] One commit per fix, with the measurement in the message.
+
+`localtime`/`gmtime` closure (2026-10-24):
+- [x] `thread_local` guest `struct tm` buffer, allocated on first non-`_r`
+  call and reused; `_r` still writes the caller buffer. Native `fmt_test`
+  calls `gmtime(0)` twice: same pointer, and the 44-byte Bionic layout has
+  the expected 1970-01-01 fields. Device: `localtime=1/44` versus Stage D's
+  `3/132`.
+- [x] One commit, measurement in the message.
+
+`AAssetManager_open` closure (2026-10-24):
+- [x] Both failure paths free `gbuf`: unsupported method (before the halt)
+  and extract-failed (before returning NULL). Native `fmt_test` builds a
+  deliberately bad deflate asset fixture; `AAssetManager_open` returns NULL,
+  `asset_map_` stays empty, and `live_idx_` returns to its pre-open count.
+  No shipping APK was used as the fixture.
+- [x] One commit, measurement in the message.
+
+`HostThreadRelease` closure (2026-10-24):
+- [x] `Runtime::ReapHostThread(tid)` calls `ReapThreadTls`; the host thread
+  destructor calls it before `GuestFree(stack)` and `delete jit`, guarded by
+  `if (g_rt)`. `DiagCounters::tls_reaps` and the `tls=live/reaps` field make
+  the path observable. Native `fmt_test` seeds a fake tid's errno/TLS state,
+  calls `ReapHostThread`, and verifies both entries are gone and the errno
+  slot is recycled.
+- [x] Device diag: `tls=3/6` (six reaps, three live) with `errno=5/3` and
+  `threads=12` stable; all markers 0.
+- [x] One commit, measurement in the message.
+
+Stage E closure (2026-10-24): all measured fixes are in. Device diag host lib
+`8e3089dee77024970d720ebe5c704e3d`, stripped
+`d565d293586751bdb92fc93699836331`, APK
+`eeec9ef431025dc5d1732e839883f069`, marker `Oct 24 2026 09:03:47`.
+Seasons loaded the saved level: `localtime=1/44`, `tls=3/6`, `assets=11`,
+`fd=16,next=131,free=32655,file=3`, `utf=1,2/1`; all markers 0 and
+`death.log` 0 B. The `fclose`, real-wrapped UTF, localtime, AAsset-failure and
+host-thread-exit paths have tests. `WrapObject`/global refs and `GetMethodID`
+caching were deliberately not changed for lack of a measured slope. The
+remaining `JniNewString` mock-jstring arena growth is separate and is not a
+guest allocation fix. Stage G still rebuilds and gates all six shipping APKs.
 
 `GetStringUTFChars` closure (2026-10-24):
 - [x] The real-wrapped path now copies into the guest heap, inserts the

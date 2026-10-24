@@ -165,9 +165,13 @@ void HostThreadRelease(void* p) {
     }
     Log("thread leave tid=%u stack=%08x live=%zu (created=%u)", st->tid, st->stack, live,
         g_ht_created.load());
-    if (st->stack) {
-        g_rt->GuestFree(st->stack);
-        st->stack = 0;
+    if (g_rt) {
+        // Drop this tid's errno/TLS before the guest stack and JIT disappear.
+        g_rt->ReapHostThread(st->tid);
+        if (st->stack) {
+            g_rt->GuestFree(st->stack);
+            st->stack = 0;
+        }
     }
     delete st->jit;
     st->jit = nullptr;

@@ -305,6 +305,9 @@ public:
     // Product host (apphost): bind a caller-created Jit + tid to this thread
     // (Java-created threads have no bridge ThreadState; same routing).
     void ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid);
+    // Product host thread exit: drop this tid's errno/TLS state before the
+    // caller frees its guest stack and deletes its JIT.
+    void ReapHostThread(std::uint32_t tid);
     std::uint32_t PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, std::uint32_t start,
                                 std::uint32_t arg);
     // End-of-run census: tid/done/retval for every worker (detached threads
