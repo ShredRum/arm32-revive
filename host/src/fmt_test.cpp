@@ -98,6 +98,8 @@ struct RuntimeTestAccess {
     static std::size_t JniStringCount(Runtime& rt) { return rt.jni_strings_.size(); }
     static std::size_t UtfCharCount(Runtime& rt) { return rt.jni_utf_chars_.size(); }
     static void TrackUtfChars(Runtime& rt, std::uint32_t g) { rt.jni_utf_chars_.insert(g); }
+    static std::size_t AssetMapSize(Runtime& rt) { return rt.asset_map_.size(); }
+    static std::size_t LiveCount(Runtime& rt) { return rt.live_idx_.Size(); }
 };
 }  // namespace abr
 
@@ -112,6 +114,68 @@ void Expect(const std::string& what, const std::string& got, const std::string& 
     }
     std::printf("FAIL %-28s -> \"%s\" (want \"%s\")\n", what.c_str(), got.c_str(), want.c_str());
     g_fail++;
+}
+
+void Put16(std::vector<std::uint8_t>& v, std::uint16_t x) {
+    v.push_back(static_cast<std::uint8_t>(x & 0xff));
+    v.push_back(static_cast<std::uint8_t>(x >> 8));
+}
+
+void Put32(std::vector<std::uint8_t>& v, std::uint32_t x) {
+    for (int i = 0; i < 4; i++) {
+        v.push_back(static_cast<std::uint8_t>((x >> (8 * i)) & 0xff));
+    }
+}
+
+// A one-entry ZIP whose central directory says "deflated, 64 bytes", but the
+// payload is not a deflate stream. AAssetManager_open must fail, free the
+// already-allocated guest buffer, and leave no live block behind.
+std::vector<std::uint8_t> MakeBadAssetZip() {
+    const std::string name = "assets/bad.bin";
+    const std::vector<std::uint8_t> data = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03};
+    std::vector<std::uint8_t> v;
+    Put32(v, 0x04034b50u);  // local file header
+    Put16(v, 20);
+    Put16(v, 0);
+    Put16(v, 8);  // method 8 = deflate
+    Put16(v, 0);
+    Put16(v, 0);
+    Put32(v, 0);
+    Put32(v, static_cast<std::uint32_t>(data.size()));
+    Put32(v, 64);  // declared uncompressed size
+    Put16(v, static_cast<std::uint16_t>(name.size()));
+    Put16(v, 0);
+    v.insert(v.end(), name.begin(), name.end());
+    v.insert(v.end(), data.begin(), data.end());
+    const std::uint32_t cd_off = static_cast<std::uint32_t>(v.size());
+    Put32(v, 0x02014b50u);  // central directory
+    Put16(v, 20);
+    Put16(v, 20);
+    Put16(v, 0);
+    Put16(v, 8);
+    Put16(v, 0);
+    Put16(v, 0);
+    Put32(v, 0);
+    Put32(v, static_cast<std::uint32_t>(data.size()));
+    Put32(v, 64);
+    Put16(v, static_cast<std::uint16_t>(name.size()));
+    Put16(v, 0);
+    Put16(v, 0);
+    Put16(v, 0);
+    Put16(v, 0);
+    Put32(v, 0);
+    Put32(v, 0);  // local header offset
+    v.insert(v.end(), name.begin(), name.end());
+    const std::uint32_t cd_size = static_cast<std::uint32_t>(v.size()) - cd_off;
+    Put32(v, 0x06054b50u);  // EOCD
+    Put16(v, 0);
+    Put16(v, 0);
+    Put16(v, 1);
+    Put16(v, 1);
+    Put32(v, cd_size);
+    Put32(v, cd_off);
+    Put16(v, 0);
+    return v;
 }
 
 constexpr std::uint32_t kScratch = 0x10001000;  // strings
@@ -148,6 +212,8 @@ int main() {
     mod.imports.push_back(abr::Import{"fopen", true, 0, 0, 0});           // 21
     mod.imports.push_back(abr::Import{"fclose", true, 0, 0, 0});          // 22
     mod.imports.push_back(abr::Import{"gmtime", true, 0, 0, 0});          // 23
+    mod.imports.push_back(abr::Import{"AAssetManager_fromJava", true, 0, 0, 0});  // 24
+    mod.imports.push_back(abr::Import{"AAssetManager_open", true, 0, 0, 0});      // 25
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -929,6 +995,35 @@ int main() {
             Expect("gmtime epoch weekday/yday", std::to_string(f[6]) + "/" + std::to_string(f[7]),
                    "4/0");
             Expect("gmtime gmtoff/zone", std::to_string(off) + "/" + std::to_string(zone), "0/0");
+        }
+    }
+
+    // --- AAssetManager_open failure: a bad deflate entry must free the
+    //     guest buffer it allocated before reporting NULL.
+    {
+        const std::string bad_zip = "/tmp/opencode/abr-asset-bad.zip";
+        const std::vector<std::uint8_t> zip = MakeBadAssetZip();
+        FILE* zf = std::fopen(bad_zip.c_str(), "wb");
+        Expect("bad asset zip written", zf ? "1" : "0", "1");
+        if (zf) {
+            std::fwrite(zip.data(), 1, zip.size(), zf);
+            std::fclose(zf);
+            rt.SetApkPath(bad_zip);
+            const std::uint32_t mgr_args[4] = {0, 0, 0, 0};
+            const std::uint32_t mgr = abr::RuntimeTestAccess::Call(rt, 24, mgr_args);
+            Expect("bad asset manager indexed", mgr ? "1" : "0", "1");
+            const std::uint32_t kAssetPath = 0x10006300;
+            put(kAssetPath, "assets/bad.bin");
+            const std::uint32_t open_args[4] = {mgr, kAssetPath, 0, 0};
+            const std::size_t live_before = abr::RuntimeTestAccess::LiveCount(rt);
+            const std::uint32_t asset = abr::RuntimeTestAccess::Call(rt, 25, open_args);
+            Expect("bad asset open returns NULL", asset ? "0" : "1", "1");
+            Expect("bad asset not registered", std::to_string(abr::RuntimeTestAccess::AssetMapSize(rt)),
+                   "0");
+            Expect("bad asset guest buffer freed",
+                   std::to_string(abr::RuntimeTestAccess::LiveCount(rt)),
+                   std::to_string(live_before));
+            std::filesystem::remove(bad_zip);
         }
     }
 

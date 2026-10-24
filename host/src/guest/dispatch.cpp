@@ -5655,6 +5655,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[asset] LOUD open(\"%s\") method %u -- halting\n", want.c_str(),
                             found->method);
                 std::fclose(f);
+                GuestFree(gbuf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
@@ -5662,6 +5663,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::fclose(f);
             if (!ok) {
                 std::printf("[asset] open(\"%s\") extract failed\n", want.c_str());
+                GuestFree(gbuf);
                 Ret(regs, 0);
                 return;
             }
