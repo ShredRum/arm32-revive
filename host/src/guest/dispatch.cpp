@@ -597,6 +597,11 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         }
         LiveIdxInsert(out, usable);
         heap_used_ += total;
+#ifdef ABR_DIAG_COUNTERS
+        if (heap_used_ > diag_.heap_peak) {
+            diag_.heap_peak = heap_used_;
+        }
+#endif
     } catch (...) {
         // Host-side OOM on bookkeeping (not guest OOM): hand the block back,
         // fail like OOM. Otherwise a std::bad_alloc would escape through the
@@ -658,6 +663,11 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
     }
     LiveIdxInsert(out, usable);
     heap_used_ += total;
+#ifdef ABR_DIAG_COUNTERS
+    if (heap_used_ > diag_.heap_peak) {
+        diag_.heap_peak = heap_used_;
+    }
+#endif
     return out;
 }
 
@@ -735,6 +745,11 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         if ((std::uint64_t)old > rtotal) {
             heap_used_ -= (std::uint64_t)old - rtotal;
         }
+#ifdef ABR_DIAG_COUNTERS
+        if (heap_used_ > diag_.heap_peak) {
+            diag_.heap_peak = heap_used_;
+        }
+#endif
         for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
             if (it->first == addr) {
                 array_pool_.erase(it);
@@ -3168,6 +3183,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::uint32_t out = a1;
         if (use_static) {
             out = GuestMalloc(44);
+#ifdef ABR_DIAG_COUNTERS
+            if (out) {
+                diag_.localtime_allocs.fetch_add(1, std::memory_order_relaxed);
+                diag_.localtime_bytes.fetch_add(44, std::memory_order_relaxed);
+            }
+#endif
         }
         if (out && CheckRange(out, 44, true) && ht) {
             std::int32_t f[9] = {ht->tm_sec,  ht->tm_min,  ht->tm_hour, ht->tm_mday, ht->tm_mon,
@@ -5586,6 +5607,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             {
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 asset_map_[gbuf] = HostAsset{gbuf, found->usize};
+#ifdef ABR_DIAG_COUNTERS
+                std::uint64_t open_bytes = 0;
+                for (const auto& kv : asset_map_) {
+                    open_bytes += kv.second.size;
+                }
+                if (asset_map_.size() > diag_.asset_peak_open) {
+                    diag_.asset_peak_open = asset_map_.size();
+                }
+                if (open_bytes > diag_.asset_peak_bytes) {
+                    diag_.asset_peak_bytes = open_bytes;
+                }
+#endif
             }
             if (EnvOn("HARNESS_FILESLOG")) {
                 std::printf("[asset] open(\"%s\") -> %08x (%llu bytes, %s)\n", want.c_str(),
@@ -7601,6 +7634,90 @@ void Runtime::ThreadCensus() {
     }
 }
 
+#ifdef ABR_DIAG_COUNTERS
+// Stage D: one line every 30 s. Snapshot under try-locks (the watchdog must
+// never wedge on a guest-held mutex), then print after releasing them. The
+// line names each quantity and keeps used/high-water side by side.
+void Runtime::DumpDiagCounters() {
+    std::uint64_t heap_used = 0, heap_peak = 0;
+    std::uint32_t str_used = 0, str_high = 0, obj_used = 0, obj_high = 0;
+    std::size_t n_strings = 0, n_objects = 0, n_rev = 0, n_fwd = 0;
+    std::size_t n_tls = 0, n_errno = 0, n_errno_free = 0;
+    std::uint32_t errno_next = 0;
+    std::uint64_t wrapg = 0, newg = 0, delg = 0;
+    std::uint64_t loc_allocs = 0, loc_bytes = 0;
+    std::size_t n_assets = 0, n_threads = 0;
+    std::uint64_t asset_bytes = 0, asset_peak_open = 0, asset_peak_bytes = 0;
+    std::size_t n_fd = 0, n_file = 0;
+    std::uint32_t fd_next = 0;
+    bool fd_ok = false;
+    {
+        std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            std::printf("[counters] SKIPPED (runtime mutex contested)\n");
+            return;
+        }
+        heap_used = heap_used_;
+        heap_peak = diag_.heap_peak;
+        str_used = jni_str_next_ >= kJniStringStart ? jni_str_next_ - kJniStringStart : 0;
+        str_high = diag_.jni_str_high;
+        obj_used = jni_obj_next_ >= kJniObjectStart
+                       ? (jni_obj_next_ - kJniObjectStart) / 4u
+                       : 0;
+        obj_high = diag_.jni_obj_high;
+        n_strings = jni_strings_.size();
+        n_objects = jni_objects_.size();
+        n_rev = obj_rev_.size();
+        n_fwd = obj_fwd_.size();
+        n_threads = threads_.size();
+        n_tls = tls_map_.size();
+        n_errno = errno_slots_.size();
+        n_errno_free = errno_free_.size();
+        errno_next = next_errno_slot_;
+        wrapg = diag_.wrap_globals;
+        newg = diag_.jni_new_global_refs.load(std::memory_order_relaxed);
+        delg = diag_.jni_delete_global_refs.load(std::memory_order_relaxed);
+        loc_allocs = diag_.localtime_allocs.load(std::memory_order_relaxed);
+        loc_bytes = diag_.localtime_bytes.load(std::memory_order_relaxed);
+        n_assets = asset_map_.size();
+        for (const auto& kv : asset_map_) {
+            asset_bytes += kv.second.size;
+        }
+        asset_peak_open = diag_.asset_peak_open;
+        asset_peak_bytes = diag_.asset_peak_bytes;
+        // fd_map_/file_map_ use the leaf io_mutex_, not mutex_. Try it only;
+        // if a guest is inside a file syscall, print '?' for those fields.
+        std::unique_lock<std::mutex> io(io_mutex_, std::try_to_lock);
+        if (io.owns_lock()) {
+            n_fd = fd_map_.size();
+            n_file = file_map_.size();
+            fd_next = next_guest_fd_;
+            fd_ok = true;
+        }
+    }
+    char fd[112];
+    if (fd_ok) {
+        const unsigned long long fd_free = fd_next < 0x8000u ? 0x8000u - fd_next : 0;
+        std::snprintf(fd, sizeof(fd), "fd=%zu,next=%u,free=%llu,file=%zu", n_fd, fd_next,
+                      fd_free, n_file);
+    } else {
+        std::snprintf(fd, sizeof(fd), "fd=?,next=?,free=?,file=?");
+    }
+    std::printf(
+        "[counters] heap=%llu/%llu jni_str=%u/%u jni_obj=%u/%u "
+        "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu wrapg=%llu newg=%llu delg=%llu "
+        "%s localtime=%llu/%llu assets=%zu/%llu,peak=%llu/%llu "
+        "tls=%zu errno=%zu/%zu,next=%u threads=%zu svc=%llu\n",
+        (unsigned long long)heap_used, (unsigned long long)heap_peak, str_used, str_high,
+        obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd,
+        (unsigned long long)wrapg, (unsigned long long)newg, (unsigned long long)delg, fd,
+        (unsigned long long)loc_allocs, (unsigned long long)loc_bytes, n_assets,
+        (unsigned long long)asset_bytes, (unsigned long long)asset_peak_open,
+        (unsigned long long)asset_peak_bytes, n_tls, n_errno, n_errno_free, errno_next,
+        n_threads, (unsigned long long)svc_count.load(std::memory_order_relaxed));
+}
+#endif
+
 // Free a finished thread's 8MB guest stack exactly once. Before 2026-10-18
 // nothing freed it at all ("leak accepted in bring-up"), which is how the
 // VideoRewards / time-sync retry loop (one pthread_create per iteration, guest
@@ -7746,6 +7863,9 @@ std::uint32_t Runtime::WrapObject(void* real) {
             next_obj_ += 4;
             obj_fwd_[g] = h;
             obj_rev_[h] = g;
+#ifdef ABR_DIAG_COUNTERS
+            ++diag_.wrap_globals;
+#endif
             return h;
         }
         // NewGlobalRef failed: fall through to raw (mock path will cope).
@@ -8455,6 +8575,12 @@ bool Runtime::JniAllocObjectHandle(std::uint32_t* out) {
         return false;
     }
     jni_obj_next_ = slot + 4;
+#ifdef ABR_DIAG_COUNTERS
+    const std::uint32_t obj_used = (jni_obj_next_ - kJniObjectStart) / 4u;
+    if (obj_used > diag_.jni_obj_high) {
+        diag_.jni_obj_high = obj_used;
+    }
+#endif
     if (out) {
         *out = slot;
     }
@@ -8492,6 +8618,12 @@ std::uint32_t Runtime::JniNewString(const std::string& s) {
     }
     std::memcpy(H(out), s.c_str(), len);
     jni_str_next_ = out + static_cast<std::uint32_t>(len);
+#ifdef ABR_DIAG_COUNTERS
+    const std::uint32_t str_used = jni_str_next_ - kJniStringStart;
+    if (str_used > diag_.jni_str_high) {
+        diag_.jni_str_high = str_used;
+    }
+#endif
     jni_strings_[out] = s;
     return out;  // opaque jstring handle == UTF-8 buffer VA
 }
@@ -8787,11 +8919,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 227:  // DeleteWeakGlobalRef(env, ref) -> void (same)
         // PROVEN load-bearing: caller @0x267FD0 treats r0!=0 as error and
         // throws "Java method threw an exception". Zero it like Dalvik does.
+#ifdef ABR_DIAG_COUNTERS
+        if (fn == 22) {
+            diag_.jni_delete_global_refs.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
         Ret(regs, 0);
         return;
     case 25:   // NewLocalRef(env, ref) -> same handle (no GC in mock world)
     case 21:   // NewGlobalRef(env, obj) -> same handle
     case 226:  // NewWeakGlobalRef(env, obj) -> same handle
+#ifdef ABR_DIAG_COUNTERS
+        if (fn == 21) {
+            diag_.jni_new_global_refs.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
         Ret(regs, a1);
         return;
     case 17:  // ExceptionClear(env) -> void (mock never raises)

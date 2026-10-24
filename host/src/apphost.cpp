@@ -411,11 +411,22 @@ std::string ImportNameAt(std::uint32_t pc) {
 void Watchdog() {
     long long reported = 0;
     unsigned last_corrupt = 0;
+#ifdef ABR_DIAG_COUNTERS
+    // Stage D: one [counters] line every 30 s. The watchdog already wakes
+    // every 10 s; this adds no per-frame work to the guest.
+    long long last_counters = WallMs();
+#endif
     while (true) {
         sleep(10);
         if (!g_rt) {
             continue;
         }
+#ifdef ABR_DIAG_COUNTERS
+        if (WallMs() - last_counters >= 30000) {
+            last_counters = WallMs();
+            g_rt->DumpDiagCounters();
+        }
+#endif
         // dlmalloc corruption tripwire (replaces abort): report transitions
         // with the guest pc captured at the trip. The game limps on past
         // dropped chunks, so this names WHEN headers break, not just death.

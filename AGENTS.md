@@ -4302,8 +4302,8 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
 
 ## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
 
-STATUS: **Stages A-C DONE (2026-10-24), Stage D next.** HEAD `7230a14` was
-clean before this entry; Stages A, B and C are committed separately with
+STATUS: **Stages A-D DONE (2026-10-24), Stage E next.** HEAD `f1047e2` was
+clean before this entry; Stages A, B, C and D are committed separately with
 their journal and device-gate evidence. This is the canonical checklist for
 the next work; a stage is closed only when every acceptance item is met. Do
 not reorder stages without a measured reason and do not mix two stages in one
@@ -4555,34 +4555,86 @@ APK md5s: Seasons `57bc467453ec39ff7fdbd07ce0296793`, Rio
 ### 144.5 Stage D — counters and soak (P1, measurement only)
 
 Tasks:
-- [ ] Add `ABR_DIAG_COUNTERS` as a CMake option, default OFF. Add a
+- [x] Add `ABR_DIAG_COUNTERS` as a CMake option, default OFF. Add a
   diagnostic build path (separate build directory or `--diag`) and make
   `DIAG=1 build-apk.sh` use the counter-enabled library. The shipping path
   continues to use the normal library.
-- [ ] Count only what answers the leak question: JNI string bytes and handles
+- [x] Count only what answers the leak question: JNI string bytes and handles
   used/high-water, `jni_strings_`/`jni_objects_`/`obj_rev_` sizes, live real
   global refs, guest fd live/free, `fd_map_`/`file_map_` sizes,
   `localtime` allocations, outstanding AAsset buffers, thread TLS/errno
   slots, guest heap allocated/peak.
-- [ ] Dump a compact `[counters]` line every 30 s in the diagnostic build;
+- [x] Dump a compact `[counters]` line every 30 s in the diagnostic build;
   no per-frame logging. On an actual capacity overflow, LOUD always.
-- [ ] Verify the shipping library has no counter symbols/strings
+- [x] Verify the shipping library has no counter symbols/strings
   (`nm`/`strings`) and no `ABR_DIAG_COUNTERS` code path.
-- [ ] Soak one representative title first: Seasons, 20–30 minutes, menu and a
+- [x] Soak one representative title first: Seasons, 20–30 minutes, menu and a
   level, with counters and OS metrics (`/proc/<pid>/status`, `smaps`, fd
   count, `dumpsys meminfo`). Add Rio only if the slope is ambiguous or the
   JNI profile differs.
-- [ ] Record the slope, not just the final number. A flat line closes the
+- [x] Record the slope, not just the final number. A flat line closes the
   "per-frame leak" hypothesis for that title; a growing line identifies the
   counter and the next stage.
 
 Acceptance:
-- [ ] Diagnostic APK installs and runs; counter lines are readable and the
+- [x] Diagnostic APK installs and runs; counter lines are readable and the
   game remains playable.
-- [ ] Shipping APK built from the same source without counters has no
+- [x] Shipping APK built from the same source without counters has no
   diagnostic overhead.
-- [ ] A written measurement note in `AGENTS.md`/the game journal states what
+- [x] A written measurement note in `AGENTS.md`/the game journal states what
   grew, what did not, and over what wall-clock time.
+
+Closure evidence (2026-10-24): `ABR_DIAG_COUNTERS` is a CMake option default
+OFF; `scripts/build-lib.sh --diag` configures `host/build-android-diag` and
+`DIAG=1 scripts/build-apk.sh` selects that library. The diagnostic struct is
+`host/src/guest/diag_counters.h`; every field/increment/dump is inside
+`#ifdef ABR_DIAG_COUNTERS`. The product watchdog prints one line every 30 s:
+`heap=used/peak jni_str=used/high jni_obj=used/high maps=str,obj,rev,fwd
+wrapg newg delg fd=live,next,free,file localtime=allocs/bytes
+assets=open/bytes,peak tls errno=slots/free,next threads svc`. A contested
+runtime mutex prints `[counters] SKIPPED (runtime mutex contested)` rather
+than wedging the watchdog; 9/15 level samples printed, the rest skipped. The
+existing JNI/fd capacity checks still print LOUD unconditionally.
+
+Shipping evidence: `host/build-android/libabhost.so` md5
+`d22f15effe5e67459337a9d948619e12`, marker `Oct 24 2026 07:41:36`;
+`nm -C` has no `DumpDiagCounters`/`DiagCounters`/`diag_`, `strings` has no
+`[counters]`/`ABR_DIAG_COUNTERS`. Seasons shipping APK
+`36ce51569c89641966d9e3ece984261c`, stripped lib
+`b5957e0256bed326691e8d8c0630664b`, manifest `debuggable=false`, same
+absence of counter strings. Diag: host lib
+`35df227cca683404229d28c12bed7104` marker `Oct 24 2026 07:42:28`, stripped
+lib `cbcbcb8faf19ec69387e5181c9b6b0bd`, APK
+`fc6401ebfed3f572da9641283d1a925e`, manifest `debuggable=true`, installed
+and run. `fmt_test` default and diag (the diag run emits the line),
+`zip_test`, `cbnz_test` and `smoke_a32` pass.
+
+Seasons soak, 10 min menu then 15 min level, counters and OS metrics:
+- Menu: PSS 372.9 -> 336.3 MB; RSS 421.7 -> 381.9 MB; heap 167.3 -> 170.9 MB
+  (then fell); jni_str 369 -> 505 B; jni_obj 117 -> 129; fd live 82 -> 103,
+  next 203 -> 230; `file_map_` 3; wrapg 9; localtime 3/132; assets 11;
+  tls 3; errno 5/3.
+- Level: PSS 343.0 -> 214.2 MB; RSS 387.8 -> 226.7 MB; heap 164.4 -> 133.3
+  MB, peak 198.2 MB; jni_str 824 -> 1161 B; jni_obj 146 -> 176; strings map
+  77 -> 97, objects map 31 -> 36; fd live 115 -> 169, next 246 -> 316;
+  `file_map_` 3; wrapg 10; newg/delg both +45 (balanced); localtime 3/132;
+  assets 11 current, peak 13/4.4 MB; tls 3; errno 5/3; guest thread states
+  15 -> 20 while OS `Threads` stayed 40/41 and OS fd count stayed 104.
+- The host RSS/PSS slope is DOWN, so the per-frame host-memory leak
+  hypothesis is closed for Seasons. The growing counters are guest-facing
+  bookkeeping: `fclose` leaves `fd_map_`/guest FILE entries (fd live +54,
+  next +70 with `file_map_` flat), and the JNI string/handle bump arenas grow
+  (`jni_strings_` +20, `jni_obj_next_` +30). Stage E order: `fclose` first,
+  then `GetStringUTFChars`/`jni_strings_`; the handle arena needs a
+  per-call-site split before any cache. `localtime` (3 calls), AAsset
+  (11 open, peak 13), TLS/errno (3/5/3) and `WrapObject` (10) were flat and
+  do not justify a fix from this soak. No other title was soaked: Seasons is
+  the representative JNI profile, per the task.
+- Playability: a bird launch scored 12530; all markers 0 and `death.log`
+  0 B. The diag build was left installed for Stage E; no shipping APK was
+  installed in this step.
+
+Full journal: `games/seasons/JOURNAL.md`.
 
 ### 144.6 Stage E — leak fixes, only after Stage D evidence (P2)
 

@@ -5,7 +5,9 @@
 #
 # Reads games/<id>/profile.toml for the package name and the guest-lib hash,
 # expects the decoded tree at games/<id>/work/apk_prod (see prepare-tree.sh) and
-# the host lib at host/build-android/libabhost.so (see build-lib.sh).
+# the shipping host lib at host/build-android/libabhost.so. DIAG=1 instead uses
+# the counter-enabled host/build-android-diag/libabhost.so and writes
+# apk_diag.apk (see build-lib.sh --diag).
 #
 # Signing: apksigner v1+v2+v3 with the shared key in keys/ (override KS=...).
 # Set SIGN_SCHEME=v1 for the legacy jarsigner-only path.
@@ -47,7 +49,16 @@ fi
 HOST_ABI="$("${PROF[@]}" host.abi)"
 HOST_LIB="$("${PROF[@]}" host.lib)"
 GUEST_ABI="$("${PROF[@]}" guest.abi)"
-LIB_SRC=host/build-android/libabhost.so
+if [ "$DIAG" = 1 ]; then
+    LIB_SRC=host/build-android-diag/libabhost.so
+    if [ ! -f "$LIB_SRC" ]; then
+        echo "build-apk: DIAG=1 needs the counter-enabled library" >&2
+        echo "  run: scripts/build-lib.sh --diag" >&2
+        exit 1
+    fi
+else
+    LIB_SRC=host/build-android/libabhost.so
+fi
 LIB_DST="$TREE/lib/$HOST_ABI/$HOST_LIB"
 # OUT_NAME=apk_fill.apk writes the signed artifact under a distinct name
 # without touching the prod/diag defaults.

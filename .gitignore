@@ -14,6 +14,8 @@ thirdparty/
 out/
 host/build-native/
 host/build-android/
+host/build-native-diag/
+host/build-android-diag/
 
 # ---- local analysis artifacts / scratch ----
 lifeline-silent-night-1-4-apk-arm64.json

@@ -25,6 +25,7 @@
 #include "dynarmic/interface/halt_reason.h"
 #include "appid.h"
 #include "arm_hwcap.h"
+#include "diag_counters.h"
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"
@@ -309,6 +310,11 @@ public:
     // End-of-run census: tid/done/retval for every worker (detached threads
     // can't be joined; _exit would silence them).
     void ThreadCensus();
+#ifdef ABR_DIAG_COUNTERS
+    // Stage D: one compact leak-counter line. Called by the product watchdog
+    // every 30 s. No-op and no symbol in the shipping build.
+    void DumpDiagCounters();
+#endif
     std::uint32_t PthreadJoin(std::uint32_t tid, std::uint32_t retval_out);
     std::uint32_t PthreadDetach(std::uint32_t tid);
     std::uint32_t ErrnoSlot();
@@ -438,6 +444,9 @@ private:
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
     std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
     std::uint64_t heap_used_ = 0;          // live bytes telemetry (OOM log)
+#ifdef ABR_DIAG_COUNTERS
+    DiagCounters diag_;
+#endif
     // Quarantine: recently-freed blocks held out of reuse (UAF oracle).
     // Poisoned on free, verified on release to dlmalloc; a clobbered block
     // names a live use-after-free LOUD instead of corrupting silently.

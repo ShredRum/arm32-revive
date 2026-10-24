@@ -817,6 +817,14 @@ int main() {
                "4:10002000 20003000 55667788 11223344");
     }
 
+#ifdef ABR_DIAG_COUNTERS
+    // Stage D smoke: the dump must be safe after JNI arena traffic and must
+    // emit exactly one parseable line. The diag APK soak is the real test;
+    // this catches a crash or a format/argument mismatch in the native build.
+    rt.JniNewString("stage-d-counters");
+    rt.DumpDiagCounters();
+#endif
+
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(AbrHost C CXX)
 
+# Stage D: leak counters are a compile-time diagnostic build only. The default
+# shipping build has no counter fields, increments, symbols or dump strings.
+option(ABR_DIAG_COUNTERS "Build the host with diagnostic leak counters" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -69,6 +73,12 @@ set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_DEFINITIONS
 set_source_files_properties(src/guest/dlmalloc.c PROPERTIES COMPILE_OPTIONS
     "-include;${CMAKE_CURRENT_SOURCE_DIR}/src/guest/abr_heap_hook.h")
 target_include_directories(guest PUBLIC src)
+if(ABR_DIAG_COUNTERS)
+    # PUBLIC: abhost.cpp and the native harness/fmt_test also include
+    # dispatch.h and must see the guarded declaration.
+    target_compile_definitions(guest PUBLIC ABR_DIAG_COUNTERS=1)
+    message(STATUS "ABR diagnostic counters: ON")
+endif()
 target_link_libraries(guest PUBLIC dynarmic z)
 if(NOT ANDROID)
     target_link_libraries(guest PUBLIC EGL GLESv2 X11)

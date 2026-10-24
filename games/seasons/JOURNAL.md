@@ -1744,3 +1744,50 @@ baseline and all 46 JSON fields; `G_MEM` remains `0x437268`. Rio, Space and
 Star Wars reach their titles; Star Wars II shows its known content-service
 error screen and Amazon its known offline prompt. The guest `.so` SHA-256
 values still match the profiles; no guest was modified.
+
+### 2026-10-24 — Stage D: diagnostic counters and Seasons soak
+
+`ABR_DIAG_COUNTERS` is a CMake option, default OFF. `scripts/build-lib.sh
+--diag` configures `host/build-android-diag` (and `host/build-native-diag`),
+and `DIAG=1 scripts/build-apk.sh` selects that library; the shipping path is
+unchanged. All counter fields, increments and the dump live behind the
+`#ifdef` in `host/src/guest/diag_counters.h` and `dispatch.*`. The product
+watchdog prints one compact `[counters]` line every 30 s; a contested runtime
+mutex prints `[counters] SKIPPED (runtime mutex contested)` instead of
+blocking. Existing capacity checks still print LOUD.
+
+Shipping verification: host lib md5
+`d22f15effe5e67459337a9d948619e12`, marker `Oct 24 2026 07:41:36`;
+`nm -C` has no `DumpDiagCounters`/`DiagCounters`/`diag_`, and `strings` has
+no `[counters]`/`ABR_DIAG_COUNTERS`. Seasons shipping APK
+`36ce51569c89641966d9e3ece984261c`, stripped lib
+`b5957e0256bed326691e8d8c0630664b`, manifest `debuggable=false`, same
+absence of counter strings. Diagnostic host lib
+`35df227cca683404229d28c12bed7104`, marker `Oct 24 2026 07:42:28`, stripped
+lib `cbcbcb8faf19ec69387e5181c9b6b0bd`, APK
+`fc6401ebfed3f572da9641283d1a925e`, manifest `debuggable=true`. The diag APK
+was installed and run; `fmt_test` default and diag, `zip_test`, `cbnz_test`
+and `smoke_a32` pass.
+
+Soak: 10 minutes in the menu, then 15 minutes in a level, with the diag APK.
+Menu PSS 372.9 -> 336.3 MB, RSS 421.7 -> 381.9 MB, heap 167.3 -> 170.9 MB
+(then fell); jni_str 369 -> 505 B, jni_obj 117 -> 129, fd live 82 -> 103,
+next 203 -> 230, `file_map_` 3, wrapg 9, localtime 3/132, assets 11, tls 3,
+errno 5/3. Level PSS 343.0 -> 214.2 MB, RSS 387.8 -> 226.7 MB, heap 164.4 ->
+133.3 MB with peak 198.2 MB; jni_str 824 -> 1161 B, jni_obj 146 -> 176,
+strings map 77 -> 97, objects map 31 -> 36, fd live 115 -> 169, next 246 ->
+316, `file_map_` 3, wrapg 10, newg/delg +45 each (balanced), localtime 3/132,
+assets 11 current and peak 13/4.4 MB, tls 3, errno 5/3, guest thread states
+15 -> 20 while OS `Threads` stayed 40/41 and OS fd count stayed 104. Nine of
+15 level samples printed; the others were the intentional try-lock skip.
+
+The host RSS/PSS slope is down, so there is no per-frame host-memory leak in
+this run. The growth is guest-facing bookkeeping: `fclose` leaves `fd_map_`
+and guest `FILE` entries (fd live +54 with `file_map_` flat), and the JNI
+string/handle bump arenas grow. Stage E order is `fclose` first, then
+`GetStringUTFChars`/`jni_strings_`; the handle arena needs a per-call-site
+split before a cache. `localtime`, AAsset, TLS/errno and `WrapObject` were
+flat. A bird launch scored 12530; all markers 0 and `death.log` 0 B. No other
+title was soaked: Seasons is the representative profile, and the user asked
+not to spend 15 minutes per game. The diag build was left installed for
+Stage E.
