@@ -1637,3 +1637,38 @@ Seasons' Tutorial_red was entered again on the new library:
   `state_baseline_59ff106.txt`;
 - the 46 numeric fields are **bit-identical** to `Tutorial_red.json`
   (`check_level_vs_json.py`).
+
+### 2026-10-24 — Stage A: Bionic wctype/iswctype and the ctype X/B fix
+
+The host now implements Bionic 7.1.2's real wide-ctype contract:
+`wctype(const char*)` maps the 12 property names to the enum 1..12, and
+`iswctype(wint_t, wctype_t)` calls the narrow classifier and returns its
+exact class mask (`isblank` stays the explicit 0/1 case). The guest property
+string is read with a bounded guest-memory loop; NULL, an unreadable byte or
+a missing NUL is LOUD plus halt instead of a silent empty string.
+
+The same change fixes `BionicCtypeClass`: Bionic's order is
+`U L N S P C X B` (`X=0x40`, `B=0x80`), digits carry `N` only, and A-F/a-f
+carry `U|X`/`L|X`. The old table had `X`/`B` swapped and set `X` on digits;
+`fmt_test` now pins `iswctype('F', 12) == 64` and
+`iswctype('5', 12) == 4`, plus the two LOUD paths.
+
+Native checks: `fmt_test` (`ALL OK`), `zip_test`, `cbnz_test` and
+`smoke_a32` all pass. The host lib is md5 `10b2cab5603ccda2be50e5c46fe3e3cc`;
+the stripped lib installed in both APKs is md5
+`a54b997b56cc4b798d837fc8e648f2db`. Seasons APK md5
+`3425f0d681b161a0c63f8a38b7f843e6`; Star Wars APK md5
+`7c39c7e05d7e0d52a944657daa084e10`.
+
+Device gate (same Pixel 1, Android 7.1.2):
+- Seasons booted to the menu and entered Tutorial_red; init 143, every marker
+  0 (HEAPCORRUPT, HEAPASSERT, CHUNKD, USAGE_ERROR, LOUD, STUCK, FATAL),
+  `death.log` 0 B. The 85-line fingerprint diff is empty and
+  `check_level_vs_json.py` reports all 46 fields bit-identical. `G_MEM` for
+  the read-only tools was re-synced to `0x437008` for this rebuild.
+- Star Wars booted through the title to the Tatooine level-select/menu; init
+  97, every marker 0, `death.log` 0 B. No LOUD from the strict `wctype` read.
+- Guest `.so` SHA-256 is still
+  `10c050d8b53a89290058ad1dc79e98169e423f6dae852e2998cb9eb9be9b5b2c`;
+  `readelf -Ws` still shows `wctype`/`iswctype` as `UND`. The guest was not
+  modified.

@@ -125,6 +125,7 @@ int main() {
     mod.imports.push_back(abr::Import{"wctob", true, 0, 0, 0});            // 17
     mod.imports.push_back(abr::Import{"wctype", true, 0, 0, 0});            // 18
     mod.imports.push_back(abr::Import{"getauxval", true, 0, 0, 0});        // 19
+    mod.imports.push_back(abr::Import{"iswctype", true, 0, 0, 0});         // 20
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -624,10 +625,13 @@ int main() {
                std::to_string(stopped ? 0 : 1), "1");
     }
 
-    // --- the wide-character ctype: the guests build their OWN classification
-    //     tables from these answers at init (measured in the Star Wars guest:
-    //     a 256-entry btowc table and a 16-entry wctype table), so a wrong
-    //     answer poisons those tables silently.
+    // --- the wide-character ctype: Bionic's wctype takes a property NAME and
+    //     returns the enum 1..12; iswctype takes that enum plus a wide char.
+    //     The guests build their OWN classification tables from these answers
+    //     at init (measured in the Star Wars guest: a 256-entry btowc table
+    //     and a 16-entry wctype table), so a wrong shape poisons those tables
+    //     silently. The strings are written into guest memory: a host pointer
+    //     would make the test pass through a path the guest never uses.
     {
         const std::uint32_t a[4] = {'A', 0, 0, 0};
         Expect("btowc of a printable byte", std::to_string(abr::RuntimeTestAccess::Call(rt, 16, a)), "65");
@@ -640,19 +644,78 @@ int main() {
         const std::uint32_t d[4] = {300, 0, 0, 0};
         Expect("wctob(300) is EOF",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 17, d)), "4294967295");
-        // The class bits are the BSD ones: U=1 L=2 N=4 S=8 P=16 C=32 B=64 X=128
-        // (hex digit). The values must equal the BYTE table's, so that the
-        // guest's own tables agree with the one it reads through _ctype_.
-        const std::uint32_t up[4] = {'A', 0, 0, 0};
-        Expect("wctype('A') is upper|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, up)), "129");
-        const std::uint32_t lo[4] = {'a', 0, 0, 0};
-        Expect("wctype('a') is lower|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, lo)), "130");
-        const std::uint32_t dg[4] = {'5', 0, 0, 0};
-        Expect("wctype('5') is digit|hex", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, dg)), "132");
-        const std::uint32_t sp[4] = {' ', 0, 0, 0};
-        Expect("wctype(' ') is space|blank", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, sp)), "72");
-        const std::uint32_t hi[4] = {0x80, 0, 0, 0};
-        Expect("wctype(0x80) is unknown", std::to_string(abr::RuntimeTestAccess::Call(rt, 18, hi)), "0");
+
+        // wctype() returns Bionic's WC_TYPE_* enum, not a ctype bit mask.
+        const char* const names[12] = {
+            "alnum", "alpha", "blank", "cntrl", "digit", "graph",
+            "lower", "print", "punct", "space", "upper", "xdigit"};
+        for (std::uint32_t i = 0; i < 12; ++i) {
+            const std::uint32_t addr = kScratch + 0x100 + i * 0x20;
+            put(addr, names[i]);
+            const std::uint32_t args[4] = {addr, 0, 0, 0};
+            Expect(std::string("wctype(\"") + names[i] + "\")",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 18, args)),
+                   std::to_string(i + 1));
+        }
+        const std::uint32_t unknown = kScratch + 0x100 + 12 * 0x20;
+        put(unknown, "no-such-class");
+        {
+            const std::uint32_t args[4] = {unknown, 0, 0, 0};
+            Expect("wctype(unknown) is 0",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 18, args)), "0");
+        }
+        {
+            const std::uint32_t args[4] = {0, 0, 0, 0};
+            Expect("wctype(NULL) is 0 after LOUD",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 18, args)), "0");
+        }
+        {
+            const std::uint32_t args[4] = {0xFFFFFFF0u, 0, 0, 0};
+            Expect("wctype(unmapped) is 0 after LOUD",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 18, args)), "0");
+        }
+
+        // iswctype(wc, type): Bionic 7.1.2 returns the classifier's class
+        // MASK (only blank is the explicit 0/1 test). Pinning the exact
+        // values also pins the X=0x40/B=0x80 order from ctype.h.
+        auto isw = [&](std::uint32_t wc, std::uint32_t type) {
+            const std::uint32_t args[4] = {wc, type, 0, 0};
+            return abr::RuntimeTestAccess::Call(rt, 20, args);
+        };
+        auto check = [&](const char* what, std::uint32_t wc, std::uint32_t type,
+                         std::uint32_t want) {
+            Expect(what, std::to_string(isw(wc, type)), std::to_string(want));
+        };
+        check("iswctype A/alnum", 'A', 1, 1);
+        check("iswctype 5/alnum", '5', 1, 4);
+        check("iswctype !/alnum", '!', 1, 0);
+        check("iswctype a/alpha", 'a', 2, 2);
+        check("iswctype 5/alpha", '5', 2, 0);
+        check("iswctype space/blank", ' ', 3, 1);
+        check("iswctype tab/blank", '\t', 3, 1);
+        check("iswctype newline/blank", '\n', 3, 0);
+        check("iswctype newline/cntrl", '\n', 4, 32);
+        check("iswctype A/cntrl", 'A', 4, 0);
+        check("iswctype 5/digit", '5', 5, 4);
+        check("iswctype !/graph", '!', 6, 16);
+        check("iswctype space/graph", ' ', 6, 0);
+        check("iswctype a/lower", 'a', 7, 2);
+        check("iswctype A/lower", 'A', 7, 0);
+        check("iswctype space/print", ' ', 8, 128);
+        check("iswctype newline/print", '\n', 8, 0);
+        check("iswctype !/punct", '!', 9, 16);
+        check("iswctype A/punct", 'A', 9, 0);
+        check("iswctype space/space", ' ', 10, 8);
+        check("iswctype tab/space", '\t', 10, 8);
+        check("iswctype A/space", 'A', 10, 0);
+        check("iswctype A/upper", 'A', 11, 1);
+        check("iswctype a/upper", 'a', 11, 0);
+        check("iswctype F/xdigit", 'F', 12, 64);
+        check("iswctype 5/xdigit", '5', 12, 4);
+        check("iswctype G/xdigit", 'G', 12, 0);
+        check("iswctype 0x80/alpha", 0x80, 2, 0);
+        check("iswctype A/type 0", 'A', 0, 0);
+        check("iswctype A/type 13", 'A', 13, 0);
     }
 
     // --- getauxval: the guest tests the HWCAP bit 12 (FAST_MULT) to decide

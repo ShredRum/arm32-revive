@@ -267,9 +267,11 @@ public:
     std::uint32_t FindExidx(std::uint32_t pc);
 
     // Fill 2014-era Bionic ctype tables (_ctype_/_tolower_tab_/_toupper_tab_)
-    // and resolve their data imports. BSD layout (bionic copied it): char
-    // classes U=1 L=2 N=4 S=8 P=16 C=32 B=64 X=128, indexed [c], EOF slot [-1].
+    // and resolve their data imports. Bionic 7.1.2 layout (libc/include/ctype.h):
+    // U=1 L=2 N=4 S=8 P=16 C=32 X=0x40 B=0x80, indexed [c], EOF slot [-1].
     // Game indexes bytes (ldrb) — verified at the 0x45C17E ctype lookup.
+    // X/B are NOT in alphabetical/bit order: swapping them breaks isxdigit
+    // and isblank while leaving isalpha working, so a quick smoke test misses it.
     void InitDataImports();
 
     // ARM32 kuser helper page: mapped RX at 0xffff0000 with svc trampolines

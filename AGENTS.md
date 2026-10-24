@@ -4299,3 +4299,347 @@ the capture's chain was stale-lr correlation. Do not call 0xBC100.]
   `sleep_ms` is called only from three fatal paths immediately before `abort()`.
   HEAD still has honest sleeps (74d7cac); the only remaining 5000 ms cap is
   `poll`'s deliberate 5-SECOND hang guard.
+
+## 144. 2026-10-24 — ACTIVE PLAN: shared-harness audit (wctype/HWCAP/JNI arena/leaks)
+
+STATUS: **Stage A DONE (2026-10-24), Stage B next.** HEAD `7230a14` was
+clean before this entry; Stage A is committed separately with its journal and
+device-gate evidence. This is the canonical checklist for the next work; a
+stage is closed only when every acceptance item is met. Do not reorder stages
+without a measured reason and do not mix two stages in one commit.
+
+### 144.0 Starting facts, independently re-checked 2026-10-24
+
+These are facts, not subagent summaries. Evidence is the NDK/Bionic header,
+the guest `.so` disassembly at the stated VA, or the host source at the stated
+line.
+
+- **`wctype` is the wrong API.** Bionic 7.1.2 has
+  `wctype_t wctype(const char*)`; it maps the 12 property names to the enum
+  `1..12` (`alnum`=1 ... `upper`=11, `xdigit`=12), and unknown names to 0.
+  `iswctype(wint_t, wctype_t)` switches on that enum. The host at
+  `host/src/guest/dispatch.cpp:1840-1858` treats `a0` as a wide character and
+  returns the byte-ctype bit mask (129/130/132/72). The host has **no**
+  `iswctype` branch at all, so the guest call falls into the generic stub and
+  returns 0.
+- **The ctype bit names were swapped, and digits carried the wrong bit.**
+  Bionic 7.1.2 `libc/include/ctype.h` defines `U=0x01, L=0x02, D/N=0x04,
+  S=0x08, P=0x10, C=0x20, X=0x40, B=0x80`; `ctype_.c` marks digits `N` only
+  and A-F/a-f `U|X`/`L|X`; `isctype.c` makes `isxdigit` test `N|X`. The old
+  `BionicCtypeClass` had `X` and `B` reversed and set `X` on digits, so the
+  guest's `_ctype_` table and the exact `iswctype` masks were wrong. This is
+  part of Stage A, not cosmetic: the guests read `_ctype_` directly.
+- **The guest really uses both.** Star Wars imports `wctype` and `iswctype`.
+  The helper at guest VA `0x5c1c94` selects the property strings
+  (`"alpha"`, `"lower"`, `"upper"`, `"xdigit"`, ...) and calls `wctype`; the
+  call sites at `0x5c1dd6` and `0x5c1e20` pass the table entry at `+0x4a0`
+  to `iswctype`. The table therefore stays zero. Seasons, Space, Star Wars,
+  Star Wars II and Star Wars II AMZ import both symbols; Rio does not.
+- **The tests currently encode the bug.** `host/src/fmt_test.cpp:647-655`
+  asserts `wctype('A') == 129`, `wctype(' ') == 72`, etc. Those assertions
+  must be replaced, not extended.
+- **HWCAP comments and tests are false.** Linux ARM defines bit 4
+  `FAST_MULT`, bit 6 `VFP`, bit 12 `NEON`, bit 15 `TLS`. The host comments at
+  `dispatch.cpp:1890-1905` label bit 0 `FP`, bit 1 `VFP`, bit 2 `NEON`,
+  bit 12 `FAST_MULT`, etc. `fmt_test.cpp:667-668` asserts the same false
+  labels. The measured guest consumer only calls `getauxval(AT_HWCAP)` at
+  `0x6708e6`, tests bit 12, then reads `AT_HWCAP2` at `0x6708f0`; the current
+  mask does set bit 12, so the NEON path works. The false labels are a latent
+  correctness problem, not the cause of a current crash.
+- **JNI arena is over-partitioned and one write is unchecked.** The arena is
+  64 KB (`kGuestDataSize = 0x10000`). Strings start at `+0x2100`, object
+  handles at `+0x3000`, so only 3840 bytes are available for strings.
+  `JniNewString` (`dispatch.cpp:8330`) checks only the end of the 64-KB
+  arena, not `+0x3000`; enough strings can overwrite the handle table.
+  `GetStaticObjectField` (`dispatch.cpp:8961`) bumps `jni_obj_next_` and writes
+  four bytes without any bound check; if the handle arena is exhausted this
+  is a host SIGSEGV. Other allocators already check their end.
+- **Leaks are real but traffic-dependent.** `WrapObject`
+  (`dispatch.cpp:7649`) takes a permanent `NewGlobalRef`; `DeleteGlobalRef`
+  is a no-op and neither `obj_fwd_` nor `obj_rev_` is erased. The identity
+  scan deduplicates, so this grows only with distinct Java objects, not with
+  every call. `GetStringUTFChars` (`dispatch.cpp:8466`) allocates a guest copy
+  only for a real-wrapped string, never calls the real
+  `ReleaseStringUTFChars`, and the host `ReleaseStringUTFChars` is a no-op;
+  mock strings return their existing pointer. `fclose`
+  (`dispatch.cpp:3877`) does not free the 96-byte guest `FILE`, does not
+  erase `fd_map_`, and `next_guest_fd_` is never recycled.
+  `localtime`/`gmtime` (`dispatch.cpp:3064`) allocate 44 bytes per call and
+  never free them. `AAssetManager_open` leaks `gbuf` on extraction failure
+  (`dispatch.cpp:5499`). `HostThreadRelease` (`apphost.cpp:152`) does not
+  call `ReapThreadTls`.
+- **What is not proven.** No per-frame leak is demonstrated by the existing
+  logs. Seasons' boot log has 37 `GetMethodID` and 10
+  `GetStaticObjectField`; Rio's boot log has 492 JNI lines, one `jstring`,
+  maximum string address `f1002778`, maximum handle `f10032b0`, no overlap.
+  These are boot workloads, not a long session. Do not call a leak the cause
+  of a crash without counters and a soak.
+- **Checked and clean.** `AppendJniWord64`, the seven new forwarders and the
+  Int family 49/50/51 are ABI-correct as previously verified. No other
+  unchecked JNI handle write was found. The measured HWCAP consumer is not
+  broken by the false labels.
+
+### 144.1 Process rules for every stage
+
+- Read the actual code and the guest binary first. A claim needs a cited
+  header, a cited source line, a disassembly address, a unit test or a device
+  log. If `jev_verify` is available, use it before closing a factual claim;
+  it is advisory, and code/disassembly wins on contradiction.
+- Before an edit: write a failing test or a measured reproduction. After an
+  edit: build the native test binary, run the affected unit tests, inspect
+  the generated code/guest imports where relevant, then run the device gate.
+- The guest `.so` is never patched. The APK is read-only input. dlmalloc stays.
+  No hardcoded game-specific shipping values.
+- Diagnostics only behind `HARNESS_DIAG`; real anomalies are LOUD even with
+  diagnostics off. New counters are **compile-time** (`ABR_DIAG_COUNTERS`,
+  default OFF) and exist only in the throwaway diagnostic build. Shipping has
+  no counter fields, no counter increments and no periodic dumps.
+- Bounds checks and LOUD failure on actual corruption stay in shipping: they
+  are safety, not debug. Cost is one comparison per JNI string/handle
+  allocation, not per frame.
+- Commit only after the device checks for that stage. One stage = one logical
+  commit. A new git tag is created only after an explicit user command.
+
+### 144.2 Stage A — `wctype`/`iswctype` (P0, functional)
+
+Tasks:
+- [x] Implement Bionic 7.1.2 semantics in `host/src/guest/dispatch.cpp`:
+  `wctype` reads a NUL-terminated guest string, maps the 12 names to 1..12,
+  returns 0 for unknown; `iswctype` accepts 1..12, returns the narrow
+  classifier's exact class mask (not merely 1), and 0 for an invalid type.
+  `isblank` is the one explicit 0/1 classifier.
+- [x] Use `BionicCtypeClass` for the ASCII range only. Bionic 7.1.2 itself
+  implements the wide classifiers through the narrow ones; no ICU path is
+  needed for these guests.
+- [x] Fix `BionicCtypeClass` to Bionic's `U L N S P C X B` order
+  (`X=0x40`, `B=0x80`) and stop setting `X` on digits. `isxdigit` is `N|X`,
+  so `iswctype('5', 12) == 4` and `iswctype('F', 12) == 64`.
+- [x] Read the guest property string safely: bound the read to the guest
+  mapping, cap the length and treat NULL, an unreadable byte and a missing
+  NUL as anomalies (LOUD plus HaltExecution), not as a silent miss. Do not
+  use `GuestStr()` here: it cannot report either failure.
+- [x] Add `iswctype` to the test import table at the end, keeping existing
+  indices stable. Add a test helper that writes property strings into guest
+  memory; do not pass host pointers.
+- [x] Replace the false tests: `wctype("upper") == 11`,
+  `wctype("xdigit") == 12`, `wctype("no-such-class") == 0`;
+  `iswctype('A', 11) == 1`, `iswctype('a', 11) == 0`,
+  `iswctype('5', 5) == 4`, `iswctype(' ', 3) == 1`,
+  `iswctype('\t', 3) == 1`, `iswctype('!', 9) == 16`,
+  `iswctype('F', 12) == 64`, `iswctype('5', 12) == 4`,
+  `iswctype(0x80, 2) == 0`, `iswctype('A', 0) == 0`,
+  `iswctype('A', 13) == 0`; all 12 classes are covered.
+- [x] Correct the test comment at `fmt_test.cpp:629` and the claim in
+  `games/star-wars/JOURNAL.md` (the old "wide-ctype tables are fixed" claim
+  is false; a correction entry is added below the old text, history is not
+  rewritten).
+
+Acceptance:
+- [x] Native `fmt_test` passes, including the new tests; the two LOUD-path
+  cases are intentional and return 0.
+- [x] `readelf -Ws` still shows `wctype`/`iswctype` as guest imports; the
+  guest `.so` hash is unchanged.
+- [x] Device gate on Star Wars and Seasons: markers 0, `death.log` 0 B, init
+  counts unchanged; Seasons golden level still matches the 85-line and
+  46-field baselines.
+- [x] Commit message names the Bionic semantics and the false-test removal.
+
+Closure evidence (2026-10-24): native `fmt_test`/`zip_test`/`cbnz_test`/
+`smoke_a32` pass. Host lib md5 `10b2cab5603ccda2be50e5c46fe3e3cc`; stripped
+lib installed in both APKs md5 `a54b997b56cc4b798d837fc8e648f2db`. Seasons
+APK md5 `3425f0d681b161a0c63f8a38b7f843e6`; Star Wars APK md5
+`7c39c7e05d7e0d52a944657daa084e10`. Seasons: init 143, Tutorial_red golden
+85-line diff empty and 46/46 fields bit-identical (`G_MEM` re-synced to
+`0x437008`), all markers 0, `death.log` 0 B. Star Wars: init 97, title to
+Tatooine level-select, all markers 0, `death.log` 0 B. Guest SHA unchanged;
+`wctype`/`iswctype` still `UND`. Full journal: `games/seasons/JOURNAL.md`.
+
+### 144.3 Stage B — JNI arena bounds (P0, crash safety)
+
+Tasks:
+- [ ] Add named constants for the string and object regions in
+  `dispatch.h`; do not scatter `0x2100`/`0x3000` in new code.
+- [ ] Make `JniNewString` check against the **string-region end**, not the
+  64-KB arena end, including alignment and length overflow.
+- [ ] Add one `JniAllocObjectHandle()` helper that aligns, checks
+  `o + 4 <= kGuestDataBase + kGuestDataSize`, and LOUD-halts on exhaustion.
+  Replace every direct `jni_obj_next_ += 4` site; preserve the checks that
+  already exist and audit the remainder.
+- [ ] Route `GetStaticObjectField` through that helper. Never write the
+  handle before the bound check.
+- [ ] Add a small pure predicate for the bounds arithmetic and unit-test it at
+  the last valid slot, first invalid slot, and with `UINT32_MAX` inputs.
+- [ ] Keep the failure mode explicit: LOUD message plus `HaltExecution`, not
+  a silent overwrite and not a null handle the game does not check.
+
+Acceptance:
+- [ ] `fmt_test` covers the boundary arithmetic.
+- [ ] The affected allocation sites are grep-audited; no unguarded
+  `jni_obj_next_ += 4` remains.
+- [ ] Device gate all six titles; no marker, no `death.log`, same init counts.
+- [ ] No behavior change in the golden Seasons check.
+
+### 144.4 Stage C — real HWCAP bits (P1, honesty/latent)
+
+Tasks:
+- [ ] Define the ARM HWCAP names from the NDK `asm/hwcap.h` (bit 4
+  `FAST_MULT`, 6 `VFP`, 12 `NEON`, 15 `TLS`, etc.). Remove the invented
+  `FP`/`VFPv3_D32` labels.
+- [ ] Decide the mask by JIT support, not by a phone model: set only bits
+  whose instructions Dynarmic actually implements and the guest may use.
+  Candidate baseline: `HALF|THUMB|FAST_MULT|VFP|EDSP|NEON|VFPv3|VFPv3D16|TLS`;
+  do not advertise `iWMMXT`, `FPA`, `JAVA`, `CRUNCH`, `THUMBEE`, `26BIT`,
+  `LPAE` unless each is proven. `AT_HWCAP2` remains zero.
+- [ ] Keep `AT_PAGESZ` behavior unchanged.
+- [ ] Fix the comments at `dispatch.cpp:1870-1905` and the tests at
+  `fmt_test.cpp:658-675`: assert actual bit positions, including
+  `NEON == bit 12` and `HWCAP2 == 0`.
+- [ ] Re-run the Seasons A/B with the final mask if the mask changes the
+  guest's feature parser; the previous A/B (0 vs fabricated mask) is not a
+  proof for the new set.
+
+Acceptance:
+- [ ] Unit tests use named constants, not magic shifts.
+- [ ] Guest `getauxval` call sites still see bit 12 set; no new guest path is
+  claimed without a disassembly/consumer check.
+- [ ] Device gate and golden Seasons; record any svc-count change as expected
+  or investigate it.
+
+### 144.5 Stage D — counters and soak (P1, measurement only)
+
+Tasks:
+- [ ] Add `ABR_DIAG_COUNTERS` as a CMake option, default OFF. Add a
+  diagnostic build path (separate build directory or `--diag`) and make
+  `DIAG=1 build-apk.sh` use the counter-enabled library. The shipping path
+  continues to use the normal library.
+- [ ] Count only what answers the leak question: JNI string bytes and handles
+  used/high-water, `jni_strings_`/`jni_objects_`/`obj_rev_` sizes, live real
+  global refs, guest fd live/free, `fd_map_`/`file_map_` sizes,
+  `localtime` allocations, outstanding AAsset buffers, thread TLS/errno
+  slots, guest heap allocated/peak.
+- [ ] Dump a compact `[counters]` line every 30 s in the diagnostic build;
+  no per-frame logging. On an actual capacity overflow, LOUD always.
+- [ ] Verify the shipping library has no counter symbols/strings
+  (`nm`/`strings`) and no `ABR_DIAG_COUNTERS` code path.
+- [ ] Soak one representative title first: Seasons, 20–30 minutes, menu and a
+  level, with counters and OS metrics (`/proc/<pid>/status`, `smaps`, fd
+  count, `dumpsys meminfo`). Add Rio only if the slope is ambiguous or the
+  JNI profile differs.
+- [ ] Record the slope, not just the final number. A flat line closes the
+  "per-frame leak" hypothesis for that title; a growing line identifies the
+  counter and the next stage.
+
+Acceptance:
+- [ ] Diagnostic APK installs and runs; counter lines are readable and the
+  game remains playable.
+- [ ] Shipping APK built from the same source without counters has no
+  diagnostic overhead.
+- [ ] A written measurement note in `AGENTS.md`/the game journal states what
+  grew, what did not, and over what wall-clock time.
+
+### 144.6 Stage E — leak fixes, only after Stage D evidence (P2)
+
+Do not bundle these. Order by the measured slope.
+
+- [ ] `GetStringUTFChars`: call the real `ReleaseStringUTFChars` immediately
+  after copying; track guest copies separately from mock strings; free a
+  tracked guest copy in the host `ReleaseStringUTFChars` and erase its map
+  entry. Test with a real-wrapped string on device; verify the mock-string
+  path still returns the original pointer.
+- [ ] `fclose`: free the 96-byte guest `FILE`, erase `fd_map_` entries, and
+  recycle the guest fd only after close. Do not touch the standard streams.
+  Add a fopen/fclose loop test and check fd counters.
+- [ ] `localtime`/`gmtime`: use a per-thread 44-byte guest buffer allocated
+  once and reused, matching the C static-buffer contract; `_r` paths keep
+  using the caller buffer. Test repeated calls return the same pointer and
+  valid fields.
+- [ ] `AAssetManager_open`: `GuestFree(gbuf)` on every extraction failure and
+  on the bad-method path; verify with a deliberately bad asset in a test
+  fixture, not a shipping APK.
+- [ ] `HostThreadRelease`: call `ReapThreadTls` for the exiting tid before
+  deleting the JIT/stack; guard the runtime lifetime. Test thread churn with
+  counters.
+- [ ] `WrapObject`/global refs: only if Stage D shows growth. Prefer a
+  refcounted mock-to-real mapping with real `DeleteGlobalRef` when the guest
+  calls it; if the guest never calls it, add a LOUD high-water warning rather
+  than a silent cap. Any identity/refcount change needs a dedicated device
+  check because stale mock handles are a correctness risk.
+- [ ] `GetMethodID`/field cookies: add a cache only if counters show repeated
+  resolution. The existing boot logs show startup-only traffic.
+- [ ] Do not "fix" the guest's own allocations; measure them separately.
+
+Acceptance per fix:
+- [ ] A unit test or a documented device reproduction.
+- [ ] Counter slope before/after on the diagnostic build.
+- [ ] Shipping build unchanged in behavior; device gate; Seasons golden.
+- [ ] One commit per fix, with the measurement in the message.
+
+### 144.7 Stage F — variadic ABI proof (outside `eff3de3..HEAD`, P2)
+
+This is not a confirmed defect. The Seasons journal contradicts itself:
+2026-10-20 says AAPCS32 even pairs, 2026-10-21 says base PCS with no even
+pair. The 2026-10-21 proof compiled a sample with `-mabi=apcs-gnu`; that is
+not evidence that the guest was built that way. The guest ELF says GCC
+4.8/Linaro 4.9, softfp, no `Tag_ABI_VFP_args`. The golden level check covers
+only the level-number path, not every variadic call with a double after an
+odd number of 32-bit arguments.
+
+Tasks:
+- [ ] Find a real guest variadic call site with a double preceded by an odd
+  number of 32-bit arguments (`printf`, `sprintf`, `snprintf`,
+  `__android_log_print`, or the libc++ `num_put` path). Disassemble the
+  caller and the va_list area; record the register/stack slots.
+- [ ] Compile the same shape with the guest's compiler family/flags or use
+  the actual call site; do not infer the ABI from the ELF attribute alone.
+- [ ] If the guest uses even pairs, fix `ExpandPrintf::next64` back to
+  AAPCS32 and add tests for `%f` and `%d %f` on both register and stack
+  paths; re-run the golden check.
+- [ ] If the guest really uses odd pairs, record the disassembly proof and
+  close the item as "base PCS confirmed"; do not change working code.
+
+Acceptance:
+- [ ] A cited guest VA and instruction sequence, not a compiler assumption.
+- [ ] A test that fails on the wrong rule and passes on the proven rule.
+- [ ] No change to the level-number path without a new golden run.
+
+### 144.8 Stage G — final rebuild, gate, commit
+
+- [ ] Rebuild `host/build-android/libabhost.so` from the final source.
+- [ ] Build all six APKs; confirm each guest `.so` SHA against the profile;
+  confirm the shipping APK is non-debuggable and has no diag/counter strings.
+- [ ] Device gate all six: markers 0 (`HEAPCORRUPT`, `HEAPASSERT`, `CHUNKD`,
+  `USAGE_ERROR`, `LOUD`, `STUCK`, `FATAL`), `death.log` 0 B, init counts
+  unchanged, process alive, screenshot if the change can affect rendering.
+- [ ] Seasons golden: 85-line live-state fingerprint byte-identical to
+  `state_baseline_59ff106.txt`; 46 numeric fields bit-identical to
+  `Tutorial_red.json` via
+  `games/seasons/work/analysis_2026-10-21/check_level_vs_json.py`.
+- [ ] Record installed library md5 and APK md5 in the journal; note that the
+  build marker makes the lib md5 change on every rebuild.
+- [ ] Commit only after all of the above. Do not create a tag unless the user
+  explicitly asks for it.
+
+### 144.9 Acceptance matrix
+
+| stage | unit/native | device | artifact |
+|---|---|---|---|
+| A wctype | `fmt_test` with guest strings and `iswctype` | Star Wars + Seasons gate, golden | host lib + APKs |
+| B arena | boundary predicate tests, grep audit | all six gate | host lib + APKs |
+| C HWCAP | real-bit tests | all six gate, golden | host lib + APKs |
+| D counters | diag build only | Seasons soak, OS metrics | `apk_diag`, not shipping |
+| E leaks | per-fix tests | per-fix gate, counter slope | host lib + APKs |
+| F variadic | disassembly proof + new format tests | Seasons golden if code changes | host lib + APKs |
+| G final | full suite | all six + golden | six shipping APKs |
+
+### 144.10 Open decisions
+
+- Exact HWCAP baseline: choose only JIT-supported bits; do not copy a phone
+  mask. The minimum required by the measured guest is bit 12; the rest is a
+  truthfulness decision, not a performance tweak.
+- Arena exhaustion policy: LOUD halt is the default for the first pass. A
+  fallback allocation would hide the bug; only add reclaim/fallback after a
+  measured need.
+- Global-ref release: measure first. A refcount change can break mock-handle
+  identity, so it is not a "small cleanup".
+- Tag: not now. The previous tag request is still pending an explicit user
+  command.

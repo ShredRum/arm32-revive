@@ -1639,9 +1639,11 @@ void Runtime::CallFastMath(std::uint8_t id, Regs& regs, std::uint32_t a0, std::u
     ret64(r);
 }
 
-// Bionic's C-locale character classes (octal 001..0200): U L N S P C B X.
+// Bionic 7.1.2's C-locale character classes: U=0x01 L=0x02 N=0x04 S=0x08
+// P=0x10 C=0x20 X=0x40 B=0x80. The X/B order is easy to get backwards; it is
+// pinned by libc/include/ctype.h at android-7.1.2_r39 (NOT U L N S P C B X).
 // ONE source of truth for the byte table the guest reads through its
-// `_ctype_` data import and for wctype(): the guests build their OWN
+// `_ctype_` data import and for iswctype(): the guests build their OWN
 // classification tables from these answers at init (measured in the Star
 // Wars guest: a 256-entry btowc table and a 16-entry wctype table), so
 // the two must agree -- a wrong answer poisons those tables silently.
@@ -1649,34 +1651,37 @@ static std::uint8_t BionicCtypeClass(int c) {
     std::uint8_t b = 0;
     const bool up = (c >= 'A' && c <= 'Z'), lo = (c >= 'a' && c <= 'z');
     const bool dg = (c >= '0' && c <= '9');
-    const bool xd = dg || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+    // Bionic's _ctype_ marks only the LETTERS with _X; digits carry _N and
+    // isxdigit() tests _N|_X. Setting _X on digits is benign for the bool
+    // test but makes the byte table (and the exact return value) wrong.
+    const bool xd = (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
     const bool sp = (c == ' ' || (c >= '\t' && c <= '\r'));
     const bool bl = (c == ' ' || c == '\t');
     const bool ct = (c < 0x20 || c == 0x7F);
     const bool gr = (c > 0x20 && c < 0x7F);
     if (up) {
-        b |= 1;
+        b |= 0x01;
     }
     if (lo) {
-        b |= 2;
+        b |= 0x02;
     }
     if (dg) {
-        b |= 4;
+        b |= 0x04;
     }
     if (sp) {
-        b |= 8;
+        b |= 0x08;
     }
     if (gr && !up && !lo && !dg) {
-        b |= 16;
+        b |= 0x10;
     }
     if (ct) {
-        b |= 32;
-    }
-    if (bl) {
-        b |= 64;
+        b |= 0x20;
     }
     if (xd) {
-        b |= 128;
+        b |= 0x40;
+    }
+    if (bl) {
+        b |= 0x80;
     }
     return b;
 }
@@ -1837,7 +1842,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(::getpid()));
         return;
     }
-    if (n == "btowc" || n == "wctob" || n == "wctype") {
+    if (n == "btowc" || n == "wctob" || n == "wctype" || n == "iswctype") {
         // The wide-character ctype (the C locale, like the byte one).
         // The guest builds its own classification tables from these answers
         // at init (measured: Star Wars fills a 256-entry btowc table and a
@@ -1845,10 +1850,115 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // answering 0 silently produces an all-zero table (no letter, no
         // space, no digit recognized) and the text comes out wrong.
         if (n == "wctype") {
-            // wctype(wint_t wc): the class bits, 0 for a char the locale
-            // does not know (the C locale knows ASCII only).
+            // Bionic 7.1.2: wctype(const char*) maps a property NAME to the
+            // WC_TYPE_* enum 1..12; it is not a character classifier. The
+            // order is the one in libc/include/wchar.h.
+            static const char* const kProperties[] = {
+                "alnum", "alpha", "blank", "cntrl", "digit", "graph",
+                "lower", "print", "punct", "space", "upper", "xdigit"};
+            // Do not pass this through GuestStr(): it silently returns "" for
+            // an unreadable pointer or a string with no NUL. The guest builds
+            // its ctype tables from this answer, so a silent miss poisons them.
+            // A property name is at most 6 bytes; 64 is a sanity bound, not a
+            // format limit. An unreadable/unterminated name is a guest bug:
+            // report it LOUD and stop rather than answer 0 as if it were
+            // merely an unknown property. NULL is checked separately because
+            // guest address 0 is mapped (the ELF header lives there).
+            constexpr std::uint32_t kMaxPropertyLen = 64;
+            auto loud_bad_name = [&](const char* why, std::uint32_t off) {
+                std::printf("[ctype] LOUD wctype %s at %08x+%u -- halting\n", why, a0, off);
+                if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+                    jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                }
+            };
+            if (a0 == 0) {
+                loud_bad_name("NULL property", 0);
+                Ret(regs, 0);
+                return;
+            }
+            std::uint32_t len = 0;
+            for (;;) {
+                if (len == kMaxPropertyLen) {
+                    loud_bad_name("unterminated property", len);
+                    Ret(regs, 0);
+                    return;
+                }
+                const std::uint64_t at = std::uint64_t(a0) + len;
+                if (at > 0xFFFFFFFFu ||
+                    !CheckAccess(static_cast<std::uint32_t>(at), 1, false, false)) {
+                    loud_bad_name("unreadable property", len);
+                    Ret(regs, 0);
+                    return;
+                }
+                if (*H<char>(static_cast<std::uint32_t>(at)) == '\0') {
+                    break;
+                }
+                ++len;
+            }
+            // Every byte below has been checked, so the bounded compare is safe.
+            for (std::uint32_t i = 0; i < 12; ++i) {
+                const char* name = kProperties[i];
+                if (std::strlen(name) == len &&
+                    std::memcmp(H<char>(a0), name, len) == 0) {
+                    Ret(regs, i + 1);
+                    return;
+                }
+            }
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "iswctype") {
+            // Bionic 7.1.2: iswctype(wint_t, wctype_t) switches on the enum
+            // and calls the narrow classifier. Those classifiers return the
+            // class MASK, not merely 1 (isblank is the one explicit 0/1
+            // case). The guests only test zero/nonzero, but returning the
+            // same value pins the bit order and catches a swapped X/B.
             const std::uint32_t wc = a0;
-            Ret(regs, wc < 128 ? BionicCtypeClass(static_cast<int>(wc)) : 0u);
+            const std::uint32_t cls =
+                wc < 128 ? BionicCtypeClass(static_cast<int>(wc)) : 0u;
+            std::uint32_t r = 0;
+            switch (a1) {
+            case 1:  // alnum: isalnum() -> U|L|N
+                r = cls & (0x01 | 0x02 | 0x04);
+                break;
+            case 2:  // alpha: isalpha() -> U|L
+                r = cls & (0x01 | 0x02);
+                break;
+            case 3:  // blank: isblank() is the explicit SPACE/TAB test
+                r = (wc == ' ' || wc == '\t') ? 1u : 0u;
+                break;
+            case 4:  // cntrl: iscntrl() -> C
+                r = cls & 0x20;
+                break;
+            case 5:  // digit: isdigit() -> N
+                r = cls & 0x04;
+                break;
+            case 6:  // graph: isgraph() -> P|U|L|N
+                r = cls & (0x10 | 0x01 | 0x02 | 0x04);
+                break;
+            case 7:  // lower: islower() -> L
+                r = cls & 0x02;
+                break;
+            case 8:  // print: isprint() -> P|U|L|N|B
+                r = cls & (0x10 | 0x01 | 0x02 | 0x04 | 0x80);
+                break;
+            case 9:  // punct: ispunct() -> P
+                r = cls & 0x10;
+                break;
+            case 10:  // space: isspace() -> S
+                r = cls & 0x08;
+                break;
+            case 11:  // upper: isupper() -> U
+                r = cls & 0x01;
+                break;
+            case 12:  // xdigit: isxdigit() -> N|X
+                r = cls & (0x04 | 0x40);
+                break;
+            default:
+                r = 0;
+                break;
+            }
+            Ret(regs, r);
             return;
         }
         if (n == "btowc") {
@@ -6652,7 +6762,7 @@ void Runtime::InitDataImports() {
         }
         return 0xFFFFFFFFu;
     };
-    // BSD ctype classes (octal 001..0200): U L N S P C B X.
+    // Bionic ctype classes (hex 01..80): U L N S P C X B (X=0x40, B=0x80).
     std::uint8_t cls[256] = {};
     for (int c = 0; c < 256; c++) {
         cls[c] = BionicCtypeClass(c);

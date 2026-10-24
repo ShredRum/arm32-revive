@@ -266,3 +266,35 @@ After the change, all four titles were re-run on the device with the final
 library (md5 31d1759d): every marker 0, death.log 0 B, the production logs
 36.5 / 29.7 / 40.9 / 21.8 KB, Star Wars down to 61 lines of import
 diagnostics.
+
+### 2026-10-24 — correction: the wide-ctype claim above is false
+
+The paragraph claiming that the same round "settled the wide-ctype fix" and
+that B0 "repairs the tables" is wrong and must not be used as evidence.
+
+- Bionic declares `wctype_t wctype(const char*)` and
+  `int iswctype(wint_t, wctype_t)`. The guest calls `wctype` with property
+  strings (`"alpha"`, `"lower"`, `"upper"`, `"xdigit"`, ...), not with a
+  wide character.
+- The host at `host/src/guest/dispatch.cpp:1840-1858` treats `a0` as a
+  character and returns a byte-ctype bit mask. It has no `iswctype` branch at
+  all. The guest's table at `+0x4a0` therefore remains zero.
+- The B0 golden check only proves that Seasons' level state is unchanged. It
+  does not prove that the wide-ctype tables are correct, and it cannot: the
+  check exercises the level-number path, not the wide-character
+  classification path. Star Wars' own imports (`wctype` and `iswctype`) and
+  the call sites at guest VA `0x5c1dd6`/`0x5c1e20` are the direct evidence.
+
+Active fix plan: `AGENTS.md` §144, Stage A. The guest `.so` remains untouched;
+the fix is host-side and the false `fmt_test` contracts must be replaced.
+
+The ctype-bit labels in the older text are wrong as well. Bionic 7.1.2 is
+`U=0x01, L=0x02, D/N=0x04, S=0x08, P=0x10, C=0x20, X=0x40, B=0x80`.
+Digits carry `N` only; A-F/a-f carry `U|X`/`L|X`, and `isxdigit` tests
+`N|X`. The host's `BionicCtypeClass` had `X` and `B` swapped and set `X` on
+digits. Stage A fixes that too; `fmt_test` now pins
+`iswctype('F', 12) == 64` and `iswctype('5', 12) == 4`.
+
+Stage A was implemented and device-gated on 2026-10-24: native tests pass,
+Seasons' Tutorial_red is still byte-identical to the golden state, and Star
+Wars reaches its title/menu with all markers zero.
