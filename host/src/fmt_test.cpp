@@ -37,6 +37,9 @@
 #include <vector>
 
 #include "jni_call_words.h"
+#include <thread>
+#include <atomic>
+#include <sys/mman.h>
 #include <chrono>
 #include <dirent.h>
 #include <poll.h>
@@ -125,6 +128,10 @@ struct RuntimeTestAccess {
     }
     static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
     static bool InMapping(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, false); }
+    static void MapRwx(Runtime& rt, std::uint32_t a, std::uint32_t n) {
+        rt.mem().Map(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
+        rt.AddMapping(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
+    }
     static bool TakeStopped(Runtime& rt) {
         const bool s = rt.stop_step_;
         rt.stop_step_ = false;
@@ -1563,6 +1570,57 @@ int main() {
         const std::uint32_t a_cmp[4] = {kD, kS, 0, 0};
         Expect("strcmp(xyz, xyy) > 0",
                static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 48, a_cmp)) > 0 ? "1" : "0", "1");
+    }
+
+    // --- LDREX/STREX are atomic across threads: 4 Jits on the shared monitor,
+    //     each with its own processor id, increment one counter 200000 times
+    //     (ldrex/add/strex/bne loop, assembled with the NDK clang). A lost
+    //     update makes the total come out short.
+    {
+        const std::uint32_t kCode = 0x60000000u, kCounter = 0x60000800u;
+        abr::RuntimeTestAccess::MapRwx(rt, kCode, 0x1000);
+        const std::uint32_t prog[] = {0xe1901f9f, 0xe2811001, 0xe1802f91, 0xe3520000,
+                                      0x1afffffa, 0xe2533001, 0x1afffff8, 0xef000000};
+        std::memcpy(rt.H(kCode), prog, sizeof(prog));
+        std::memset(rt.H(kCounter), 0, 4);
+        abr::GuestCallbacks cb(&rt);
+        constexpr int kThreads = 4;
+        constexpr std::uint32_t kIters = 200000;
+        std::vector<std::thread> ths;
+        std::atomic<int> halted_ok{0};
+        for (int t = 0; t < kThreads; t++) {
+            ths.emplace_back([&, t]() {
+                std::size_t id = 0;
+                if (!rt.AcquireCpuId(&id)) {
+                    return;
+                }
+                Dynarmic::A32::UserConfig cfg;
+                cfg.callbacks = &cb;
+                cfg.global_monitor = &rt.Monitor();
+                cfg.processor_id = id;
+                Dynarmic::A32::Jit jit(cfg);
+                rt.ThreadEnter(&jit, 500 + t);
+                jit.Regs()[0] = kCounter;
+                jit.Regs()[3] = kIters;
+                jit.Regs()[15] = kCode;
+                jit.SetCpsr(0x10);
+                const auto hr = jit.Run();
+                if (Dynarmic::Has(hr, Dynarmic::HaltReason::UserDefined1)) {
+                    halted_ok++;
+                }
+                rt.ReleaseCpuId(id);
+            });
+        }
+        for (auto& th : ths) {
+            th.join();
+        }
+        std::uint32_t total = 0;
+        std::memcpy(&total, rt.H(kCounter), 4);
+        Expect("4 threads x 200000 LDREX/STREX increments", std::to_string(total),
+               std::to_string(kThreads * kIters));
+        Expect("all increment threads halted cleanly", std::to_string(halted_ok.load()),
+               std::to_string(kThreads));
+        abr::RuntimeTestAccess::TakeStopped(rt);
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

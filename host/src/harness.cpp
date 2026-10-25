@@ -792,8 +792,10 @@ int main(int argc, char** argv) {
     if (std::getenv("HARNESS_FASTMEM")) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());
     }
-    Dynarmic::ExclusiveMonitor monitor(1);
-    cfg.global_monitor = &monitor;
+    std::size_t main_cpu = 0;
+    rt.AcquireCpuId(&main_cpu);
+    cfg.global_monitor = &rt.Monitor();
+    cfg.processor_id = main_cpu;
     Dynarmic::A32::Jit jit(cfg);
     rt.set_jit(&jit);
     rt.set_callbacks(&callbacks);  // worker Jits share these callbacks

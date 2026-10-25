@@ -7361,9 +7361,16 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             if (std::getenv("HARNESS_FASTMEM")) {
                 cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
             }
-            static Dynarmic::ExclusiveMonitor cb_mon(8);
-            cfg.global_monitor = &cb_mon;
-            cfg.processor_id = (unsigned)(slot_idx & 7);
+            // Comparator slots are permanent: their ids are never released.
+            std::size_t cpu_id = 0;
+            if (!AcquireCpuId(&cpu_id)) {
+                GuestFree(slot->stack);
+                slot->stack = 0;
+                slot->busy = false;
+                return false;
+            }
+            cfg.global_monitor = &monitor_;
+            cfg.processor_id = cpu_id;
             slot->jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
         }
     }
@@ -7461,6 +7468,28 @@ void Runtime::SetGuestErrno(int e) {
     }
 }
 
+bool Runtime::AcquireCpuId(std::size_t* id) {
+    std::lock_guard<std::mutex> l(cpu_ids_mu_);
+    for (std::size_t i = 0; i < kMaxGuestCpus; i++) {
+        if (!cpu_ids_used_[i]) {
+            cpu_ids_used_[i] = true;
+            *id = i;
+            return true;
+        }
+    }
+    std::printf("[thread] LOUD all %zu exclusive-monitor processor ids in use\n", kMaxGuestCpus);
+    return false;
+}
+
+void Runtime::ReleaseCpuId(std::size_t id) {
+    if (id >= kMaxGuestCpus) {
+        return;
+    }
+    monitor_.ClearProcessor(id);  // a recycled id must not inherit a reservation
+    std::lock_guard<std::mutex> l(cpu_ids_mu_);
+    cpu_ids_used_[id] = false;
+}
+
 std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, std::uint32_t start,
                                      std::uint32_t arg) {
     if (!IsCodeAddress(start & ~std::uint32_t(1))) {
@@ -7481,7 +7510,12 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // ReapThreadStack (2026-10-18: it used to be leaked outright).
     const std::uint32_t stack = GuestMalloc(kThreadStackSize);
     if (!stack) {
-        return 12;  // ENOMEM
+        return ENOMEM;
+    }
+    std::size_t cpu_id = 0;
+    if (!AcquireCpuId(&cpu_id)) {
+        GuestFree(stack);
+        return EAGAIN;  // never share a processor id: exclusives would break
     }
     auto st = std::make_shared<ThreadState>();
     std::uint32_t tid = 0;
@@ -7503,7 +7537,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         std::printf("[thread] create tid=%u start=%08x arg=%08x stack=%08x\n", tid, start, arg,
                     stack);
     }
-    st->th = std::thread([this, st, tid, start, arg, stack]() {
+    st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
         t_tid = tid;
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
@@ -7513,13 +7547,8 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         if (std::getenv("HARNESS_FASTMEM")) {
             cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
         }
-        static Dynarmic::ExclusiveMonitor shared_mon(8);
-        cfg.global_monitor = &shared_mon;
-        static std::atomic<unsigned> next_cpu{1};
-        cfg.processor_id = next_cpu.fetch_add(1) % 8;
-        if (cfg.processor_id == 0) {
-            cfg.processor_id = 1;
-        }
+        cfg.global_monitor = &monitor_;
+        cfg.processor_id = cpu_id;
         Dynarmic::A32::Jit jit(cfg);
         t_active_jit = &jit;
         // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
@@ -7578,6 +7607,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         // joiner only needs st->retval). Idempotent with join/detach.
         ReapThreadStack(tid);
         t_active_jit = nullptr;
+        ReleaseCpuId(cpu_id);  // the Jit no longer runs
     });
     st->th.detach();
     return 0;
@@ -9967,10 +9997,18 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return 0;
     }
+    // A naturally aligned access is one single-copy-atomic host load (ARMv7
+    // guarantees that for aligned LDR/LDRH/LDRD-by-LDREXD and the exclusive
+    // reads route through here); only unaligned accesses go byte by byte.
+    // Guest and host are both little-endian.
     T v = 0;
-    const std::uint8_t* p = rt_->H<const std::uint8_t>(addr);
-    for (std::size_t i = 0; i < sizeof(T); i++) {
-        v |= T(p[i]) << (8 * i);
+    if ((addr & (sizeof(T) - 1)) == 0) {
+        v = __atomic_load_n(rt_->H<T>(addr), __ATOMIC_RELAXED);
+    } else {
+        const std::uint8_t* p = rt_->H<const std::uint8_t>(addr);
+        for (std::size_t i = 0; i < sizeof(T); i++) {
+            v |= T(p[i]) << (8 * i);
+        }
     }
     // Data-load trace (HARNESS_TRACELOADS=1, step mode): every data read.
     static std::int64_t tl = -2;
@@ -10107,9 +10145,13 @@ void GuestCallbacks::Write(VAddr addr, T v) {
             std::printf("[sesswatch] latch restored 1 (t=%u)\n", t_tid);
         }
     }
-    std::uint8_t* p = rt_->H<std::uint8_t>(addr);
-    for (std::size_t i = 0; i < sizeof(T); i++) {
-        p[i] = std::uint8_t(v >> (8 * i));
+    if ((addr & (sizeof(T) - 1)) == 0) {
+        __atomic_store_n(rt_->H<T>(addr), v, __ATOMIC_RELAXED);  // single-copy atomic
+    } else {
+        std::uint8_t* p = rt_->H<std::uint8_t>(addr);
+        for (std::size_t i = 0; i < sizeof(T); i++) {
+            p[i] = std::uint8_t(v >> (8 * i));
+        }
     }
 }
 

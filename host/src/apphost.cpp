@@ -59,6 +59,7 @@ struct HostThread {
     std::uint32_t stack = 0;  // guest stack base (8MB, see GuestMalloc below)
     std::uint32_t tid = 0;    // bridge tid (errno/TLS routing)
     JNIEnv* env = nullptr;    // real, attached
+    std::size_t cpu_id = SIZE_MAX;  // exclusive-monitor processor id (Runtime pool)
     // Re-entrancy guard: a nested JNI entry on the same thread while its
     // Jit runs trips Dynarmic's is_executing assert (tombstone). Drop the
     // nested frame LOUD instead (names the re-entrant path); e.g. a dropped
@@ -175,6 +176,10 @@ void HostThreadRelease(void* p) {
     }
     delete st->jit;
     st->jit = nullptr;
+    if (g_rt && st->cpu_id != SIZE_MAX) {
+        g_rt->ReleaseCpuId(st->cpu_id);
+        st->cpu_id = SIZE_MAX;
+    }
 }
 
 void HostThreadKeyInit() {
@@ -590,6 +595,15 @@ std::shared_ptr<HostThread> Enter() {
     }
     auto st = std::make_shared<HostThread>();
     st->stack = g_rt->GuestMalloc(kThreadStackSize);  // 8MB: see above
+    if (!st->stack) {
+        Log("LOUD Enter: no guest heap for an 8 MB thread stack -- refusing the call");
+        return nullptr;
+    }
+    if (!g_rt->AcquireCpuId(&st->cpu_id)) {
+        Log("LOUD Enter: no exclusive-monitor processor id left -- refusing the call");
+        g_rt->GuestFree(st->stack);
+        return nullptr;
+    }
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = g_cb;
     cfg.optimizations =
@@ -598,8 +612,8 @@ std::shared_ptr<HostThread> Enter() {
     if (std::getenv("HARNESS_FASTMEM")) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
     }
-    static Dynarmic::ExclusiveMonitor shared_mon(8);
-    cfg.global_monitor = &shared_mon;
+    cfg.global_monitor = &g_rt->Monitor();  // one monitor for every Jit
+    cfg.processor_id = st->cpu_id;
     st->jit = new Dynarmic::A32::Jit(cfg);
     // Real attach: Java-created threads are attached already; our workers not.
     JNIEnv* env = nullptr;
@@ -634,6 +648,9 @@ std::shared_ptr<HostThread> Enter() {
 
 std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, void* thiz, va_list ap) {
     auto st = Enter();
+    if (!st) {
+        return 1;  // same as a dropped re-entrant frame: logged LOUD in Enter
+    }
     if (st->in_guest.load()) {
         Log("REENTER %s while %s active -- dropping frame", name, st->in_name);
         return 1;
@@ -1517,6 +1534,10 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_cb = &callbacks;
     g_rt->set_callbacks(&callbacks);
     auto st = Enter();  // OnLoad thread state (+ real attach)
+    if (!st) {
+        Log("FATAL: no thread state for the OnLoad thread");
+        return 0;
+    }
     g_rt->set_jit(st->jit);
     // Static init (park the dead-by-construction #22 stub 0x5885C -- a pinned-
     // image VA: only that image has the stub at that address).

@@ -4,6 +4,7 @@
 // 0x100000 + i        -> JNI function (fatal until the JNI bridge lands)
 #pragma once
 #include <array>
+#include <bitset>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -65,6 +66,13 @@ inline constexpr bool kJitCycleCounting = false;
 inline constexpr std::uint32_t kGuestDirentNameOff = 19;
 // Bionic arm32 sizeof(struct stat) (NDK sys/stat.h, checked with sizeof).
 inline constexpr std::uint32_t kGuestStatSize = 104;
+// Every Jit in the process shares one exclusive monitor (Dynarmic requires a
+// single monitor for all Jits that touch the same memory, and a unique
+// processor id per Jit: exclusive_monitor.h). This is the id pool size; the
+// monitor's CheckAndClear is O(N) under a spin lock, so keep it modest. Live
+// Jits at once: Java threads that entered the guest + running guest workers +
+// up to 8 qsort comparator slots.
+inline constexpr std::size_t kMaxGuestCpus = 64;
 // poll() nfds above this is rejected with EINVAL (the kernel's limit is
 // RLIMIT_NOFILE; the guests poll one to a few fds). Bounds the host vector.
 inline constexpr std::uint32_t kGuestPollMaxFds = 4096;
@@ -104,6 +112,12 @@ public:
     LoadedModule& mod() { return mod_; }
     Dynarmic::A32::Jit* jit() { return jit_; }
     void set_jit(Dynarmic::A32::Jit* jit) { jit_ = jit; }
+    // The process-wide exclusive monitor and its processor ids. Every Jit
+    // factory acquires an id and passes Monitor() as global_monitor; the id is
+    // released (and its reservation cleared) once that Jit no longer runs.
+    Dynarmic::ExclusiveMonitor& Monitor() { return monitor_; }
+    bool AcquireCpuId(std::size_t* id);
+    void ReleaseCpuId(std::size_t id);
 
     // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
@@ -461,6 +475,9 @@ private:
     LoadedModule& mod_;
     Dynarmic::A32::Jit* jit_ = nullptr;
     Dynarmic::A32::UserCallbacks* cb_ = nullptr;  // shared callbacks for worker Jits
+    Dynarmic::ExclusiveMonitor monitor_{kMaxGuestCpus};
+    std::mutex cpu_ids_mu_;
+    std::bitset<kMaxGuestCpus> cpu_ids_used_;
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
     std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
     std::uint64_t heap_used_ = 0;          // live bytes telemetry (OOM log)
@@ -884,9 +901,10 @@ public:
     void MemoryWrite32(VAddr addr, std::uint32_t v) override;
     void MemoryWrite64(VAddr addr, std::uint64_t v) override;
 
-    // LDREX/STREX support. Single-threaded bring-up: compare-and-swap against
-    // the normal path is exact while no other thread writes concurrently.
-    // (Multithreaded guests will need monitor-backed exclusives later.)
+    // STREX: Dynarmic's monitor checks the reservation, then calls these with
+    // the value LDREX saw (`e`); the store must succeed only if memory still
+    // holds it, atomically against every other thread (a real CAS). The arm64
+    // backend never uses fastmem for exclusives, so all of them come here.
     bool MemoryWriteExclusive8(VAddr addr, std::uint8_t v, std::uint8_t e) override {
         return ExclusiveWrite(addr, v, e);
     }
@@ -914,34 +932,33 @@ private:
     template <typename T>
     bool ExclusiveWrite(VAddr addr, T v, T expected) {
         const char* gwhat = nullptr;
-        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
-            if (rt_->NoteWriteGuard()) {
-                std::printf("[mem] %s write REFUSED (exclusive) @ %08x size %zu guest-pc=%08x\n",
-                            gwhat, addr, sizeof(T), rt_->ActiveJit()->Regs()[15]);
-            }
-            return false;
-        }
-        if (!rt_->CheckAccess(addr, sizeof(T), true, false)) {
+        Dynarmic::A32::Jit* self = rt_->ActiveJit();  // the thread doing the STREX
+        if ((addr & (sizeof(T) - 1)) != 0) {
+            // ARMv7: an unaligned exclusive access is an alignment fault.
             if (rt_->NoteBad()) {
-                std::printf("[mem] BAD exclusive write @ %08x size %zu -- halting\n", addr,
-                            sizeof(T));
+                std::printf("[mem] BAD unaligned exclusive write @ %08x size %zu -- halting\n",
+                            addr, sizeof(T));
             }
-            rt_->jit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            rt_->stop_step_ = true;
+            if (self) {
+                self->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
             return false;
         }
-        T cur = 0;
-        const std::uint8_t* p = rt_->H<const std::uint8_t>(addr);
-        for (std::size_t i = 0; i < sizeof(T); i++) {
-            cur |= T(p[i]) << (8 * i);
-        }
-        if (cur != expected) {
+        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat) ||
+            !rt_->CheckAccess(addr, sizeof(T), true, false)) {
+            if (rt_->NoteBad()) {
+                std::printf("[mem] BAD exclusive write @ %08x size %zu%s%s -- halting\n", addr,
+                            sizeof(T), gwhat ? " guard=" : "", gwhat ? gwhat : "");
+            }
+            rt_->stop_step_ = true;
+            if (self) {
+                self->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
             return false;
         }
-        std::uint8_t* w = rt_->H<std::uint8_t>(addr);
-        for (std::size_t i = 0; i < sizeof(T); i++) {
-            w[i] = std::uint8_t(v >> (8 * i));
-        }
-        return true;
+        return __atomic_compare_exchange_n(rt_->H<T>(addr), &expected, v, false,
+                                           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     }
     Runtime* rt_;
 };
