@@ -143,9 +143,9 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | C-03 | S2 | GuestMmap | 32-bit bound checks wrap: MAP_FIXED can reach trampolines/stacks/past 4 GB | fixed a1bbccd |
 | C-04 | S2 | mappings_ | appended by mmap without sync against lock-free readers | fixed a1bbccd |
 | C-05 | S2 | munmap | stale mappings + caches: guest access -> host SIGSEGV instead of halt | fixed a1bbccd |
-| C-06 | S2 | mutex/rwlock/cond destroy | host object deleted while another thread is about to use it (UAF) | open |
+| C-06 | S2 | mutex/rwlock/cond destroy | host object deleted while another thread is about to use it (UAF) | fixed e221e33 |
 | C-07 | S2 | guest tids | collide with Java thread ids (from 1000) after 998 pthread_create -> shared errno/TLS | fixed 0df4897 |
-| C-08 | S2 | pthread_once | "done" published without memory ordering | open |
+| C-08 | S2 | pthread_once | "done" published without memory ordering | fixed 500d528 |
 | C-09 | S2 | pthread_once | Java threads never release once controls after an abnormal halt | open |
 | C-10 | S2 | thread stacks | in the heap with no guard page | open |
 | C-11 | S2 | dlmalloc | 64-bit host pointers in guest-writable memory: wild guest write -> host write | open |
@@ -156,11 +156,11 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | C-17 | S3 | quarantine check | any block > 16 MB treated as corrupt and leaked | open |
 | C-22 | S2 | loader | guest module at VA 0: NULL reads return ELF bytes instead of halting | open |
 | C-25 | S2 | PthreadMutex | every guest mutex is recursive, attributes ignored (trylock/relock/foreign unlock differ) | fixed 0df4897 |
-| C-27 | S3 | pthread_key_create | writes through an unchecked guest pointer | open |
+| C-27 | S3 | pthread_key_create | writes through an unchecked guest pointer | fixed 500d528 |
 | C-28 | S3 | pthread keys | destructors never run | open |
-| C-29 | S3 | threads_ | grows without bound | open |
-| C-30 | S3 | PthreadCreate | std::thread exception reaches std::terminate (and leaks the cpu id) | open |
-| C-31 | S3 | apphost watchdog | g_upd_jit raw pointer outlives a recreated GL thread's Jit (UAF on STUCK path) | open |
+| C-29 | S3 | threads_ | grows without bound | fixed 137b44f |
+| C-30 | S3 | PthreadCreate | std::thread exception reaches std::terminate (and leaks the cpu id) | fixed 500d528 |
+| C-31 | S3 | apphost watchdog | g_upd_jit raw pointer outlives a recreated GL thread's Jit (UAF on STUCK path) | fixed 137b44f |
 | C-32 | S3 | ActiveJit() | falls back to the OnLoad Jit for threads without one | open |
 | C-33 | S3 | exception redirect | redirect state shared by all threads (SUSPECTED) | open |
 
@@ -169,15 +169,15 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | id | sev | where | finding | status |
 |---|---|---|---|---|
 | D-01 | S2 | 9010 GetObjectClass | real objects get a fake `java/lang/Object` class: App.quitRequested()/isSilentProfile() never reach Java (seen in logs) | open |
-| D-02 | S2 | 8878, 8897, 9629, 9675 | isCopy written as 4 bytes; jboolean is 1 byte | open |
+| D-02 | S2 | 8878, 8897, 9629, 9675 | isCopy written as 4 bytes; jboolean is 1 byte | fixed 393f105 |
 | D-03 | S2 | 8170, 8507 | real-call `...`/V forms read float as one word; C promotes to double | open |
 | D-04 | S2 | 8488-8506 RealNewObject | J/D wrong in plain and A forms (copy of the marshaller) | open |
-| D-05 | S2 | 8189, 8512 | any mapped mock handle is materialized as java.lang.String | open |
+| D-05 | S2 | 8189, 8512 | any mapped mock handle is materialized as java.lang.String | fixed 393f105 |
 | D-06 | S2 | apphost.cpp:592 Enter | 8 MB stack alloc unchecked -> host write to unmapped VA on OOM | fixed 3d6fba5 |
 | D-07 | S2 | 9865 GetObjectField | name/sig split heuristic ("MANUFACTURER" -> "MANU") | open |
 | D-08 | S2 | 164/220/221/171/222/223 | real-wrapped strings/arrays unsupported; 223 missing | open |
-| D-09 | S2 | 9686 Release mode | JNI_COMMIT treated as final release | open |
-| D-10 | S2 | 8824, 8197, 8520 | strings silently truncated at 4096 bytes | open |
+| D-09 | S2 | 9686 Release mode | JNI_COMMIT treated as final release | fixed 393f105 |
+| D-10 | S2 | 8824, 8197, 8520 | strings silently truncated at 4096 bytes | fixed 393f105 |
 | D-11 | S3 | 117-151 mocks | shipping mocks shadow real Java (API 21, 800x480, Build.* "", hasSystemFeature list, static void dropped, FindClass never fails) | open |
 | D-12 | S3 | 135-137 | CallStaticFloatMethod missing; AccelerometerWrapper getters resolved | open |
 | D-13 | S3 | 215 RegisterNatives | registers nothing; "never ships" comment false; 6 natives without forwarders (Rio smali) | open |
