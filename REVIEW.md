@@ -36,6 +36,12 @@ games/seasons/JOURNAL.md); device gate on the sandbox
 (`ssh -p 8022 u0_a41@192.168.1.202`, markers HEAPCORRUPT/HEAPASSERT/CHUNKD/
 USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 
+## Next steps (as of 2026-10-26)
+
+1. Remaining S2: F-22 RELRO guard under fastmem, H-01/H-02/F-11 16 KB pages, G-01/D-01/D-11 JNI mocks vs real Java (quitRequested is safe to forward), G-02 0-stub imports (vasprintf, fnmatch, ...), C-09/10/11/22, E-03/04/05/06/07, B-12, R-003, R-004.
+2. Dead-code cleanup per work/review/G-crutches.md (~4000 lines), starting with zero-risk deletions.
+3. Then per-title work and docs (games/*/JOURNAL.md stale references to AGENTS sections).
+
 ## Areas and waves
 
 | id | area | scope | wave | status |
@@ -72,6 +78,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | 2026-10-25 | Oct 25 2026 15:20:38 (md5 5e225f86) | + allocator, mmap/MappingTable, setjmp VFP, fma/remquo, file-bridge errno/dup/mkdir/mkstemp/props, asset lock | rio + seasons + space + star-wars boot to the main menu, all markers 0, death.log 0 B, no tombstone; user reported earlier frequent crashes seem gone (batch 1-2 build, light play) |
 | 2026-10-25 | Oct 25 2026 15:34:38 (md5 c5247c11) | + guest mutex types, single tid counter | all six titles reach their usual first screen (star-wars-ii/amz: R-004 dialog), markers 0, death.log 0 B |
 | 2026-10-25 | Oct 25 2026 15:47:17 (md5 c8f95ed1) | + Rio init #22 runs | rio boots to the menu, markers 0 |
+| 2026-10-26 | lib md5 137e5cdf | + JNI batch (fields, float/J marshalling, JavaVM, GetArrayLength), GL fast path, glGetUniformfv, glCopyTex | rio, seasons, space, star-wars render the menu and run 100 s, markers 0, death.log 0 B, no new tombstones |
 | 2026-10-25 | Oct 25 2026 19:24:21 | + shared sync objects, once ordering, key_create, pthread_create/threads_ hardening, g_upd_jit | rio, seasons, space, star-wars alive at the menu after 100 s, markers 0, death.log 0 B, no tombstones |
 
 ### Wave 1 (areas A-D, 2026-10-25)
@@ -219,14 +226,14 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| E-01 | S1 | realgl glGetUniformfv | passes a uniform LOCATION as an index to glGetActiveUniform and sizes the host buffer by element count, not floats: vec4/mat4 overflow the host heap by 12/60 B (Rio 5 call sites) | open |
-| E-02 | S2 | glCopyTexImage2D | falls into the fake shim (never executed, logs UNHANDLED); Rio 0x2522e0 | open |
+| E-01 | S1 | realgl glGetUniformfv | passes a uniform LOCATION as an index to glGetActiveUniform and sizes the host buffer by element count, not floats: vec4/mat4 overflow the host heap by 12/60 B (Rio 5 call sites) | fixed 6adfb9e |
+| E-02 | S2 | glCopyTexImage2D | falls into the fake shim (never executed, logs UNHANDLED); Rio 0x2522e0 | fixed 6adfb9e |
 | E-03 | S2 | realgl bound-buffer tracking | one per process, but bindings are per GL context (context loss / shared contexts) -> 32-bit offset taken as host pointer (SUSPECTED) | open |
 | E-04 | S2 | client vertex arrays | only 1 byte checked at glVertexAttribPointer, nothing at draw time; bad pointer silently NULL | open |
 | E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | open |
 | E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | open |
 | E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | open |
-| E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | open |
+| E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | fixed 4ae3709 (fast path + own lock; enum dispatch still open) |
 | E-08.. | S3/S4 | see report | glBufferData size zero-extension, glGetString slot capacity, fake shim on context-less threads, NOBLEND per draw, unexplained \x01 shader rewrite, dead glGetError code | open |
 
 **F — loader / JIT callbacks / probes** (report: work/review/F-loader.md; 38 findings: 3 S2, 20 S3, 15 S4)
@@ -253,7 +260,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 |---|---|---|---|---|
 | G-01 | S2 | JNI shipping | only object methods/fields go to ART; all Boolean/Int/Long/Void calls and static fields are mocks, wrong on modern phones (density 1 vs ~420, screenLayout, 800x480, API 21, empty Build.*). App.quitRequested only calls stopLockTask() in all six titles: safe to forward (= D-01/D-11) | open |
 | G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | open |
-| G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | open |
+| G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | fixed 2dadd39 |
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
 | G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | open |
 | G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
