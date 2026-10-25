@@ -2162,11 +2162,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // only ever hands the pointer back to longjmp. The guests keep the
     // buffer on their stack (add r0, sp, #8..#24 inside a 268..284 byte
     // frame) and call longjmp(buf, 1).
-    // Saved: r4-r11 (callee-saved), sp and the return address -- 10 words =
-    // 40 bytes, far below the guest's buffer. The guest is softfp, so there
-    // are no VFP registers to preserve (d0-d7 are caller-saved in AAPCS32).
+    // Saved, like bionic's arm setjmp: r4-r11 (callee-saved), sp, the return
+    // address, then the VFP callee-saved d8-d15 (s16-s31) and FPSCR:
+    // 10 + 16 + 1 words = 108 bytes, inside bionic's 64-word arm jmp_buf.
+    // softfp only changes how arguments are passed; guest code keeps values
+    // in d8-d15 across calls (e.g. vstr d8/d13 in the WebP fprintf callers),
+    // and Lua's error path is a longjmp.
     if (n == "setjmp" || n == "_setjmp" || n == "sigsetjmp" || n == "__sigsetjmp") {
-        if (!CheckRange(a0, 40, true)) {
+        if (!CheckRange(a0, kGuestJmpBufBytes, true)) {
             goto bad_ptr;
         }
         std::uint32_t* buf = H<std::uint32_t>(a0);
@@ -2175,11 +2178,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         buf[8] = regs[13];        // sp
         buf[9] = regs[14];        // lr: where the guest continues after longjmp
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            const auto& ext = jit->ExtRegs();
+            for (int i = 0; i < 16; i++) {
+                buf[10 + i] = ext[16 + i];  // s16..s31 = d8..d15
+            }
+            buf[26] = jit->Fpscr();
+        }
         Ret(regs, 0);
         return;
     }
     if (n == "longjmp" || n == "_longjmp" || n == "siglongjmp") {
-        if (!CheckRange(a0, 40, false)) {
+        if (!CheckRange(a0, kGuestJmpBufBytes, false)) {
             goto bad_ptr;
         }
         const std::uint32_t* buf = H<const std::uint32_t>(a0);
@@ -2188,11 +2198,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         regs[13] = buf[8];  // sp
         regs[14] = buf[9];  // the saved return address: Ret() jumps there
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            auto& ext = jit->ExtRegs();
+            for (int i = 0; i < 16; i++) {
+                ext[16 + i] = buf[10 + i];
+            }
+            jit->SetFpscr(buf[26]);
+        }
         // C99: longjmp(env, 0) must still make setjmp return 1.
         Ret(regs, a1 != 0 ? a1 : 1);
         return;
     }
-    // --- libc odds and ends the guests actually call -------------------
     // --- libc odds and ends the guests actually call -------------------
     if (n == "gethostname") {
         // gethostname(buf, len): POSIX returns 0 on SUCCESS and -1 on error

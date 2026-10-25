@@ -1706,6 +1706,43 @@ int main() {
                std::to_string(abr::RuntimeTestAccess::Call(rt, 52, fargs, in, nullptr)), "4294967295");
     }
 
+    // --- setjmp/longjmp preserve the VFP callee-saved d8-d15 and FPSCR.
+    {
+        abr::GuestCallbacks cb2(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb2;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        Dynarmic::A32::Jit jit(cfg);
+        rt.ThreadEnter(&jit, 700);
+        for (int i = 0; i < 16; i++) {
+            jit.ExtRegs()[16 + i] = 0xA0000000u + static_cast<std::uint32_t>(i);
+        }
+        jit.SetFpscr(0x03000000u);  // RMode = round towards zero
+        const std::uint32_t kJb = 0x10008400;
+        const std::uint32_t sj[4] = {kJb, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 6, sj);
+        for (int i = 0; i < 16; i++) {
+            jit.ExtRegs()[16 + i] = 0;
+        }
+        jit.SetFpscr(0);
+        const std::uint32_t lj[4] = {kJb, 7, 0, 0};
+        const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 7, lj);
+        bool vfp_ok = true;
+        for (int i = 0; i < 16; i++) {
+            if (jit.ExtRegs()[16 + i] != 0xA0000000u + static_cast<std::uint32_t>(i)) {
+                vfp_ok = false;
+            }
+        }
+        Expect("longjmp returns its value", std::to_string(r), "7");
+        Expect("longjmp restores d8-d15", vfp_ok ? "1" : "0", "1");
+        Expect("longjmp restores FPSCR", std::to_string(jit.Fpscr() & 0x03000000u), std::to_string(0x03000000u));
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReleaseCpuId(id);
+    }
+
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
     //     of halting (Rio filled the arena in 160 s of play, 2026-10-25).
     {

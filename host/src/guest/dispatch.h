@@ -74,6 +74,9 @@ inline constexpr std::uint32_t kGuestStatSize = 104;
 // Jits at once: Java threads that entered the guest + running guest workers +
 // up to 8 qsort comparator slots.
 inline constexpr std::size_t kMaxGuestCpus = 64;
+// Bytes of the guest jmp_buf our setjmp/longjmp use: r4-r11, sp, lr, s16-s31
+// (d8-d15), FPSCR. Bionic's arm jmp_buf is 64 words, so this always fits.
+inline constexpr std::uint32_t kGuestJmpBufBytes = 27 * 4;
 // poll() nfds above this is rejected with EINVAL (the kernel's limit is
 // RLIMIT_NOFILE; the guests poll one to a few fds). Bounds the host vector.
 inline constexpr std::uint32_t kGuestPollMaxFds = 4096;
