@@ -808,8 +808,6 @@ int main(int argc, char** argv) {
     std::size_t ok_count = 0;
     // HARNESS_SKIP=num[,num...]: skip init indices (bring-up isolation).
     // HARNESS_DEFER=num: run that init LAST (dependency probe).
-    // #22 is PARKED by default (dead-by-construction, AGENTS.md sect.5);
-    // HARNESS_FORCE22=1 overrides for experiments.
     bool skip[128] = {};
     int defer = -1;
     if (const char* e = std::getenv("HARNESS_SKIP")) {
@@ -830,15 +828,6 @@ int main(int argc, char** argv) {
     if (const char* e = std::getenv("HARNESS_DEFER")) {
         defer = std::atoi(e);
     }
-    if (!std::getenv("HARNESS_FORCE22") && mod.init_array.size() > 22 &&
-        mod.init_array[22] == 0x5885Cu) {
-        // Park ONLY the known dead-by-construction stub (`b 0x1AEB24` at Rio's
-        // pinned VA 0x5885C). Other images have a real initializer at index 22
-        // (Seasons 0x3BFD0 runs 434 svcs of work) and must execute it. Mirrors
-        // apphost's pinned+address test, minus the build-id requirement so an
-        // unpinned copy of the same stub is still parked.
-        skip[22] = true;
-    }
     // Execution order: file order, with `defer` moved last (dependency probe).
     std::vector<std::size_t> order;
     for (std::size_t k = 0; k < mod.init_array.size(); k++) {
@@ -856,9 +845,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (skip[k]) {
-            const bool parked = (k == 22 && !std::getenv("HARNESS_FORCE22"));
-            std::printf("[init] #%zu @%08x %s\n", k, mod.init_array[k],
-                        parked ? "PARKED (dead-by-construction, see AGENTS.md sect.5)" : "SKIPPED");
+            std::printf("[init] #%zu @%08x SKIPPED\n", k, mod.init_array[k]);
             ok_count++;
             continue;
         }

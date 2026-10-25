@@ -69,7 +69,6 @@ struct HostThread {
 };
 std::mutex g_tmu;
 std::unordered_map<pid_t, std::shared_ptr<HostThread>> g_threads;
-std::uint32_t g_next_tid = 1000;
 
 // Re-entrancy guard body (see HostThread): nested entry drops LOUD.
 struct GuestRunGuard {
@@ -628,7 +627,7 @@ std::shared_ptr<HostThread> Enter() {
     std::size_t live = 0;
     {
         std::lock_guard<std::mutex> l(g_tmu);
-        tid = g_next_tid++;
+        tid = g_rt->AllocTid();
         st->tid = tid;
         g_threads[me] = st;
         live = g_threads.size();
@@ -1499,7 +1498,6 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
     CheckGuestBuildId(*g_mod, guest_identity_ok);
-    const bool pinned = IsPinnedGuest(*g_mod);
     // The pinned-image JSON SSO fill ("{}" at guest VA 1a410c) used to be
     // armed here as HARNESS_PROBE=1a410c,fill. Measured on 2026-10-19 (lib
     // 14c43eda, Rio prod 75 s): the probe fires, but its own verdict is
@@ -1539,18 +1537,15 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         return 0;
     }
     g_rt->set_jit(st->jit);
-    // Static init (park the dead-by-construction #22 stub 0x5885C -- a pinned-
-    // image VA: only that image has the stub at that address).
+    // Static init: every DT_INIT_ARRAY entry runs, in order. (Rio's #22 used
+    // to be "parked" as dead-by-construction because it calls 0xFFFF0FA0;
+    // that is the ARM kuser __kuser_memory_barrier, which the host now maps,
+    // and the initializer runs clean: harness halts 53 -> 54.)
     std::size_t ok = 0;
     for (std::size_t k = 0; k < g_mod->init_array.size(); k++) {
         if (g_mod->init_array[k] == 0) {
             // A NULL slot of the guest's DT_INIT_ARRAY: kept in the vector so
             // the indices match the guest's, but there is nothing to run.
-            continue;
-        }
-        if (pinned && g_mod->init_array[k] == 0x5885Cu) {
-            Log("[init] #%zu @0005885c PARKED (dead-by-construction)", k);
-            ok++;
             continue;
         }
         auto& regs = st->jit->Regs();
