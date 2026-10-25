@@ -259,7 +259,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | id | sev | where | finding | status |
 |---|---|---|---|---|
 | G-01 | S2 | JNI shipping | only object methods/fields go to ART; all Boolean/Int/Long/Void calls and static fields are mocks, wrong on modern phones (density 1 vs ~420, screenLayout, 800x480, API 21, empty Build.*). App.quitRequested only calls stopLockTask() in all six titles: safe to forward (= D-01/D-11) | open |
-| G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | open |
+| G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | fixed b979090 |
 | G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | fixed 2dadd39 |
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
 | G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | open |
