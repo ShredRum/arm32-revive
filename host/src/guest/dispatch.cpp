@@ -10068,11 +10068,16 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         std::memcpy(H(c), &c, 4);
+        // Methods: "Cls.name(sig)ret" (the signature starts with '(').
+        // Fields: "field Cls.name:sig" -- a field descriptor follows the name
+        // with no delimiter of its own, and ':' can appear in neither a Java
+        // identifier nor a type descriptor.
+        const bool is_field = (fn == 94 || fn == 144);
         jni_methods_[c] =
             (fn == 33 ? std::string("")
                       : fn == 113 ? std::string("static ")
                                   : std::string("field ")) +
-            cname + "." + mname + msig;
+            cname + "." + mname + (is_field ? ":" : "") + msig;
         if (DiagOn()) {
             std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
                         (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);
@@ -10101,28 +10106,16 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             const std::string pfx = "field ";
             if (re && robj && d.compare(0, pfx.size(), pfx) == 0) {
                 d = d.substr(pfx.size());
-                const std::size_t dot = d.rfind('.');
-                const std::size_t par = d.find('(');
-                // Field desc shape: "Cls.name(sig)" (no parens; tolerate).
+                // "Cls.name:sig" (see GetFieldID).
                 std::string cls, name, sig;
-                if (dot != std::string::npos) {
-                    cls = d.substr(0, dot);
-                    const std::string rest = d.substr(dot + 1);
-                    const std::size_t lp = rest.find('(');
-                    if (lp != std::string::npos) {
-                        name = rest.substr(0, lp);
-                        sig = rest.substr(lp);
-                    } else {
-                        name = rest;
-                    }
-                }
-                // Field sig follows the name directly ("name[Sig") when the
-                // mock cookie was built as name+sig. Split trailing type.
-                if (!name.empty() && sig.empty()) {
-                    const std::size_t tp = name.find_first_of("ZBCDFIJSV[(");
-                    if (tp != std::string::npos && tp > 0) {
-                        sig = name.substr(tp);
-                        name = name.substr(0, tp);
+                const std::size_t colon = d.find(':');
+                if (colon != std::string::npos) {
+                    const std::string head = d.substr(0, colon);
+                    sig = d.substr(colon + 1);
+                    const std::size_t dot = head.rfind('.');
+                    if (dot != std::string::npos) {
+                        cls = head.substr(0, dot);
+                        name = head.substr(dot + 1);
                     }
                 }
                 jfieldID rfid = nullptr;
