@@ -173,12 +173,12 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 |---|---|---|---|---|
 | D-01 | S2 | 9010 GetObjectClass | real objects get a fake `java/lang/Object` class: App.quitRequested()/isSilentProfile() never reach Java (seen in logs) | open |
 | D-02 | S2 | 8878, 8897, 9629, 9675 | isCopy written as 4 bytes; jboolean is 1 byte | fixed 393f105 |
-| D-03 | S2 | 8170, 8507 | real-call `...`/V forms read float as one word; C promotes to double | open |
-| D-04 | S2 | 8488-8506 RealNewObject | J/D wrong in plain and A forms (copy of the marshaller) | open |
+| D-03 | S2 | 8170, 8507 | real-call `...`/V forms read float as one word; C promotes to double | fixed fcdca1b |
+| D-04 | S2 | 8488-8506 RealNewObject | J/D wrong in plain and A forms (copy of the marshaller) | fixed fcdca1b |
 | D-05 | S2 | 8189, 8512 | any mapped mock handle is materialized as java.lang.String | fixed 393f105 |
 | D-06 | S2 | apphost.cpp:592 Enter | 8 MB stack alloc unchecked -> host write to unmapped VA on OOM | fixed 3d6fba5 |
-| D-07 | S2 | 9865 GetObjectField | name/sig split heuristic ("MANUFACTURER" -> "MANU") | open |
-| D-08 | S2 | 164/220/221/171/222/223 | real-wrapped strings/arrays unsupported; 223 missing | open |
+| D-07 | S2 | 9865 GetObjectField | name/sig split heuristic ("MANUFACTURER" -> "MANU") | fixed 621b9cb |
+| D-08 | S2 | 164/220/221/171/222/223 | real-wrapped strings/arrays unsupported; 223 missing | fixed 5f617d8 (GetArrayLength only; 164/220/221/222/223 open) |
 | D-09 | S2 | 9686 Release mode | JNI_COMMIT treated as final release | fixed 393f105 |
 | D-10 | S2 | 8824, 8197, 8520 | strings silently truncated at 4096 bytes | fixed 393f105 |
 | D-11 | S3 | 117-151 mocks | shipping mocks shadow real Java (API 21, 800x480, Build.* "", hasSystemFeature list, static void dropped, FindClass never fails) | open |
@@ -187,12 +187,12 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | D-14 | S3 | JniNewString etc. | unbounded growth: mock strings, registry, method cookies never deduped | open |
 | D-15 | S3 | apphost.cpp:281 DeathHandler | stack walk before write -> line lost on corrupt frames; ActiveJit() may print another thread's regs | open |
 | D-16 | S3 | apphost.cpp:1209 | stdout "w" + stderr "a" on the same apphost.log -> overwrites | open |
-| D-17 | S3 | JavaVM 3/5/7 | Detach/AttachAsDaemon/Destroy halt LOUD | open |
+| D-17 | S3 | JavaVM 3/5/7 | Detach/AttachAsDaemon/Destroy halt LOUD | fixed 5f617d8 |
 | D-18 | S3 | 8947, 8959 | region copy silently clamped (keep bound, report LOUD) | open |
 | D-19 | S3 | gen_apphost.py | F/D/object return types broken; `$` mangling | open |
-| D-20 | S3 | 9443 | CallStaticBooleanMethod plain form reads first vararg from [sp] not r3 | open |
+| D-20 | S3 | 9443 | CallStaticBooleanMethod plain form reads first vararg from [sp] not r3 | fixed 5f617d8 |
 | D-21 | S3 | 8371, 9158, 9244 | AudioOutput / startOutput name-matched scope guards in shared code | open |
-| D-22 | S4 | 9410 | GetArrayLength: lock_guard is inside a comment | open |
+| D-22 | S4 | 9410 | GetArrayLength: lock_guard is inside a comment | fixed 5f617d8 |
 | D-23 | S4 | 8001, 9401, 9565, 8340, apphost.cpp:2 | stale comments, dead `fn==145` branch | open |
 | D-24 | S4 | apphost.cpp:1163, 1314 | abflags.txt: CRLF kept in values ("0\r" = ON), >255-byte lines split | open |
 | D-25 | S4 | 7935 WrapObject | linear IsSameObject scan per wrap; permanent global refs | open |
