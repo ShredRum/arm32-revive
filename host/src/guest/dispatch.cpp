@@ -2333,8 +2333,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // the caller's lr matches (JSON-parse forensics: input lives on the
         // heap and drifts between runs due to worker-thread racing, so
         // post-mortem dumps are unreliable — capture at call time).
-        if (const char* mdl = std::getenv("HARNESS_MEMDUMP")) {
-            std::uint32_t mlr = static_cast<std::uint32_t>(std::strtoul(mdl, nullptr, 16));
+        // Read once: memchr is hot (JSON/string parsing) and getenv is a
+        // linear scan of environ.
+        static const std::int64_t memdump_lr = [] {
+            const char* e = std::getenv("HARNESS_MEMDUMP");
+            return e ? static_cast<std::int64_t>(std::strtoul(e, nullptr, 16)) : std::int64_t(-1);
+        }();
+        if (memdump_lr >= 0) {
+            const std::uint32_t mlr = static_cast<std::uint32_t>(memdump_lr);
             if (regs[14] == mlr && a2 <= 0x10000) {
                 std::printf("[memdump] %s(%08x,'%c',%u) lr=%08x:\n", n.c_str(), a0,
                             (a1 & 0xFF) >= 32 ? (char)(a1 & 0xFF) : '?', a2, regs[14]);
