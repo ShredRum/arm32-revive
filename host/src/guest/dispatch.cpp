@@ -1833,9 +1833,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // DIAG off this also stops paying the ~17 string compares per call.
     if (DiagOn() &&
         (n == "socket" || n == "connect" || n == "send" || n == "sendto" || n == "recv" ||
-         n == "recvfrom" || n == "bind" || n == "listen" || n == "accept" ||
-         n == "getaddrinfo" || n == "freeaddrinfo" || n == "gethostbyname" ||
-         n == "setsockopt" || n == "shutdown" || n == "sendmsg" || n == "recvmsg")) {
+         n == "recvfrom" || n == "bind" || n == "listen" || n == "setsockopt" ||
+         n == "shutdown")) {
         std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                     GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
     }
@@ -3120,8 +3119,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "strtol" || n == "strtoul" || n == "strtoll" || n == "strtoull" || n == "atoi" ||
-        n == "atol" || n == "atoll") {
-        // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol/atoll take
+        n == "atol") {
+        // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol take
         // only a0. Guest `long` is 32-bit while the host's is 64-bit, so the
         // 32-bit variants parse with the 64-bit host functions and saturate
         // like a 32-bit libc: strtol -> LONG_MIN/LONG_MAX + ERANGE, strtoul ->
@@ -3149,12 +3148,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (n == "atoi" || n == "atol") {
             int err = 0;
             Ret(regs, strtol32(10, nullptr, &err));
-            return;
-        }
-        if (n == "atoll") {
-            const long long v = std::atoll(s.c_str());
-            Ret(regs, static_cast<std::uint32_t>(v & 0xFFFFFFFFu),
-                static_cast<std::uint32_t>((std::uint64_t(v) >> 32) & 0xFFFFFFFFu));
             return;
         }
         const int base = static_cast<int>(a2);
@@ -3775,12 +3768,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "usleep" || n == "sleep") {
-        std::uint64_t us = (n == "sleep") ? std::uint64_t(a0) * 1000000u : a0;
-        GuestSleepUs(us);
-        Ret(regs, 0);
-        return;
-    }
     // --- loud exits ---
     if (n == "abort" || n == "__stack_chk_fail" || n == "__assert2" || n == "exit" || n == "_exit") {
         std::printf("[svc] FATAL %s() called (r0=%08x) pc=%08x lr=%08x -- halting\n", n.c_str(), a0,
@@ -3831,8 +3818,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "pthread_rwlock_init" || n == "pthread_rwlock_destroy" || n == "pthread_rwlock_rdlock" ||
-        n == "pthread_rwlock_wrlock" || n == "pthread_rwlock_unlock" ||
-        n == "pthread_rwlock_tryrdlock" || n == "pthread_rwlock_trywrlock") {
+        n == "pthread_rwlock_wrlock" || n == "pthread_rwlock_unlock") {
         Ret(regs, PthreadRwlock(n, a0));
         return;
     }
@@ -4527,15 +4513,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(wrote));
             return;
         }
-        if (n == "fseek" || n == "fseeko" || n == "ftell" || n == "ftello" || n == "rewind") {
+        if (n == "fseek" || n == "fseeko" || n == "ftell" || n == "ftello") {
             FILE* f = file_of(a0);
             if (!f) {
                 Ret(regs, (n == "fseek" || n == "fseeko") ? static_cast<std::uint32_t>(-1) : 0u);
-                return;
-            }
-            if (n == "rewind") {
-                std::rewind(f);
-                Ret(regs, 0);
                 return;
             }
             if (n == "ftell" || n == "ftello") {
@@ -5287,30 +5268,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "accept") {
-            const int lfd = host_fd_of(a0);
-            if (lfd < 0) {
-                set_guest_errno(EBADF);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
-            }
-            if (wait_fd(lfd, POLLIN, 5000) <= 0) {
-                set_guest_errno(EAGAIN);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
-            }
-            struct sockaddr_storage ss {};
-            socklen_t sl = sizeof(ss);
-            int hfd = ::accept(lfd, reinterpret_cast<struct sockaddr*>(&ss), &sl);
-            if (hfd < 0) {
-                set_guest_errno(errno);
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
-            }
-            const std::uint32_t g = alloc_guest_fd(hfd);
-            Ret(regs, g);
-            return;
-        }
         if (n == "send" || n == "sendto") {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
@@ -5507,12 +5464,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "sendmsg" || n == "recvmsg") {
-            std::printf("[netsock] LOUD %s unmarshal TODO -- halting\n", n.c_str());
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
-            return;
-        }
         // getpeername/getsockname: the engine stringifies socket addrs
         // (sa_addr inet_ntop) and logs "Trying %s...". Stubs left the
         // buffers zeroed (family 0) -> ntop failed -> HttpRequestException.
@@ -5671,8 +5622,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
         }
-        if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
-            n == "inet_ntop") {
+        if (n == "inet_addr" || n == "inet_pton" || n == "inet_ntoa" || n == "inet_ntop") {
             InetThunk(regs, n, a0, a1, a2, a3);
             return;
         }
@@ -6386,10 +6336,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "glGetError") {
-            Ret(regs, 0);  // GL_NO_ERROR
-            return;
-        }
     }
     if (n == "__system_property_get") {
         // int __system_property_get(const char* name, char* value): copies the
@@ -6524,8 +6470,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(rng.Next()));
         return;
     }
-    if (n == "srand48" || n == "lrand48" || n == "mrand48" || n == "drand48" ||
-        n == "erand48" || n == "jrand48" || n == "nrand48") {
+    if (n == "srand48" || n == "lrand48") {
         // Real 48-bit LCG (was stub->0: EVERY lrand48() returned 0, so all
         // per-bird animation phases / blink thresholds / interval picks
         // collapsed to one value -> synchronous jumps + every-frame blinks).
@@ -6549,49 +6494,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "drand48") {
-            const double d = (double)rng_next() / (double)(1ull << 48);
-            std::uint64_t u = 0;
-            std::memcpy(&u, &d, 8);
-            Ret(regs, static_cast<std::uint32_t>(u & 0xFFFFFFFFu),
-                static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
-            return;
-        }
-        if (n == "erand48" || n == "jrand48" || n == "nrand48") {
-            // xsubi = 3x u16 in guest memory (in/out).
-            std::uint16_t xs[3] = {0x330E, 0xABCD, 0x1234};
-            if (CheckRange(a0, 6, false)) {
-                std::memcpy(xs, H(a0), 6);
-            }
-            std::uint64_t x = ((std::uint64_t)xs[2] << 32) | ((std::uint64_t)xs[1] << 16) |
-                              (std::uint64_t)xs[0];
-            x = (rng_a * x + rng_c) & rng_m;
-            xs[0] = (std::uint16_t)(x & 0xFFFFu);
-            xs[1] = (std::uint16_t)((x >> 16) & 0xFFFFu);
-            xs[2] = (std::uint16_t)((x >> 32) & 0xFFFFu);
-            if (CheckRange(a0, 6, true)) {
-                std::memcpy(H(a0), xs, 6);
-            }
-            if (n == "erand48") {
-                const double d = (double)x / (double)(1ull << 48);
-                std::uint64_t u = 0;
-                std::memcpy(&u, &d, 8);
-                Ret(regs, static_cast<std::uint32_t>(u & 0xFFFFFFFFu),
-                    static_cast<std::uint32_t>((u >> 32) & 0xFFFFFFFFu));
-                return;
-            }
-            if (n == "jrand48") {
-                Ret(regs, static_cast<std::uint32_t>((std::int32_t)(x >> 16)));
-                return;
-            }
-            Ret(regs, static_cast<std::uint32_t>((x >> 17) & 0x7FFFFFFFu));  // nrand48: [0,2^31)
-            return;
-        }
-        if (n == "mrand48") {
-            Ret(regs, static_cast<std::uint32_t>((std::int32_t)(rng_next() >> 16)));
-            return;
-        }
-        // rand/random/lrand48: [0,2^31) (RAND_MAX on both Bionic and glibc).
+        // lrand48: [0,2^31) (RAND_MAX on both Bionic and glibc).
         Ret(regs, static_cast<std::uint32_t>((rng_next() >> 17) & 0x7FFFFFFFu));
         return;
     }
@@ -6957,12 +6860,6 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
     }
     if (n == "pthread_rwlock_unlock") {
         return static_cast<std::uint32_t>(pthread_rwlock_unlock(r));
-    }
-    if (n == "pthread_rwlock_tryrdlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_tryrdlock(r));
-    }
-    if (n == "pthread_rwlock_trywrlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_trywrlock(r));
     }
     return EINVAL;
 }
@@ -11000,15 +10897,6 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
     const char* s = GuestStr(sptr);
     if (n == "inet_addr") {
         Ret(regs, static_cast<std::uint32_t>(::inet_addr(s)));
-        return;
-    }
-    if (n == "inet_aton") {
-        struct in_addr ia {};
-        const int r = ::inet_aton(s, &ia);
-        if (r != 0 && a1 != 0 && CheckRange(a1, 4, true)) {
-            std::memcpy(H(a1), &ia, 4);
-        }
-        Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
     // inet_pton(af, src, dst): AF_INET (4B) and AF_INET6 (16B).
