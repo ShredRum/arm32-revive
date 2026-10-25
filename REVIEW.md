@@ -215,7 +215,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | id | sev | where | finding | status |
 |---|---|---|---|---|
 | H-01 | S2 | host/CMakeLists.txt | libabhost.so LOAD segments are 4 KB aligned; 16 KB-page devices (Android 15+ Pixels etc.) need -z max-page-size=16384 | fixed 2c2feaa |
-| H-02 | S2 | elf_loader.cpp:96-117,559; guest_memory.h; GuestMmap | loader assumes 4 KB host pages: 5 of 6 guests have RW segments not 16 KB aligned (map fails), code+data share a 16 KB page in 3 | open |
+| H-02 | S2 | elf_loader.cpp:96-117,559; guest_memory.h; GuestMmap | loader assumes 4 KB host pages: 5 of 6 guests have RW segments not 16 KB aligned (map fails), code+data share a 16 KB page in 3 | fixed 52a6ee4 |
 | H-03 | S3 | apphost.cpp:1230 | stdout "w" + stderr "a" on one log: stdout overwrote stderr lines (= D-16) | fixed 12082e2 |
 | H-04 | S3 | build API 26 vs sandbox API 25, minSdk 16 | lib really needs API 24; build for android-24 and declare minSdk 24 | open |
 | H-05 | S3 | scripts/devgate.sh | tombstones counted without sudo; grep -w matched star-wars-ii-amz; md5 mismatch not fatal | fixed ccd4747 |
@@ -241,7 +241,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | id | sev | where | finding | status |
 |---|---|---|---|---|
 | F-22 | S2 | RELRO write guard | only checked in slow-path callbacks; with fastmem (shipping) RELRO is host-writable, so the guard never fires; host memcpy/memset thunks skip it too. Fix: mprotect RELRO read-only after InitDataImports and record it read-only | fixed f4802e0 |
-| F-11 | S2 | elf_loader, guest_memory | 4 KiB pages hard-wired (= H-02) | open |
+| F-11 | S2 | elf_loader, guest_memory | 4 KiB pages hard-wired (= H-02) | fixed 52a6ee4 |
 | F-23/24 | S3 | MemoryReadCode, Read/Write | bad code read returns 0 (Dynarmic caches a zero block, wrong pc in the halt); bad data access halts only at block end, the rest of the block runs on 0. Fix: nullopt, check_halt_on_memory_access, MemoryAbort | open |
 | F-25 | S3 | InitDataImports | runs before any Jit: LOUD branches call ActiveJit()->HaltExecution on null | open |
 | F-34 | S3 | diag mode | HARNESS_DIAG arms Rio probe VAs for all six titles | open |
