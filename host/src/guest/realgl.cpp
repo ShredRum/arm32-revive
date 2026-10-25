@@ -631,30 +631,52 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glGetUniformfv") {
-        // glGetUniformfv(program, location, params): GLES2 has no count
-        // (the uniform's type gives it), so ask the driver how many floats
-        // the uniform holds and write exactly that many into the GUEST's
-        // buffer -- a host pointer would be read as guest memory by the
-        // game, and the uniforms would stay garbage.
-        GLint size = 0;
-        GLenum type = 0;
-        GLint len = 0;
-        glGetActiveUniform((GLuint)a0, (GLint)a1, 1, &len, &size, &type, nullptr);
-        if (size <= 0 || size > 256) {
-            std::printf("%s LOUD uniform loc=%u size=%d type=%04x\n", tag, a1, size, type);
+        // glGetUniformfv(program, location, params) writes ONE value of the
+        // uniform's type (a mat4 = 16 floats). GLES2 gives no count, so find
+        // the active uniform that owns this location (glGetActiveUniform
+        // takes an INDEX, not a location; for an array uniform "u[0]" the
+        // locations are base..base+size-1) and use its component count.
+        GLint nact = 0;
+        glGetProgramiv((GLuint)a0, GL_ACTIVE_UNIFORMS, &nact);
+        GLenum found_type = 0;
+        char nm[256];
+        for (GLint i = 0; i < nact && found_type == 0; i++) {
+            GLint size = 0, len = 0;
+            GLenum type = 0;
+            glGetActiveUniform((GLuint)a0, (GLuint)i, sizeof(nm), &len, &size, &type, nm);
+            const GLint base = glGetUniformLocation((GLuint)a0, nm);
+            if (base >= 0 && (GLint)a1 >= base && (GLint)a1 < base + size) {
+                found_type = type;
+            }
+        }
+        std::size_t comps = 0;
+        switch (found_type) {
+            case GL_FLOAT: case GL_INT: case GL_BOOL: case GL_SAMPLER_2D: case GL_SAMPLER_CUBE:
+                comps = 1; break;
+            case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_BOOL_VEC2: comps = 2; break;
+            case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_BOOL_VEC3: comps = 3; break;
+            case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_BOOL_VEC4: case GL_FLOAT_MAT2:
+                comps = 4; break;
+            case GL_FLOAT_MAT3: comps = 9; break;
+            case GL_FLOAT_MAT4: comps = 16; break;
+            default: comps = 0; break;
+        }
+        if (comps == 0) {
+            std::printf("%s LOUD no active uniform at program %u location %d (type %04x)\n", tag,
+                        a0, (int)a1, found_type);
             r->Ret(regs, 0);
             return true;
         }
-        if (!r->CheckRange(a2, (std::size_t)size * 4, true)) {
+        if (!r->CheckRange(a2, comps * 4, true)) {
             std::printf("%s LOUD params %08x out of range\n", tag, a2);
             r->Ret(regs, 0);
             return true;
         }
-        std::vector<GLfloat> vals((std::size_t)size, 0.0f);
-        glGetUniformfv((GLuint)a0, (GLint)a1, vals.data());
-        std::memcpy(r->H(a2), vals.data(), (std::size_t)size * 4);
+        GLfloat vals[16] = {};  // the largest GLES2 uniform value: mat4
+        glGetUniformfv((GLuint)a0, (GLint)a1, vals);
+        std::memcpy(r->H(a2), vals, comps * 4);
         if (EnvOn("HARNESS_GLDRAWLOG")) {
-            std::printf("%s(%u,%u) size=%d type=%04x ok\n", tag, a0, a1, size, type);
+            std::printf("%s(%u,%d) type=%04x comps=%zu ok\n", tag, a0, (int)a1, found_type, comps);
         }
         r->Ret(regs, 0);
         return true;
@@ -797,8 +819,25 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glCopyTexImage2D" || n == "glCopyTexSubImage2D") {
-        std::printf("%s UNHANDLED -> fake\n", tag);
-        return false;
+        // Eight scalar args: four in r0-r3, four on the stack (gl2.h).
+        //   CopyTexImage2D(target, level, internalformat, x | y, w, h, border)
+        //   CopyTexSubImage2D(target, level, xoff, yoff | x, y, w, h)
+        std::uint32_t st[4] = {0, 0, 0, 0};
+        if (!r->CheckRange(sp, sizeof(st), false)) {
+            std::printf("%s LOUD stack args unreadable\n", tag);
+            r->Ret(regs, 0);
+            return true;
+        }
+        std::memcpy(st, r->H(sp), sizeof(st));
+        if (n == "glCopyTexImage2D") {
+            glCopyTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLint)a3, (GLint)st[0],
+                             (GLsizei)st[1], (GLsizei)st[2], (GLint)st[3]);
+        } else {
+            glCopyTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLint)st[0],
+                                (GLint)st[1], (GLsizei)st[2], (GLsizei)st[3]);
+        }
+        r->Ret(regs, 0);
+        return true;
     }
     // --- buffers + draws (bound-buffer tracking resolves offset duality) ---
     if (n == "glBindBuffer") {
