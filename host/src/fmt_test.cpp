@@ -38,6 +38,7 @@
 
 #include "jni_call_words.h"
 #include <dirent.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include "guest/dispatch.h"
@@ -242,6 +243,10 @@ int main() {
     mod.imports.push_back(abr::Import{"fseek", true, 0, 0, 0});           // 30
     mod.imports.push_back(abr::Import{"ftell", true, 0, 0, 0});           // 31
     mod.imports.push_back(abr::Import{"fwrite", true, 0, 0, 0});          // 32
+    mod.imports.push_back(abr::Import{"socket", true, 0, 0, 0});          // 33
+    mod.imports.push_back(abr::Import{"setsockopt", true, 0, 0, 0});      // 34
+    mod.imports.push_back(abr::Import{"getsockopt", true, 0, 0, 0});      // 35
+    mod.imports.push_back(abr::Import{"close", true, 0, 0, 0});           // 36
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1282,6 +1287,48 @@ int main() {
             const std::uint32_t cargs[4] = {f, 0, 0, 0};
             abr::RuntimeTestAccess::Call(rt, 22, cargs);
         }
+    }
+
+    // --- setsockopt passes optlen BY VALUE at [sp]; getsockopt passes a
+    //     pointer there. SO_RCVTIMEO's struct timeval is 8 bytes on the guest.
+    {
+        const std::uint32_t sargs[4] = {AF_INET, SOCK_DGRAM, 0, 0};
+        const std::uint32_t fd = abr::RuntimeTestAccess::Call(rt, 33, sargs);
+        Expect("socket() returns a guest fd", static_cast<std::int32_t>(fd) >= 0 ? "1" : "0", "1");
+        const std::uint32_t kVal = 0x10007900, kLen = 0x10007910, kSp = 0x10007A00;
+        abr::RuntimeTestAccess::RegsView in{};
+        in[13] = kSp;
+        auto st32 = [&](std::uint32_t a, std::uint32_t v) { std::memcpy(rt.H(a), &v, 4); };
+        auto ld32 = [&](std::uint32_t a) {
+            std::uint32_t v = 0;
+            std::memcpy(&v, rt.H(a), 4);
+            return v;
+        };
+        st32(kVal, 1);
+        st32(kSp, 4);  // optlen by value
+        const std::uint32_t so[4] = {fd, SOL_SOCKET, SO_REUSEADDR, kVal};
+        Expect("setsockopt SO_REUSEADDR (len by value)",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 34, so, in, nullptr)), "0");
+        st32(kVal, 0);
+        st32(kLen, 4);
+        st32(kSp, kLen);  // optlen pointer
+        Expect("getsockopt SO_REUSEADDR returns 0",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 35, so, in, nullptr)), "0");
+        Expect("getsockopt SO_REUSEADDR value", std::to_string(ld32(kVal) != 0), "1");
+        st32(kVal, 2);
+        st32(kVal + 4, 0);
+        st32(kSp, 8);
+        const std::uint32_t tvo[4] = {fd, SOL_SOCKET, SO_RCVTIMEO, kVal};
+        Expect("setsockopt SO_RCVTIMEO (8-byte timeval)",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 34, tvo, in, nullptr)), "0");
+        st32(kVal, 0);
+        st32(kLen, 8);
+        st32(kSp, kLen);
+        abr::RuntimeTestAccess::Call(rt, 35, tvo, in, nullptr);
+        Expect("getsockopt SO_RCVTIMEO sec", std::to_string(ld32(kVal)), "2");
+        Expect("getsockopt SO_RCVTIMEO len", std::to_string(ld32(kLen)), "8");
+        const std::uint32_t cargs[4] = {fd, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 36, cargs);
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

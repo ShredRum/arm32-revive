@@ -4766,28 +4766,72 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     r = ::listen(hfd, (int)a1);  // a1 = backlog, no pointer
                 }
             } else {
-                // (level,name) in regs; value + len-ptr: a3=ptr, stack=lenptr.
-                std::uint32_t lenptr = 0;
-                if (CheckRange(regs[13], 4, false)) {
-                    std::memcpy(&lenptr, H(regs[13]), 4);
-                }
-                std::uint32_t len = 0;
-                if (lenptr && CheckRange(lenptr, 4, false)) {
-                    std::memcpy(&len, H(lenptr), 4);
-                }
-                if (len > 256 || !CheckRange(a3, len, n != "setsockopt")) {
+                // setsockopt(fd, level, name, const void* val, socklen_t len):
+                //   the 5th argument (len) is passed BY VALUE at [sp].
+                // getsockopt(fd, level, name, void* val, socklen_t* len):
+                //   the 5th argument is a POINTER at [sp].
+                // SO_RCVTIMEO/SO_SNDTIMEO carry struct timeval, 8 bytes on the
+                // 32-bit guest ({long,long}) vs 16 on the host: converted.
+                // Every other option value is ints/structs of ints, the same
+                // on both sides (asm-generic/socket.h is shared by arm/arm64).
+                std::uint32_t arg5 = 0;
+                if (!CheckRange(regs[13], 4, false)) {
                     set_guest_errno(EFAULT);
-                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    Ret(regs, 0xFFFFFFFFu);
                     return;
                 }
-                if (n == "setsockopt") {
-                    r = ::setsockopt(hfd, (int)a1, (int)a2, H(a3), (socklen_t)len);
+                std::memcpy(&arg5, H(regs[13]), 4);
+                const bool is_set = (n == "setsockopt");
+                const bool tv_opt = ((int)a1 == SOL_SOCKET &&
+                                     ((int)a2 == SO_RCVTIMEO || (int)a2 == SO_SNDTIMEO));
+                std::uint32_t len = 0;
+                if (is_set) {
+                    len = arg5;
+                } else {
+                    if (arg5 == 0 || !CheckRange(arg5, 4, true)) {
+                        set_guest_errno(EFAULT);
+                        Ret(regs, 0xFFFFFFFFu);
+                        return;
+                    }
+                    std::memcpy(&len, H(arg5), 4);
+                }
+                if (len > 256 || (len != 0 && !CheckRange(a3, len, !is_set))) {
+                    set_guest_errno(len > 256 ? EINVAL : EFAULT);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                if (tv_opt) {
+                    if (len < 8) {
+                        set_guest_errno(EINVAL);
+                        Ret(regs, 0xFFFFFFFFu);
+                        return;
+                    }
+                    struct timeval tv {};
+                    if (is_set) {
+                        std::int32_t g[2] = {0, 0};
+                        std::memcpy(g, H(a3), 8);
+                        tv.tv_sec = g[0];
+                        tv.tv_usec = g[1];
+                        r = ::setsockopt(hfd, (int)a1, (int)a2, &tv, sizeof(tv));
+                    } else {
+                        socklen_t sl = sizeof(tv);
+                        r = ::getsockopt(hfd, (int)a1, (int)a2, &tv, &sl);
+                        if (r == 0) {
+                            const std::int32_t g[2] = {static_cast<std::int32_t>(tv.tv_sec),
+                                                       static_cast<std::int32_t>(tv.tv_usec)};
+                            std::memcpy(H(a3), g, 8);
+                            const std::uint32_t back = 8;
+                            std::memcpy(H(arg5), &back, 4);
+                        }
+                    }
+                } else if (is_set) {
+                    r = ::setsockopt(hfd, (int)a1, (int)a2, len ? H(a3) : nullptr, (socklen_t)len);
                 } else {
                     socklen_t sl = (socklen_t)len;
-                    r = ::getsockopt(hfd, (int)a1, (int)a2, H(a3), &sl);
-                    if (lenptr && CheckRange(lenptr, 4, true)) {
+                    r = ::getsockopt(hfd, (int)a1, (int)a2, len ? H(a3) : nullptr, &sl);
+                    if (r == 0) {
                         const std::uint32_t back = (std::uint32_t)sl;
-                        std::memcpy(H(lenptr), &back, 4);
+                        std::memcpy(H(arg5), &back, 4);
                     }
                 }
             }
