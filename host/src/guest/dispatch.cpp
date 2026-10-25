@@ -6357,14 +6357,29 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
     return 22;
 }
 
+// Host condition variables always run on CLOCK_MONOTONIC so that a wall-clock
+// jump cannot stretch or cut a wait. Guest deadlines come in two clocks:
+// pthread_cond_timedwait_monotonic (bionic's legacy API, the one all six
+// titles use, e.g. Rio clock_gettime(CLOCK_MONOTONIC) at 0x38f45c then the
+// call at 0x38f530) passes a CLOCK_MONOTONIC deadline; plain
+// pthread_cond_timedwait passes a CLOCK_REALTIME one, converted below. No
+// title imports pthread_condattr_setclock, so cond attributes carry no clock.
+static pthread_cond_t* NewHostCond() {
+    auto* c = new pthread_cond_t;
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(c, &attr);
+    pthread_condattr_destroy(&attr);
+    return c;
+}
+
 std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
-                                   std::uint32_t arg2, bool /*monotonic*/) {
+                                   std::uint32_t arg2, bool monotonic) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy") {
         if (n == "pthread_cond_init") {
-            auto* c = new pthread_cond_t;
-            pthread_cond_init(c, nullptr);
-            cond_map_[cond] = c;
+            cond_map_[cond] = NewHostCond();
         } else {
             auto it = cond_map_.find(cond);
             if (it != cond_map_.end()) {
@@ -6377,11 +6392,9 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     }
     auto it = cond_map_.find(cond);
     if (it == cond_map_.end()) {
-        // Same lazy creation for statically-initialized condvars.
-        auto* c = new pthread_cond_t;
-        pthread_cond_init(c, nullptr);
-        cond_map_[cond] = c;
-        it = cond_map_.find(cond);
+        // Lazy creation for statically-initialized condvars
+        // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
+        it = cond_map_.emplace(cond, NewHostCond()).first;
     }
     if (n == "pthread_cond_signal") {
         return static_cast<std::uint32_t>(pthread_cond_signal(it->second));
@@ -6391,98 +6404,52 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     }
     auto mit = mutex_map_.find(arg1);
     if (mit == mutex_map_.end()) {
-        return 22;
+        return EINVAL;
     }
     if (n == "pthread_cond_wait") {
-        // HARNESS_CONDSATISFY=1: satisfy lang::Signal waits. Decomp
-        // (FUN_0039f2a4): predicate is mutex_obj->__size[8]&1 (set by
-        // 0x39F170 writes 1 + broadcast; reset writes 0). The signaler never
-        // runs here, so set [mutex+8]|=1 (arg1) and return 0 (predicate true
-        // -> proceed, no abort). Plausibility-gated (flag clear); first wait
-        // per cond.
-        {
-            static int csen = -1;
-            if (csen < 0) {
-                csen = std::getenv("HARNESS_CONDSATISFY") ? 1 : 0;
-            }
-            static std::unordered_map<std::uint32_t, char> csdone;
-            if (csen && csdone.find(cond) == csdone.end() && csdone.size() < 16) {
-                csdone[cond] = 1;
-                bool ok = CheckRange(arg1 + 8, 1, false);
-                std::uint8_t fl = 0;
-                if (ok) {
-                    std::memcpy(&fl, H(arg1 + 8), 1);
-                    ok = (fl == 0);
-                }
-                std::printf("[cond] satisfy c=%08x m=%08x fl=%u %s\n", cond, arg1, fl,
-                            ok ? "SATISFIED" : "skipped");
-                if (ok && CheckRange(arg1 + 8, 1, true)) {
-                    const std::uint8_t one = 1;
-                    std::memcpy(H(arg1 + 8), &one, 1);
-                    return 0;
-                }
-            }
-        }
-        // TEMP-DIAG (rendezvous hunt): dump around cond+mutex (find the
-        // predicate flag the waiter polls, e.g. Signal.cpp [r4+8]).
-        {
-            static int cd = 0;
-            if (DiagOn() && cd < 3 && CheckRange(cond > 64 ? cond - 64 : 0, 128, false)) {
-                cd++;
-                const std::uint8_t* p = H<const std::uint8_t>(cond - 64);
-                std::printf("[cond] wait c=%08x m=%08x t=%u dump:", cond, arg1, GuestTid());
-                for (int j = 0; j < 128; j++) {
-                    std::printf(" %02x", p[j]);
-                }
-                std::printf("\n");
-            }
-        }
-        // Untimed wait: block until signalled, as bionic does. There used to be
-        // a 5 s cap here plus HARNESS_SPURWAKE, which turned the cap's ETIMEDOUT
-        // into a spurious success -- both are gone (PLAN.md backlog item 2).
-        // Rationale for the old cap ("a worker/main rendezvous on a never
-        // signalled cond hangs forever") was measured on the device: with the
-        // cap off (HARNESS_NOCAPWAIT=1, the pre-change opt-out) Space runs its
-        // frame path and its audio JNI for 75 s with zero spurwake events.
-        // A waiter that never gets its broadcast stays visible in the
-        // end-of-run [census] instead of being papered over here.
+        // Untimed wait: block until signalled, as bionic does.
         mutex_.unlock();
         const int r = pthread_cond_wait(it->second, mit->second);
         mutex_.lock();
-        // TEMP-DIAG (cond triage): who waits/signals which cond.
-        {
-            static int cw = 0;
-            if (DiagOn() && cw < 10) {
-                cw++;
-                std::printf("[cond] wait c=%08x m=%08x t=%u -> %d\n", cond, arg1, GuestTid(), r);
-            }
-        }
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_cond_timedwait") {
-        // Guest ABI: absolute timeout as 2x u32 (sec, nsec) at arg2 --
-        // NOT a 16B host timespec (over-read misparsed tv_sec/nsec).
-        std::uint32_t gsec = 0, gnsec = 0;
-        if (CheckRange(arg2, 8, false)) {
-            std::memcpy(&gsec, H(arg2), 4);
-            std::memcpy(&gnsec, H(arg2 + 4), 4);
+        // Guest struct timespec is {long tv_sec; long tv_nsec;}, 2 x 32 bits.
+        if (!CheckRange(arg2, 8, false)) {
+            return EINVAL;
+        }
+        std::int32_t gsec = 0, gnsec = 0;
+        std::memcpy(&gsec, H(arg2), 4);
+        std::memcpy(&gnsec, H(arg2 + 4), 4);
+        if (gnsec < 0 || gnsec >= 1000000000) {
+            return EINVAL;
         }
         struct timespec ts {};
-        ts.tv_sec = (time_t)gsec;
-        ts.tv_nsec = (long)gnsec;
-        // The guest's own absolute deadline is honoured as-is. A 5 s clamp used
-        // to shorten anything further out ("cap absurd waits so missing signals
-        // surface"), which made ETIMEDOUT arrive earlier than the guest asked
-        // (PLAN.md backlog item 2). A timedwait cannot hang: it carries its own
-        // deadline. NOTE: the clock of the deadline is the guest's business --
-        // pthread_condattr_setclock is still ignored, so the (currently unused)
-        // _monotonic variant would compare against the wrong epoch.
+        ts.tv_sec = static_cast<time_t>(static_cast<std::uint32_t>(gsec));
+        ts.tv_nsec = gnsec;
+        if (!monotonic) {
+            // Convert the CLOCK_REALTIME deadline to CLOCK_MONOTONIC.
+            struct timespec now_rt {}, now_mono {};
+            clock_gettime(CLOCK_REALTIME, &now_rt);
+            clock_gettime(CLOCK_MONOTONIC, &now_mono);
+            std::int64_t left_ns = (static_cast<std::int64_t>(ts.tv_sec) - now_rt.tv_sec) *
+                                       1000000000LL +
+                                   (ts.tv_nsec - now_rt.tv_nsec);
+            if (left_ns < 0) {
+                left_ns = 0;
+            }
+            const std::int64_t mono_ns =
+                static_cast<std::int64_t>(now_mono.tv_sec) * 1000000000LL + now_mono.tv_nsec +
+                left_ns;
+            ts.tv_sec = static_cast<time_t>(mono_ns / 1000000000LL);
+            ts.tv_nsec = static_cast<long>(mono_ns % 1000000000LL);
+        }
         mutex_.unlock();
         const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
         mutex_.lock();
         return static_cast<std::uint32_t>(r);
     }
-    return 22;
+    return EINVAL;
 }
 
 std::uint32_t Runtime::PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t /*destr*/) {

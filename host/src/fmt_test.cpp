@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "jni_call_words.h"
+#include <chrono>
 #include <dirent.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -250,6 +251,8 @@ int main() {
     mod.imports.push_back(abr::Import{"close", true, 0, 0, 0});           // 36
     mod.imports.push_back(abr::Import{"statfs", true, 0, 0, 0});          // 37
     mod.imports.push_back(abr::Import{"poll", true, 0, 0, 0});            // 38
+    mod.imports.push_back(abr::Import{"pthread_cond_timedwait_monotonic", true, 0, 0, 0});  // 39
+    mod.imports.push_back(abr::Import{"pthread_cond_timedwait", true, 0, 0, 0});  // 40
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1397,6 +1400,45 @@ int main() {
         Expect("poll ignored entry revents 0", std::to_string(rev(1)), "0");
         const std::uint32_t cargs[4] = {sfd, 0, 0, 0};
         abr::RuntimeTestAccess::Call(rt, 36, cargs);
+    }
+
+    // --- timed cond waits honour the deadline's clock: the _monotonic
+    //     variant takes a CLOCK_MONOTONIC deadline (it used to be compared
+    //     against CLOCK_REALTIME and time out at once), the plain one a
+    //     CLOCK_REALTIME deadline.
+    {
+        const std::uint32_t kM = 0x10007E00, kC = 0x10007E40, kTs = 0x10007E80;
+        const std::uint32_t minit[4] = {kM, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 8, minit);
+        abr::RuntimeTestAccess::Call(rt, 9, minit);  // lock
+        auto wait_ms = [&](std::uint32_t idx, clockid_t clk) {
+            struct timespec now {};
+            clock_gettime(clk, &now);
+            std::int64_t ns = static_cast<std::int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec +
+                              100000000LL;
+            const std::uint32_t sec = static_cast<std::uint32_t>(ns / 1000000000LL);
+            const std::uint32_t nsec = static_cast<std::uint32_t>(ns % 1000000000LL);
+            std::memcpy(rt.H(kTs), &sec, 4);
+            std::memcpy(rt.H(kTs + 4), &nsec, 4);
+            const std::uint32_t args[4] = {kC, kM, kTs, 0};
+            const auto t0 = std::chrono::steady_clock::now();
+            const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, idx, args);
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+            return std::make_pair(r, static_cast<long long>(ms));
+        };
+        const auto mono = wait_ms(39, CLOCK_MONOTONIC);
+        Expect("timedwait_monotonic returns ETIMEDOUT", std::to_string(mono.first),
+               std::to_string(ETIMEDOUT));
+        Expect("timedwait_monotonic waits ~100 ms", (mono.second >= 80 && mono.second < 1000) ? "1" : "0",
+               "1");
+        const auto real = wait_ms(40, CLOCK_REALTIME);
+        Expect("timedwait (realtime) returns ETIMEDOUT", std::to_string(real.first),
+               std::to_string(ETIMEDOUT));
+        Expect("timedwait (realtime) waits ~100 ms", (real.second >= 80 && real.second < 1000) ? "1" : "0",
+               "1");
+        abr::RuntimeTestAccess::Call(rt, 11, minit);  // unlock
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
