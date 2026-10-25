@@ -702,48 +702,6 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         g_upd_jit = st->jit;
         g_upd_tid = (int)gettid();
     }
-    // HARNESS_FUNCTORAT=N: after the Nth nativeUpdate, forge a login-
-    // functor ctx (PC RAWBUILD recipe: vtable 0x65E650 + zeroed
-    // account block) and BL the fail functor 0x5FE70 once, then
-    // continue normally. Binary: clean return? "Login failed"?
-    // burst (+164? builders? menu)? PC proved clean+log (functor1).
-    {
-        static int un = 0, fired = 0;
-        static int at = -1;
-        if (at < 0) {
-            at = 0;
-            if (const char* e = std::getenv("HARNESS_FUNCTORAT")) {
-                at = std::atoi(e);
-            }
-        }
-        if (at > 0 && !fired && std::strstr(name, "nativeUpdate")) {
-            if (++un >= at) {
-                fired = 1;
-                const std::uint32_t zb = g_rt->GuestCalloc(1, 0x2C);
-                const std::uint32_t cx = g_rt->GuestCalloc(1, 0x20);
-                if (zb && cx) {
-                    const std::uint32_t fv = 0x65E650u;
-                    std::memcpy(g_rt->H(cx), &fv, 4);
-                    std::memcpy(g_rt->H(cx + 4), &zb, 4);
-                    Log("[functor] forged ctx=%08x acct=%08x, calling 0x5FE70", cx, zb);
-                    auto& fr = st->jit->Regs();
-                    fr.fill(0);
-                    fr[13] = st->stack + kThreadStackSize - 0x100u;
-                    fr[14] = g_mod->halt_va;
-                    fr[0] = cx;
-                    CallGuest(*st->jit, 0x5FE70u);
-                    Dynarmic::HaltReason fhr;
-                    {
-                        GuestRunGuard gg(st.get(), name);
-                        fhr = st->jit->Run();
-                    }
-                    Log("[functor] hr=%d r0=%08x", (int)fhr, fr[0]);
-                } else {
-                    Log("[functor] alloc failed");
-                }
-            }
-        }
-    }
     static std::unordered_map<std::string, std::uint32_t> vacache;
     std::uint32_t va = 0;
     {
@@ -831,183 +789,6 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &words[i], 4);
     }
     regs[14] = g_mod->halt_va;
-#ifdef __ANDROID__
-    // Synthetic input heartbeat (tapbeat): when no real finger input for
-    // a while, replay the last input words with action forced to MOVE(2)
-    // (no press-flag side effects) ahead of the update, so event-driven
-    // timers/quantums advance without a finger. Pacing-only; game logic
-    // untouched. HARNESS_TAPBEAT=1 enables (test), unset = off.
-    // Stash last real input (words + time) for replay shape.
-    {
-        static std::vector<std::uint32_t> lastw;
-        static long long lastms = 0;
-        static int upd_n = 0;
-        static int beat_on = -1;
-        if (beat_on < 0) {
-            beat_on = std::getenv("HARNESS_TAPBEAT") ? 1 : 0;
-        }
-        // Seed template (PLAY center) so the pulse fires even with
-        // zero real taps. thiz MUST be the genuine MyInputHandler mock:
-        // synthetic DOWN with thiz=0 throws in guest (unwind LR=45AF67,
-        // UD2 halt) and never sets the press-flag. Resolved once via
-        // the real NativeApplication.f field (no finger needed).
-        // Seed on the first update regardless of words shape (splash
-        // calls carry <6 words; updates are the beat domain anyway).
-        static void* g_real_app = nullptr;
-        static std::uint32_t g_handler_mock = 0;
-        // 2026-10-19 (PLAN item 6): the JNI resolve below exists only to give
-        // the synthetic driver a genuine MyInputHandler mock. The driver is off
-        // unless HARNESS_TAPBEAT is set, so in prod this did 2 NewGlobalRef +
-        // GetObjectClass/GetFieldID/GetObjectField on the first update for
-        // nothing (and printed `[tapbeat] handler mock=`). Gated on beat_on.
-        if (beat_on && lastw.empty() && std::strstr(name, "nativeUpdate")) {
-            if (!g_real_app && thiz &&
-                abr::GuestCallbacks::g_real_env_hook) {
-                JNIEnv* re =
-                    static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
-                if (re && !re->ExceptionCheck()) {
-                    g_real_app = re->NewGlobalRef(static_cast<jobject>(thiz));
-                    if (re->ExceptionCheck() || !g_real_app) {
-                        re->ExceptionClear();
-                        g_real_app = nullptr;
-                    }
-                }
-            }
-            if (!g_handler_mock && g_real_app &&
-                abr::GuestCallbacks::g_real_env_hook) {
-                JNIEnv* re =
-                    static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
-                if (re && !re->ExceptionCheck()) {
-                    jclass acl = re->GetObjectClass(static_cast<jobject>(g_real_app));
-                    jfieldID ff = acl ? re->GetFieldID(
-                        acl, "f", "Lcom/rovio/fusion/MyInputHandler;") : nullptr;
-                    jobject h = (acl && ff && !re->ExceptionCheck())
-                                    ? re->GetObjectField(static_cast<jobject>(g_real_app),
-                                                         ff)
-                                    : nullptr;
-                    if (h && !re->ExceptionCheck()) {
-                        jobject gh = re->NewGlobalRef(h);
-                        if (gh && !re->ExceptionCheck()) {
-                            g_handler_mock = g_rt->WrapObject(gh);
-                            std::printf("[tapbeat] handler mock=%08x\n", g_handler_mock);
-                        }
-                        re->DeleteLocalRef(h);
-                    } else {
-                        re->ExceptionClear();
-                    }
-                    if (acl) {
-                        re->DeleteLocalRef(acl);
-                    }
-                }
-            }
-            float dx = 1124.0f, dy = 629.0f;
-            std::uint32_t xb = 0, yb = 0;
-            std::memcpy(&xb, &dx, 4);
-            std::memcpy(&yb, &dy, 4);
-            lastw = {g_rt->JniEnv(), g_handler_mock, 2, xb, yb, 0};
-        }
-        if (lastw.empty() && words.size() >= 6) {
-            lastw = words;
-            float dx = 1124.0f, dy = 629.0f;
-            std::uint32_t xb = 0, yb = 0;
-            std::memcpy(&xb, &dx, 4);
-            std::memcpy(&yb, &dy, 4);
-            lastw[1] = words[1];  // genuine mock (never 0: DOWN needs thiz)
-            lastw[2] = 2;
-            lastw[3] = xb;
-            lastw[4] = yb;
-            lastw[5] = 0;
-        }
-        auto now_ms = []() -> long long {
-            struct timespec ts {};
-            ::clock_gettime(CLOCK_MONOTONIC, &ts);
-            return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        };
-        if (std::strstr(name, "nativeInput") && words.size() >= 6) {
-            lastw = words;
-            lastms = now_ms();
-        } else if (beat_on && std::strstr(name, "nativeUpdate")) {
-            upd_n++;
-            const long long idle = lastms ? (now_ms() - lastms) : 1000000;
-            // Governor v3 (2026-10-14, user-corrected twice): splashes
-            // want taps ASAP, loading wants ~3min untapped (jobs cook),
-            // menu wants taps. +164==2 from boot (useless as phase).
-            // Hybrid: beat during the first K updates (splash window),
-            // hold until wall-delay (loading cooks), beat after (menu).
-            static long long t0 = 0;
-            if (!t0) {
-                t0 = now_ms();
-            }
-            static long long delay_ms = -1;
-            if (delay_ms < 0) {
-                delay_ms = 300000;
-                if (const char* e = std::getenv("HARNESS_TAPBEAT_DELAY")) {
-                    delay_ms = (long long)std::atoi(e) * 1000;
-                }
-            }
-            const bool splash_win = (upd_n <= 400);
-            const bool soaked = (now_ms() - t0 >= delay_ms);
-            const int every = (splash_win || soaked) ? 30 : 0;
-            // Synthetic nativeInput driver: DOWN(0)/UP(1) must land in
-            // SEPARATE updates (finger: began -> updates -> ended; the
-            // press-flag/skip arms between). Back-to-back in one beat =
-            // strobe flash, no skip (observed live).
-            auto fire = [&](int act) {
-                std::vector<std::uint32_t> w = lastw;
-                w[2] = (std::uint32_t)act;
-                auto& br = st->jit->Regs();
-                br.fill(0);
-                for (std::size_t i = 0; i < w.size() && i < 4; i++) {
-                    br[i] = w[i];
-                }
-                for (std::size_t i = 4; i < w.size(); i++) {
-                    std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &w[i],
-                                4);
-                }
-                br[14] = g_mod->halt_va;
-                br[13] = spbase;  // (was 0 from fill -> guest stack underflow
-                // to 0xFFFFFFxx -> BAD halt; the normal path sets it, the
-                // synthetic one forgot. Caught live 2026-10-14.)
-                CallGuest(*st->jit, 0xC23E4u);
-                Dynarmic::HaltReason bhr;
-                {
-                    GuestRunGuard gg(st.get(), name);
-                    bhr = st->jit->Run();
-                }
-                std::printf("[tapbeat] #%d act=%d idle=%lldms hr=%d r0=%08x\n", upd_n, act,
-                            idle, (int)bhr, br[0]);
-                if (bhr != Dynarmic::HaltReason::UserDefined1) {
-                    Log("[tapbeat] ABNORMAL hr=%d r0=%08x", (int)bhr, br[0]);
-                }
-            };
-            static int pend_up = 0;
-            if (pend_up && !lastw.empty() && lastw.size() >= 6) {
-                pend_up = 0;  // release lands on the update right after press
-                fire(1);
-            }
-            // Coexistence (2026-10-14): a live finger OWNS the game.
-            // After any real input hold beats for QUIET_MS (synthetic
-            // press-flag steals finger taps otherwise: menu goes dead
-            // while beats interleave). 15s stillness => gentle pump.
-            static long long quiet_ms = -1;
-            if (quiet_ms < 0) {
-                quiet_ms = 15000;
-                if (const char* e = std::getenv("HARNESS_TAPBEAT_QUIET")) {
-                    quiet_ms = (long long)std::atoi(e) * 1000;
-                }
-            }
-            // Every 30th update (~1/s at 30fps) and quiet.
-            if (every && !lastw.empty() && lastw.size() >= 6 && idle > quiet_ms &&
-                (upd_n % every == 0)) {
-                // Full synthetic tap: DOWN(0) now, UP(1) on next update.
-                // MOVE-only never sets the press-flag / skip logic.
-                // Solo, no finger => no interleave hazard.
-                fire(0);
-                pend_up = 1;
-            }
-        }
-    }
-#endif
     CallGuest(*st->jit, va);
     Dynarmic::HaltReason hr;
     {
@@ -1244,95 +1025,24 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::set_terminate(TerminateWitness);  // name escaping host exceptions instead of silent abort
     Log("OnLoad: product host starting");
     Log("build marker %s %s", __DATE__, __TIME__);
-    // RETSUCC was re-armed unconditionally here (2026-10-14, "real fail path
-    // stalls on Fox"), but it never had a shipping effect: the injection is a
-    // PROBE3 hook, and PROBE3 is only armed under HARNESS_DIAG. Measured on the
-    // current baseline, the raiser it targets (guest VA 0x28a3dc) is never even
-    // translated -- no `[probe-emit] ... 0028a3dc` and no `[succ]` line in any
-    // diag run. So the crutch is inert; the lever is gone and the experiment
-    // stays opt-in (put HARNESS_RETSUCC=1 into files/abflags.txt with diag on).
     // ---- diagnostic layer: ONE switch, OFF for shipping (2026-10-17) -------
-    // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the pc
-    // probes, the WATCHPC hook, the per-call/per-frame tracing and the
-    // hot-path logs; with it off that whole layer is skipped (no logs, no
-    // per-call cost). PROBE(fill), FASTMEM and REALGL are
+    // HARNESS_DIAG=1 (real environment OR files/abflags.txt) re-arms the
+    // per-call/per-frame tracing and the hot-path logs; with it off that whole
+    // layer is skipped (no logs, no per-call cost). FASTMEM and REALGL are
     // NOT diagnostics -- they change behaviour -- and stay unconditional.
-    // See PLAN.md, batches A/B.
     const bool diag = DiagBootWanted(g_files);
     if (diag) {
         setenv("HARNESS_DIAG", "1", 1);
-        setenv("HARNESS_PROBE2", "457f90", 1);
-        setenv("HARNESS_PROBE3", "28a3dc", 1);
-        setenv("HARNESS_PROBE_N", "500", 1);
-        setenv("HARNESS_RDUMP", "1", 1);
     }
-    // Perf A/B (behavior-neutral infra): fastmem first, SAFEOPTS after.
-    // Metric = updates/min + same-behavior verdicts (sessions/rdump).
-    // 2026-10-14: fastmem back ON (proven neutral; no-fastmem boot is
-    // ~10x slower). WPA tick PROVEN, off (log bloat).
+    // Fastmem on (proven neutral; a no-fastmem boot is ~10x slower).
     setenv("HARNESS_FASTMEM", "1", 1);
-    // 2026-10-16 audit: the "HUNT" block that used to sit here left this
-    // FASTMEM line ON (its own commented copy never took effect), so the
-    // heapwatch "hunt" was blind (no store callbacks under fastmem) and its
-    // verdict was void. MALLOCPAD=32 also survived here against the Pad-OFF
-    // verdict. Both removed. Experiments now go through files/abflags.txt
-    // (applied after these defaults, logged as overrides) => no rebuild, and
-    // the log always states what was actually on.
-    // TRIAGE done (2026-10-16, AFK autopsy): NORELEASE retired -- quarantine
-    // releases normally again (delay-only, cap 64). NORELEASE leaked to 947MB
-    // -> thread-stack OOM -> wild thread -> SIGSEGV. Silent deaths were never
-    // in mspace_free. Switch stays as dormant diag code only.
-    // setenv("HARNESS_NORELEASE", "1", 1);
-    // PROBE verdict (Fox layout test, 2026-10-16): pad CONFIRMED the cost
-    // model, not the theory — fresh-boot OOM at brk=top via
-    // __cxa_eh_globals alloc failure (pad 256B x ~4M boot allocs). Fox
-    // frequency on pad: inconclusive (too few runs before OOM wall).
-    // Pad OFF; layout question moves to the dlmalloc port instead.
-    // setenv("HARNESS_MALLOCPAD", "256", 1);
-    // TRIAGE stash stays (governor reads last_mgr164_).
-    if (diag) setenv("HARNESS_WATCHPC", "250ab8", 1);
-    // setenv("HARNESS_WPA", "672ea0", 1);  // tick PROVEN, off
-    // Synthesis: DISABLED (POKE forces early body with unbuilt content
-    // -> body returns 0 (quit) -> orderly suicide in seconds, §97.
-    // Gate opens naturally only when content is ready; forcing it kills.
-    // setenv("HARNESS_POKE1187", "1", 1);
-    // r0=1-source hunt: probe the +912 quit-poller vcall site (c52ac)
-    // -> per-hit r0 dump (ProbeDump). Slot PROBE4 (PROBE/PROBE3 taken).
-    if (diag) setenv("HARNESS_PROBE4", "c52ac", 1);
-    // (Removed 2026-10-19: HARNESS_SPURWAKE=1 capped cycles as spurious
-    // success for untimed cond_wait. The cap is gone and the wait now
-    // blocks like bionic; measured on device that behaviour is correct --
-    // see PLAN.md backlog item 2.)
-    // Stuck-update forensics (2026-10-14): per-thread last import is
-    // always tracked now (watchdog resolves the name at dump time).
+    // Experiments go through files/abflags.txt (applied after these defaults,
+    // logged as overrides), so the log always states what was actually on.
+    // Per-thread last import for the stuck-update watchdog dump.
     if (diag) setenv("HARNESS_LASTSVC", "1", 1);
-    // Worker import traffic for the tid=11 death forensics (one
-    // diagnostic run; THREADLOG is capped at 5/import so log stays sane).
+    // Worker import traffic (THREADLOG is capped at 5/import).
     if (diag) setenv("HARNESS_THREADLOG", "1", 1);
-    // Victim-object provenance for the Fox BAD death (logging only,
-    // capped; zero behavior change): first mallocs with caller lr,
-    // match the crashed r4 against them from the log.
-    // PERF VARIANT (uncommitted test): MALLOCLOG off for feel comparison.
-    // setenv("HARNESS_MALLOCLOG", "1", 1);
-    // +164 ground truth on device (read-only manager-pass entry dump;
-    // closes "logically LOADING" -> proven or not).
-    if (diag) setenv("HARNESS_DIAG164", "1", 1);
-    // Synthetic input heartbeat: ENABLED hands-off test (2026-10-14).
-    // Prior disable was for finger-interleave chaos; solo (no finger)
-    // it is the only event source. Tick jumps on taps PROVEN => this
-    // should pump quanta hands-off. Binary: tick advances? menu?
-    // Crutch OFF again (2026-10-14): isolated test tapbeat-off +
-    // RETSUCC-on (last time both were off - confounded). If it
-    // self-drives, taps are unnecessary.
-    // setenv("HARNESS_TAPBEAT", "1", 1);
-    // Fail-functor synthesis timing: DISABLED (2026-10-14). Correlation:
-    // boots WITH functor fire (14932 died, 35844 black-after-loading)
-    // vs boot WITHOUT (15265 menu). Suspect: forged login-failed state
-    // suppresses menu construction downstream. Binary test: off -> menu?
-    // setenv("HARNESS_FUNCTORAT", "150", 1);
     // Real GLES on device (shared Handle; caller's context, no EGL init).
-    // PC parity verified post-split (54/54, 948). First test: live ctx?
-    // GL errors? survival? (pixels need content+burst; LOADING art first.)
     setenv("HARNESS_REALGL", "1", 1);
     // Device-side experiment flags: <files>/abflags.txt, one KEY=VALUE per
     // line ('#' comments ok), applied AFTER the shipping defaults so a pushed
@@ -1510,12 +1220,6 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
     CheckGuestBuildId(*g_mod, guest_identity_ok);
-    // The pinned-image JSON SSO fill ("{}" at guest VA 1a410c) used to be
-    // armed here as HARNESS_PROBE=1a410c,fill. Measured on 2026-10-19 (lib
-    // 14c43eda, Rio prod 75 s): the probe fires, but its own verdict is
-    // `[probe] OUT non-empty, kept` -- the slot is already filled by the guest,
-    // so the write never happens; the only effect was 16 log lines. Removed.
-    // The ',fill' code stays as an opt-in experiment (HARNESS_PROBE=...,fill).
     // Trampoline map (first 48): lets any future death-pc name its import
     // offline. Slots: 0 = halt (swi 0), 1 = once return (swi kSwiOnce), then
     // import idx at slot idx+2 (swi idx+1) -- so name it by the va printed

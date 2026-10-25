@@ -40,7 +40,7 @@ namespace abr {
 // happen once pre-guest, nothing unsets).
 bool EnvOn(const char* name);
 
-// Master switch for the diagnostic layer: pc probes, the WATCHPC hook, the
+// Master switch for the diagnostic layer: the
 // per-call / per-frame tracing and the hot-path logs. Backed by HARNESS_DIAG,
 // default OFF for shipping (see PLAN.md batch A/B). Explicit values "0",
 // "off", "false", "-" and "" mean OFF; any other value means ON.
