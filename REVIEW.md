@@ -23,7 +23,7 @@ against `games/<id>/profile.toml`:
 
 | title | init | svc | halts | LOUD |
 |---|---|---|---|---|
-| rio | 54/55 | 949 | 53 | 0 |
+| rio | 54/55 | 979 | 54 | 0 (since a200ffe: init #22 runs; was 949/53) |
 | seasons | 142/143 | 3073 | 142 | 3 (build-id pin noise, R-001) |
 | space | 67/68 | 1330 | 67 | 3 (same) |
 | star-wars | 96/97 | 2320 | 96 | 3 (same) |
@@ -60,6 +60,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 |---|---|---|---|---|---|
 | R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | confirmed |
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
+| R-004 | S2 | star-wars-ii(-amz) | boot ends at "Asset downloading failed" (wants Rovio content servers that no longer exist); pre-existing, needs an offline content path | open |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
 
 ### Device gates
@@ -143,18 +144,18 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | C-04 | S2 | mappings_ | appended by mmap without sync against lock-free readers | fixed a1bbccd |
 | C-05 | S2 | munmap | stale mappings + caches: guest access -> host SIGSEGV instead of halt | fixed a1bbccd |
 | C-06 | S2 | mutex/rwlock/cond destroy | host object deleted while another thread is about to use it (UAF) | open |
-| C-07 | S2 | guest tids | collide with Java thread ids (from 1000) after 998 pthread_create -> shared errno/TLS | open |
+| C-07 | S2 | guest tids | collide with Java thread ids (from 1000) after 998 pthread_create -> shared errno/TLS | fixed 0df4897 |
 | C-08 | S2 | pthread_once | "done" published without memory ordering | open |
 | C-09 | S2 | pthread_once | Java threads never release once controls after an abnormal halt | open |
 | C-10 | S2 | thread stacks | in the heap with no guard page | open |
 | C-11 | S2 | dlmalloc | 64-bit host pointers in guest-writable memory: wild guest write -> host write | open |
-| C-12 | S2 | Rio init #22 | still parked; its "wild" pointer 0xFFFF0FA0 is the kuser barrier the host now emulates; 0x1aeb24 is a real flag-guarded initializer also called lazily from 4 sites -> un-park and retest | open |
+| C-12 | S2 | Rio init #22 | still parked; its "wild" pointer 0xFFFF0FA0 is the kuser barrier the host now emulates; 0x1aeb24 is a real flag-guarded initializer also called lazily from 4 sites -> un-park and retest | fixed a200ffe |
 | C-13 | S2 | mmap | = A-02 (file mappings come back zeroed; Rio MemoryMappedFile, 3 callers of 0x2cd2b8) | fixed a1bbccd |
 | C-14 | S2 | GuestMalloc | = A-08 (size wrap) | fixed 68d7bda |
 | C-15 | S3 | GuestCalloc | calloc(0)=NULL (= A-16) + magic 256 MB cap | fixed 68d7bda |
 | C-17 | S3 | quarantine check | any block > 16 MB treated as corrupt and leaked | open |
 | C-22 | S2 | loader | guest module at VA 0: NULL reads return ELF bytes instead of halting | open |
-| C-25 | S2 | PthreadMutex | every guest mutex is recursive, attributes ignored (trylock/relock/foreign unlock differ) | open |
+| C-25 | S2 | PthreadMutex | every guest mutex is recursive, attributes ignored (trylock/relock/foreign unlock differ) | fixed 0df4897 |
 | C-27 | S3 | pthread_key_create | writes through an unchecked guest pointer | open |
 | C-28 | S3 | pthread keys | destructors never run | open |
 | C-29 | S3 | threads_ | grows without bound | open |
