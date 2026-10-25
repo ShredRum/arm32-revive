@@ -59,7 +59,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | id | sev | where | finding | evidence | status |
 |---|---|---|---|---|---|
 | R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | confirmed |
-| R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | open |
+| R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
 
 ### Device gates
@@ -68,6 +68,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 |---|---|---|---|
 | 2026-10-25 | Oct 25 2026 14:39:58 (md5 96da05d3) | B-01..B-05, A-01/06/12, C-01 | rio + seasons boot to the main menu on the sandbox, all markers 0, death.log 0 B, no tombstone; in-level play not yet checked |
 | 2026-10-25 | Oct 25 2026 14:54:04 (md5 56d53d81) | + A-03/05/07/10/11, C-02, D-06 | rio + seasons + space boot to the main menu, all markers 0, death.log 0 B, no tombstone; in-level play not yet checked |
+| 2026-10-25 | Oct 25 2026 15:20:38 (md5 5e225f86) | + allocator, mmap/MappingTable, setjmp VFP, fma/remquo, file-bridge errno/dup/mkdir/mkstemp/props, asset lock | rio + seasons + space + star-wars boot to the main menu, all markers 0, death.log 0 B, no tombstone; user reported earlier frequent crashes seem gone (batch 1-2 build, light play) |
 
 ### Wave 1 (areas A-D, 2026-10-25)
 
@@ -80,21 +81,21 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | id | sev | where | finding | status |
 |---|---|---|---|---|
 | A-01 | S1 | 3503 poll | `fd_map_.find` without `io_mutex_` (every other access locks) — host data race | fixed e4b29a4 |
-| A-02 | S1→S2 | 1773 mmap, 907 GuestMmap | fd/offset/flags dropped: file mapping returns zero pages; addr hint treated as FIXED. All 6 import mmap/munmap (code comment "not imported" is false); Rio call site 0x2cd35c (MemoryMappedFile). Not seen in device logs | confirmed (latent) |
+| A-02 | S1→S2 | 1773 mmap, 907 GuestMmap | fd/offset/flags dropped: file mapping returns zero pages; addr hint treated as FIXED. All 6 import mmap/munmap (code comment "not imported" is false); Rio call site 0x2cd35c (MemoryMappedFile). Not seen in device logs | fixed a1bbccd |
 | A-03 | S2 | 2995 strtol/strtoul | host 64-bit result truncated: strtol("2147483648") -> INT_MIN (want LONG_MAX+ERANGE); strtoul("4294967296") -> 0; no strto*/ato* sets guest errno | fixed 6352806 |
-| A-04 | S2 | math_thunks.inc:262,391 | fma addend and remquo quo read from r4/r5 (garbage); AAPCS32: [sp], remquof quo = r2. Rio imports remquo, no call site | open |
+| A-04 | S2 | math_thunks.inc:262,391 | fma addend and remquo quo read from r4/r5 (garbage); AAPCS32: [sp], remquof quo = r2. Rio imports remquo, no call site | fixed 2c64d6b |
 | A-05 | S2 | 2282 strncat | CheckRange covers [dest,dest+n+1) but write is at dest+strlen(dest); n+1 wraps; unbounded host strlen | fixed 5d397e9 |
 | A-06 | S2 | 3497, 3657 poll | fd<0 must give revents=0 (POSIX); unmapped fd must count POLLNVAL in return | fixed e4b29a4 |
 | A-07 | S2 | 1678/1702 ctype | TAB carries B (printable) bit: `_ctype_['\t']`=0xA8 not 0x28, iswctype('\t',print)!=0 | fixed 726cd28 |
-| A-08 | S2 | 549 GuestMalloc | size rounding wraps: malloc(0xFFFFFFF9+) returns 8-byte block | open |
-| A-09 | S2 | 2077 setjmp/longjmp | d8-d15/FPSCR not saved; "softfp has no VFP regs" comment false | open |
+| A-08 | S2 | 549 GuestMalloc | size rounding wraps: malloc(0xFFFFFFF9+) returns 8-byte block | fixed 68d7bda |
+| A-09 | S2 | 2077 setjmp/longjmp | d8-d15/FPSCR not saved; "softfp has no VFP regs" comment false | fixed 1c40191 |
 | A-10 | S2 | 3329 nanosleep | guest pointers unchecked (host SIGSEGV possible); nsec>=1e9 not EINVAL. Live: Rio sleep_for 0x4428fc | fixed 701f8e7 |
 | A-11 | S2 | 975 GuestStr users | strlen/strdup/strcmp/sscanf/strto*/%s truncate at 64 KiB, unreadable ptr -> "" | fixed 5d397e9 |
 | A-12 | S3 | 3511 poll | timeout -1 becomes 5000 (spurious timeout); >5000 not capped despite comment | fixed e4b29a4 |
-| A-13 | S3 | 2314 memchr | getenv("HARNESS_MEMDUMP") on every call in shipping | open |
+| A-13 | S3 | 2314 memchr | getenv("HARNESS_MEMDUMP") on every call in shipping | fixed febf56c |
 | A-14 | S3 | 2308, 2283 | memchr/strncpy validate the full n bytes of source -> false halts | fixed 5d397e9 (strncpy; memchr open) |
 | A-15 | S3 | math_thunks.inc:268, 1846 | __fpclassifyd/sysconf pass host constants (ok on bionic host, wrong in harness) | open |
-| A-16 | S3 | 641 calloc | calloc(0,x) returns NULL (should return a unique pointer) | open |
+| A-16 | S3 | 641 calloc | calloc(0,x) returns NULL (should return a unique pointer) | fixed 68d7bda |
 | A-17 | S3 | 1550 printf %s | NULL prints ELF header (VA 0 mapped); want "(null)" | open |
 | A-18 | S3 | 3311 snprintf | unmapped dst silently skipped, full length returned | open |
 | A-19 | S3 | 3175, 3200 localtime | TIMEWARP applied twice (diag); tm_zone NULL | open |
@@ -119,17 +120,17 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | B-03 | S1 | 3945, 5211 statfs | branch unreachable ("statfs" missing from the outer if, falls to the 0-stub); layout uses 32-bit counts, arm32 statfs is 88 B with u64 f_blocks at +8 | fixed f534b93 (gate: boot->menu ok) |
 | B-04 | S1 | 4171, 4537 fseek/fseeko/lseek | `(long)a1` zero-extends: negative offsets seek +4 GB (Rio fseeko(f,-r5,SEEK_CUR) at 0x274314) | fixed 584fb22 (gate: boot->menu ok) |
 | B-05 | S1 | 4744 setsockopt | by-value optlen read as a pointer (reads VA 4) | fixed 217165e (gate: boot->menu ok) |
-| B-06 | S2 | asset block | every asset import holds global `mutex_`, inflate under it | open |
-| B-07 | S2 | __system_property_get | buffer unwritten for unknown keys | open |
-| B-08 | S2 | mkdir | stale errno on EEXIST | open |
-| B-09 | S2 | read/write/lseek/close | errno never set on failure | open |
-| B-10 | S2 | dup/freopen/utime | fall to the 0-stub; dup() makes the guest use fd 0 | open |
-| B-11 | S2 | mkstemp | suffix written at host path length, can overflow guest buffer | open |
+| B-06 | S2 | asset block | every asset import holds global `mutex_`, inflate under it | fixed 42c88ad |
+| B-07 | S2 | __system_property_get | buffer unwritten for unknown keys | fixed 52120ed |
+| B-08 | S2 | mkdir | stale errno on EEXIST | fixed 52120ed |
+| B-09 | S2 | read/write/lseek/close | errno never set on failure | fixed 52120ed |
+| B-10 | S2 | dup/freopen/utime | fall to the 0-stub; dup() makes the guest use fd 0 | fixed 52120ed (dup/utime/fflush; freopen open) |
+| B-11 | S2 | mkstemp | suffix written at host path length, can overflow guest buffer | fixed 52120ed |
 | B-12 | S2 | connect | non-blocking connect made synchronous, forced 10 s socket timeouts | open |
-| B-13 | S2 | MapGuestPath | unmapped path halts the thread instead of ENOENT; `..` can escape the files dir | open |
+| B-13 | S2 | MapGuestPath | unmapped path halts the thread instead of ENOENT; `..` can escape the files dir | fixed 52120ed (ENOENT; .. escape open) |
 | B-14 | S3 | sockets | always-on TLS ClientHello rewrite of the guest buffer in shared code | open |
-| B-15 | S3 | __system_property_get | hardcoded values ("izan", sdk 21, DNS 8.8.8.8) | open |
-| B-16 | S3 | poll, FIFO read | 5 s caps (crutches) | open |
+| B-15 | S3 | __system_property_get | hardcoded values ("izan", sdk 21, DNS 8.8.8.8) | fixed 52120ed (on device real props) |
+| B-16 | S3 | poll, FIFO read | 5 s caps (crutches) | fixed 52120ed (FIFO cap; poll done) |
 | B-17 | S3 | zipfile.cpp ZipExtractStored | fwrite result ignored: partial seed file can persist | open |
 
 **C — memory / heap / threads / sync** (full re-run report: work/review/C-memthreads.md, C-13..C-36 added there; key ones below)
@@ -138,9 +139,9 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 |---|---|---|---|---|
 | C-01 | S1 | 3376, 6486 PthreadCond | `pthread_cond_timedwait_monotonic`: mono flag ignored, host cond on REALTIME vs guest MONOTONIC deadline -> immediate ETIMEDOUT. Live: Rio clock_gettime(1) 0x38f45c -> timedwait_monotonic 0x38f530; all 6 import it. Comment "currently unused" false | fixed 938c961 |
 | C-02 | S1 | LDREX/STREX | not atomic across guest threads: two separate static ExclusiveMonitors (Java threads vs workers), Java threads all processor 0, workers `% 8`; ExclusiveWrite byte-wise compare/store, no real CAS | fixed 3d6fba5 |
-| C-03 | S2 | GuestMmap | 32-bit bound checks wrap: MAP_FIXED can reach trampolines/stacks/past 4 GB | open |
-| C-04 | S2 | mappings_ | appended by mmap without sync against lock-free readers | open |
-| C-05 | S2 | munmap | stale mappings + caches: guest access -> host SIGSEGV instead of halt | open |
+| C-03 | S2 | GuestMmap | 32-bit bound checks wrap: MAP_FIXED can reach trampolines/stacks/past 4 GB | fixed a1bbccd |
+| C-04 | S2 | mappings_ | appended by mmap without sync against lock-free readers | fixed a1bbccd |
+| C-05 | S2 | munmap | stale mappings + caches: guest access -> host SIGSEGV instead of halt | fixed a1bbccd |
 | C-06 | S2 | mutex/rwlock/cond destroy | host object deleted while another thread is about to use it (UAF) | open |
 | C-07 | S2 | guest tids | collide with Java thread ids (from 1000) after 998 pthread_create -> shared errno/TLS | open |
 | C-08 | S2 | pthread_once | "done" published without memory ordering | open |
@@ -148,9 +149,9 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | C-10 | S2 | thread stacks | in the heap with no guard page | open |
 | C-11 | S2 | dlmalloc | 64-bit host pointers in guest-writable memory: wild guest write -> host write | open |
 | C-12 | S2 | Rio init #22 | still parked; its "wild" pointer 0xFFFF0FA0 is the kuser barrier the host now emulates; 0x1aeb24 is a real flag-guarded initializer also called lazily from 4 sites -> un-park and retest | open |
-| C-13 | S2 | mmap | = A-02 (file mappings come back zeroed; Rio MemoryMappedFile, 3 callers of 0x2cd2b8) | open |
-| C-14 | S2 | GuestMalloc | = A-08 (size wrap) | open |
-| C-15 | S3 | GuestCalloc | calloc(0)=NULL (= A-16) + magic 256 MB cap | open |
+| C-13 | S2 | mmap | = A-02 (file mappings come back zeroed; Rio MemoryMappedFile, 3 callers of 0x2cd2b8) | fixed a1bbccd |
+| C-14 | S2 | GuestMalloc | = A-08 (size wrap) | fixed 68d7bda |
+| C-15 | S3 | GuestCalloc | calloc(0)=NULL (= A-16) + magic 256 MB cap | fixed 68d7bda |
 | C-17 | S3 | quarantine check | any block > 16 MB treated as corrupt and leaked | open |
 | C-22 | S2 | loader | guest module at VA 0: NULL reads return ELF bytes instead of halting | open |
 | C-25 | S2 | PthreadMutex | every guest mutex is recursive, attributes ignored (trylock/relock/foreign unlock differ) | open |
