@@ -228,3 +228,21 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | open |
 | E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | open |
 | E-08.. | S3/S4 | see report | glBufferData size zero-extension, glGetString slot capacity, fake shim on context-less threads, NOBLEND per draw, unexplained \x01 shader rewrite, dead glGetError code | open |
+
+**F — loader / JIT callbacks / probes** (report: work/review/F-loader.md; 38 findings: 3 S2, 20 S3, 15 S4)
+
+| id | sev | where | finding | status |
+|---|---|---|---|---|
+| F-22 | S2 | RELRO write guard | only checked in slow-path callbacks; with fastmem (shipping) RELRO is host-writable, so the guard never fires; host memcpy/memset thunks skip it too. Fix: mprotect RELRO read-only after InitDataImports and record it read-only | open |
+| F-11 | S2 | elf_loader, guest_memory | 4 KiB pages hard-wired (= H-02) | open |
+| F-23/24 | S3 | MemoryReadCode, Read/Write | bad code read returns 0 (Dynarmic caches a zero block, wrong pc in the halt); bad data access halts only at block end, the rest of the block runs on 0. Fix: nullopt, check_halt_on_memory_access, MemoryAbort | open |
+| F-25 | S3 | InitDataImports | runs before any Jit: LOUD branches call ActiveJit()->HaltExecution on null | open |
+| F-34 | S3 | diag mode | HARNESS_DIAG arms Rio probe VAs for all six titles | open |
+| F-pin | S3 | elf_loader.h IsPinnedGuest | build-id pin gates nothing (only its own log); delete it, harness verifies the SHA from profile.toml (closes R-001) | open |
+| F-01..03 | S4 | relocations | REL32 lacks -P (unused), weak undefined -> trampoline, GLOB_DAT addend applied (all 0 in these guests) | open |
+| F-06 | S3 | Find_exidx | exidx table returned for trampoline pcs; nest guard state shared across threads | open |
+| F-12..21 | S3 | elf parsing | unbounded table reads / uint32 wraps on malformed ELF (low risk: guest SHA is checked first) | open |
+| F-26 | S4 | ExceptionRaised | add-pc emulation dead (Dynarmic handles add pc natively) | open |
+| F-29 | S3 | Runtime::jit_ | still points at the OnLoad Jit after its thread exits (= C-32) | open |
+| F-35 | S3 | gate | harness runs with fastmem off, unlike shipping | open |
+| F-36 | S3 | cbnz_test | always returns 0, checks nothing | open |
