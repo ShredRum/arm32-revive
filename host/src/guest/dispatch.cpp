@@ -1188,8 +1188,9 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
                         "sp=%08x -- init return from a foreign thread\n",
                         top.control, top.owner_tid, halt_tid, once_depth_, regs[13]);
         }
-        std::uint32_t done = 2;
-        std::memcpy(H(top.control), &done, 4);
+        // Release: the init routine's stores must be visible to any thread
+        // that sees "done" (PthreadOnce reads the word with acquire).
+        __atomic_store_n(H<std::uint32_t>(top.control), 2u, __ATOMIC_RELEASE);
         for (int r = 0; r <= 12; r++) {
             regs[r] = top.saved_regs[r];
         }
@@ -3602,7 +3603,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // TEMP-DIAG (worker hang): log the job name (inline C string at
         // [arg+0x20], seen as "Configuration") so runs inventory jobs.
         // Also scan [arg,arg+0x200] for an http URL (job identity).
-        {
+        if (DiagOn()) {  // job-name / URL sniffing is diagnostics only
             std::string jn = "?";
             if (CheckRange(a3 + 0x20, 32, false)) {
                 char tmp[33] = {0};
@@ -3641,10 +3642,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     }
                 }
             }
-            if (DiagOn()) {
-                std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
-                            jn.c_str(), surl.c_str());
-            }
+            std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
+                        jn.c_str(), surl.c_str());
         }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
@@ -6786,11 +6785,12 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
 
 std::uint32_t Runtime::PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t /*destr*/) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!CheckRange(key_ptr, 4, true)) {
+        return EINVAL;  // a wild key pointer must not become a host write
+    }
     const std::uint32_t key = next_key_++;
     key_map_[key] = 0;
-    if (key_ptr) {
-        std::memcpy(H(key_ptr), &key, 4);
-    }
+    std::memcpy(H(key_ptr), &key, 4);
     return 0;
 }
 
@@ -6832,8 +6832,7 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
             return false;
         }
     }
-    std::uint32_t state = 0;
-    std::memcpy(&state, H(control), 4);
+    std::uint32_t state = __atomic_load_n(H<std::uint32_t>(control), __ATOMIC_ACQUIRE);
     if (state == 1) {
         // IN PROGRESS on another thread. bionic blocks the caller here until the
         // control reads DONE; returning 0 at once hands out a half-initialised
@@ -6861,7 +6860,7 @@ bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
         for (;;) {
             std::this_thread::sleep_for(std::chrono::microseconds(500));
             lock.lock();
-            std::memcpy(&state, H(control), 4);
+            state = __atomic_load_n(H<std::uint32_t>(control), __ATOMIC_ACQUIRE);
             if (state != 1) {
                 break;
             }
@@ -7790,6 +7789,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         std::printf("[thread] create tid=%u start=%08x arg=%08x stack=%08x\n", tid, start, arg,
                     stack);
     }
+    // std::thread throws std::system_error when the host cannot create a
+    // thread; that must become EAGAIN for the guest, not std::terminate.
+    try {
     st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
         t_tid = tid;
         Dynarmic::A32::UserConfig cfg;
@@ -7862,6 +7864,16 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         t_active_jit = nullptr;
         ReleaseCpuId(cpu_id);  // the Jit no longer runs
     });
+    } catch (const std::system_error&) {
+        ReapThreadStack(tid);
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            threads_.erase(tid);
+        }
+        ReleaseCpuId(cpu_id);
+        std::printf("[thread] LOUD host thread creation failed -- pthread_create = EAGAIN\n");
+        return EAGAIN;
+    }
     st->th.detach();
     return 0;
 }
