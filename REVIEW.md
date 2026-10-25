@@ -246,3 +246,20 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | F-29 | S3 | Runtime::jit_ | still points at the OnLoad Jit after its thread exits (= C-32) | open |
 | F-35 | S3 | gate | harness runs with fastmem off, unlike shipping | open |
 | F-36 | S3 | cbnz_test | always returns 0, checks nothing | open |
+
+**G — crutches / knobs / magic numbers / dead code** (report: work/review/G-crutches.md; 157 HARNESS_* knobs classified, ~40 magic numbers traced, ~4000 dead lines identified: dispatch.cpp ~3000, harness.cpp ~850, apphost.cpp ~200)
+
+| id | sev | where | finding | status |
+|---|---|---|---|---|
+| G-01 | S2 | JNI shipping | only object methods/fields go to ART; all Boolean/Int/Long/Void calls and static fields are mocks, wrong on modern phones (density 1 vs ~420, screenLayout, 800x480, API 21, empty Build.*). App.quitRequested only calls stopLockTask() in all six titles: safe to forward (= D-01/D-11) | open |
+| G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | open |
+| G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | open |
+| G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
+| G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | open |
+| G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
+| G-09 | S3 | unwind nest guard | leftover racy crutch | open |
+| G-10 | S3 | fake GL shim | still reachable on device (context-less threads, names RealGL doesn't handle) | open |
+| G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | open |
+| G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | open |
+| G-14 | S3 | fcntl | lock commands report success without doing anything | open |
+| G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | open |
