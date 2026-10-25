@@ -4103,7 +4103,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // TEMP-DIAG (registry ParseError): track registry handles to dump
             // their exact bytes on fread/fwrite below.
-            if (hp.find("registry") != std::string::npos) {
+            // Diagnostics only: in shipping this dumped save-file bytes to the log.
+            if (DiagOn() && hp.find("registry") != std::string::npos) {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 g_regfiles.insert(f);
             }
@@ -4133,6 +4134,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
+            }
+            if (n == "fclose" && DiagOn()) {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                g_regfiles.erase(f);  // a reused FILE* must not inherit the tag
             }
             int r = (n == "fclose") ? std::fclose(f) : std::fflush(f);
             if (n == "fclose") {
@@ -4197,7 +4202,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // TEMP-DIAG (registry ParseError): dump exact bytes read.
             bool regdump = false;
-            {
+            if (DiagOn()) {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 regdump = g_regfiles.count(f) && g_regdump_n < 60;
             }
@@ -4228,7 +4233,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // TEMP-DIAG (registry ParseError): dump exact bytes written.
             bool regdump = false;
-            {
+            if (DiagOn()) {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 regdump = g_regfiles.count(f) && g_regdump_n < 60;
             }
