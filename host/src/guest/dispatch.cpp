@@ -8514,12 +8514,15 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
     if (!re) {
         return false;
     }
+    // JNINativeInterface: Call<T>Method / Call<T>MethodV / Call<T>MethodA come
+    // in triples from 34 (Object) to 61-63 (Void); the static family from 114
+    // to 141-143 (jni.h). The position in the triple is the argument form.
     const bool is_static = fn >= 114;
-    // fn 61/62/63 are the void forms: same varargs / V / A shapes as the
-    // object-returning 34/35/36 and 114/115/116.
-    const int vtag = (fn == 114 || fn == 34 || fn == 61)
-                         ? 0
-                         : ((fn == 115 || fn == 35 || fn == 62) ? 1 : 2);
+    const std::uint32_t family_base = is_static ? 114u : 34u;
+    if (fn < family_base || fn > family_base + 29u) {
+        return false;
+    }
+    const int vtag = static_cast<int>((fn - family_base) % 3u);
     // Split "[static|field ]com/a/B.name(sig)" -> cls, name, sig, ret.
     // (Instance methods carry a legacy "field " tag from the mock path.)
     std::string d = mdesc;
@@ -9371,6 +9374,28 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
     }
+#ifdef __ANDROID__
+    // Every Call<T>Method / CallStatic<T>Method family goes to the real Java
+    // method first (the Object families 34-36/114-116 already did); the mock
+    // answers below are only the fallback when the call cannot be made real
+    // (no JVM on this thread, a mock-only class/object). The mocks were
+    // device answers from 2014 (API 21, 800x480, density group 1...) and
+    // dropped every void call, e.g. App.quitRequested (which only calls
+    // stopLockTask() in all six titles).
+    if ((fn >= 37 && fn <= 63) || (fn >= 117 && fn <= 143)) {
+        std::string mdesc;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_methods_.find(a2);
+            if (it != jni_methods_.end()) {
+                mdesc = it->second;
+            }
+        }
+        if (!mdesc.empty() && RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
+            return;
+        }
+    }
+#endif
     switch (fn) {
     // String thunks work off the jni_strings_ registry (mock content model).
     // Unknown handle (e.g. a method cookie misused as a string) = LOUD halt:
@@ -9586,6 +9611,61 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 31: {  // GetObjectClass(env, obj) -> jclass (verified vs NDK jni.h)
+#ifdef __ANDROID__
+        // A real Java object (wrapped handle): its runtime class, by name, so
+        // GetMethodID/GetFieldID on it resolve against the real class (they
+        // used to land on a made-up java/lang/Object and fall back to mocks).
+        if (void* real = UnwrapObject(a1)) {
+            if (JNIEnv* re = RealEnv()) {
+                std::string cname;
+                jclass oc = re->GetObjectClass(static_cast<jobject>(real));
+                jclass cc = oc ? re->FindClass("java/lang/Class") : nullptr;
+                jmethodID gn = cc ? re->GetMethodID(cc, "getName", "()Ljava/lang/String;") : nullptr;
+                jstring js = gn ? static_cast<jstring>(re->CallObjectMethod(oc, gn)) : nullptr;
+                if (js) {
+                    if (const char* u = re->GetStringUTFChars(js, nullptr)) {
+                        cname = u;
+                        re->ReleaseStringUTFChars(js, u);
+                    }
+                    re->DeleteLocalRef(js);
+                }
+                if (cc) {
+                    re->DeleteLocalRef(cc);
+                }
+                if (oc) {
+                    re->DeleteLocalRef(oc);
+                }
+                if (re->ExceptionCheck()) {
+                    re->ExceptionClear();
+                    cname.clear();
+                }
+                for (char& c : cname) {
+                    if (c == '.') {
+                        c = '/';  // Class.getName() is dotted; JNI names use '/'
+                    }
+                }
+                if (!cname.empty()) {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    std::uint32_t ch = 0;
+                    for (const auto& kv : jni_classes_) {
+                        if (kv.second == cname) {
+                            ch = kv.first;
+                            break;
+                        }
+                    }
+                    if (!ch) {
+                        if (!JniAllocObjectHandle(&ch)) {
+                            return;
+                        }
+                        std::memcpy(H(ch), &ch, 4);  // self-marked handle word
+                        jni_classes_[ch] = cname;
+                    }
+                    Ret(regs, ch);
+                    return;
+                }
+            }
+        }
+#endif
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint32_t ch = 0;
         const auto it = jni_objclass_.find(a1);
