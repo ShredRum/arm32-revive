@@ -3479,186 +3479,73 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "poll") {
-        // struct pollfd {int fd; short events; short revents} = 8B, same both
-        // sides. Translate guest fds to host; unknown fds (unstubbed sockets)
-        // get POLLNVAL. Timeout capped so bring-up can't hang (5s).
-        if (!CheckRange(a0, (std::size_t)a1 * 8, true)) {
-            Ret(regs, static_cast<std::uint32_t>(-1));
+        // poll(struct pollfd* fds, nfds_t nfds, int timeout). struct pollfd is
+        // {int fd; short events; short revents} = 8 bytes on both sides.
+        // POSIX: an entry with fd < 0 is ignored and gets revents = 0; an fd
+        // that is not open gets POLLNVAL and counts in the result. The
+        // timeout is passed through unchanged (-1 = wait forever).
+        if (a1 > kGuestPollMaxFds) {
+            SetGuestErrno(EINVAL);
+            Ret(regs, 0xFFFFFFFFu);
             return;
         }
-        std::vector<struct pollfd> pfds;
-        pfds.reserve(a1);
-        for (std::uint32_t i = 0; i < a1; i++) {
-            std::int32_t gfd = 0;
-            std::int16_t ev = 0;
-            std::memcpy(&gfd, H(a0 + i * 8), 4);
-            std::memcpy(&ev, H(a0 + i * 8 + 4), 2);
-            struct pollfd p {};
-            p.events = ev;
-            if (gfd < 0) {
-                p.fd = -1;
-            } else if (gfd <= 2) {
-                p.fd = gfd;
-            } else {
-                const auto it = fd_map_.find((std::uint32_t)gfd);
-                if (it == fd_map_.end()) {
-                    p.fd = -1;
+        if (a1 != 0 && !CheckRange(a0, static_cast<std::size_t>(a1) * 8, true)) {
+            goto bad_ptr;
+        }
+        std::vector<struct pollfd> pfds(a1);
+        std::vector<char> invalid(a1, 0);
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            for (std::uint32_t i = 0; i < a1; i++) {
+                std::int32_t gfd = 0;
+                std::int16_t ev = 0;
+                std::memcpy(&gfd, H(a0 + i * 8), 4);
+                std::memcpy(&ev, H(a0 + i * 8 + 4), 2);
+                pfds[i].events = ev;
+                pfds[i].revents = 0;
+                if (gfd < 0) {
+                    pfds[i].fd = -1;  // ignored by the kernel too
+                } else if (gfd <= 2) {
+                    pfds[i].fd = gfd;  // stdio is shared with the host
                 } else {
-                    p.fd = it->second;
+                    const auto it = fd_map_.find(static_cast<std::uint32_t>(gfd));
+                    if (it == fd_map_.end()) {
+                        pfds[i].fd = -1;
+                        invalid[i] = 1;
+                    } else {
+                        pfds[i].fd = it->second;
+                    }
                 }
             }
-            pfds.push_back(p);
         }
-        int to = (int)a2;
-        if (to < 0 || to > 5000) {
-            to = (to < 0) ? 5000 : to;
+        std::uint32_t n_invalid = 0;
+        for (char c : invalid) {
+            n_invalid += c ? 1u : 0u;
         }
-        if (DiagOn()) {  // PLAN.md A3/B: off => no per-poll fstat+snprintf+log
+        // An fd that is not open is reported at once, as the kernel does: no
+        // wait when at least one entry is already "ready" with POLLNVAL.
+        const int timeout = n_invalid ? 0 : static_cast<int>(a2);
+        if (DiagOn()) {
             static std::uint64_t poll_hits = 0;
             if (++poll_hits <= 400) {
-                std::string ds;
-                for (std::size_t i = 0; i < pfds.size() && i < 4; i++) {
-                    char b[48];
-                    std::int32_t gfd = -99;
-                    std::memcpy(&gfd, H(a0 + i * 8), 4);
-                    std::int16_t ev = 0;
-                    std::memcpy(&ev, H(a0 + i * 8 + 4), 2);
-                    char ft = '?';
-                    if (pfds[i].fd >= 0) {
-                        struct stat fs {};
-                        if (::fstat(pfds[i].fd, &fs) == 0) {
-                            ft = S_ISSOCK(fs.st_mode) ? 'S'
-                                 : S_ISFIFO(fs.st_mode) ? 'P'
-                                 : S_ISREG(fs.st_mode)  ? 'F'
-                                                        : 'o';
-                        }
-                    }
-                    std::snprintf(b, sizeof(b), "g%d->h%d%c:%04x ", gfd, pfds[i].fd, ft,
-                                  (unsigned)ev & 0xFFFF);
-                    ds += b;
-                }
-                std::printf("[poll][t%u]%s nfds=%u to=%d fds=[%s]%s\n", GuestTid(),
-                            GuestTid() == 1 ? "" : "(T2+)", a1, (int)a2, ds.c_str(),
-                            poll_hits == 5 ? " (quiet henceforth)" : "");
+                std::printf("[poll][t%u] nfds=%u to=%d invalid=%u\n", GuestTid(), a1,
+                            static_cast<int>(a2), n_invalid);
             }
         }
-        int r = ::poll(pfds.data(), (nfds_t)pfds.size(), to);
-        // TEMP-EXP (HARNESS_POLLFAIL=1): fail-fast synthesis for starved
-        // dispatcher waits. A single-fd worker poll with >=10 straight zero
-        // results AFTER sessions succeeded gets NVAL lied from then on
-        // (device delivers fast network failure -> graceful; we hang).
-        // Paced 100ms, no fd destruction (writer-safe, reversible).
-        // HARNESS_POLLFAIL=err: return -1/EINTR instead (different reader
-        // branch; NVAL proved swallowed).
-        // HARNESS_PIPEWAKE=1: instead write a 1B wake (0x00) to the paired
-        // write end (guest G+1, verified FIFO) when streak hits 10, re-arming
-        // (mimics observed main/worker 1B wakes; may advance the job to its
-        // next step, e.g. recv -> EAGAIN -> graceful).
-        {
-            static int pfmode = -1;
-            static int pwake = -1;
-            if (pfmode < 0) {
-                pfmode = 0;
-                pwake = 0;
-                if (const char* e = std::getenv("HARNESS_POLLFAIL")) {
-                    pfmode = (!std::strcmp(e, "err")) ? 2 : 1;
-                }
-                if (std::getenv("HARNESS_PIPEWAKE")) {
-                    pwake = 1;
-                }
-            }
-            extern bool g_succ_done_hack;
-            static std::unordered_map<std::uint32_t, int> streak;
-            static std::unordered_map<std::uint32_t, char> lying;
-            if ((pfmode || pwake) && a1 == 1 && g_succ_done_hack) {
-                std::int32_t gfd0 = -99;
-                std::memcpy(&gfd0, H(a0), 4);
-                const std::uint32_t ug = (std::uint32_t)gfd0;
-                if (gfd0 > 2 && lying.find(ug) == lying.end() && streak.size() < 64) {                    if (r == 0) {
-                        if (++streak[ug] == 10) {
-                            if (pwake) {
-                                // Wake via paired write end (guest G+1).
-                                int wh = -1;
-                                {
-                                    std::lock_guard<std::mutex> io(io_mutex_);
-                                    const auto wit = fd_map_.find(ug + 1);
-                                    if (wit != fd_map_.end()) {
-                                        wh = wit->second;
-                                    }
-                                }
-                                struct stat wfs {};
-                                if (wh >= 0 && ::fstat(wh, &wfs) == 0 &&
-                                    S_ISFIFO(wfs.st_mode)) {
-                                    const std::uint8_t wb = 0;
-                                    if (::write(wh, &wb, 1) == 1) {
-                                        std::printf("[pipewake] 1B -> g%d (h%d)\n", gfd0 + 1,
-                                                    wh);
-                                    }
-                                }
-                                streak[ug] = 0;  // re-arm
-                            } else {
-                                std::printf("[pollfail] %s starved g%d\n",
-                                            pfmode == 2 ? "ERR-lie" : "NVAL-lie", gfd0);
-                                lying[ug] = 1;
-                            }
-                        }
-                    } else {
-                        streak.erase(ug);
-                    }
-                }
-                if (gfd0 > 2 && lying.find(ug) != lying.end()) {
-                    ::usleep(100000);
-                    if (pfmode == 2) {
-                        const std::uint32_t es = ErrnoSlot();
-                        if (CheckRange(es, 4, true)) {
-                            const int ee = EINTR;
-                            std::memcpy(H(es), &ee, 4);
-                        }
-                        r = -1;
-                    } else {
-                        r = 1;
-                        for (auto& p : pfds) {
-                            p.revents = (int16_t)(POLLNVAL | POLLERR);
-                        }
-                    }
-                }
-            }
+        int r = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout);
+        if (r < 0) {
+            SetGuestErrno(errno);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
         }
-        // TEMP-DIAG (worker hang): log which fd fires on nonzero returns.
-        // Gated default-off (was uncapped: fires on every wake, 100s/boot).
-        if (r > 0 && EnvOn("HARNESS_POLLDBG")) {
-            std::string ds;
-            for (std::size_t i = 0; i < pfds.size() && i < 8; i++) {
-                std::int32_t gfd = -99;
-                std::memcpy(&gfd, H(a0 + i * 8), 4);
-                char b[64];
-                std::snprintf(b, sizeof(b), "g%d->h%d:ev%04x ", gfd, pfds[i].fd, pfds[i].revents);
-                ds += b;
-            }
-            std::printf("[poll-event] r=%d %s\n", r, ds.c_str());
-        }
-        // TEMP-DIAG (poll-ret): was an unconditional write(2) per poll —
-        // a raw syscall on the hottest path. Gated default-off.
-        if (EnvOn("HARNESS_POLLDBG")) {
-            char b[64];
-            int n = std::snprintf(b, sizeof(b), "[poll-ret] %d\n", r);
-            (void)write(STDERR_FILENO, b, (std::size_t)(n > 0 ? n : 0));
-        }
-        {
-            static std::uint64_t pollret_hits = 0;
-            if (DiagOn() && ++pollret_hits <= 5) {
-                std::printf("[poll] -> %d%s\n", r,
-                            pollret_hits == 5 ? " (quiet henceforth)" : "");
-            }
-        }
-        for (std::size_t i = 0; i < pfds.size(); i++) {
+        for (std::uint32_t i = 0; i < a1; i++) {
             std::int16_t re = pfds[i].revents;
-            if (pfds[i].fd < 0) {
-                re = (std::int16_t)(POLLNVAL | POLLERR);
+            if (invalid[i]) {
+                re = static_cast<std::int16_t>(POLLNVAL);
             }
             std::memcpy(H(a0 + i * 8 + 6), &re, 2);
         }
-        Ret(regs, static_cast<std::uint32_t>(r < 0 ? -1 : r));
+        Ret(regs, static_cast<std::uint32_t>(r) + n_invalid);
         return;
     }
     if (n == "pthread_once") {

@@ -38,6 +38,7 @@
 
 #include "jni_call_words.h"
 #include <dirent.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
@@ -248,6 +249,7 @@ int main() {
     mod.imports.push_back(abr::Import{"getsockopt", true, 0, 0, 0});      // 35
     mod.imports.push_back(abr::Import{"close", true, 0, 0, 0});           // 36
     mod.imports.push_back(abr::Import{"statfs", true, 0, 0, 0});          // 37
+    mod.imports.push_back(abr::Import{"poll", true, 0, 0, 0});            // 38
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1358,6 +1360,43 @@ int main() {
         Expect("statfs f_blocks (u64 @8) > 0", blocks > 0 ? "1" : "0", "1");
         Expect("statfs f_namelen @56", std::to_string(namelen), "255");
         Expect("statfs writes exactly 88 bytes", tail ? "1" : "0", "1");
+    }
+
+    // --- poll: fd < 0 -> revents 0 and not counted; an fd that is not open
+    //     -> POLLNVAL, counted, no wait; a real socket is reported normally.
+    {
+        const std::uint32_t kP = 0x10007D00;
+        auto setpfd = [&](std::uint32_t i, std::int32_t fd, std::int16_t ev) {
+            std::memcpy(rt.H(kP + i * 8), &fd, 4);
+            std::memcpy(rt.H(kP + i * 8 + 4), &ev, 2);
+            const std::int16_t z = 0x5A5A;
+            std::memcpy(rt.H(kP + i * 8 + 6), &z, 2);
+        };
+        auto rev = [&](std::uint32_t i) {
+            std::int16_t v = 0;
+            std::memcpy(&v, rt.H(kP + i * 8 + 6), 2);
+            return static_cast<int>(v);
+        };
+        setpfd(0, -1, POLLIN);
+        const std::uint32_t a_neg[4] = {kP, 1, 0, 0};
+        Expect("poll fd<0 returns 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 38, a_neg)), "0");
+        Expect("poll fd<0 revents 0", std::to_string(rev(0)), "0");
+        setpfd(0, 9999, POLLIN);
+        const std::uint32_t a_bad[4] = {kP, 1, static_cast<std::uint32_t>(-1), 0};
+        Expect("poll unknown fd returns 1 at once",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 38, a_bad)), "1");
+        Expect("poll unknown fd revents POLLNVAL", std::to_string(rev(0)), std::to_string(POLLNVAL));
+        const std::uint32_t sargs[4] = {AF_INET, SOCK_DGRAM, 0, 0};
+        const std::uint32_t sfd = abr::RuntimeTestAccess::Call(rt, 33, sargs);
+        setpfd(0, static_cast<std::int32_t>(sfd), POLLOUT);
+        setpfd(1, -1, POLLIN);
+        const std::uint32_t a_ok[4] = {kP, 2, 1000, 0};
+        Expect("poll writable socket returns 1",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 38, a_ok)), "1");
+        Expect("poll socket revents POLLOUT", std::to_string(rev(0) & POLLOUT), std::to_string(POLLOUT));
+        Expect("poll ignored entry revents 0", std::to_string(rev(1)), "0");
+        const std::uint32_t cargs[4] = {sfd, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 36, cargs);
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

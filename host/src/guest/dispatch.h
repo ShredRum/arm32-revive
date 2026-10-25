@@ -65,6 +65,9 @@ inline constexpr bool kJitCycleCounting = false;
 inline constexpr std::uint32_t kGuestDirentNameOff = 19;
 // Bionic arm32 sizeof(struct stat) (NDK sys/stat.h, checked with sizeof).
 inline constexpr std::uint32_t kGuestStatSize = 104;
+// poll() nfds above this is rejected with EINVAL (the kernel's limit is
+// RLIMIT_NOFILE; the guests poll one to a few fds). Bounds the host vector.
+inline constexpr std::uint32_t kGuestPollMaxFds = 4096;
 // Bionic arm32 sizeof(struct statfs) (NDK sys/vfs.h, checked with sizeof).
 inline constexpr std::uint32_t kGuestStatfsSize = 88;
 
