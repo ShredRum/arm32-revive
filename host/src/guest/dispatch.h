@@ -119,6 +119,7 @@ public:
     LoadedModule& mod() { return mod_; }
     Dynarmic::A32::Jit* jit() { return jit_; }
     void set_jit(Dynarmic::A32::Jit* jit) { jit_ = jit; }
+    std::uint32_t AllocTid() { return next_tid_.fetch_add(1, std::memory_order_relaxed); }
     // The process-wide exclusive monitor and its processor ids. Every Jit
     // factory acquires an id and passes Monitor() as global_monitor; the id is
     // released (and its reservation cleared) once that Jit no longer runs.
@@ -220,7 +221,7 @@ public:
     // "#jni:N" for JNI) — no per-call overhead added here.
     void SvcHistDump();
 
-    std::uint32_t PthreadMutex(const std::string& n, std::uint32_t obj);
+    std::uint32_t PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr = 0);
     // Real rwlock map (MCSM-compare gap: guest imports 5 rwlock symbols).
     std::uint32_t PthreadRwlock(const std::string& n, std::uint32_t obj);
     std::uint32_t PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
@@ -568,7 +569,11 @@ private:
         std::string svc_hist;        // ring of recent imports (path shape)
     };
     std::unordered_map<std::uint32_t, std::shared_ptr<ThreadState>> threads_;
-    std::uint32_t next_tid_ = 2;
+    // One counter for every guest-visible thread id (guest workers AND Java
+    // threads entering the guest): they key errno slots and TLS, so two
+    // threads must never share one. It used to be two counters (workers from
+    // 2, Java threads from 1000) that collided after 998 pthread_create.
+    std::atomic<std::uint32_t> next_tid_{2};
     // Live PthreadCreate stacks (counted for the OOM line: thread churn is the
     // first thing that ever filled the arena, so name it there).
     unsigned thr_stacks_ = 0;

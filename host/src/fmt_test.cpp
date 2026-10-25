@@ -290,6 +290,9 @@ int main() {
     mod.imports.push_back(abr::Import{"mkstemp", true, 0, 0, 0});         // 61
     mod.imports.push_back(abr::Import{"__system_property_get", true, 0, 0, 0});  // 62
     mod.imports.push_back(abr::Import{"access", true, 0, 0, 0});          // 63
+    mod.imports.push_back(abr::Import{"pthread_mutexattr_init", true, 0, 0, 0});     // 64
+    mod.imports.push_back(abr::Import{"pthread_mutexattr_settype", true, 0, 0, 0});  // 65
+    mod.imports.push_back(abr::Import{"pthread_mutex_trylock", true, 0, 0, 0});      // 66
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -741,9 +744,13 @@ int main() {
         abr::RuntimeTestAccess::Call(rt, 10, destroy);  // must be refused
         Expect("the raced destroy was refused",
                std::to_string(rt.mutex_destroy_skipped_ > before ? 1 : 0), "1");
+        // The mutex is a NORMAL one (bionic default): release the hold the
+        // test took, then it must lock and unlock again.
+        Expect("mutex unlock after a raced destroy",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
         Expect("mutex usable after a raced destroy",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
-        Expect("mutex unlock after a raced destroy",
+        Expect("mutex unlock again",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
         rt.test_skip_mutex_owner_ = false;
     }
@@ -1858,6 +1865,44 @@ int main() {
         const std::uint32_t pargs[4] = {kP, kBuf, 0, 0};
         Expect("property_get(unknown) = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 62, pargs)), "0");
         Expect("property_get(unknown) writes \"\"", std::to_string(*rt.H<std::uint8_t>(kBuf)), "0");
+    }
+
+    // --- guest mutex types follow bionic: NORMAL (default) can be unlocked
+    //     by another thread and trylock on a held one is EBUSY; RECURSIVE /
+    //     ERRORCHECK come from the attribute or the static initializer word.
+    {
+        const std::uint32_t kMn = 0x10008A00, kMr = 0x10008A40, kMe = 0x10008A80, kMs = 0x10008AC0,
+                            kAt = 0x10008B00;
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0) {
+            const std::uint32_t args[4] = {x, y, 0, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        call(8, kMn, 0);  // init NORMAL (attr NULL)
+        Expect("normal: lock", std::to_string(call(9, kMn)), "0");
+        Expect("normal: trylock while held = EBUSY", std::to_string(call(66, kMn)), std::to_string(EBUSY));
+        std::uint32_t foreign = 1;
+        std::thread([&] { foreign = call(11, kMn); }).join();
+        Expect("normal: unlock from another thread = 0", std::to_string(foreign), "0");
+        Expect("normal: free again after foreign unlock", std::to_string(call(66, kMn)), "0");
+        call(11, kMn);
+        call(64, kAt);
+        call(65, kAt, 1);  // RECURSIVE
+        call(8, kMr, kAt);
+        Expect("recursive: lock", std::to_string(call(9, kMr)), "0");
+        Expect("recursive: relock", std::to_string(call(9, kMr)), "0");
+        call(11, kMr);
+        call(11, kMr);
+        call(65, kAt, 2);  // ERRORCHECK
+        call(8, kMe, kAt);
+        call(9, kMe);
+        Expect("errorcheck: relock = EDEADLK", std::to_string(call(9, kMe)), std::to_string(EDEADLK));
+        call(11, kMe);
+        const std::uint32_t rec_init = 0x4000;  // PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+        std::memcpy(rt.H(kMs), &rec_init, 4);
+        call(9, kMs);
+        Expect("static recursive initializer: relock", std::to_string(call(9, kMs)), "0");
+        call(11, kMs);
+        call(11, kMs);
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

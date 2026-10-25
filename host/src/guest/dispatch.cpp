@@ -3509,10 +3509,44 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined3);
         return;
     }
+    // pthread_mutexattr_t is one long on the guest (NDK bits/pthread_types.h);
+    // bionic keeps the mutex type in its low 4 bits (NORMAL 0, RECURSIVE 1,
+    // ERRORCHECK 2). These used to fall into the generic stub, so the type a
+    // guest asked for never reached pthread_mutex_init.
+    if (n == "pthread_mutexattr_init" || n == "pthread_mutexattr_destroy" ||
+        n == "pthread_mutexattr_settype" || n == "pthread_mutexattr_gettype") {
+        if (!CheckRange(a0, 4, n != "pthread_mutexattr_gettype")) {
+            Ret(regs, EINVAL);
+            return;
+        }
+        std::uint32_t v = 0;
+        std::memcpy(&v, H(a0), 4);
+        if (n == "pthread_mutexattr_init") {
+            v = 0;  // PTHREAD_MUTEX_DEFAULT = NORMAL
+        } else if (n == "pthread_mutexattr_settype") {
+            if (a1 > 2) {
+                Ret(regs, EINVAL);
+                return;
+            }
+            v = (v & ~0xFu) | a1;
+        } else if (n == "pthread_mutexattr_gettype") {
+            if (!CheckRange(a1, 4, true)) {
+                Ret(regs, EINVAL);
+                return;
+            }
+            const std::uint32_t ty = v & 0xFu;
+            std::memcpy(H(a1), &ty, 4);
+            Ret(regs, 0);
+            return;
+        }
+        std::memcpy(H(a0), &v, 4);
+        Ret(regs, 0);
+        return;
+    }
     // --- pthread: real mutex/cond/key maps, create/join stubbed for now ---
     if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy" || n == "pthread_mutex_lock" ||
         n == "pthread_mutex_unlock" || n == "pthread_mutex_trylock") {
-        Ret(regs, PthreadMutex(n, a0));
+        Ret(regs, PthreadMutex(n, a0, a1));
         return;
     }
     if (n == "pthread_rwlock_init" || n == "pthread_rwlock_destroy" || n == "pthread_rwlock_rdlock" ||
@@ -6441,7 +6475,24 @@ bad_ptr:
     }
 }
 
-std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
+// Host mutex of the guest's type. NORMAL must stay NORMAL: bionic lets any
+// thread unlock a normal mutex (the games do: Rio logs UNLOCK-FOREIGN), while
+// a recursive/errorcheck host mutex answers EPERM and stays locked. Making
+// every guest mutex recursive (as before) also turned a self-relock or
+// trylock of a normal mutex into a silent success.
+static pthread_mutex_t* NewHostMutex(int type) {
+    auto* m = new pthread_mutex_t;
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, type == 1   ? PTHREAD_MUTEX_RECURSIVE
+                                     : type == 2 ? PTHREAD_MUTEX_ERRORCHECK
+                                                 : PTHREAD_MUTEX_NORMAL);
+    pthread_mutex_init(m, &attr);
+    pthread_mutexattr_destroy(&attr);
+    return m;
+}
+
+std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr) {
     // Resolve the host mutex under guard, then operate OUTSIDE it. The old
     // code held mutex_ across pthread_mutex_lock: a thread blocking on a
     // game mutex (held by a halted worker, or ABBA with a guest critical
@@ -6451,15 +6502,30 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (n == "pthread_mutex_init") {
-        auto* m = new pthread_mutex_t;
-        pthread_mutexattr_t attr;
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(m, &attr);
-        pthread_mutexattr_destroy(&attr);
-        mutex_map_[obj] = m;
-        return 0;
-    }
+            // Type from the attribute word (NULL = NORMAL); bionic also keeps
+            // it in the mutex word at bits 14-15 (PTHREAD_*_INITIALIZER).
+            std::uint32_t type = 0;
+            if (attr != 0 && CheckRange(attr, 4, false)) {
+                std::memcpy(&type, H(attr), 4);
+                type &= 0xFu;
+            }
+            if (type > 2) {
+                return EINVAL;
+            }
+            if (CheckRange(obj, 4, true)) {
+                const std::uint32_t word = (type & 3u) << 14;
+                std::memcpy(H(obj), &word, 4);
+            }
+            auto old = mutex_map_.find(obj);
+            if (old != mutex_map_.end()) {
+                // Re-init of an existing guest mutex: a fresh host mutex (the
+                // old one is leaked, another thread might still block on it).
+                old->second = NewHostMutex(static_cast<int>(type));
+            } else {
+                mutex_map_[obj] = NewHostMutex(static_cast<int>(type));
+            }
+            return 0;
+        }
         if (n == "pthread_mutex_destroy") {
             auto it = mutex_map_.find(obj);
             if (it != mutex_map_.end()) {
@@ -6515,16 +6581,15 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {
         }
     auto it = mutex_map_.find(obj);
     if (it == mutex_map_.end()) {
-        // Statically-initialized mutex (PTHREAD_MUTEX_INITIALIZER): Bionic
-        // allows use without pthread_mutex_init. Lazily create (recursive).
-        auto* m = new pthread_mutex_t;
-        pthread_mutexattr_t attr;
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(m, &attr);
-        pthread_mutexattr_destroy(&attr);
-        mutex_map_[obj] = m;
-        it = mutex_map_.find(obj);
+        // Statically initialized guest mutex: the initializer word carries
+        // the type in bits 14-15 (NDK pthread.h: NORMAL 0, RECURSIVE 0x4000,
+        // ERRORCHECK 0x8000).
+        std::uint32_t word = 0;
+        if (CheckRange(obj, 4, false)) {
+            std::memcpy(&word, H(obj), 4);
+        }
+        const int type = static_cast<int>((word >> 14) & 3u);
+        it = mutex_map_.emplace(obj, NewHostMutex(type == 3 ? 0 : type)).first;
     }
         m = it->second;
     }  // guard released: blocking lock/unlock below must not hold mutex_.
@@ -7710,7 +7775,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     std::uint32_t tid = 0;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        tid = next_tid_++;
+        tid = AllocTid();
         st->stack = stack;
         thr_stacks_++;
         thr_stack_bytes_ += kThreadStackSize;
