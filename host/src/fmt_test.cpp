@@ -247,6 +247,7 @@ int main() {
     mod.imports.push_back(abr::Import{"setsockopt", true, 0, 0, 0});      // 34
     mod.imports.push_back(abr::Import{"getsockopt", true, 0, 0, 0});      // 35
     mod.imports.push_back(abr::Import{"close", true, 0, 0, 0});           // 36
+    mod.imports.push_back(abr::Import{"statfs", true, 0, 0, 0});          // 37
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1329,6 +1330,34 @@ int main() {
         Expect("getsockopt SO_RCVTIMEO len", std::to_string(ld32(kLen)), "8");
         const std::uint32_t cargs[4] = {fd, 0, 0, 0};
         abr::RuntimeTestAccess::Call(rt, 36, cargs);
+    }
+
+    // --- statfs: reachable (it used to fall into the 0 stub) and fills the
+    //     88-byte bionic arm32 struct statfs with 64-bit counts.
+    {
+        rt.SetFilesDir("/data/data/abr.sfs/files", "/tmp/opencode/abr-stattest");
+        const std::uint32_t kPath = 0x10007B00, kBuf = 0x10007C00;
+        put(kPath, "/data/data/abr.sfs/files");
+        std::memset(rt.H<std::uint8_t>(kBuf), 0xAB, 0x100);
+        const std::uint32_t args[4] = {kPath, kBuf, 0, 0};
+        const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 37, args);
+        const std::uint8_t* b = rt.H<std::uint8_t>(kBuf);
+        std::uint32_t bsize = 0, namelen = 0;
+        std::uint64_t blocks = 0;
+        std::memcpy(&bsize, b + 4, 4);
+        std::memcpy(&blocks, b + 8, 8);
+        std::memcpy(&namelen, b + 56, 4);
+        bool tail = true;
+        for (int k = 88; k < 0x100; k++) {
+            if (b[k] != 0xAB) {
+                tail = false;
+            }
+        }
+        Expect("statfs returns 0", std::to_string(r), "0");
+        Expect("statfs f_bsize > 0", bsize > 0 ? "1" : "0", "1");
+        Expect("statfs f_blocks (u64 @8) > 0", blocks > 0 ? "1" : "0", "1");
+        Expect("statfs f_namelen @56", std::to_string(namelen), "255");
+        Expect("statfs writes exactly 88 bytes", tail ? "1" : "0", "1");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

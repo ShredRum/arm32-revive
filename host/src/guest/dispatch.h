@@ -65,6 +65,8 @@ inline constexpr bool kJitCycleCounting = false;
 inline constexpr std::uint32_t kGuestDirentNameOff = 19;
 // Bionic arm32 sizeof(struct stat) (NDK sys/stat.h, checked with sizeof).
 inline constexpr std::uint32_t kGuestStatSize = 104;
+// Bionic arm32 sizeof(struct statfs) (NDK sys/vfs.h, checked with sizeof).
+inline constexpr std::uint32_t kGuestStatfsSize = 88;
 
 // The JNI guest-data arena has two disjoint bump regions. Strings must never
 // grow into the handle table: the old check only looked at kGuestDataSize and

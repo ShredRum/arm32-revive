@@ -3947,36 +3947,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return true;
         };
         auto fill_statfs = [&](std::uint32_t dst, const struct statfs& st) -> bool {
-            // The guest's struct statfs (bionic ARM32) is 16 words = 64 bytes:
-            // f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree,
-            // f_fsid (2 words), f_namelen, f_frsize, f_flags, f_spare[4].
-            // The host's struct statfs has a different size (and, on glibc, a
-            // different field width), so the words are copied one by one.
-            if (!CheckRange(dst, 64, true)) {
+            // Bionic arm32 struct statfs, 88 bytes (NDK sys/vfs.h; offsets
+            // checked with offsetof under the NDK clang for armv7a): u32
+            // f_type@0, f_bsize@4; u64 f_blocks@8, f_bfree@16, f_bavail@24,
+            // f_files@32, f_ffree@40; fsid[2]@48; u32 f_namelen@56,
+            // f_frsize@60, f_flags@64; spare[4]@68.
+            if (!CheckRange(dst, kGuestStatfsSize, true)) {
                 return false;
             }
             std::uint8_t* p = H<std::uint8_t>(dst);
-            std::memset(p, 0, 64);
+            std::memset(p, 0, kGuestStatfsSize);
+            auto w64 = [&](std::size_t o, std::uint64_t v) { std::memcpy(p + o, &v, 8); };
             auto w32 = [&](std::size_t o, std::uint64_t v) {
                 const std::uint32_t w = static_cast<std::uint32_t>(v);
                 std::memcpy(p + o, &w, 4);
             };
             w32(0, (std::uint64_t)st.f_type);
             w32(4, (std::uint64_t)st.f_bsize);
-            w32(8, (std::uint64_t)st.f_blocks);
-            w32(12, (std::uint64_t)st.f_bfree);
-            w32(16, (std::uint64_t)st.f_bavail);
-            w32(20, (std::uint64_t)st.f_files);
-            w32(24, (std::uint64_t)st.f_ffree);
-            // f_fsid is two 32-bit words; glibc names the array __val and
-            // bionic names it val, so copy the bytes.
-            std::uint32_t fsid[2] = {0, 0};
-            std::memcpy(fsid, &st.f_fsid, sizeof(fsid));
-            w32(28, (std::uint64_t)fsid[0]);
-            w32(32, (std::uint64_t)fsid[1]);
-            w32(36, (std::uint64_t)st.f_namelen);
-            w32(40, (std::uint64_t)st.f_frsize);
-            w32(44, (std::uint64_t)st.f_flags);
+            w64(8, (std::uint64_t)st.f_blocks);
+            w64(16, (std::uint64_t)st.f_bfree);
+            w64(24, (std::uint64_t)st.f_bavail);
+            w64(32, (std::uint64_t)st.f_files);
+            w64(40, (std::uint64_t)st.f_ffree);
+            // f_fsid: glibc names the array __val, bionic val; copy the bytes.
+            std::memcpy(p + 48, &st.f_fsid, 8);
+            w32(56, (std::uint64_t)st.f_namelen);
+            w32(60, (std::uint64_t)st.f_frsize);
+            w32(64, (std::uint64_t)st.f_flags);
             return true;
         };
         if (n == "fopen") {
@@ -5232,7 +5229,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
             n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd" ||
-            n == "pathconf") {
+            n == "pathconf" || n == "statfs") {
             if (n == "getcwd") {
                 const std::string cwd = files_hostbase_.empty() ? "/" : files_hostbase_;
                 if (a1 == 0 || !CheckRange(a0, cwd.size() + 1, true)) {
@@ -5278,8 +5275,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             if (n == "statfs") {
                 // statfs(path, buf): the guest asks how much room its data
-                // directory has. The generic tail answered "success" and left
-                // the buffer untouched, so the guest decided on stack garbage.
+                // directory has.
                 struct statfs st {};
                 if (::statfs(hp.c_str(), &st) != 0 || !fill_statfs(a1, st)) {
                     SetGuestErrno(errno);
