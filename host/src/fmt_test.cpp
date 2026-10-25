@@ -284,6 +284,12 @@ int main() {
     mod.imports.push_back(abr::Import{"fma", true, 0, 0, 0});             // 55
     mod.imports.push_back(abr::Import{"remquo", true, 0, 0, 0});          // 56
     mod.imports.push_back(abr::Import{"remquof", true, 0, 0, 0});         // 57
+    mod.imports.push_back(abr::Import{"dup", true, 0, 0, 0});             // 58
+    mod.imports.push_back(abr::Import{"mkdir", true, 0, 0, 0});           // 59
+    mod.imports.push_back(abr::Import{"read", true, 0, 0, 0});            // 60
+    mod.imports.push_back(abr::Import{"mkstemp", true, 0, 0, 0});         // 61
+    mod.imports.push_back(abr::Import{"__system_property_get", true, 0, 0, 0});  // 62
+    mod.imports.push_back(abr::Import{"access", true, 0, 0, 0});          // 63
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1790,6 +1796,68 @@ int main() {
         abr::RuntimeTestAccess::Call(rt, 57, fa, in, &out);
         std::memcpy(&q, rt.H(kQ), 4);
         Expect("remquof quo via r2", std::to_string(q & 7), "4");
+    }
+
+    // --- file bridge errno and missing calls (dup, mkdir, read, unmapped
+    //     paths, mkstemp, __system_property_get).
+    {
+        auto guest_errno = [&]() {
+            std::uint32_t e = 0;
+            std::memcpy(&e, rt.H(rt.ErrnoSlot()), 4);
+            return e;
+        };
+        const std::string host_dir = "/tmp/opencode/abr-errnotest";
+        std::filesystem::remove_all(host_dir);
+        std::filesystem::create_directories(host_dir);
+        rt.SetFilesDir("/data/data/abr.errno/files", host_dir);
+        const std::uint32_t kP = 0x10008800, kBuf = 0x10008900;
+        // dup
+        const std::uint32_t sargs[4] = {AF_INET, SOCK_DGRAM, 0, 0};
+        const std::uint32_t sfd = abr::RuntimeTestAccess::Call(rt, 33, sargs);
+        const std::uint32_t dargs[4] = {sfd, 0, 0, 0};
+        const std::uint32_t dfd = abr::RuntimeTestAccess::Call(rt, 58, dargs);
+        Expect("dup returns a new guest fd (not stdin)",
+               (static_cast<std::int32_t>(dfd) > 2 && dfd != sfd) ? "1" : "0", "1");
+        // mkdir
+        put(kP, "/data/data/abr.errno/files/d");
+        const std::uint32_t margs[4] = {kP, 0755, 0, 0};
+        Expect("mkdir new dir = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 59, margs)), "0");
+        Expect("mkdir existing dir = -1",
+               std::to_string(static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 59, margs))), "-1");
+        Expect("mkdir existing dir errno EEXIST", std::to_string(guest_errno()), std::to_string(EEXIST));
+        put(kP, "/data/data/abr.errno/files/no/such");
+        abr::RuntimeTestAccess::Call(rt, 59, margs);
+        Expect("mkdir with missing parent errno ENOENT", std::to_string(guest_errno()), std::to_string(ENOENT));
+        // read on an unknown fd
+        const std::uint32_t rargs[4] = {9999, kBuf, 4, 0};
+        Expect("read(unknown fd) = -1",
+               std::to_string(static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 60, rargs))), "-1");
+        Expect("read(unknown fd) errno EBADF", std::to_string(guest_errno()), std::to_string(EBADF));
+        // unmapped path: ENOENT, no halt
+        put(kP, "/sdcard/nothing");
+        const std::uint32_t aargs[4] = {kP, F_OK, 0, 0};
+        Expect("access(unmapped path) = -1",
+               std::to_string(static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 63, aargs))), "-1");
+        Expect("access(unmapped path) errno ENOENT", std::to_string(guest_errno()), std::to_string(ENOENT));
+        Expect("unmapped path does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        // mkstemp writes the suffix at the end of the GUEST template
+        const std::string tmpl = "/data/data/abr.errno/files/tXXXXXX";
+        put(kP, tmpl);
+        const std::uint32_t tlen = static_cast<std::uint32_t>(tmpl.size());
+        *rt.H<char>(kP + tlen + 1) = 'Z';  // byte after the NUL must stay
+        const std::uint32_t kargs[4] = {kP, 0, 0, 0};
+        const std::uint32_t tfd = abr::RuntimeTestAccess::Call(rt, 61, kargs);
+        const std::string tname(rt.H<const char>(kP));
+        Expect("mkstemp returns a fd", static_cast<std::int32_t>(tfd) > 2 ? "1" : "0", "1");
+        Expect("mkstemp keeps the guest length", std::to_string(tname.size()), std::to_string(tlen));
+        Expect("mkstemp replaced the X's", tname.find("XXXXXX") == std::string::npos ? "1" : "0", "1");
+        Expect("mkstemp wrote nothing past the NUL", std::string(1, *rt.H<char>(kP + tlen + 1)), "Z");
+        // unknown property -> "" and 0
+        put(kP, "abr.no.such.property");
+        std::memset(rt.H(kBuf), 'q', 92);
+        const std::uint32_t pargs[4] = {kP, kBuf, 0, 0};
+        Expect("property_get(unknown) = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 62, pargs)), "0");
+        Expect("property_get(unknown) writes \"\"", std::to_string(*rt.H<std::uint8_t>(kBuf)), "0");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

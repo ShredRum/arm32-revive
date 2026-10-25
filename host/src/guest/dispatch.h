@@ -77,6 +77,9 @@ inline constexpr std::size_t kMaxGuestCpus = 64;
 // Bytes of the guest jmp_buf our setjmp/longjmp use: r4-r11, sp, lr, s16-s31
 // (d8-d15), FPSCR. Bionic's arm jmp_buf is 64 words, so this always fits.
 inline constexpr std::uint32_t kGuestJmpBufBytes = 27 * 4;
+// PROP_VALUE_MAX of the guest's bionic (sys/system_properties.h): value
+// buffers passed to __system_property_get are this many bytes.
+inline constexpr std::uint32_t kGuestPropValueMax = 92;
 // poll() nfds above this is rejected with EINVAL (the kernel's limit is
 // RLIMIT_NOFILE; the guests poll one to a few fds). Bounds the host vector.
 inline constexpr std::uint32_t kGuestPollMaxFds = 4096;

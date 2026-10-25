@@ -26,6 +26,11 @@
 #include <sys/mman.h>
 #include <sys/vfs.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+#include <utime.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -3803,13 +3808,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         auto map_path = [this](std::uint32_t gp) -> std::string {
             return MapGuestPath(gp);
         };
+        // A guest path outside the mapped areas (files dir, assets, /proc,
+        // /sys, /dev ...) does not exist for the guest: fail the call with
+        // ENOENT like the kernel would (it used to halt the whole thread on a
+        // mere existence check). The result is NULL for the pointer-returning
+        // calls and -1 for the rest; the caller just returns afterwards.
         auto need_host = [&](const std::string& h, const char* what) -> bool {
             if (!h.empty()) {
                 return true;
             }
-            std::printf("[files] LOUD %s: unmapped guest path -- halting\n", what);
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            static std::atomic<int> unmapped_logs{0};
+            if (unmapped_logs.fetch_add(1) < 20) {
+                std::printf("[files] %s(\"%s\"): unmapped guest path -> ENOENT\n", what,
+                            CheckRange(a0, 1, false) ? GuestStr(a0) : "?");
+            }
+            SetGuestErrno(ENOENT);
+            const bool ptr_result = std::strcmp(what, "fopen") == 0 ||
+                                    std::strcmp(what, "opendir") == 0 ||
+                                    std::strcmp(what, "freopen") == 0;
+            Ret(regs, ptr_result ? 0u : 0xFFFFFFFFu);
             return false;
         };
         auto ensure_parent = [&](const std::string& hp) {
@@ -4052,6 +4069,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
+        if (n == "fflush" && a0 == 0) {
+            // fflush(NULL) flushes every output stream and returns 0.
+            std::fflush(nullptr);
+            Ret(regs, 0);
+            return;
+        }
         if (n == "fclose" || n == "fflush") {
             FILE* f = file_of(a0);
             if (!f) {
@@ -4144,7 +4167,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     nb = 192;
                 }
                 const std::uint8_t* p = H<const std::uint8_t>(a0);
-                std::printf("[regio] fread #%d %u items(%uB):", g_regdump_n, got, (unsigned)(got * a1));
+                std::printf("[regio] fread #%d %zu items(%zuB):", g_regdump_n, static_cast<std::size_t>(got),
+                            static_cast<std::size_t>(got) * a1);
                 for (std::size_t i = 0; i < nb; i++) {
                     std::printf(" %02x", p[i]);
                 }
@@ -4387,11 +4411,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             // The kernel rewrites only the six trailing 'X'. Copy those six
-            // characters back into the guest buffer; the host prefix may be
-            // longer (harness) or shorter, so the full path must not go in.
+            // characters back to the end of the GUEST template (the host path
+            // has a different length, so its offsets do not apply).
+            std::uint32_t gl = 0;
             if (hp.size() >= 6 && hp.compare(hp.size() - 6, 6, "XXXXXX") == 0 &&
-                CheckRange(a0, static_cast<std::uint32_t>(hp.size() + 1), true)) {
-                std::memcpy(H(a0 + hp.size() - 6), tmpl.data() + hp.size() - 6, 6);
+                GuestStrnlen(a0, 0xFFFFFFFFu, &gl) && gl >= 6 &&
+                CheckRange(a0 + gl - 6, 6, true)) {
+                std::memcpy(H(a0 + gl - 6), tmpl.data() + hp.size() - 6, 6);
             }
             const std::uint32_t g = alloc_guest_fd(fd);
             if (g == 0xFFFFFFFFu) {
@@ -4426,12 +4452,70 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 ForgetAlarmFd(a0);
             }
             if (hfd < 0) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
             // Unlocked I/O: fsync can block; close must not run under the map
             // lock either (a concurrent in-flight read keeps its own copy).
-            int r = (n == "close") ? ::close(hfd) : ::fsync(hfd);
+            const int r = (n == "close") ? ::close(hfd) : ::fsync(hfd);
+            if (r != 0) {
+                set_guest_errno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "dup") {
+            // dup(fd): a new guest fd for the same open file. It fell into the
+            // generic stub and returned 0, so the guest wrote "its" copy to
+            // stdin (Rio 0x4da11a, 0x4da16e). Guest fds 0-2 are the host's.
+            const int src = (a0 <= 2) ? static_cast<int>(a0) : host_fd_of(a0);
+            if (src < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            const int nfd = ::dup(src);
+            if (nfd < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            const std::uint32_t g = alloc_guest_fd(nfd);
+            if (g == 0xFFFFFFFFu) {
+                ::close(nfd);
+                set_guest_errno(EMFILE);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            Ret(regs, g);
+            return;
+        }
+        if (n == "utime") {
+            // utime(path, const struct utimbuf* t): guest utimbuf is
+            // {time_t actime; time_t modtime} = 2 x 32 bits; NULL = now.
+            const std::string hp = map_path(a0);
+            if (!need_host(hp, "utime")) {
+                return;
+            }
+            struct utimbuf ub {};
+            const struct utimbuf* up = nullptr;
+            if (a1 != 0) {
+                if (!CheckRange(a1, 8, false)) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                std::int32_t t[2] = {0, 0};
+                std::memcpy(t, H(a1), 8);
+                ub.actime = t[0];
+                ub.modtime = t[1];
+                up = &ub;
+            }
+            const int r = ::utime(hp.c_str(), up);
+            if (r != 0) {
+                set_guest_errno(errno);
+            }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -4439,17 +4523,29 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // Fills int[2] with guest fds. The old stub returned 0 WITHOUT
             // writing fds (stack garbage downstream -> throw-nest). Real ones.
             if (!CheckRange(a0, 8, true)) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                set_guest_errno(EFAULT);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
             int hfds[2] = {-1, -1};
-            int r = (n == "pipe") ? ::pipe(hfds) : ::pipe2(hfds, (int)a1);
+            const int r = (n == "pipe") ? ::pipe(hfds) : ::pipe2(hfds, (int)a1);
             if (r != 0) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
             const std::uint32_t g0 = alloc_guest_fd(hfds[0]);
-            const std::uint32_t g1 = alloc_guest_fd(hfds[1]);
+            const std::uint32_t g1 = (g0 == 0xFFFFFFFFu) ? 0xFFFFFFFFu : alloc_guest_fd(hfds[1]);
+            if (g0 == 0xFFFFFFFFu || g1 == 0xFFFFFFFFu) {
+                if (g0 != 0xFFFFFFFFu) {
+                    erase_guest_fd(g0);
+                }
+                ::close(hfds[0]);
+                ::close(hfds[1]);
+                set_guest_errno(EMFILE);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
             std::memcpy(H(a0), &g0, 4);
             std::memcpy(H(a0 + 4), &g1, 4);
             if (DiagOn()) {
@@ -4476,11 +4572,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
             if (!CheckRange(a1, a2, n == "read")) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                set_guest_errno(EFAULT);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
             // HARNESS_NONET=1: airplane-faithful — writes to sockets fail
@@ -4495,23 +4593,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
             // Unlocked: pipes/sockets block here; the map lock must be free
-            // so other threads keep running (2026-10-10 deadlock fix).
-            // Cap: FIFO reads wait max 5s (poll) then fail EAGAIN —
-            // an uncapped ::read on a pipe whose writer (dead worker) never
-            // delivers message #2 froze the whole run (STUCK@300s, 2026-10-10).
-            // Sockets skip the cap (SO_RCVTIMEO governs; blocking semantics).
-            // Regular files skip the cap (always fast). EOF semantics intact:
-            // closed write-ends still read 0 via the normal path below.
-            if (n == "read") {
-                struct stat fst {};
-                if (::fstat(hfd, &fst) == 0 && S_ISFIFO(fst.st_mode)) {
-                    if (wait_fd(hfd, POLLIN, 5000) <= 0) {
-                        set_guest_errno(EAGAIN);
-                        Ret(regs, static_cast<std::uint32_t>(-1));
-                        return;
-                    }
-                }
-            }
+            // so other threads keep running (2026-10-10 deadlock fix). A read
+            // blocks exactly as long as the real one would (a 5 s FIFO cap
+            // that returned EAGAIN on a blocking fd is gone).
             // TLS ClientHello version bump for write() path (the in-module
             // TLS stack uses plain write, not send — same fix as send()).
             // Pattern first (cheap), fstat only on match (not per-write).
@@ -4572,7 +4656,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                 r > show ? "..." : "");
                 }
             }
-            Ret(regs, static_cast<std::uint32_t>(r < 0 ? -1 : r));
+            if (r < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
         if (n == "lseek") {
@@ -4600,30 +4689,40 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "writev") {
+            // writev(fd, const struct iovec* iov, int iovcnt); guest iovec =
+            // {void* base; size_t len} = 2 x 32 bits. One host writev keeps
+            // the call's atomicity (pipes/sockets).
             const int hfd = host_fd_of(a0);
-            if (hfd < 0 || !CheckRange(a1, (std::size_t)a2 * 8, false)) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            ssize_t total = 0;
+            if (a2 > IOV_MAX || !CheckRange(a1, (std::size_t)a2 * 8, false)) {
+                set_guest_errno(a2 > IOV_MAX ? EINVAL : EFAULT);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            std::vector<struct iovec> iov(a2);
             for (std::uint32_t i = 0; i < a2; i++) {
                 std::uint32_t base = 0, len = 0;
                 std::memcpy(&base, H(a1 + i * 8), 4);
                 std::memcpy(&len, H(a1 + i * 8 + 4), 4);
                 if (!CheckRange(base, len, false)) {
-                    break;
+                    set_guest_errno(EFAULT);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
                 }
-                ssize_t w = ::write(hfd, H(base), len);
-                if (w < 0) {
-                    total = -1;
-                    break;
-                }
-                total += w;
-                if ((std::uint32_t)w != len) {
-                    break;
-                }
+                iov[i].iov_base = H(base);
+                iov[i].iov_len = len;
             }
-            Ret(regs, static_cast<std::uint32_t>(total < 0 ? -1 : total));
+            const ssize_t w = ::writev(hfd, iov.data(), static_cast<int>(a2));
+            if (w < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            Ret(regs, static_cast<std::uint32_t>(w));
             return;
         }
         // --- socket bridge (host-backed; identical path runs on device) ---
@@ -5326,13 +5425,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             if (n == "mkdir") {
-                std::error_code ec;
-                bool ok = std::filesystem::create_directories(hp, ec);
-                if (!ok || ec) {
-                    SetGuestErrno(errno ? errno : EEXIST);
+                // POSIX mkdir: one level, EEXIST if present, ENOENT if the
+                // parent is missing, honours the mode. (create_directories
+                // made it "mkdir -p" and left a stale errno on EEXIST.)
+                const int r = ::mkdir(hp.c_str(), static_cast<mode_t>(a1));
+                if (r != 0) {
+                    SetGuestErrno(errno);
                 }
-                Ret(regs, (ok && !ec) ? 0u : static_cast<std::uint32_t>(-1));
-                (void)ok;
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (n == "unlink" || n == "remove") {
@@ -5972,12 +6072,30 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
     if (n == "__system_property_get") {
-        // Bionic: int(name, value_out) -> length. The generic stub returned 0
-        // with an empty buffer, which silently killed the resolver worker
-        // (empty net.dns1 -> resolve fails -> worker exits -> main's pipe
-        // wait starves). Serve a small table (HARNESS_DNS1/2 overrides).
-        const std::string key = GuestStr(a0);
+        // int __system_property_get(const char* name, char* value): copies the
+        // value (at most PROP_VALUE_MAX = 92 bytes incl. NUL) and returns its
+        // length; a missing property gives "" and 0. On the device the real
+        // property service answers (it used to be a table of invented values:
+        // sdk 21, model "izan", DNS 8.8.8.8). The native harness has no
+        // property service and keeps a small table (HARNESS_DNS1/2 override).
+        if (!CheckRange(a1, kGuestPropValueMax, true)) {
+            goto bad_ptr;
+        }
+        std::uint32_t klen = 0;
+        if (!GuestStrnlen(a0, kGuestPropValueMax * 4, &klen)) {
+            goto bad_ptr;
+        }
+        const std::string key(H<const char>(a0), klen);
         std::string val;
+#ifdef __ANDROID__
+        {
+            char buf[PROP_VALUE_MAX] = {0};
+            const int len = ::__system_property_get(key.c_str(), buf);
+            if (len > 0) {
+                val.assign(buf, static_cast<std::size_t>(len));
+            }
+        }
+#else
         if (key == "net.dns1" || key == "net.dns2") {
             val = (key == "net.dns1") ? "8.8.8.8" : "8.8.4.4";
             if (const char* e = std::getenv(key == "net.dns1" ? "HARNESS_DNS1" : "HARNESS_DNS2")) {
@@ -5985,21 +6103,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         } else if (key == "ro.build.version.sdk") {
             val = "21";
-        } else if (key == "ro.product.model") {
-            val = "izan";
-        } else if (key == "ro.product.manufacturer") {
-            val = "unknown";
         }
-        if (!val.empty() && CheckRange(a1, val.size() + 1, true)) {
-            std::memcpy(H(a1), val.c_str(), val.size() + 1);
-            if (DiagOn()) {  // PLAN.md A5: diagnostic layer
-                std::printf("[prop]%s \"%s\" -> \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)",
-                            key.c_str(), val.c_str());
-            }
-            Ret(regs, static_cast<std::uint32_t>(val.size()));
-            return;
+#endif
+        if (val.size() >= kGuestPropValueMax) {
+            val.resize(kGuestPropValueMax - 1);
         }
-        // Unknown key: legacy empty behavior (length 0).
+        std::memcpy(H(a1), val.c_str(), val.size() + 1);
+        if (DiagOn()) {
+            std::printf("[prop]%s \"%s\" -> \"%s\"\n", GuestTid() == 1 ? "" : "(T2+)", key.c_str(),
+                        val.c_str());
+        }
+        Ret(regs, static_cast<std::uint32_t>(val.size()));
+        return;
     }
     if (n == "mktime" || n == "difftime" || n == "strftime") {
         // Real time-lib thunks (were stub->0: frozen daily/session timers).
@@ -10094,7 +10209,8 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
         const std::int64_t wp = ReadWP();
         if (wp >= 0 && v == static_cast<T>(wp)) {
             auto& regs = rt_->ActiveJit()->Regs();
-            std::printf("[wpr] %08x loaded from %08x guest-pc=%08x\n", v, addr, regs[15]);
+            std::printf("[wpr] %08x loaded from %08x guest-pc=%08x\n", static_cast<std::uint32_t>(v),
+                        addr, regs[15]);
             std::printf("[wpr] regs:");
             for (int r = 0; r < 16; r++) {
                 std::printf(" r%d=%08x", r, regs[r]);
@@ -10103,13 +10219,13 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
         }
         const std::int64_t wa = WatchAddr();
         if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
-            std::printf("[wpa] read from %08x = %08x guest-pc=%08x\n", addr, v,
-                        rt_->ActiveJit()->Regs()[15]);
+            std::printf("[wpa] read from %08x = %08x guest-pc=%08x\n", addr,
+                        static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
         }
         // Session-flag watch (DumpR9-armed): who observes sessions?
         if (g_sess_watch != 0 && addr == g_sess_watch) {
             std::printf("[sesswatch] t=%u read from %08x = %08x guest-pc=%08x\n", t_tid, addr,
-                        v, rt_->ActiveJit()->Regs()[15]);
+                        static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
         }
     }
     // Same for sub-word accesses (flag protocol uses strb/ldrb!).
