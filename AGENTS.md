@@ -4859,3 +4859,24 @@ Amazon 143/144. All seven markers 0, `death.log` 0 B, no new tombstone
   identity, so it is not a "small cleanup".
 - Tag: not now. The previous tag request is still pending an explicit user
   command.
+
+## 145. Rio closes mid-play: JNI string arena exhausted (2026-10-25)
+- SYMPTOM (user, main arm64 phone, prod `1b4156f`): episode 1 level 12, after
+  several restarts the app closes instantly. Logcat:
+  `[jni] LOUD string arena exhausted next=f1002ff6 len=18 limit=f1003000 --
+  halting` -> nativeUpdate hr=UserDefined2 r0=0 -> Java doShutdown. Process
+  lived 2 min 40 s => mock jstrings grow ~24 B/s in play; the 3840-byte arena
+  is boot-sized. Not level-specific (wall-clock). Before Stage B this overflow
+  silently overwrote the object-handle table instead.
+- FIX: JniNewString keeps the arena first (boot layout unchanged), then falls
+  back to GuestMalloc (same place delegated real-String copies live), one-shot
+  `[jni] string arena full ...` notice; LOUD only if the heap alloc fails.
+  Diag counter `jni_str=used/high,heap=<bytes>`. fmt_test: 400 strings past
+  the arena are created, readable, live heap blocks, GetStringUTFLength ok.
+- KNOWN DEBT (not fixed on purpose): mock jstrings are never freed (the arena
+  never was either), ~86 KB/h. Freeing on DeleteLocalRef is unsafe while the
+  mock NewGlobalRef returns the same handle; needs real local/global ref
+  lifetimes (see 144.10 "Global-ref release").
+- VERIFIED: native fmt_test ALL OK (shipping + diag), harness 54/55 svc=949
+  (= Stage C). Rio APK lib md5 1de8522c34b764be8bef31afbd20b81c; user-verified
+  on the phone: no more crash. Other five titles not rebuilt yet.

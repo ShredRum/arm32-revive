@@ -1160,6 +1160,30 @@ int main() {
                "0");
     }
 
+    // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
+    //     of halting (Rio filled the arena in 160 s of play, 2026-10-25).
+    {
+        bool all_ok = true;
+        std::uint32_t last = 0;
+        for (int i = 0; i < 400; i++) {  // 400 x 20 B > 3840 B
+            const std::string s = "jstring-overflow-" + std::to_string(i % 10);
+            last = rt.JniNewString(s);
+            if (last == 0 || std::strcmp(reinterpret_cast<const char*>(rt.H(last)), s.c_str()) != 0) {
+                all_ok = false;
+                break;
+            }
+        }
+        Expect("jstrings past the arena are created and readable", all_ok ? "1" : "0", "1");
+        Expect("overflow jstring lives outside the arena",
+               (last < abr::kJniStringStart || last >= abr::kJniStringLimit) ? "1" : "0", "1");
+        Expect("overflow jstring is a live heap block",
+               abr::RuntimeTestAccess::GuestLiveSize(rt, last) != 0 ? "1" : "0", "1");
+        const std::uint32_t len_args[4] = {0, last, 0, 0};
+        Expect("overflow jstring GetStringUTFLength",
+               std::to_string(abr::RuntimeTestAccess::Jni(rt, 168, len_args)),
+               std::to_string(std::strlen("jstring-overflow-9")));
+    }
+
 #ifdef ABR_DIAG_COUNTERS
     // Stage D smoke: the dump must be safe after JNI arena traffic and must
     // emit exactly one parseable line. The diag APK soak is the real test;

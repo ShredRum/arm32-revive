@@ -15,6 +15,8 @@ struct DiagCounters {
     // peak.
     std::uint32_t jni_str_high = 0;  // bytes from kJniStringStart
     std::uint32_t jni_obj_high = 0;  // 4-byte handles from kJniObjectStart
+    // Mock jstring bytes placed on the guest heap after the arena filled.
+    std::uint64_t jni_str_heap_bytes = 0;
     // Guest heap: live bytes (heap_used_) high-water.
     std::uint64_t heap_peak = 0;
     // Per-thread errno/TLS reaps (bridge worker exit or host thread exit).

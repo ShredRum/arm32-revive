@@ -7702,6 +7702,7 @@ void Runtime::ThreadCensus() {
 void Runtime::DumpDiagCounters() {
     std::uint64_t heap_used = 0, heap_peak = 0;
     std::uint32_t str_used = 0, str_high = 0, obj_used = 0, obj_high = 0;
+    std::uint64_t str_heap = 0;
     std::size_t n_strings = 0, n_objects = 0, n_rev = 0, n_fwd = 0, n_utf = 0;
     std::uint64_t utf_allocs = 0, utf_releases = 0;
     std::size_t n_tls = 0, n_errno = 0, n_errno_free = 0;
@@ -7724,6 +7725,7 @@ void Runtime::DumpDiagCounters() {
         heap_peak = diag_.heap_peak;
         str_used = jni_str_next_ >= kJniStringStart ? jni_str_next_ - kJniStringStart : 0;
         str_high = diag_.jni_str_high;
+        str_heap = diag_.jni_str_heap_bytes;
         obj_used = jni_obj_next_ >= kJniObjectStart
                        ? (jni_obj_next_ - kJniObjectStart) / 4u
                        : 0;
@@ -7773,12 +7775,12 @@ void Runtime::DumpDiagCounters() {
         std::snprintf(fd, sizeof(fd), "fd=?,next=?,free=?,file=?");
     }
     std::printf(
-        "[counters] heap=%llu/%llu jni_str=%u/%u jni_obj=%u/%u "
+        "[counters] heap=%llu/%llu jni_str=%u/%u,heap=%llu jni_obj=%u/%u "
         "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu utf=%zu,%llu/%llu wrapg=%llu newg=%llu delg=%llu "
         "%s localtime=%llu/%llu assets=%zu/%llu,peak=%llu/%llu "
         "tls=%zu/%llu errno=%zu/%zu,next=%u threads=%zu svc=%llu\n",
         (unsigned long long)heap_used, (unsigned long long)heap_peak, str_used, str_high,
-        obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd, n_utf,
+        (unsigned long long)str_heap, obj_used, obj_high, n_strings, n_objects, n_rev, n_fwd, n_utf,
         (unsigned long long)utf_allocs, (unsigned long long)utf_releases,
         (unsigned long long)wrapg, (unsigned long long)newg, (unsigned long long)delg, fd,
         (unsigned long long)loc_allocs, (unsigned long long)loc_bytes, n_assets,
@@ -8687,17 +8689,36 @@ std::uint32_t Runtime::JniNewString(const std::string& s) {
     }
     const std::size_t len = s.size() + 1;
     std::uint32_t out = 0;
-    if (!JniStringFits(jni_str_next_, len, &out)) {
-        std::printf("[jni] LOUD string arena exhausted next=%08x len=%zu limit=%08x -- halting\n",
-                    jni_str_next_, len, kJniStringLimit);
-        stop_step_ = true;
-        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
-            jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+    if (JniStringFits(jni_str_next_, len, &out)) {
+        jni_str_next_ = out + static_cast<std::uint32_t>(len);
+    } else {
+        // The 3840-byte arena only covers boot. Rio keeps creating mock
+        // jstrings during play (~24 B/s measured on device, 2026-10-25) and
+        // filled it in 160 s, which halted nativeUpdate -> app closed. Past the
+        // arena, strings go to the guest heap, like the delegated real-String
+        // copies already do. They are never freed: the mock Delete*Ref are
+        // no-ops and NewGlobalRef returns the same handle, so freeing on
+        // DeleteLocalRef would free a live global.
+        out = GuestMalloc(static_cast<std::uint32_t>(len));
+        if (!out) {
+            std::printf("[jni] LOUD string alloc failed len=%zu -- halting\n", len);
+            stop_step_ = true;
+            if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+                jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            return 0;
         }
-        return 0;
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("[jni] string arena full at %08x, further jstrings on the guest heap\n",
+                        jni_str_next_);
+        }
+#ifdef ABR_DIAG_COUNTERS
+        diag_.jni_str_heap_bytes += len;
+#endif
     }
     std::memcpy(H(out), s.c_str(), len);
-    jni_str_next_ = out + static_cast<std::uint32_t>(len);
 #ifdef ABR_DIAG_COUNTERS
     const std::uint32_t str_used = jni_str_next_ - kJniStringStart;
     if (str_used > diag_.jni_str_high) {
