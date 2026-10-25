@@ -1,14 +1,18 @@
 // Unit test for the guest printf formatter (Runtime::ExpandPrintf).
 //
-// The guests are GCC/arm-linux-gnueabi builds (base PCS) on a 32-bit ARM
-// target, so the variadic ABI is:
+// The guests are GCC/arm-linux-gnueabi builds on a 32-bit ARM target. The
+// variadic ABI is AAPCS32:
 //
 //   size_t / unsigned int / int / long / ptrdiff_t  = 4 bytes  -> ONE slot
-//   long long / intmax_t                             = 8 bytes  -> TWO
-//                                                       consecutive slots
-//   double                                           = 8 bytes  -> TWO
-//                                                       consecutive slots
-//   va_list (base PCS)                               = ONE WORD (a pointer
+//   long long / intmax_t                             = 8 bytes  -> an EVEN
+//                                                       core-register pair,
+//                                                       else an 8-byte
+//                                                       aligned stack slot
+//   double                                           = 8 bytes  -> an EVEN
+//                                                       core-register pair,
+//                                                       else an 8-byte
+//                                                       aligned stack slot
+//   va_list                                          = ONE WORD (a pointer
 //                                                       to a flat area); the
 //                                                       consumer reads AT the
 //                                                       pointer and advances
@@ -17,12 +21,14 @@
 //                                                       CALLER aligns.
 //
 // That is the VARIADIC export path (ExpandPrintf). The JNI native ENTRY path
-// is different: there a 64-bit argument takes an AAPCS32 even pair (or an
-// 8-byte aligned stack slot), pinned by the marshalling test near the end and
-// by the guest's own Utils.handleReferrerValue entry.
+// uses the same even-pair rule, pinned by the marshalling test near the end
+// and by the guest's own Utils.handleReferrerValue entry.
 //
-// The facts below were established by compiling with -mabi=apcs-gnu and
-// reading the disassembly, not by assumption.
+// Proven from the guest code, not from a compiler guess: the WebP Xing
+// parser in Rio/Space/Star Wars calls
+//   fprintf(fp, "Note: Xing stream size %lu differs by %f%% ...", lu, d);
+// with the %lu in r2 and the double wholly at [sp] (`vstr d8,[sp]`), r3
+// unused. Base PCS would put the low word in r3. See the ABI tests below.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -260,24 +266,29 @@ int main() {
         Expect("%td negative", rt.ExpandPrintf("%td", st), "-16");
     }
 
-    // --- 8-byte integer argument: TWO consecutive core registers (base PCS:
-    //     no even-pair rule -- see abi_basepcs.c). With ai == 1 the pair is
-    //     r1:r2; with ai == 3 the registers are gone and the argument is on
-    //     the stack, at an 8-byte aligned address.
+    // --- 8-byte integer argument: AAPCS32 EVEN core-register pair. With
+    //     ai == 1, r1 is skipped and the value is in r2:r3; with ai == 3
+    //     there is no complete pair, so the whole value is on the stack at
+    //     an 8-byte aligned address.
     {
         abr::Runtime::GuestFmtArgs st{};
         st.gargs[0] = 0;
-        st.gargs[1] = 0x55667788u;  // r1: low word
-        st.gargs[2] = 0x11223344u;  // r2: high word
+        st.gargs[1] = 0xDEADBEEFu;  // r1: skipped
+        st.gargs[2] = 0x55667788u;  // r2: low word
+        st.gargs[3] = 0x11223344u;  // r3: high word
         st.ai = 1;
-        Expect("%jd from r1:r2", rt.ExpandPrintf("%jd", st), "1234605616436508552");
+        Expect("%jd skips r1 -> r2:r3", rt.ExpandPrintf("%jd", st),
+               "1234605616436508552");
     }
     {
         abr::Runtime::GuestFmtArgs st{};
         const std::uint64_t v = 0x1122334455667788ull;
         std::memcpy(rt.H<std::uint8_t>(kStack), &v, 8);
         st.gargs[0] = 0;
-        st.ai = 3;  // r0..r2 taken -> the argument is on the stack
+        st.gargs[1] = 0xDEADBEEFu;  // r1: skipped
+        st.gargs[2] = 0xDEADBEEFu;  // r2
+        st.gargs[3] = 0xDEADBEEFu;  // r3: no complete pair left
+        st.ai = 3;
         st.stack = kStack;
         Expect("%jd from the stack", rt.ExpandPrintf("%jd", st), "1234605616436508552");
     }
@@ -292,13 +303,15 @@ int main() {
         Expect("%jd from r2:r3", rt.ExpandPrintf("%jd", st), "1234605616436508552");
     }
     {
-        // %lld is 8 bytes too, and %ld is 4.
+        // %lld is 8 bytes too; ai == 1 skips r1 exactly like %jd.
         abr::Runtime::GuestFmtArgs st{};
         st.gargs[0] = 0;
-        st.gargs[1] = 0x55667788u;  // r1: low word
-        st.gargs[2] = 0x11223344u;  // r2: high word
+        st.gargs[1] = 0xDEADBEEFu;  // r1: skipped
+        st.gargs[2] = 0x55667788u;  // r2: low word
+        st.gargs[3] = 0x11223344u;  // r3: high word
         st.ai = 1;
-        Expect("%lld from r1:r2", rt.ExpandPrintf("%lld", st), "1234605616436508552");
+        Expect("%lld skips r1 -> r2:r3", rt.ExpandPrintf("%lld", st),
+               "1234605616436508552");
     }
     {
         abr::Runtime::GuestFmtArgs st{};
@@ -332,8 +345,9 @@ int main() {
         Expect("%hd narrowed", rt.ExpandPrintf("%hd", st), "-32768");
     }
 
-    // --- a double takes the next two free words as well (base PCS).
+    // --- a double follows the same AAPCS32 even-pair rule.
     {
+        // r0 and r1 are taken, so the pair is r2:r3.
         abr::Runtime::GuestFmtArgs st{};
         const double d = 1.5;
         std::uint64_t bits = 0;
@@ -346,19 +360,71 @@ int main() {
         Expect("%f from r2:r3", rt.ExpandPrintf("%f", st), "1.500000");
     }
     {
-        // One named argument only: the pair is r1:r2 (r1 is NOT skipped).
+        // printf("%f", d): the first variadic argument is the double, so
+        // r1 is skipped and the value is in r2:r3. This is the test that
+        // fails under the old base-PCS rule (which read r1:r2).
         abr::Runtime::GuestFmtArgs st{};
         const double d = 2.25;
         std::uint64_t bits = 0;
         std::memcpy(&bits, &d, 8);
-        st.gargs[0] = 0;
-        st.gargs[1] = static_cast<std::uint32_t>(bits & 0xFFFFFFFFu);  // r1: low word
-        st.gargs[2] = static_cast<std::uint32_t>(bits >> 32);          // r2: high word
+        st.gargs[0] = 0;         // fmt
+        st.gargs[1] = 0xDEADBEEFu;  // r1: skipped
+        st.gargs[2] = static_cast<std::uint32_t>(bits & 0xFFFFFFFFu);  // r2: low word
+        st.gargs[3] = static_cast<std::uint32_t>(bits >> 32);          // r3: high word
         st.ai = 1;
-        Expect("%f from r1:r2", rt.ExpandPrintf("%f", st), "2.250000");
+        Expect("%f skips r1 -> r2:r3", rt.ExpandPrintf("%f", st), "2.250000");
+    }
+    {
+        // printf("%d %f", i, d): %d takes r1, so the double is in r2:r3.
+        abr::Runtime::GuestFmtArgs st{};
+        const double d = 2.25;
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &d, 8);
+        st.gargs[0] = 0;         // fmt
+        st.gargs[1] = 42;        // %d: r1
+        st.gargs[2] = static_cast<std::uint32_t>(bits & 0xFFFFFFFFu);  // r2: low word
+        st.gargs[3] = static_cast<std::uint32_t>(bits >> 32);          // r3: high word
+        st.ai = 1;
+        Expect("%d %f from r2:r3", rt.ExpandPrintf("%d %f", st), "42 2.250000");
+    }
+    {
+        // sprintf(dst, "%d %f", i, d): dst/fmt take r0/r1, %d takes r2,
+        // and the double has no complete even pair left -> [sp].
+        abr::Runtime::GuestFmtArgs st{};
+        const double d = 1.5;
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &d, 8);
+        std::memcpy(rt.H<std::uint8_t>(kStack), &bits, 8);
+        st.gargs[0] = 0;         // dst
+        st.gargs[1] = 0;         // fmt
+        st.gargs[2] = 42;        // %d: r2
+        st.gargs[3] = 0xDEADBEEFu;  // r3: skipped
+        st.ai = 2;
+        st.stack = kStack;
+        Expect("%d %f from the stack", rt.ExpandPrintf("%d %f", st), "42 1.500000");
+    }
+    {
+        // The real guest shape: Rio/Space/Star Wars WebP
+        //   fprintf(fp, "Note: Xing stream size %lu differs by %f%% ...",
+        //           lu, d)
+        // has the %lu in r2 and the double wholly at [sp]; r3 is not the
+        // low word. This is the call site that proves AAPCS32.
+        abr::Runtime::GuestFmtArgs st{};
+        const double d = 1.5;
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &d, 8);
+        std::memcpy(rt.H<std::uint8_t>(kStack), &bits, 8);
+        st.gargs[0] = 0;         // FILE*
+        st.gargs[1] = 0;         // fmt
+        st.gargs[2] = 4660;      // %lu: r2
+        st.gargs[3] = 0xDEADBEEFu;  // r3: stale, not the double
+        st.ai = 2;
+        st.stack = kStack;
+        Expect("guest %lu %f from the stack", rt.ExpandPrintf("%lu %f", st),
+               "4660 1.500000");
     }
 
-    // --- base PCS va_list: the consumer reads AT the pointer and advances
+    // --- AAPCS32 va_list: the consumer reads AT the pointer and advances
     //     by 4 / 8; the CALLER aligns the 8-byte slots (a compiler built
     //     area puts them at 8-byte aligned addresses), so an 8-byte read
     //     rounds the cursor up to the next 8 first.

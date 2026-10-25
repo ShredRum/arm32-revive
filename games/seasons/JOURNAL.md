@@ -1880,3 +1880,61 @@ and live 10, with newg/delg both advancing, so no refcount change was made.
 startup-only and no counter shows repeated resolution. The remaining
 `JniNewString` mock-jstring arena growth is separate from the real-wrapped
 `GetStringUTFChars` path and is not a guest allocation fix.
+
+### 2026-10-25 — Stage F/G: AAPCS32 variadic ABI proven, final six-title gate
+
+Correction to the 2026-10-21 "base PCS" conclusion. The actual guests use
+**AAPCS32 even register pairs**. The 2026-10-21 proof compiled a sample
+with `-mabi=apcs-gnu`; that was a compiler assumption, not evidence that
+the guest was built that way. The guest call site settles it.
+
+The WebP Xing parser in three titles formats a 32-bit `%lu` and a `double`
+in one `fprintf`:
+
+| title | call | format | caller sequence |
+|---|---|---|---|
+| Rio | `0x3ab590` | `0x5d8c67` | `0x3ab584 mov r2,r5`; `0x3ab58c vstr d13,[sp]`; `0x3ab590 bl fprintf@plt` |
+| Space | `0x4b258c` | `0x68955c` | `0x4b2570 mov r2,r4`; `0x4b2584 vstr d8,[sp]`; `0x4b258c bl fprintf@plt` |
+| Star Wars | `0x5243e4` | `0x70792c` | `0x5243c8 mov r2,r4`; `0x5243dc vstr d8,[sp]`; `0x5243e4 bl fprintf@plt` |
+
+At each site r0 is the `FILE*`, r1 is the format, r2 holds the `%lu`, r3 is
+not written with the double, and the whole 8-byte double is at `[sp]`.
+Base PCS would put the low word in r3 and only the high word at `[sp]`.
+A Clang `-mabi=aapcs-linux` vs `-mabi=apcs-gnu` compile of the same shape
+reproduces the two layouts; the guest call site is the primary proof. All
+argument-passing double moves in the six guest libraries use even pairs;
+the single odd Rio `vmov r5,r6,d0` is not argument passing.
+
+`ExpandPrintf::next64` now rounds an odd `st.ai` up to the next even
+register, reads a complete even `gargs` pair when available, otherwise
+reads the whole 8-byte value from the 8-byte aligned stack and sets
+`st.ai = 4`. New `fmt_test` cases cover `%f`, `%d %f`, `%jd`, `%lld` and
+the real `%lu %f` guest shape. Removing the odd-register skip fails
+`%jd skips r1 -> r2:r3`, `%lld skips r1 -> r2:r3` and
+`%f skips r1 -> r2:r3`; restored code passes all 172 checks. Native
+shipping and diag `fmt_test` are `ALL OK`; `zip_test`, `cbnz_test` and
+`smoke_a32` pass.
+
+Shipping host lib md5 `778f151f1bf5588e5db0961ed2b89fbd`, marker
+`Oct 25 2026 03:28:11`; stripped/installed lib md5
+`7d22210c103e3478ab730868f8e0684e`. All six APKs rebuilt from it:
+
+| title | APK md5 | init | process |
+|---|---|---|---|
+| Seasons | `61131e91958e9e87553567c35c49a9c6` | 142/143 | 2236 |
+| Rio | `7a4e25be33626b5fff6a48948b46b7d8` | 54/55 | 3355 |
+| Space | `12a2496112e5741ffcee671efe37188e` | 67/68 | 5013 |
+| Star Wars | `7947a4651b1a6537e05ca69960aa536b` | 96/97 | 5431 |
+| Star Wars II | `280d9a7403aa2652201bb1c2e56398b0` | 143/144 | 5842 |
+| Amazon | `bcf06060ee5591a85bfddd744c6f23b8` | 143/144 | 6228 |
+
+Installed guest SHA-256 matches every profile; all six manifests have
+`android:debuggable=0x0`; the shipping lib contains no `[counters]`,
+`fmttrace` or `ABR_DIAG_COUNTERS` string. All seven markers
+(`HEAPCORRUPT`, `HEAPASSERT`, `CHUNKD`, `USAGE_ERROR`, `LOUD`, `STUCK`,
+`FATAL`) are 0, every `death.log` is 0 B, and no tombstone is newer than
+2026-10-20. Seasons' Tutorial_red fingerprint is 85/85 lines
+byte-identical to `state_baseline_59ff106.txt` and 46/46 fields
+bit-identical to `Tutorial_red.json`; `G_MEM` for the read-only tools is
+`0x437428`. Screenshots: Rio, Space and Star Wars main menus; Star Wars II
+shows the expected asset-download failure; Amazon reaches its menu.

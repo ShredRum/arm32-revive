@@ -4753,50 +4753,87 @@ guest allocation fix. Stage G still rebuilds and gates all six shipping APKs.
   for this isolated fix. Final Stage G rebuilds and gates all six.
 - [x] One commit, measurement in the message.
 
-### 144.7 Stage F — variadic ABI proof (outside `eff3de3..HEAD`, P2)
+### 144.7 Stage F — variadic ABI proof (closed 2026-10-25)
 
-This is not a confirmed defect. The Seasons journal contradicts itself:
-2026-10-20 says AAPCS32 even pairs, 2026-10-21 says base PCS with no even
-pair. The 2026-10-21 proof compiled a sample with `-mabi=apcs-gnu`; that is
-not evidence that the guest was built that way. The guest ELF says GCC
-4.8/Linaro 4.9, softfp, no `Tag_ABI_VFP_args`. The golden level check covers
-only the level-number path, not every variadic call with a double after an
-odd number of 32-bit arguments.
+The guests use **AAPCS32 even register pairs**, not base PCS. The proof is
+the guests' own WebP Xing parser, which formats a 32-bit `%lu` and a
+`double` in one `fprintf`:
+
+| title | call | format | caller sequence |
+|---|---|---|---|
+| Rio | `0x3ab590` | `0x5d8c67` | `0x3ab584 mov r2,r5`; `0x3ab58c vstr d13,[sp]`; `0x3ab590 bl fprintf@plt` |
+| Space | `0x4b258c` | `0x68955c` | `0x4b2570 mov r2,r4`; `0x4b2584 vstr d8,[sp]`; `0x4b258c bl fprintf@plt` |
+| Star Wars | `0x5243e4` | `0x70792c` | `0x5243c8 mov r2,r4`; `0x5243dc vstr d8,[sp]`; `0x5243e4 bl fprintf@plt` |
+
+At each site r0 is the `FILE*`, r1 is the format, r2 holds the `%lu`, r3 is
+not written with the double, and the whole 8-byte double is at `[sp]`.
+Base PCS would put the low word in r3 and only the high word at `[sp]`.
+The actual guest call site is the primary proof; a Clang
+`-mabi=aapcs-linux` vs `-mabi=apcs-gnu` compile of the same shape reproduces
+the two layouts. All argument-passing double moves in the six guest
+libraries use even pairs; the single odd Rio `vmov r5,r6,d0` is not argument
+passing. The ELF attribute was not used as proof.
 
 Tasks:
-- [ ] Find a real guest variadic call site with a double preceded by an odd
-  number of 32-bit arguments (`printf`, `sprintf`, `snprintf`,
-  `__android_log_print`, or the libc++ `num_put` path). Disassemble the
-  caller and the va_list area; record the register/stack slots.
-- [ ] Compile the same shape with the guest's compiler family/flags or use
-  the actual call site; do not infer the ABI from the ELF attribute alone.
-- [ ] If the guest uses even pairs, fix `ExpandPrintf::next64` back to
-  AAPCS32 and add tests for `%f` and `%d %f` on both register and stack
-  paths; re-run the golden check.
-- [ ] If the guest really uses odd pairs, record the disassembly proof and
-  close the item as "base PCS confirmed"; do not change working code.
+- [x] Found a real guest call site with a double after one 32-bit argument
+  in three titles (Rio, Space, Star Wars), and recorded the slots above.
+- [x] Used the actual guest call site; the compiler probe is only a
+  cross-check, not the ABI source.
+- [x] Fixed `ExpandPrintf::next64` back to AAPCS32: an odd `st.ai` is
+  rounded up to the next even register; a complete even pair is read from
+  `gargs`; otherwise the whole value is read from the 8-byte aligned stack
+  and `st.ai` becomes 4. Added `%f`, `%d %f`, `%jd`, `%lld` and the real
+  `%lu %f` guest shape tests; re-ran the golden check.
+- [x] The base-PCS branch was not taken; the guest proved even pairs.
 
 Acceptance:
-- [ ] A cited guest VA and instruction sequence, not a compiler assumption.
-- [ ] A test that fails on the wrong rule and passes on the proven rule.
-- [ ] No change to the level-number path without a new golden run.
+- [x] Cited guest VAs and instruction sequences, not a compiler assumption.
+- [x] `fmt_test` fails on the old rule and passes on the proven rule:
+  removing the odd-register skip fails `%jd skips r1 -> r2:r3`,
+  `%lld skips r1 -> r2:r3` and `%f skips r1 -> r2:r3`; restored code
+  passes all 172 checks.
+- [x] Seasons golden after the change: 85/85 live-state lines byte-identical
+  to `state_baseline_59ff106.txt`, 46/46 fields bit-identical to
+  `Tutorial_red.json` (`G_MEM` re-synced to `0x437428`).
+
+Closure evidence (2026-10-25): native shipping and diag `fmt_test` both
+`ALL OK` (172 `ok` lines); `zip_test`, `cbnz_test` and `smoke_a32` pass.
+Shipping host lib md5 `778f151f1bf5588e5db0961ed2b89fbd`, marker
+`Oct 25 2026 03:28:11`; stripped/installed lib md5
+`7d22210c103e3478ab730868f8e0684e`. All six APKs rebuilt from that lib; the
+device gate is in Stage G below.
 
 ### 144.8 Stage G — final rebuild, gate, commit
 
-- [ ] Rebuild `host/build-android/libabhost.so` from the final source.
-- [ ] Build all six APKs; confirm each guest `.so` SHA against the profile;
+- [x] Rebuild `host/build-android/libabhost.so` from the final source.
+- [x] Build all six APKs; confirm each guest `.so` SHA against the profile;
   confirm the shipping APK is non-debuggable and has no diag/counter strings.
-- [ ] Device gate all six: markers 0 (`HEAPCORRUPT`, `HEAPASSERT`, `CHUNKD`,
+- [x] Device gate all six: markers 0 (`HEAPCORRUPT`, `HEAPASSERT`, `CHUNKD`,
   `USAGE_ERROR`, `LOUD`, `STUCK`, `FATAL`), `death.log` 0 B, init counts
   unchanged, process alive, screenshot if the change can affect rendering.
-- [ ] Seasons golden: 85-line live-state fingerprint byte-identical to
+- [x] Seasons golden: 85-line live-state fingerprint byte-identical to
   `state_baseline_59ff106.txt`; 46 numeric fields bit-identical to
   `Tutorial_red.json` via
   `games/seasons/work/analysis_2026-10-21/check_level_vs_json.py`.
-- [ ] Record installed library md5 and APK md5 in the journal; note that the
+- [x] Record installed library md5 and APK md5 in the journal; note that the
   build marker makes the lib md5 change on every rebuild.
-- [ ] Commit only after all of the above. Do not create a tag unless the user
+- [x] Commit only after all of the above. Do not create a tag unless the user
   explicitly asks for it.
+
+Gate evidence (2026-10-25): installed lib md5
+`7d22210c103e3478ab730868f8e0684e` in all six packages; installed guest
+SHA-256 matches every profile; all six manifests have
+`android:debuggable=0x0`; no `[counters]`, `fmttrace` or
+`ABR_DIAG_COUNTERS` string in the shipping lib. Init counts: Seasons
+142/143, Rio 54/55, Space 67/68, Star Wars 96/97, Star Wars II 143/144,
+Amazon 143/144. All seven markers 0, `death.log` 0 B, no new tombstone
+(newest still 2026-10-20), all six processes alive. APK md5s: Seasons
+`61131e91958e9e87553567c35c49a9c6`, Rio
+`7a4e25be33626b5fff6a48948b46b7d8`, Space
+`12a2496112e5741ffcee671efe37188e`, Star Wars
+`7947a4651b1a6537e05ca69960aa536b`, Star Wars II
+`280d9a7403aa2652201bb1c2e56398b0`, Amazon
+`bcf06060ee5591a85bfddd744c6f23b8`.
 
 ### 144.9 Acceptance matrix
 

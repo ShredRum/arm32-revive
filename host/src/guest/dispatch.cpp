@@ -1296,15 +1296,20 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
         st.stack += 4;
         return v;
     };
-    // Variadic double-word arguments (double, long long) in these BASE PCS
-    // guests take the NEXT TWO core registers (r1:r2, r2:r3, ...): there
-    // is no even-pair rule (that is AAPCS32 -- the NDK's default ABI, which
-    // is NOT what these guests were built with). If fewer than two
-    // registers are left, the argument is on the stack. Low word first.
-    // Reading the wrong pair swapped the halves of every variadic double
-    // -> the guest's own number->text formatting (libc++ num_put ->
-    // vsprintf) produced "inf"/"0"/"nan" and the level's fractional fields
-    // came out garbage (the integers survived).
+    // Variadic double-word arguments (double, long long) follow AAPCS32:
+    // they occupy an EVEN-numbered core register pair (r0:r1, r2:r3, ...).
+    // If the next free register is odd, it is skipped; if the even pair is
+    // no longer available, the argument goes on the stack at an 8-byte
+    // aligned address. Low word first.
+    //
+    // Proven from the guests, not from a compiler guess. The WebP Xing
+    // parser in Rio/Space/Star Wars calls
+    //   fprintf(fp, "Note: Xing stream size %lu differs by %f%% ...",
+    //           lu, d);
+    // with the %lu in r2 and the double stored entirely at [sp]
+    // (`vstr d8,[sp]`), r3 unused. Under base PCS the low word would be in
+    // r3 and only the high word at [sp]. See also the even argument-passing
+    // `vmov` pairs in all six guest libraries.
     auto next64 = [&]() -> std::uint64_t {
         if (st.via_va) {
             // va_list position: a double-word sits at an 8-byte aligned slot.
@@ -1316,22 +1321,18 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
             st.stack += 8;
             return v;
         }
-        // These guests are GCC/arm-linux-gnueabi (BASE PCS) builds: an
-        // 8-byte argument takes the NEXT TWO core registers (r1:r2, r2:r3,
-        // ...) — there is NO even-pair rule. That rule belongs to AAPCS32,
-        // which the NDK's default (aapcs) clang uses and which is why the
-        // old code was wrong: with -mabi=apcs-gnu the caller emits
-        // `vmov r1, r2, d16` (r1 NOT skipped), with the default ABI it emits
-        // `vmov r2, r3, d16`. Low word first.
-        // If fewer than two registers are left, the argument is on the stack
-        // at an 8-byte aligned address (the CALLER aligns it).
+        if (st.ai & 1) {
+            st.ai++;  // AAPCS32: a double-word starts on an even register
+        }
         if (st.ai + 2 <= 4) {
             const std::uint32_t lo = st.gargs[st.ai];
             const std::uint32_t hi = st.gargs[st.ai + 1];
             st.ai += 2;
             return static_cast<std::uint64_t>(lo) | (static_cast<std::uint64_t>(hi) << 32);
         }
-        // Core registers exhausted: the argument is on the stack, 8-byte aligned.
+        // No complete even pair left: the caller put the whole argument on
+        // the stack. Once that happens, later arguments are on the stack too.
+        st.ai = 4;
         st.stack = (st.stack + 7u) & ~7u;
         std::uint64_t v = 0;
         if (CheckRange(st.stack, 8, false)) {
@@ -1412,7 +1413,7 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
                 }
             }
         }
-        // Length modifier. The guest is a 32-bit ARM build (ILP32, base PCS):
+        // Length modifier. The guest is a 32-bit ARM build (ILP32, AAPCS32):
         //     int / long / ptrdiff_t / size_t = 4 bytes
         //     long long / intmax_t             = 8 bytes
         //     long double                      = double (8 bytes)
@@ -2511,9 +2512,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 2;  // first vararg: r2
         std::uint32_t stack = regs[13];
-        // vsscanf(str, fmt, va_list): these guests are GCC/arm-linux-gnueabi
-        // builds (base PCS), where a va_list is a single word -- a POINTER to
-        // a flat argument area -- and it arrives in a core register, not in
+        // vsscanf(str, fmt, va_list): these guests use the ARM AAPCS32
+        // variadic ABI, where a va_list is a single word -- a POINTER to a
+        // flat argument area -- and it arrives in a core register, not in
         // memory. vsscanf has two named arguments (str, fmt), so the area
         // pointer is the third argument: r2 == a2. The area holds the
         // variadic arguments back to back: a 4-byte argument is read AT the
@@ -2522,13 +2523,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // does not shift the pointer.
         //
         // Ground truth (not from memory): the guests' own code does
-        // `add r3, sp, #20` + `bl vsnprintf@plt`, and a -mabi=apcs-gnu
-        // compile (clang, the same toolchain the audit used) shows va_start
-        // storing a single pointer to the register save area and va_arg
-        // reading at that pointer and advancing by 4 (int) / 8 (double-word).
-        // The earlier "an 8-byte struct passed in memory at the entry SP"
-        // reading was wrong: it came from an NDK-clang AAPCS32 experiment,
-        // not from the guests' actual ABI.
+        // `add r3, sp, #20` + `bl vsnprintf@plt` (the va_list is a pointer in
+        // r3). The same AAPCS32 even-pair rule is visible in the WebP
+        // `fprintf(fp, "%lu %f", lu, d)` call: the double is wholly at [sp],
+        // not in r3.
         const bool via_va = (n == "vsscanf");
         std::uint32_t va_area = 0;
         if (via_va) {
@@ -3217,8 +3215,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // carry its OWN formatter, which had diverged from the printf
         // family: it printed %f/%e/%g as %g, printed %p without the 0x,
         // ignored the length modifiers and the flags/width/precision, and
-        // read a double from an AAPCS32 EVEN register pair -- while these
-        // guests are base PCS, where a double takes the next two words.
+        // read a double from an AAPCS32 EVEN register pair -- the same rule
+        // the guests use (proved by the WebP `%lu %f` fprintf call).
         // One formatter now: Runtime::ExpandPrintf.
         const std::string fmt(GuestStr(a2));  // copy: later GuestStr calls reuse scratch
         GuestFmtArgs st{};
