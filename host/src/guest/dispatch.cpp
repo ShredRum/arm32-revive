@@ -3916,30 +3916,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return ::poll(&p, 1, ms);
         };
         auto fill_stat = [&](std::uint32_t dst, const struct stat& st) -> bool {
-            if (!CheckRange(dst, 96, true)) {
+            // Bionic arm32 struct stat, 104 bytes (NDK sys/stat.h; offsets
+            // checked with offsetof under the NDK clang for armv7a). Note the
+            // 4-byte pads after st_dev and st_rdev and the 8-byte alignment of
+            // st_size/st_blocks; Rio reads st_size with ldrd [sp,#48].
+            if (!CheckRange(dst, kGuestStatSize, true)) {
                 return false;
             }
             std::uint8_t* p = H<std::uint8_t>(dst);
-            std::memset(p, 0, 96);
+            std::memset(p, 0, kGuestStatSize);
             auto w64 = [&](std::size_t o, std::uint64_t v) { std::memcpy(p + o, &v, 8); };
             auto w32 = [&](std::size_t o, std::uint32_t v) { std::memcpy(p + o, &v, 4); };
             w64(0, (std::uint64_t)st.st_dev);
-            w32(12, (std::uint32_t)st.st_ino);
+            w32(12, (std::uint32_t)st.st_ino);  // __st_ino
             w32(16, (std::uint32_t)st.st_mode);
             w32(20, (std::uint32_t)st.st_nlink);
             w32(24, (std::uint32_t)st.st_uid);
             w32(28, (std::uint32_t)st.st_gid);
             w64(32, (std::uint64_t)st.st_rdev);
-            w64(44, (std::uint64_t)st.st_size);
-            w32(52, (std::uint32_t)st.st_blksize);
-            w64(56, (std::uint64_t)st.st_blocks);
-            w32(64, (std::uint32_t)st.st_atime);
-            w32(68, (std::uint32_t)0);
-            w32(72, (std::uint32_t)st.st_mtime);
-            w32(76, (std::uint32_t)0);
-            w32(80, (std::uint32_t)st.st_ctime);
-            w32(84, (std::uint32_t)0);
-            w64(88, (std::uint64_t)st.st_ino);
+            w64(48, (std::uint64_t)st.st_size);
+            w32(56, (std::uint32_t)st.st_blksize);
+            w64(64, (std::uint64_t)st.st_blocks);
+            w32(72, (std::uint32_t)st.st_atim.tv_sec);
+            w32(76, (std::uint32_t)st.st_atim.tv_nsec);
+            w32(80, (std::uint32_t)st.st_mtim.tv_sec);
+            w32(84, (std::uint32_t)st.st_mtim.tv_nsec);
+            w32(88, (std::uint32_t)st.st_ctim.tv_sec);
+            w32(92, (std::uint32_t)st.st_ctim.tv_nsec);
+            w64(96, (std::uint64_t)st.st_ino);
             return true;
         };
         auto fill_statfs = [&](std::uint32_t dst, const struct statfs& st) -> bool {

@@ -63,6 +63,8 @@ inline constexpr bool kJitCycleCounting = false;
 // u16 d_reclen and u8 d_type (NDK dirent.h; offsetof checked with the NDK
 // clang for armv7a). Guest code reads names at +19 (Rio 0x2c67b8, 0x508ed0).
 inline constexpr std::uint32_t kGuestDirentNameOff = 19;
+// Bionic arm32 sizeof(struct stat) (NDK sys/stat.h, checked with sizeof).
+inline constexpr std::uint32_t kGuestStatSize = 104;
 
 // The JNI guest-data arena has two disjoint bump regions. Strings must never
 // grow into the handle table: the old check only looked at kGuestDataSize and

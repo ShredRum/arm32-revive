@@ -38,6 +38,7 @@
 
 #include "jni_call_words.h"
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include "guest/dispatch.h"
 #include "guest/bsd_random.h"
@@ -237,6 +238,7 @@ int main() {
     mod.imports.push_back(abr::Import{"opendir", true, 0, 0, 0});         // 26
     mod.imports.push_back(abr::Import{"readdir_r", true, 0, 0, 0});       // 27
     mod.imports.push_back(abr::Import{"closedir", true, 0, 0, 0});        // 28
+    mod.imports.push_back(abr::Import{"stat", true, 0, 0, 0});            // 29
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1215,6 +1217,41 @@ int main() {
             const std::uint32_t cargs[4] = {d, 0, 0, 0};
             abr::RuntimeTestAccess::Call(rt, 28, cargs);
         }
+    }
+
+    // --- stat: bionic arm32 struct stat is 104 bytes, st_size at +48.
+    {
+        const std::string host_dir = "/tmp/opencode/abr-stattest";
+        std::filesystem::create_directories(host_dir);
+        {
+            std::FILE* f = std::fopen((host_dir + "/sz").c_str(), "wb");
+            const std::string blob(12345, 'x');
+            if (f) {
+                std::fwrite(blob.data(), 1, blob.size(), f);
+                std::fclose(f);
+            }
+        }
+        rt.SetFilesDir("/data/data/abr.stat/files", host_dir);
+        const std::uint32_t kPath = 0x10007400, kBuf = 0x10007500;
+        put(kPath, "/data/data/abr.stat/files/sz");
+        std::memset(rt.H<std::uint8_t>(kBuf), 0xAB, 0x100);
+        const std::uint32_t sargs[4] = {kPath, kBuf, 0, 0};
+        const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 29, sargs);
+        const std::uint8_t* b = rt.H<std::uint8_t>(kBuf);
+        std::uint64_t size = 0;
+        std::uint32_t mode = 0;
+        std::memcpy(&size, b + 48, 8);
+        std::memcpy(&mode, b + 16, 4);
+        bool tail = true;
+        for (int k = 104; k < 0x100; k++) {
+            if (b[k] != 0xAB) {
+                tail = false;
+            }
+        }
+        Expect("stat returns 0", std::to_string(r), "0");
+        Expect("stat st_size at +48", std::to_string(size), "12345");
+        Expect("stat st_mode is a regular file", S_ISREG(mode) ? "1" : "0", "1");
+        Expect("stat writes exactly 104 bytes", tail ? "1" : "0", "1");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
