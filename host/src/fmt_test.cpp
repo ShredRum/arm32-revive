@@ -253,6 +253,9 @@ int main() {
     mod.imports.push_back(abr::Import{"poll", true, 0, 0, 0});            // 38
     mod.imports.push_back(abr::Import{"pthread_cond_timedwait_monotonic", true, 0, 0, 0});  // 39
     mod.imports.push_back(abr::Import{"pthread_cond_timedwait", true, 0, 0, 0});  // 40
+    mod.imports.push_back(abr::Import{"strtol", true, 0, 0, 0});          // 41
+    mod.imports.push_back(abr::Import{"strtoul", true, 0, 0, 0});         // 42
+    mod.imports.push_back(abr::Import{"atoi", true, 0, 0, 0});            // 43
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1439,6 +1442,43 @@ int main() {
         Expect("timedwait (realtime) waits ~100 ms", (real.second >= 80 && real.second < 1000) ? "1" : "0",
                "1");
         abr::RuntimeTestAccess::Call(rt, 11, minit);  // unlock
+    }
+
+    // --- strtol/strtoul/atoi saturate like a 32-bit libc and set errno.
+    {
+        const std::uint32_t kStr = 0x10007F00, kEnd = 0x10007F80;
+        auto guest_errno = [&]() {
+            std::uint32_t e = 0;
+            std::memcpy(&e, rt.H(rt.ErrnoSlot()), 4);
+            return e;
+        };
+        auto conv = [&](std::uint32_t idx, const char* txt, std::uint32_t* err) {
+            put(kStr, txt);
+            const std::uint32_t z = 0;
+            std::memcpy(rt.H(rt.ErrnoSlot()), &z, 4);
+            const std::uint32_t args[4] = {kStr, kEnd, 10, 0};
+            const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, idx, args);
+            *err = guest_errno();
+            return r;
+        };
+        std::uint32_t e = 0;
+        Expect("strtol(2147483648) = LONG_MAX", std::to_string(conv(41, "2147483648", &e)), "2147483647");
+        Expect("strtol overflow errno ERANGE", std::to_string(e), std::to_string(ERANGE));
+        Expect("strtol(-2147483649) = LONG_MIN",
+               std::to_string(static_cast<std::int32_t>(conv(41, "-2147483649", &e))), "-2147483648");
+        Expect("strtol(-5) = -5", std::to_string(static_cast<std::int32_t>(conv(41, "-5", &e))), "-5");
+        Expect("strtol(-5) errno 0", std::to_string(e), "0");
+        Expect("strtoul(4294967296) = ULONG_MAX", std::to_string(conv(42, "4294967296", &e)), "4294967295");
+        Expect("strtoul overflow errno ERANGE", std::to_string(e), std::to_string(ERANGE));
+        Expect("strtoul(4294967295) fits", std::to_string(conv(42, "4294967295", &e)), "4294967295");
+        Expect("strtoul(4294967295) errno 0", std::to_string(e), "0");
+        Expect("strtoul(-1) = ULONG_MAX, no error", std::to_string(conv(42, "-1", &e)) + "/" + std::to_string(e),
+               "4294967295/0");
+        conv(41, "123abc", &e);
+        std::uint32_t endp = 0;
+        std::memcpy(&endp, rt.H(kEnd), 4);
+        Expect("strtol endptr after digits", std::to_string(endp - kStr), "3");
+        Expect("atoi(99999999999) saturates", std::to_string(conv(43, "99999999999", &e)), "2147483647");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

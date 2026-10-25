@@ -2974,20 +2974,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (n == "strtol" || n == "strtoul" || n == "strtoll" || n == "strtoull" || n == "atoi" ||
         n == "atol" || n == "atoll") {
         // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol/atoll take
-        // only a0. Guest `long` is 32-bit (host long is 64-bit) — narrow results.
-        // NOTE: GuestStr caps at 512 chars; numeric prefixes are short, fine.
+        // only a0. Guest `long` is 32-bit while the host's is 64-bit, so the
+        // 32-bit variants parse with the 64-bit host functions and saturate
+        // like a 32-bit libc: strtol -> LONG_MIN/LONG_MAX + ERANGE, strtoul ->
+        // ULONG_MAX + ERANGE (a leading '-' negates modulo 2^32, as C says).
+        // bionic's atoi/atol are (int)strtol(s, NULL, 10): same saturation.
         if (!CheckRange(a0, 1, false)) {
             goto bad_ptr;
         }
         const std::string s(GuestStr(a0));
         char* end = nullptr;
-        if (n == "atoi") {
-            Ret(regs, static_cast<std::uint32_t>(std::atoi(s.c_str())));
-            return;
-        }
-        if (n == "atol") {
-            const std::int32_t v = static_cast<std::int32_t>(std::atol(s.c_str()));
-            Ret(regs, static_cast<std::uint32_t>(v));
+        auto strtol32 = [&](int base, char** endp, int* err) -> std::uint32_t {
+            errno = 0;
+            const long long v = std::strtoll(s.c_str(), endp, base);
+            *err = errno;
+            if (v > INT32_MAX) {
+                *err = ERANGE;
+                return static_cast<std::uint32_t>(INT32_MAX);
+            }
+            if (v < INT32_MIN) {
+                *err = ERANGE;
+                return static_cast<std::uint32_t>(INT32_MIN);
+            }
+            return static_cast<std::uint32_t>(static_cast<std::int32_t>(v));
+        };
+        if (n == "atoi" || n == "atol") {
+            int err = 0;
+            Ret(regs, strtol32(10, nullptr, &err));
             return;
         }
         if (n == "atoll") {
@@ -3008,25 +3021,48 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::memcpy(H(slot), &ev, 4);
             return true;
         };
+        int err = 0;
         if (n == "strtoll" || n == "strtoull") {
+            errno = 0;
             const unsigned long long v = (n == "strtoull") ? std::strtoull(s.c_str(), &end, base)
                                                            : (unsigned long long)std::strtoll(
                                                                  s.c_str(), &end, base);
+            err = errno;
             if (!store_end(a1)) {
                 goto bad_ptr;
             }
             Ret(regs, static_cast<std::uint32_t>(v & 0xFFFFFFFFu),
                 static_cast<std::uint32_t>((v >> 32) & 0xFFFFFFFFu));
         } else {
-            const std::int32_t v = (n == "strtoul")
-                                       ? static_cast<std::int32_t>(std::strtoul(s.c_str(), &end,
-                                                                               base))
-                                       : static_cast<std::int32_t>(std::strtol(s.c_str(), &end,
-                                                                              base));
+            std::uint32_t v = 0;
+            if (n == "strtoul") {
+                errno = 0;
+                const unsigned long long u = std::strtoull(s.c_str(), &end, base);
+                err = errno;
+                // Magnitude check: strtoull already negated a leading '-'.
+                const char* q = s.c_str();
+                while (*q == ' ' || (*q >= '\t' && *q <= '\r')) {
+                    q++;
+                }
+                const bool neg = (*q == '-');
+                const unsigned long long mag = neg ? (0ULL - u) : u;
+                if (err == ERANGE || mag > 0xFFFFFFFFULL) {
+                    err = ERANGE;
+                    v = 0xFFFFFFFFu;
+                } else {
+                    v = neg ? static_cast<std::uint32_t>(0u - static_cast<std::uint32_t>(mag))
+                            : static_cast<std::uint32_t>(mag);
+                }
+            } else {
+                v = strtol32(base, &end, &err);
+            }
             if (!store_end(a1)) {
                 goto bad_ptr;
             }
-            Ret(regs, static_cast<std::uint32_t>(v));
+            Ret(regs, v);
+        }
+        if (err != 0) {
+            SetGuestErrno(err);
         }
         return;
     }
