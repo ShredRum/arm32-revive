@@ -70,6 +70,9 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | 2026-10-25 | Oct 25 2026 14:39:58 (md5 96da05d3) | B-01..B-05, A-01/06/12, C-01 | rio + seasons boot to the main menu on the sandbox, all markers 0, death.log 0 B, no tombstone; in-level play not yet checked |
 | 2026-10-25 | Oct 25 2026 14:54:04 (md5 56d53d81) | + A-03/05/07/10/11, C-02, D-06 | rio + seasons + space boot to the main menu, all markers 0, death.log 0 B, no tombstone; in-level play not yet checked |
 | 2026-10-25 | Oct 25 2026 15:20:38 (md5 5e225f86) | + allocator, mmap/MappingTable, setjmp VFP, fma/remquo, file-bridge errno/dup/mkdir/mkstemp/props, asset lock | rio + seasons + space + star-wars boot to the main menu, all markers 0, death.log 0 B, no tombstone; user reported earlier frequent crashes seem gone (batch 1-2 build, light play) |
+| 2026-10-25 | Oct 25 2026 15:34:38 (md5 c5247c11) | + guest mutex types, single tid counter | all six titles reach their usual first screen (star-wars-ii/amz: R-004 dialog), markers 0, death.log 0 B |
+| 2026-10-25 | Oct 25 2026 15:47:17 (md5 c8f95ed1) | + Rio init #22 runs | rio boots to the menu, markers 0 |
+| 2026-10-25 | Oct 25 2026 19:24:21 | + shared sync objects, once ordering, key_create, pthread_create/threads_ hardening, g_upd_jit | rio, seasons, space, star-wars alive at the menu after 100 s, markers 0, death.log 0 B, no tombstones |
 
 ### Wave 1 (areas A-D, 2026-10-25)
 
