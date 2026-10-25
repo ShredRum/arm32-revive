@@ -7863,6 +7863,14 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         ReapThreadStack(tid);
         t_active_jit = nullptr;
         ReleaseCpuId(cpu_id);  // the Jit no longer runs
+        {
+            // A detached thread is gone once it ends (a joinable one waits
+            // for pthread_join, which drops it).
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (st->detached) {
+                threads_.erase(tid);
+            }
+        }
     });
     } catch (const std::system_error&) {
         ReapThreadStack(tid);
@@ -8062,6 +8070,9 @@ void Runtime::ReapThreadTls(std::uint32_t tid) {
 }
 
 std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) {
+    if (tid == GuestTid()) {
+        return EDEADLK;  // joining yourself would wait forever
+    }
     std::shared_ptr<ThreadState> st;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -8100,6 +8111,12 @@ std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) 
         std::memcpy(H(retval_out), &st->retval, 4);
     }
     ReapThreadStack(tid);
+    // A joined thread's id is invalid afterwards (POSIX): drop its state, or
+    // the per-iteration create/join loops grow threads_ without bound.
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        threads_.erase(tid);
+    }
     return 0;
 }
 

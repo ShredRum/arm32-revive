@@ -145,6 +145,10 @@ void DumpHaltTailOnce(const char* name, int hr) {
 // the thread has stopped running guest code, so deleting the Jit and freeing
 // the stack is safe; an in-flight shared_ptr (AppHost_CallImpl) keeps the
 // HostThread itself alive on its own.
+// Update thread's JIT, for the watchdog's stuck-PC reads. Cleared when that
+// thread's JIT is deleted (GLSurfaceView recreates its thread on pause/resume),
+// so the watchdog never reads a freed Jit.
+std::atomic<Dynarmic::A32::Jit*> g_upd_jit{nullptr};
 pthread_key_t g_hostthread_key;
 pthread_once_t g_hostthread_once = PTHREAD_ONCE_INIT;
 std::atomic<unsigned> g_ht_created{0};
@@ -173,6 +177,8 @@ void HostThreadRelease(void* p) {
             st->stack = 0;
         }
     }
+    Dynarmic::A32::Jit* dying = st->jit;
+    g_upd_jit.compare_exchange_strong(dying, nullptr);
     delete st->jit;
     st->jit = nullptr;
     if (g_rt && st->cpu_id != SIZE_MAX) {
@@ -381,8 +387,7 @@ static void InstallDeathWitness(const std::string& dir) {
 std::atomic<long long> g_upd_entry_ms{0};
 std::atomic<long long> g_upd_done_ms{0};
 std::atomic<int> g_upd_entry_n{0};
-// Update thread's JIT (for stuck-PC reads) + its host tid.
-std::atomic<Dynarmic::A32::Jit*> g_upd_jit{nullptr};
+// Update thread's host tid (its JIT pointer is g_upd_jit, declared above).
 std::atomic<int> g_upd_tid{0};
 
 long long WallMs() {
