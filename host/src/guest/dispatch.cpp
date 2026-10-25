@@ -546,10 +546,15 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
         }
     }
     const std::uint32_t pad = (std::uint32_t)mallocpad;
-    size = (size + 7) & ~std::uint32_t(7);
-    if (size == 0) {
-        size = 8;
+    // Round in 64 bits: (size + 7) used to wrap for sizes >= 0xFFFFFFF9 and
+    // hand back an 8-byte block for a near-4 GB request. Anything larger
+    // than the whole arena fails like a real malloc (NULL).
+    const std::uint64_t rounded =
+        std::max<std::uint64_t>((std::uint64_t(size) + 7) & ~std::uint64_t(7), 8);
+    if (rounded + pad > kHeapSize) {
+        return 0;
     }
+    size = static_cast<std::uint32_t>(rounded);
     const std::uint32_t total =
         size + pad;  // pad kept: MALLOCPAD layout probe stays available
     void* hp = heap_ms_ ? mspace_malloc(heap_ms_, total) : nullptr;
@@ -637,9 +642,19 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
 }
 
 std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
-    const std::uint64_t total = std::uint64_t(n) * size;
-    if (total == 0 || total > 0x10000000u) {
+    // calloc(n, size): the product is computed in 64 bits, so overflow of the
+    // guest's 32-bit size_t is a plain "too large" -> NULL. A zero product
+    // still returns a unique minimum block, like bionic/dlmalloc (it used to
+    // return NULL, which guest code treats as out-of-memory). The limit is
+    // the arena itself (there was an unexplained 256 MB cap).
+    std::uint64_t total = std::uint64_t(n) * size;
+    if (total > kHeapSize) {
         return 0;
+    }
+    if (total == 0) {
+        n = 1;
+        size = 1;
+        total = 1;
     }
     // mspace_calloc zeroes itself; keep our size map + telemetry in sync.
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -716,6 +731,9 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
             }
             std::printf("\n");
         }
+    }
+    if (std::uint64_t(size) + PadGlobal() > kHeapSize) {
+        return 0;  // too large: the old block stays valid (realloc contract)
     }
     const std::uint32_t rtotal = size + PadGlobal();
     void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), rtotal) : nullptr;
@@ -1788,16 +1806,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
 
     // --- memory management ---
-    if (n == "malloc") {
-        Ret(regs, GuestMalloc(a0));
-        return;
-    }
-    if (n == "calloc") {
-        Ret(regs, GuestCalloc(a0, a1));
-        return;
-    }
-    if (n == "realloc") {
-        Ret(regs, GuestRealloc(a0, a1));
+    if (n == "malloc" || n == "calloc" || n == "realloc") {
+        const std::uint32_t r = (n == "malloc")   ? GuestMalloc(a0)
+                                : (n == "calloc") ? GuestCalloc(a0, a1)
+                                                  : GuestRealloc(a0, a1);
+        // realloc(p, 0) frees and legitimately returns NULL.
+        if (r == 0 && !(n == "realloc" && a1 == 0)) {
+            SetGuestErrno(ENOMEM);
+        }
+        Ret(regs, r);
         return;
     }
     if (n == "free" || n == "cfree") {

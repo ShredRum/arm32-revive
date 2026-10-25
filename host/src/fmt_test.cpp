@@ -274,6 +274,9 @@ int main() {
     mod.imports.push_back(abr::Import{"strncpy", true, 0, 0, 0});         // 46
     mod.imports.push_back(abr::Import{"strncat", true, 0, 0, 0});         // 47
     mod.imports.push_back(abr::Import{"strcmp", true, 0, 0, 0});          // 48
+    mod.imports.push_back(abr::Import{"malloc", true, 0, 0, 0});          // 49
+    mod.imports.push_back(abr::Import{"calloc", true, 0, 0, 0});          // 50
+    mod.imports.push_back(abr::Import{"realloc", true, 0, 0, 0});         // 51
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1621,6 +1624,31 @@ int main() {
         Expect("all increment threads halted cleanly", std::to_string(halted_ok.load()),
                std::to_string(kThreads));
         abr::RuntimeTestAccess::TakeStopped(rt);
+    }
+
+    // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
+    //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
+    //     a calloc product that overflows 32 bits fails.
+    {
+        auto guest_errno = [&]() {
+            std::uint32_t e = 0;
+            std::memcpy(&e, rt.H(rt.ErrnoSlot()), 4);
+            return e;
+        };
+        const std::uint32_t m_huge[4] = {0xFFFFFFFCu, 0, 0, 0};
+        Expect("malloc(0xFFFFFFFC) = NULL", std::to_string(abr::RuntimeTestAccess::Call(rt, 49, m_huge)), "0");
+        Expect("malloc failure errno ENOMEM", std::to_string(guest_errno()), std::to_string(ENOMEM));
+        const std::uint32_t c_zero[4] = {0, 16, 0, 0};
+        const std::uint32_t z1 = abr::RuntimeTestAccess::Call(rt, 50, c_zero);
+        const std::uint32_t z2 = abr::RuntimeTestAccess::Call(rt, 50, c_zero);
+        Expect("calloc(0,16) returns a unique block", (z1 && z2 && z1 != z2) ? "1" : "0", "1");
+        const std::uint32_t c_ovf[4] = {0x10000u, 0x10001u, 0, 0};
+        Expect("calloc overflowing 32 bits = NULL",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 50, c_ovf)), "0");
+        const std::uint32_t r_huge[4] = {z1, 0xFFFFFFF0u, 0, 0};
+        Expect("realloc(p, huge) = NULL", std::to_string(abr::RuntimeTestAccess::Call(rt, 51, r_huge)), "0");
+        Expect("realloc failure keeps the block", abr::RuntimeTestAccess::GuestLiveSize(rt, z1) ? "1" : "0",
+               "1");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
