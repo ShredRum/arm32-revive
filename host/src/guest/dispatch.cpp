@@ -4171,7 +4171,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(std::ftell(f)));
                 return;
             }
-            Ret(regs, static_cast<std::uint32_t>(std::fseek(f, (long)a1, (int)a2)));
+            // fseek/fseeko: the guest's long/off_t is a signed 32-bit value
+            // (Rio calls fseeko(f, -n, SEEK_CUR) at 0x274314).
+            const int r = std::fseek(f, static_cast<long>(static_cast<std::int32_t>(a1)), (int)a2);
+            if (r != 0) {
+                SetGuestErrno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
         if (n == "feof" || n == "ferror" || n == "clearerr" || n == "fileno") {
@@ -4541,12 +4547,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (n == "lseek") {
+            // lseek(int fd, off_t off, int whence): off_t is a signed 32-bit
+            // long on the guest, so the offset must be sign-extended (a
+            // negative SEEK_CUR/SEEK_END offset used to become +4 GB).
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
+                SetGuestErrno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            off_t r = ::lseek(hfd, (off_t)a1, (int)a2);
+            const off_t r = ::lseek(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)), (int)a2);
+            if (r < 0) {
+                SetGuestErrno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (r > INT32_MAX) {
+                SetGuestErrno(EOVERFLOW);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }

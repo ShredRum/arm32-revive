@@ -239,6 +239,9 @@ int main() {
     mod.imports.push_back(abr::Import{"readdir_r", true, 0, 0, 0});       // 27
     mod.imports.push_back(abr::Import{"closedir", true, 0, 0, 0});        // 28
     mod.imports.push_back(abr::Import{"stat", true, 0, 0, 0});            // 29
+    mod.imports.push_back(abr::Import{"fseek", true, 0, 0, 0});           // 30
+    mod.imports.push_back(abr::Import{"ftell", true, 0, 0, 0});           // 31
+    mod.imports.push_back(abr::Import{"fwrite", true, 0, 0, 0});          // 32
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1252,6 +1255,33 @@ int main() {
         Expect("stat st_size at +48", std::to_string(size), "12345");
         Expect("stat st_mode is a regular file", S_ISREG(mode) ? "1" : "0", "1");
         Expect("stat writes exactly 104 bytes", tail ? "1" : "0", "1");
+    }
+
+    // --- fseek: the guest long is signed 32-bit; a negative offset must
+    //     move backwards (it used to be zero-extended to ~+4 GB).
+    {
+        const std::string host_dir = "/tmp/opencode/abr-seektest";
+        std::filesystem::create_directories(host_dir);
+        rt.SetFilesDir("/data/data/abr.seek/files", host_dir);
+        const std::uint32_t kPath = 0x10007600, kMode = 0x10007700, kData = 0x10007800;
+        put(kPath, "/data/data/abr.seek/files/s.bin");
+        put(kMode, "w+");
+        put(kData, "0123456789");
+        const std::uint32_t oargs[4] = {kPath, kMode, 0, 0};
+        const std::uint32_t f = abr::RuntimeTestAccess::Call(rt, 21, oargs);
+        Expect("seek test fopen", f ? "1" : "0", "1");
+        if (f) {
+            const std::uint32_t wargs[4] = {kData, 1, 10, f};
+            Expect("fwrite 10 bytes", std::to_string(abr::RuntimeTestAccess::Call(rt, 32, wargs)), "10");
+            const std::uint32_t sargs[4] = {f, static_cast<std::uint32_t>(-3), SEEK_END, 0};
+            Expect("fseek(-3, SEEK_END) returns 0",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 30, sargs)), "0");
+            const std::uint32_t targs[4] = {f, 0, 0, 0};
+            Expect("ftell after fseek(-3, SEEK_END)",
+                   std::to_string(abr::RuntimeTestAccess::Call(rt, 31, targs)), "7");
+            const std::uint32_t cargs[4] = {f, 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 22, cargs);
+        }
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
