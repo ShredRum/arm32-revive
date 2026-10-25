@@ -1227,8 +1227,15 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     std::error_code ec;
     std::filesystem::create_directories(g_files, ec);
     const std::string logpath = g_files + "/apphost.log";
-    std::freopen(logpath.c_str(), "w", stdout);
-    std::freopen(logpath.c_str(), "a", stderr);
+    // One open file for both streams: truncate once, then stderr shares
+    // stdout's descriptor (and so its O_APPEND offset). Separate "w"/"a"
+    // opens gave stdout its own offset, so later stdout lines overwrote what
+    // stderr had appended (HEAPCORRUPT/HEAPASSERT/terminate witness).
+    if (std::FILE* t = std::fopen(logpath.c_str(), "w")) {
+        std::fclose(t);
+    }
+    std::freopen(logpath.c_str(), "a", stdout);
+    ::dup2(fileno(stdout), fileno(stderr));
     setvbuf(stdout, nullptr, _IONBF, 0);
     // The zip module logs through the app's logger (it lives in its own
     // module so the unit test can reach it).
