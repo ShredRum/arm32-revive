@@ -35,7 +35,8 @@ done
 if [ "$NATIVE" = 1 ]; then
     BUILD="host/build-native"
     [ "$DIAG" = 1 ] && BUILD="host/build-native-diag"
-    CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
+    # compile_commands.json feeds clangd (host/.clangd points at build-native).
+    CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
     [ "$DIAG" = 1 ] && CMAKE_ARGS+=(-DABR_DIAG_COUNTERS=ON) || CMAKE_ARGS+=(-DABR_DIAG_COUNTERS=OFF)
     cmake -S host -B "$BUILD" "${CMAKE_ARGS[@]}"
     cmake --build "$BUILD" -j"$JOBS"

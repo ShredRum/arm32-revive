@@ -1,0 +1,4 @@
+# clangd (editor/LSP only): use the native build's compile database.
+# Generate it with scripts/build-lib.sh --native.
+CompileFlags:
+  CompilationDatabase: build-native
