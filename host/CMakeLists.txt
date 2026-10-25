@@ -102,6 +102,10 @@ target_compile_options(guest PRIVATE -g)
 if(ANDROID)
     add_library(abhost SHARED src/apphost.cpp)
     target_link_libraries(abhost PRIVATE guest log zipfile)
+    # Android 15+ devices may run with 16 KB pages: LOAD segments must be
+    # aligned to 16 KB or the library does not load there. Harmless on 4 KB
+    # devices (it only adds alignment padding).
+    target_link_options(abhost PRIVATE "LINKER:-z,max-page-size=16384")
 endif()
 
 # Harness-only real-GLES compile check (PC GPU validation of game shaders).
