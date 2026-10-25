@@ -8423,14 +8423,23 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                 ro = static_cast<jobject>(UnwrapObject(w));
                 if (!ro) {
                     // Mock string/array buffers (guest-side): materialize real.
-                    if (CheckRange(w, 1, false)) {
-                        std::size_t n = 0;
-                        const auto* p = H<const std::uint8_t>(w);
-                        while (n < 4096 && CheckRange(w + (std::uint32_t)n, 1, false) && p[n]) {
-                            n++;
+                    // Only a registered mock jstring becomes a java.lang.String (with its
+                    // registry content). Any other guest handle (mock class/object) is not
+                    // a String: leave ro null so the real call is abandoned (ok = false).
+                    {
+                        std::string sv;
+                        bool known = false;
+                        {
+                            std::lock_guard<std::recursive_mutex> lk(mutex_);
+                            const auto js = jni_strings_.find(w);
+                            if (js != jni_strings_.end()) {
+                                sv = js->second;
+                                known = true;
+                            }
                         }
-                        std::string s(reinterpret_cast<const char*>(p), n);
-                        ro = re->NewStringUTF(s.c_str());
+                        if (known) {
+                            ro = re->NewStringUTF(sv.c_str());
+                        }
                     }
                     if (!ro) {
                         ok = false;
@@ -8746,14 +8755,23 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
             jobject ro = nullptr;
             if (w) {
                 ro = static_cast<jobject>(UnwrapObject(w));
-                if (!ro && CheckRange(w, 1, false)) {
-                    std::size_t n = 0;
-                    const auto* p = H<const std::uint8_t>(w);
-                    while (n < 4096 && CheckRange(w + (std::uint32_t)n, 1, false) && p[n]) {
-                        n++;
+                // Only a registered mock jstring becomes a java.lang.String (with its
+                // registry content). Any other guest handle (mock class/object) is not
+                // a String: leave ro null so the real call is abandoned (ok = false).
+                if (!ro) {
+                    std::string sv;
+                    bool known = false;
+                    {
+                        std::lock_guard<std::recursive_mutex> lk(mutex_);
+                        const auto js = jni_strings_.find(w);
+                        if (js != jni_strings_.end()) {
+                            sv = js->second;
+                            known = true;
+                        }
                     }
-                    std::string s(reinterpret_cast<const char*>(p), n);
-                    ro = re->NewStringUTF(s.c_str());
+                    if (known) {
+                        ro = re->NewStringUTF(sv.c_str());
+                    }
                 }
                 if (!ro) {
                     ok = false;
@@ -9051,12 +9069,14 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const char* p = reinterpret_cast<const char*>(H(a1));
-            std::size_t n = 0;
-            while (n < 4096 && CheckRange(a1 + (std::uint32_t)n, 1, false) && p[n]) {
-                n++;
+            std::uint32_t len = 0;  // no length cap: NewStringUTF has none
+            if (!GuestStrnlen(a1, 0xFFFFFFFFu, &len)) {
+                std::printf("[jni] LOUD NewStringUTF unterminated/unreadable %08x -- halting\n", a1);
+                stop_step_ = true;
+                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                return;
             }
-            s.assign(p, n);
+            s.assign(reinterpret_cast<const char*>(H(a1)), len);
         }
         Ret(regs, JniNewString(s));
         return;
@@ -9107,9 +9127,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                             diag_.utf_allocs.fetch_add(1, std::memory_order_relaxed);
 #endif
                             re->ReleaseStringUTFChars(static_cast<jstring>(real), p);
-                            if (a2 && CheckRange(a2, 4, true)) {
-                                const std::uint32_t one = 1;
-                                std::memcpy(H(a2), &one, 4);
+                            if (a2 && CheckRange(a2, 1, true)) {  // jboolean* isCopy: 1 byte (jni.h)
+                                *H<std::uint8_t>(a2) = 1;
                             }
                             Ret(regs, g);
                             return;
@@ -9126,9 +9145,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
-        if (a2 && CheckRange(a2, 4, true)) {
-            std::uint32_t no = 0;  // JNI_FALSE: we return a direct pointer
-            std::memcpy(H(a2), &no, 4);
+        if (a2 && CheckRange(a2, 1, true)) {  // jboolean* isCopy: 1 byte (jni.h)
+            *H<std::uint8_t>(a2) = 0;
         }
         Ret(regs, a1);  // handle IS the UTF-8 buffer
         return;
@@ -9858,9 +9876,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                             std::lock_guard<std::recursive_mutex> lock(mutex_);
                             array_pins_[a1] = ArrayPin{rarr, hp, gb, (std::uint32_t)len};
                         }
-                        if (a2 && CheckRange(a2, 4, true)) {
-                            const std::uint32_t t = 1;  // JNI_TRUE: copy
-                            std::memcpy(H(a2), &t, 4);
+                        if (a2 && CheckRange(a2, 1, true)) {  // jboolean* isCopy: 1 byte (jni.h)
+                            *H<std::uint8_t>(a2) = 1;
                         }
                         if (DiagOn()) {
                             std::printf("[jni] GetByteArrayElements real len=%d -> %08x\n",
@@ -9904,25 +9921,29 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
-        if (a2 && CheckRange(a2, 4, true)) {
-            std::uint32_t no = 0;  // JNI_FALSE: direct pointer, no copy
-            std::memcpy(H(a2), &no, 4);
+        if (a2 && CheckRange(a2, 1, true)) {  // jboolean* isCopy: 1 byte (jni.h)
+            *H<std::uint8_t>(a2) = 0;
         }
         Ret(regs, a1);  // handle IS the buffer
         return;
     }
     case 192: {  // ReleaseByteArrayElements(env, array, elems, mode) -> void
 #ifdef __ANDROID__
-        // Pinned real array: copy back per mode, unpin.
+        // Pinned real array: copy back per mode. JNI modes: 0 = copy back and
+        // release, JNI_COMMIT (1) = copy back but KEEP the buffer (a later
+        // release follows), JNI_ABORT (2) = release without copying.
         {
             ArrayPin pin;
             bool have = false;
+            const bool commit_only = (a3 == 1);
             {
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 const auto it = array_pins_.find(a1);
                 if (it != array_pins_.end()) {
                     pin = it->second;
-                    array_pins_.erase(it);
+                    if (!commit_only) {
+                        array_pins_.erase(it);
+                    }
                     have = true;
                 }
             }
@@ -9945,7 +9966,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 // Recycle the guest copy (cap 8; overflow leaks as before).
                 // Only properly-Released buffers: the guest cannot hold them
                 // (it must Release before the next Get on the same array).
-                if (pin.guest_buf && pin.len) {
+                // After JNI_COMMIT the guest still owns the buffer.
+                if (!commit_only && pin.guest_buf && pin.len) {
                     std::lock_guard<std::recursive_mutex> lock(mutex_);
                     if (array_pool_.size() < 8) {
                         array_pool_.push_back({pin.guest_buf, pin.len});
