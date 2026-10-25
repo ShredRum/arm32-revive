@@ -62,6 +62,12 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | open |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
 
+### Device gates
+
+| date | lib build marker | fixes | result |
+|---|---|---|---|
+| 2026-10-25 | Oct 25 2026 14:39:58 (md5 96da05d3) | B-01..B-05, A-01/06/12, C-01 | rio + seasons boot to the main menu on the sandbox, all markers 0, death.log 0 B, no tombstone; in-level play not yet checked |
+
 ### Wave 1 (areas A-D, 2026-10-25)
 
 Line numbers refer to dispatch.cpp at HEAD 2cba59a unless a file is named.
@@ -72,18 +78,18 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| A-01 | S1 | 3503 poll | `fd_map_.find` without `io_mutex_` (every other access locks) — host data race | confirmed |
+| A-01 | S1 | 3503 poll | `fd_map_.find` without `io_mutex_` (every other access locks) — host data race | fixed e4b29a4 |
 | A-02 | S1→S2 | 1773 mmap, 907 GuestMmap | fd/offset/flags dropped: file mapping returns zero pages; addr hint treated as FIXED. All 6 import mmap/munmap (code comment "not imported" is false); Rio call site 0x2cd35c (MemoryMappedFile). Not seen in device logs | confirmed (latent) |
 | A-03 | S2 | 2995 strtol/strtoul | host 64-bit result truncated: strtol("2147483648") -> INT_MIN (want LONG_MAX+ERANGE); strtoul("4294967296") -> 0; no strto*/ato* sets guest errno | confirmed |
 | A-04 | S2 | math_thunks.inc:262,391 | fma addend and remquo quo read from r4/r5 (garbage); AAPCS32: [sp], remquof quo = r2. Rio imports remquo, no call site | open |
 | A-05 | S2 | 2282 strncat | CheckRange covers [dest,dest+n+1) but write is at dest+strlen(dest); n+1 wraps; unbounded host strlen | open |
-| A-06 | S2 | 3497, 3657 poll | fd<0 must give revents=0 (POSIX); unmapped fd must count POLLNVAL in return | confirmed |
+| A-06 | S2 | 3497, 3657 poll | fd<0 must give revents=0 (POSIX); unmapped fd must count POLLNVAL in return | fixed e4b29a4 |
 | A-07 | S2 | 1678/1702 ctype | TAB carries B (printable) bit: `_ctype_['\t']`=0xA8 not 0x28, iswctype('\t',print)!=0 | open |
 | A-08 | S2 | 549 GuestMalloc | size rounding wraps: malloc(0xFFFFFFF9+) returns 8-byte block | open |
 | A-09 | S2 | 2077 setjmp/longjmp | d8-d15/FPSCR not saved; "softfp has no VFP regs" comment false | open |
 | A-10 | S2 | 3329 nanosleep | guest pointers unchecked (host SIGSEGV possible); nsec>=1e9 not EINVAL. Live: Rio sleep_for 0x4428fc | confirmed |
 | A-11 | S2 | 975 GuestStr users | strlen/strdup/strcmp/sscanf/strto*/%s truncate at 64 KiB, unreadable ptr -> "" | open |
-| A-12 | S3 | 3511 poll | timeout -1 becomes 5000 (spurious timeout); >5000 not capped despite comment | confirmed |
+| A-12 | S3 | 3511 poll | timeout -1 becomes 5000 (spurious timeout); >5000 not capped despite comment | fixed e4b29a4 |
 | A-13 | S3 | 2314 memchr | getenv("HARNESS_MEMDUMP") on every call in shipping | open |
 | A-14 | S3 | 2308, 2283 | memchr/strncpy validate the full n bytes of source -> false halts | open |
 | A-15 | S3 | math_thunks.inc:268, 1846 | __fpclassifyd/sysconf pass host constants (ok on bionic host, wrong in harness) | open |
@@ -107,11 +113,11 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| B-01 | S1 | 5455 readdir_r | d_type written at +17, d_name at +18; bionic: +18/+19 (dirent.h; Rio reads name at r8+19, 0x2c67b8) — every name loses its first char | confirmed |
-| B-02 | S1 | 3918 fill_stat | 96-byte packed layout; arm32 struct stat is 104 B: st_size +48, blksize +56, blocks +64, atim/mtim/ctim +72/+80/+88, st_ino +96 (NDK clang offsetof) | confirmed |
-| B-03 | S1 | 3945, 5211 statfs | branch unreachable ("statfs" missing from the outer if, falls to the 0-stub); layout uses 32-bit counts, arm32 statfs is 88 B with u64 f_blocks at +8 | layout confirmed, dead-branch open |
-| B-04 | S1 | 4171, 4537 fseek/fseeko/lseek | `(long)a1` zero-extends: negative offsets seek +4 GB (Rio fseeko(f,-r5,SEEK_CUR) at 0x274314) | confirmed |
-| B-05 | S1 | 4744 setsockopt | by-value optlen read as a pointer (reads VA 4) | confirmed |
+| B-01 | S1 | 5455 readdir_r | d_type written at +17, d_name at +18; bionic: +18/+19 (dirent.h; Rio reads name at r8+19, 0x2c67b8) — every name loses its first char | fixed bc92fa4 (gate: boot->menu ok) |
+| B-02 | S1 | 3918 fill_stat | 96-byte packed layout; arm32 struct stat is 104 B: st_size +48, blksize +56, blocks +64, atim/mtim/ctim +72/+80/+88, st_ino +96 (NDK clang offsetof) | fixed 61a5ca0 (gate: boot->menu ok) |
+| B-03 | S1 | 3945, 5211 statfs | branch unreachable ("statfs" missing from the outer if, falls to the 0-stub); layout uses 32-bit counts, arm32 statfs is 88 B with u64 f_blocks at +8 | fixed f534b93 (gate: boot->menu ok) |
+| B-04 | S1 | 4171, 4537 fseek/fseeko/lseek | `(long)a1` zero-extends: negative offsets seek +4 GB (Rio fseeko(f,-r5,SEEK_CUR) at 0x274314) | fixed 584fb22 (gate: boot->menu ok) |
+| B-05 | S1 | 4744 setsockopt | by-value optlen read as a pointer (reads VA 4) | fixed 217165e (gate: boot->menu ok) |
 | B-06 | S2 | asset block | every asset import holds global `mutex_`, inflate under it | open |
 | B-07 | S2 | __system_property_get | buffer unwritten for unknown keys | open |
 | B-08 | S2 | mkdir | stale errno on EEXIST | open |
@@ -129,7 +135,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| C-01 | S1 | 3376, 6486 PthreadCond | `pthread_cond_timedwait_monotonic`: mono flag ignored, host cond on REALTIME vs guest MONOTONIC deadline -> immediate ETIMEDOUT. Live: Rio clock_gettime(1) 0x38f45c -> timedwait_monotonic 0x38f530; all 6 import it. Comment "currently unused" false | confirmed |
+| C-01 | S1 | 3376, 6486 PthreadCond | `pthread_cond_timedwait_monotonic`: mono flag ignored, host cond on REALTIME vs guest MONOTONIC deadline -> immediate ETIMEDOUT. Live: Rio clock_gettime(1) 0x38f45c -> timedwait_monotonic 0x38f530; all 6 import it. Comment "currently unused" false | fixed 938c961 |
 | C-02 | S1 | LDREX/STREX | not atomic across guest threads: two separate static ExclusiveMonitors (Java threads vs workers), Java threads all processor 0, workers `% 8`; ExclusiveWrite byte-wise compare/store, no real CAS | open |
 | C-03 | S2 | GuestMmap | 32-bit bound checks wrap: MAP_FIXED can reach trampolines/stacks/past 4 GB | open |
 | C-04 | S2 | mappings_ | appended by mmap without sync against lock-free readers | open |
