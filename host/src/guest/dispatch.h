@@ -281,6 +281,14 @@ public:
 
     // Mapped-range tracking for safe callbacks.
     void AddMapping(std::uint32_t start, std::uint32_t size, int prot);
+    // Records the module's LOAD segments in the mapping table, splitting the
+    // segment that holds PT_GNU_RELRO at the (page-aligned) RELRO end so the
+    // RELRO pages can later become read-only on their own.
+    void AddModuleSegments(const LoadedModule& mod);
+    // After relocation (InitDataImports): RELRO pages become read-only on the
+    // host and in the mapping table, as bionic's linker does. A guest write
+    // there is then a clean halt in every mode (fastmem stores fault too).
+    void ProtectRelro(const LoadedModule& mod);
     bool CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec);
 
     // --- file bridge (bring-up): guest paths under files-prefix map to a host

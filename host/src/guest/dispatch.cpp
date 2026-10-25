@@ -224,6 +224,53 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
     }
 }
 
+// RELRO page range as bionic protects it: start rounded down, end rounded up
+// (all six guests end RELRO on a page boundary).
+static void RelroPages(const LoadedModule& mod, std::uint32_t* ps, std::uint32_t* pe) {
+    *ps = mod.relro_start & ~0xFFFu;
+    *pe = static_cast<std::uint32_t>((std::uint64_t(mod.relro_start) + mod.relro_size + 0xFFFu) &
+                                     ~std::uint64_t(0xFFFu));
+}
+
+void Runtime::AddModuleSegments(const LoadedModule& mod) {
+    std::uint32_t ps = 0, pe = 0;
+    RelroPages(mod, &ps, &pe);
+    for (const auto& seg : mod.segments) {
+        const std::uint64_t end = std::uint64_t(seg.start) + seg.size;
+        if (mod.relro_size != 0 && seg.start <= ps && pe < end) {
+            AddMapping(seg.start, pe - seg.start, seg.prot);
+            AddMapping(pe, static_cast<std::uint32_t>(end - pe), seg.prot);
+        } else {
+            AddMapping(seg.start, seg.size, seg.prot);
+        }
+    }
+}
+
+void Runtime::ProtectRelro(const LoadedModule& mod) {
+    if (mod.relro_size == 0) {
+        return;
+    }
+    std::uint32_t ps = 0, pe = 0;
+    RelroPages(mod, &ps, &pe);
+    const MappingTable::Hit h = mappings_.Find(ps, pe - ps);
+    if (h.end == 0) {
+        std::printf("[guest] LOUD RELRO [%08x,%08x) has no mapping entry -- left writable\n", ps, pe);
+        return;
+    }
+    // Table first (host thunks check it), then the host pages.
+    const int ro = h.prot & ~PROT_WRITE;
+    if (h.start == ps && h.end == pe) {
+        mappings_.SetProt(h.start, h.end, ro);
+    } else {
+        std::printf("[guest] LOUD RELRO [%08x,%08x) shares a mapping entry -- table not narrowed\n",
+                    ps, pe);
+    }
+    if (!mem_.Protect(ps, pe - ps, PROT_READ)) {
+        std::printf("[guest] LOUD mprotect(RELRO [%08x,%08x), PROT_READ) failed\n", ps, pe);
+    }
+    AddWriteGuard(mod.relro_start, mod.relro_size, "RELRO");  // names slow-path hits
+}
+
 void Runtime::AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what) {
     if (size == 0) {
         return;

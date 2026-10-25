@@ -1525,9 +1525,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             g_mod->imports[ti].name.c_str());
     }
     g_rt = new Runtime(*g_mem, *g_mod);
-    for (const auto& seg : g_mod->segments) {
-        g_rt->AddMapping(seg.start, seg.size, seg.prot);
-    }
+    g_rt->AddModuleSegments(*g_mod);
     {
         std::random_device rd;
         const std::uint32_t canary = (static_cast<std::uint32_t>(rd()) << 1) | 1u;
@@ -1537,7 +1535,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // After relocation the guest's PT_GNU_RELRO is read-only in a real process;
     // refuse guest writes there so a wild write cannot zero a GOT slot (and be
     // named when it happens) instead of turning a later PLT call into pc = 0.
-    g_rt->AddWriteGuard(g_mod->relro_start, g_mod->relro_size, "RELRO");
+    g_rt->ProtectRelro(*g_mod);
     g_rt->SetFilesDir(GuestFilesDir(), g_files);
     g_rt->SetApkPath(g_apk);
     static GuestCallbacks callbacks(g_rt);
