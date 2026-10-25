@@ -3368,13 +3368,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // --- sleeps: honest (PLAN item 8) --------------------------------------
     if (n == "nanosleep") {
-        std::uint32_t sec = 0, nsec = 0;
-        if (a0) {
-            std::memcpy(&sec, H(a0), 4);
-            std::memcpy(&nsec, H(a0 + 4), 4);
+        // nanosleep(const struct timespec* req, struct timespec* rem); guest
+        // timespec = {long sec; long nsec} (2 x 32 bits). Live: Rio's
+        // std::this_thread::sleep_for (0x4428fc).
+        if (a0 == 0) {
+            SetGuestErrno(EFAULT);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
         }
-        std::uint64_t us = std::uint64_t(sec) * 1000000u + nsec / 1000u;
-        GuestSleepUs(us);
+        if (!CheckRange(a0, 8, false) || (a1 != 0 && !CheckRange(a1, 8, true))) {
+            goto bad_ptr;
+        }
+        std::int32_t sec = 0, nsec = 0;
+        std::memcpy(&sec, H(a0), 4);
+        std::memcpy(&nsec, H(a0 + 4), 4);
+        if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+            SetGuestErrno(EINVAL);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        GuestSleepUs(std::uint64_t(sec) * 1000000u + std::uint32_t(nsec) / 1000u);
         if (a1) {
             const std::uint32_t z = 0;
             std::memcpy(H(a1), &z, 4);

@@ -256,6 +256,7 @@ int main() {
     mod.imports.push_back(abr::Import{"strtol", true, 0, 0, 0});          // 41
     mod.imports.push_back(abr::Import{"strtoul", true, 0, 0, 0});         // 42
     mod.imports.push_back(abr::Import{"atoi", true, 0, 0, 0});            // 43
+    mod.imports.push_back(abr::Import{"nanosleep", true, 0, 0, 0});       // 44
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1490,6 +1491,23 @@ int main() {
         Expect("iswctype(SPACE, print) = _B",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 20, s_print)), "128");
         Expect("iswctype(TAB, blank) = 1", std::to_string(abr::RuntimeTestAccess::Call(rt, 20, t_blank)), "1");
+    }
+
+    // --- nanosleep: NULL req -> EFAULT, bad nsec -> EINVAL, valid -> 0.
+    {
+        const std::uint32_t kTs = 0x10008000;
+        const std::uint32_t a_null[4] = {0, 0, 0, 0};
+        Expect("nanosleep(NULL) = -1", std::to_string(static_cast<std::int32_t>(
+                                           abr::RuntimeTestAccess::Call(rt, 44, a_null))), "-1");
+        std::uint32_t ts[2] = {0, 1000000000u};
+        std::memcpy(rt.H(kTs), ts, 8);
+        const std::uint32_t a_bad[4] = {kTs, 0, 0, 0};
+        Expect("nanosleep(nsec=1e9) = -1", std::to_string(static_cast<std::int32_t>(
+                                               abr::RuntimeTestAccess::Call(rt, 44, a_bad))), "-1");
+        ts[1] = 1000000;  // 1 ms
+        std::memcpy(rt.H(kTs), ts, 8);
+        const std::uint32_t a_ok[4] = {kTs, kTs, 0, 0};
+        Expect("nanosleep(1 ms) = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 44, a_ok)), "0");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
