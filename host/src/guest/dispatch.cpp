@@ -60,7 +60,6 @@ size_t mspace_usable_size(const void*);
 
 // Quarantine depth: freed blocks held out of reuse (UAF oracle).
 static constexpr std::uint32_t kQuarantineCap = 64;
-static constexpr std::uint8_t kQuarantinePoison = 0xABu;
 
 
 // HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
