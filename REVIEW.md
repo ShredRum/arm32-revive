@@ -178,7 +178,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| D-01 | S2 | 9010 GetObjectClass | real objects get a fake `java/lang/Object` class: App.quitRequested()/isSilentProfile() never reach Java (seen in logs) | open |
+| D-01 | S2 | 9010 GetObjectClass | real objects get a fake `java/lang/Object` class: App.quitRequested()/isSilentProfile() never reach Java (seen in logs) | fixed d8adc22 (static fields 145-151 still mock) |
 | D-02 | S2 | 8878, 8897, 9629, 9675 | isCopy written as 4 bytes; jboolean is 1 byte | fixed 393f105 |
 | D-03 | S2 | 8170, 8507 | real-call `...`/V forms read float as one word; C promotes to double | fixed fcdca1b |
 | D-04 | S2 | 8488-8506 RealNewObject | J/D wrong in plain and A forms (copy of the marshaller) | fixed fcdca1b |
@@ -188,7 +188,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | D-08 | S2 | 164/220/221/171/222/223 | real-wrapped strings/arrays unsupported; 223 missing | fixed 5f617d8 (GetArrayLength only; 164/220/221/222/223 open) |
 | D-09 | S2 | 9686 Release mode | JNI_COMMIT treated as final release | fixed 393f105 |
 | D-10 | S2 | 8824, 8197, 8520 | strings silently truncated at 4096 bytes | fixed 393f105 |
-| D-11 | S3 | 117-151 mocks | shipping mocks shadow real Java (API 21, 800x480, Build.* "", hasSystemFeature list, static void dropped, FindClass never fails) | open |
+| D-11 | S3 | 117-151 mocks | shipping mocks shadow real Java (API 21, 800x480, Build.* "", hasSystemFeature list, static void dropped, FindClass never fails) | fixed d8adc22 (static fields 145-151 still mock) |
 | D-12 | S3 | 135-137 | CallStaticFloatMethod missing; AccelerometerWrapper getters resolved | open |
 | D-13 | S3 | 215 RegisterNatives | registers nothing; "never ships" comment false; 6 natives without forwarders (Rio smali) | open |
 | D-14 | S3 | JniNewString etc. | unbounded growth: mock strings, registry, method cookies never deduped | open |
@@ -258,7 +258,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 
 | id | sev | where | finding | status |
 |---|---|---|---|---|
-| G-01 | S2 | JNI shipping | only object methods/fields go to ART; all Boolean/Int/Long/Void calls and static fields are mocks, wrong on modern phones (density 1 vs ~420, screenLayout, 800x480, API 21, empty Build.*). App.quitRequested only calls stopLockTask() in all six titles: safe to forward (= D-01/D-11) | open |
+| G-01 | S2 | JNI shipping | only object methods/fields go to ART; all Boolean/Int/Long/Void calls and static fields are mocks, wrong on modern phones (density 1 vs ~420, screenLayout, 800x480, API 21, empty Build.*). App.quitRequested only calls stopLockTask() in all six titles: safe to forward (= D-01/D-11) | fixed d8adc22 (static fields 145-151 still mock) |
 | G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | fixed b979090 |
 | G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | fixed 2dadd39 |
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
