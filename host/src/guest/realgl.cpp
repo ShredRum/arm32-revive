@@ -127,7 +127,8 @@ bool RealGL::Ensure() {
 // pbuffer, no share group. Presentation is free (Java swaps its own
 // surface after onDrawFrame). Worker threads (no context) -> fake.
 bool RealGL::Ensure() {
-    if (!std::getenv("HARNESS_REALGL")) {
+    static const bool enabled = std::getenv("HARNESS_REALGL") != nullptr;  // read once
+    if (!enabled) {
         return false;
     }
     if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
@@ -254,6 +255,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     if (!Ensure()) {
         return false;
     }
+    // RealGL's own lock: its binding/attribute bookkeeping is shared by every
+    // thread with a current context. It is NOT the runtime's mutex_, so a slow
+    // driver call (upload, compile, readback) no longer blocks other guest
+    // threads' malloc/pthread/JNI work.
+    std::lock_guard<std::mutex> gl_lock(mu_);
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
     std::string n(name);

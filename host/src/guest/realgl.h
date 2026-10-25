@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 
 #include "dispatch.h"
 
@@ -30,6 +31,7 @@ class RealGL {
     bool Screenshot(const char* path, int w, int h);
 
   private:
+    std::mutex mu_;  // see Handle
     Runtime* rt_;
     bool ok_ = false;
     bool tried_ = false;

@@ -1772,6 +1772,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    // GL fast path. gl* calls are the hottest imports (12-20 per draw): send
+    // them to the real driver before the long name chain below, and without
+    // the runtime's mutex_ (RealGL has its own lock). Unhandled names and
+    // threads without a GL context fall through to the fake shim.
+    if (n.size() > 2 && n[0] == 'g' && n[1] == 'l' &&
+        RealGLBackend()->Handle(n.c_str(), regs, a0, a1, a2, a3)) {
+        return;
+    }
     // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
     // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
     // DIAG off this also stops paying the ~17 string compares per call.
@@ -5894,13 +5902,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // what it fakes. Nonzero handles, status queries report GL_TRUE, logs
     // empty. Everything else falls to the generic [stub]->0 tail.
     if (n.compare(0, 2, "gl") == 0) {
+        // The real backend was tried at the top of CallImport; this is the
+        // fake shim (PC harness without GL, threads without a context).
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        // Real GLES backend (HARNESS_REALGL=1): EGL surfaceless + forward to
-        // the host driver. Falls through to the fake shim for unhandled calls
-        // (compressed textures) or when the flag is off.
-        if (RealGLBackend()->Handle(n.c_str(), regs, a0, a1, a2, a3)) {
-            return;
-        }
         if (n == "glGetString") {
             // No GL context in the harness (real EGL comes later), so report
             // era-correct 2014-Android strings. EXTENSIONS claims ETC1 (the
