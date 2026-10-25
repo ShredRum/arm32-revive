@@ -8361,7 +8361,12 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             break;
         }
         const char k = full[0];
-        if (k == 'J' || k == 'D') {
+        // A float passed through "..." (and so through a va_list) is promoted
+        // to double (C default argument promotions): in the plain and V forms
+        // it occupies an aligned 8-byte slot like D. Only the A form (jvalue
+        // array) carries a real 4-byte float.
+        const bool promoted_float = (k == 'F' && vtag != 2);
+        if (k == 'J' || k == 'D' || promoted_float) {
             if (vtag == 2) {  // A form: 8B slots
                 std::uint64_t u = 0;
                 if (CheckRange(a3 + (std::uint32_t)nj * 8, 8, false)) {
@@ -8396,12 +8401,16 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                     const std::uint64_t u = ((std::uint64_t)hi << 32) | lo;
                     double dd = 0;
                     std::memcpy(&dd, &u, 8);
-                    jv[nj].d = dd;
+                    if (promoted_float) {
+                        jv[nj].f = static_cast<float>(dd);
+                    } else {
+                        jv[nj].d = dd;
+                    }
                 }
             }
-        } else if (k == 'F') {
-            std::uint32_t w = (vtag == 2) ? 0 : ((vtag == 0) ? next_word() : next_va());
-            if (vtag == 2 && CheckRange(a3 + (std::uint32_t)nj * 8, 4, false)) {
+        } else if (k == 'F') {  // A form only (see promoted_float above)
+            std::uint32_t w = 0;
+            if (CheckRange(a3 + (std::uint32_t)nj * 8, 4, false)) {
                 std::memcpy(&w, H(a3 + (std::uint32_t)nj * 8), 4);
             }
             float f = 0;
@@ -8578,8 +8587,9 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
 // Real NewObject (product host): resolve mock class/<init> cookies to
 // real ART refs (cached), marshal the V-form va_list (a3) to jvalues,
 // NewObjectA, Wrap. False = caller falls through to mock objects.
-// V-form word order mirrors RealCallObject's next_va (sequential words;
-// J/D = 2 words lo,hi; F = 1 word float bits, same quirk).
+// Argument layout follows AAPCS32 / C varargs like RealCallObject: J/D (and
+// F, promoted to double) take an aligned word pair; the A form is a jvalue
+// array with one 8-byte slot per argument.
 bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2, std::uint32_t a3,
                             Regs& regs, const std::string& mdesc) {
     if (DiagOn()) {
@@ -8726,26 +8736,43 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
             break;
         }
         const char k = full[0];
-        if (k == 'J' || k == 'D') {
-            if (vtag == 1) {
-                // Same AAPCS va_arg align-up as RealCallObject (pad word when
-                // the va base is 4-mod-8).
-                const std::uint32_t at = a3 + (word_idx - 3u) * 4u;
-                if (at & 7u) {
-                    next_w();
+        // J/D take two words; so does F in the plain/V forms, where C's
+        // default argument promotion turns a float into a double. The A form
+        // is a jvalue array: one 8-byte slot per argument, read whole.
+        const bool promoted_float = (k == 'F' && vtag != 2);
+        if (k == 'J' || k == 'D' || promoted_float) {
+            std::uint64_t u = 0;
+            if (vtag == 2) {
+                if (CheckRange(a3 + (std::uint32_t)nj * 8, 8, false)) {
+                    std::memcpy(&u, H(a3 + (std::uint32_t)nj * 8), 8);
                 }
-            }
-            const std::uint32_t lo = next_w();
-            const std::uint32_t hi = next_w();
-            if (k == 'J') {
-                jv[nj].j = ((std::uint64_t)hi << 32) | lo;
             } else {
-                const std::uint64_t u = ((std::uint64_t)hi << 32) | lo;
+                if (vtag == 0 && (word_idx & 1u)) {
+                    next_w();  // AAPCS32: 64-bit values take an even register pair
+                } else if (vtag == 1) {
+                    // va_arg of an 8-byte value aligns the address up (pad word
+                    // when the va base is 4-mod-8), as in RealCallObject.
+                    const std::uint32_t at = a3 + (word_idx - 3u) * 4u;
+                    if (at & 7u) {
+                        next_w();
+                    }
+                }
+                const std::uint32_t lo = next_w();
+                const std::uint32_t hi = next_w();
+                u = ((std::uint64_t)hi << 32) | lo;
+            }
+            if (k == 'J') {
+                jv[nj].j = (jlong)u;
+            } else {
                 double dd = 0;
                 std::memcpy(&dd, &u, 8);
-                jv[nj].d = dd;
+                if (promoted_float) {
+                    jv[nj].f = static_cast<float>(dd);
+                } else {
+                    jv[nj].d = dd;
+                }
             }
-        } else if (k == 'F') {
+        } else if (k == 'F') {  // A form: the float in the low 4 bytes of its slot
             const std::uint32_t w = next_w();
             float f = 0;
             std::memcpy(&f, &w, 4);
