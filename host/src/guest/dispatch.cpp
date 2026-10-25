@@ -5594,9 +5594,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
     // --- APK asset bridge (AAssetManager_*): getBuffer model over APK entries.
-    // Whole-block lock (same reasoning as the file bridge above).
+    // Each handler locks mutex_ only around the maps it touches; reading and
+    // inflating an asset runs unlocked (a whole-block lock used to serialise
+    // every import that reached this point, and a 32 MB inflate, against all
+    // other guest threads). apk_index_ is built once and then only read.
     {
-        std::lock_guard<std::recursive_mutex> asset_lock(mutex_);
         auto ensure_index = [&]() -> bool {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             if (apk_indexed_) {
@@ -5724,11 +5726,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (found->usize == 0 || found->usize > 0x2000000u) {
-                std::printf("[asset] LOUD open(\"%s\") bad size %llu -- halting\n", want.c_str(),
-                            (unsigned long long)found->usize);
-                stop_step_ = true;
-                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            // An empty asset is legal (length 0, a 1-byte buffer as handle);
+            // the only real limit is the guest heap.
+            if (found->usize >= kHeapSize) {
+                std::printf("[asset] LOUD open(\"%s\") size %llu exceeds the guest heap\n",
+                            want.c_str(), (unsigned long long)found->usize);
+                Ret(regs, 0);
                 return;
             }
             FILE* f = std::fopen(apk_path_.c_str(), "rb");
@@ -5736,14 +5739,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            const std::uint32_t gbuf = GuestMalloc(static_cast<std::uint32_t>(found->usize));
+            const std::uint32_t gbuf =
+                GuestMalloc(static_cast<std::uint32_t>(found->usize ? found->usize : 1));
             if (!gbuf) {
                 std::fclose(f);
                 Ret(regs, 0);
                 return;
             }
             bool ok = false;
-            if (found->method == 0) {
+            if (found->usize == 0) {
+                ok = true;
+            } else if (found->method == 0) {
                 std::fseek(f, (long)found->data_off, SEEK_SET);
                 ok = std::fread(H(gbuf), 1, (std::size_t)found->usize, f) ==
                      (std::size_t)found->usize;
