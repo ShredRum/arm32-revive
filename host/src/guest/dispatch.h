@@ -250,24 +250,6 @@ public:
     // Product host: real-ART <-> mock-handle map (pointer-width airtight).
     std::uint32_t WrapObject(void* real);
     void* UnwrapObject(std::uint32_t mock);
-    // Throw-to-catch emulation (unwinder stand-in, harness-only): consume a
-    // pending redirect (set by ProbeRedir) by resuming ActiveJit at the pad
-    // in ARM state. Returns true if redirected (caller must Run() again).
-    bool ApplyRedirect();
-    // Park a redirect from a probe (captures calling Jit for per-thread match).
-    void ParkRedirect(std::uint32_t pad);
-    // Park a redirect with r0 override (e.g. resume in a functor with a
-    // runtime-found record instead of the exception object); 0 = keep regs.
-    void ParkRedirectObj(std::uint32_t pad, std::uint32_t r0val);
-    // TTFILE matcher parks pad + filter here (r1 override for the pad's
-    // catch-clause switch); ApplyRedirect applies them.
-    void ParkRedirectEx(std::uint32_t pad, std::uint32_t r1val);
-    // Park a redirect with unwind state (frame fp + restore flags + sp
-    // offset), applied AT RESUME (register writes at park time were
-    // observed clobbered before resume).
-    void ParkUnwind(std::uint32_t pad, std::uint32_t r1val, std::uint32_t fp, std::uint32_t flags,
-                    std::int32_t spoff, std::uint32_t regoff = 28);
-
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -470,25 +452,6 @@ private:
     // cannot cross their automatic inits (2026-10-10).
     void InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                    std::uint32_t a2, std::uint32_t a3);
-    // Throw-to-catch emulation (unwinder stand-in): ProbeRedir halts at the
-    // throw with pending_redir_ set; ApplyRedirect() resumes there.
-    // Per-Jit: a halted thread must never redirect a different thread.
-    // Unwind state (frame fp + flags) is applied AT RESUME (not at park):
-    // anything guest-side between park and resume would clobber parked
-    // register values (observed: r4/r6 rewritten post-park).
-    std::uint32_t pending_redir_ = 0;
-    Dynarmic::A32::Jit* pending_jit_ = nullptr;
-    // r1 override for the pad (catch-clause switch value); ~0u = keep regs.
-    std::uint32_t pending_r1_ = ~0u;
-    // r0 override for the pad (functor record etc.); 0 = keep regs.
-    std::uint32_t pending_r0_ = 0;
-    // Frame fp for reg/sp restore; restore-mode flags (bit0: regs, bit1: sp).
-    std::uint32_t pending_fp_ = 0;
-    std::uint32_t pending_flags_ = 0;
-    std::int32_t pending_spoff_ = 8;
-    // r4 slot = [fp-regoff] (from the frame's prologue push pattern).
-    std::uint32_t pending_regoff_ = 28;
-
     GuestMemory& mem_;
     LoadedModule& mod_;
     Dynarmic::A32::Jit* jit_ = nullptr;
@@ -679,12 +642,7 @@ private:
     // Allocate one aligned 4-byte object/class/method handle. Caller holds
     // mutex_. Returns false after LOUD-halting; callers must not write then.
     bool JniAllocObjectHandle(std::uint32_t* out);
-    // Recorded AudioOutput native handle (J) from <init>(JIIII)V, for
-    // mixdata arg synthesis (HARNESS_JLAST/JOVR "J").
-    std::uint32_t audio_j_lo_ = 0, audio_j_hi_ = 0;
   public:
-    std::uint32_t AudioJLo() const { return audio_j_lo_; }
-    std::uint32_t AudioJHi() const { return audio_j_hi_; }
     std::unordered_map<std::uint32_t, std::string> jni_classes_;  // handle -> name
     std::unordered_map<std::uint32_t, std::string> jni_methods_;  // cookie -> desc
     std::unordered_map<std::uint32_t, std::string> jni_objects_;  // handle -> desc
@@ -823,31 +781,6 @@ private:
     // Real GLES backend (HARNESS_REALGL=1); null until first gl* call.
     // Harness-only bring-up; same forwarding serves the device build later.
     class RealGL* realgl_ = nullptr;
-    // HARNESS_EVENTPOST/FILL (synthetic-event intervention, harness-only):
-    // pi captured from the walk (r6 after BL 0xC4654); callable recorded for
-    // the free-thunk invocation marker. Guest VAs; 0 = none.
-    std::uint32_t eventpost_pi_ = 0;
-    std::uint32_t eventpost_callable_ = 0;
-    // Loading-manager object last seen by the render hook (PokeManagerFlag);
-    // HARNESS_SCENEAT reads it from here (never hardcoded). Guest VA.
-    std::uint32_t last_mgr_ = 0;
-    // Its +164 at last sight (2=loading per DIAG164). TAPBEAT governor
-    // reads it (slow beat while loading cooks). 0xFFFFFFFF = unseen.
-    std::uint32_t last_mgr164_ = 0xFFFFFFFFu;
-    // Scene object last seen by the loading-builder hook (HARNESS_LASTTHIS);
-    // HARNESS_BUILDER calls the menu builder with it. Guest VA.
-    std::uint32_t last_this_ = 0;
-    // Session-ish object last seen at D5994 entry (HARNESS_WATCHPC); the
-    // login trigger links its forged account+32 to it (updates pass the real
-    // one, the trigger forged zeros). Guest VA, 0 = none seen.
-    std::uint32_t loginat_session_ = 0;
-    // Live object last seen at a WATCHPC hit (HARNESS_WATCHPCSNAP=<hexlen>):
-    // guest VA + host-side byte snapshot (first hit wins). Lets later code
-    // forge a faithful copy without hardcoding heap addrs (which drift
-    // ±0x290 run to run even with identical configs — retry PROVEN).
-    std::uint32_t loginat_acct_ = 0;
-    std::uint32_t loginat_acct_len_ = 0;
-    std::uint8_t loginat_acct_snap_[64] = {};
   public:
     class RealGL* RealGLBackend();
 };
@@ -856,67 +789,18 @@ class GuestCallbacks : public Dynarmic::A32::UserCallbacks {
 public:
     using VAddr = Dynarmic::A32::VAddr;
     using Exception = Dynarmic::A32::Exception;
-    explicit GuestCallbacks(Runtime* rt) : rt_(rt) { g_probe_cb = this; }
-    // Execution-time probe target for HARNESS_PROBE (single callback set;
-    // harness uses one Runtime per process for the main thread's Jit; worker
-    // Jits share the same callbacks object... see ActiveJit routing).
-    static GuestCallbacks* g_probe_cb;
+    explicit GuestCallbacks(Runtime* rt) : rt_(rt) {}
     // Product host (apphost): real-Java delegation hook. Returns the calling
     // host thread's real JNIEnv*, or null (harness: always null -> mocks).
     // Set once by apphost at OnLoad; never in harness builds.
     static void* (*g_real_env_hook)();
-    static std::uint32_t g_probe_pc;  // pc being probed (fill gates on it)
-    static void ProbeDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
-    static void ProbeDump2(std::uint64_t r2, std::uint64_t r3, std::uint64_t sp);
-    static void ProbeDump3(std::uint64_t r4, std::uint64_t r5, std::uint64_t r6);
-    static void ProbeRedir(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
-    // Per-frame unwinder step (throw probe + resume trap share it).
-    static void UnwNext(std::uint32_t thrown_ti);
-    // _Unwind_Resume trap: continue the pad walk instead of spiraling.
-    static void ResumeTrap(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_RDUMP=1: deep dump of the HTTP raiser entry ABI (PROBE3).
-    static void RaiserDump(std::uint64_t r0, std::uint64_t r1, std::uint64_t r2);
-    static void RaiserDump2(std::uint64_t r3, std::uint64_t lr, std::uint64_t sp);
-    // HARNESS_RETSUCC=1: synthesize HTTP success at the raiser entry
-    // (PROBE3) for the .../time endpoint (canned timestamp + test sig).
-    static void SuccInject(std::uint64_t r0, std::uint64_t lr, std::uint64_t);
-    // HARNESS_POKE1187 mid-update gate poke (r7 = gate slot address).
-    static void PokeGateByte(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_POKE180=1: loading render-state advance. At 0x263338
-    // (ldr r0,[r4,#180] in ShadowingSurfaceData draw), if [r4+180]==3 write 4
-    // (flips the 0x263340 bne + switch mode). r4 is live — no hardcode.
-    static void PokeShadowState(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_POKE164=1: [loading-manager+164]=0 at 0x283B5C entry (forces
-    // the state-1/menu branch at the 0x283C34 fork).
-    static void PokeManagerFlag(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_EVENTPOST=1: at 0xC465C (PROBE4 slot, right after the walk's
-    // mov r6,r0), decide the pi the walk will use: mirror the natural one
-    // into pi#1 when usable, else synthetic content. Then r6<=pi#1 (baked).
-    static void EventDecide(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_EVENTPOST=1: at event-walk entry (0xC45FC, PROBE5 slot), fake a
-    // nonzero subscriber count while natural is 0 (see EventDecide).
-    static void EventEntry(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_LASTTHIS=1: record loading-builder r0 (scene object) at PROBE4.
-    static void LastThis(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_WATCHPC=<hexpc>: regs + stack code-pointer backtrace at pc
-    // (ladder forensics: who calls with null-derived args). Capped, no slot.
-    static void WatchPC(std::uint64_t r0, std::uint64_t r1, std::uint64_t lr);
-    static void WatchSP(std::uint64_t, std::uint64_t, std::uint64_t);
-    // HARNESS_WATCHPC companion: stashes r4/r6/sp at the watched pc (the binder
-    // checkers keep the context in r4 and the arg position in r6; probing only
-    // r0/r1/lr hid both). Dev-only, emitted only for the watched pc.
-    static void WatchRegs(std::uint64_t a, std::uint64_t b, std::uint64_t c);
-    // HARNESS_DUMPR9=1: log session object (r9) + flag at a probe slot
-    // (e.g. PROBE2=0xd726c, the [r9+120] check). Finds the object main
-    // must observe for the sessions->menu handoff.
-    static void DumpR9(std::uint64_t, std::uint64_t, std::uint64_t);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;
     std::uint32_t MemoryRead32(VAddr addr) override;
     std::uint64_t MemoryRead64(VAddr addr) override;
     std::optional<std::uint32_t> MemoryReadCode(VAddr addr) override;
-    // Translation log (HARNESS_TRANSLOG=1): every translated instruction address.
+    // Translation-time diagnostics (HARNESS_TRANSLOG, HARNESS_PCTRACE); emits no IR.
     void PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                 Dynarmic::A32::IREmitter& ir) override;
     void MemoryWrite8(VAddr addr, std::uint8_t v) override;
@@ -985,8 +869,5 @@ private:
     }
     Runtime* rt_;
 };
-
-// Session-flag watch address (DumpR9-armed; read by harness census).
-extern std::uint32_t g_sess_watch;
 
 }  // namespace abr
