@@ -999,6 +999,43 @@ const char* Runtime::GuestStr(std::uint32_t guest) {
     return scratch.c_str();
 }
 
+bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* len) {
+    std::uint32_t done = 0;
+    while (done < max) {
+        const std::uint32_t cur = s + done;
+        if (cur < s) {
+            return false;  // wrapped past 4 GB
+        }
+        // Readable extent that contains cur (mappings_ only grows; same
+        // first-match rule as CheckRange).
+        std::uint64_t ext_end = 0;
+        for (const auto& m : mappings_) {
+            if (cur >= m.start && cur < m.end) {
+                if ((m.prot & PROT_READ) == 0) {
+                    return false;
+                }
+                ext_end = m.end;
+                break;
+            }
+        }
+        if (ext_end == 0) {
+            return false;
+        }
+        const std::uint64_t avail = ext_end - cur;
+        const std::uint32_t chunk =
+            static_cast<std::uint32_t>(std::min<std::uint64_t>(avail, max - done));
+        const void* hit = std::memchr(H<const char>(cur), 0, chunk);
+        if (hit) {
+            *len = done + static_cast<std::uint32_t>(static_cast<const char*>(hit) -
+                                                     H<const char>(cur));
+            return true;
+        }
+        done += chunk;
+    }
+    *len = max;
+    return true;
+}
+
 // Validates a guest range before host-side bulk access. Halts cleanly on violation.
 bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (size == 0) {
@@ -1787,24 +1824,24 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "strdup" || n == "strndup") {
-        const char* s = GuestStr(a0);
-        // Triage (2026-10-16): log WHAT gets strdup'd (names the subsystem:
-        // Lua chunknames start with @, cert names, filenames). Capped 20.
-        {
+        std::uint32_t len = 0;
+        if (!GuestStrnlen(a0, n == "strndup" ? a1 : 0xFFFFFFFFu, &len) || len == 0xFFFFFFFFu) {
+            goto bad_ptr;
+        }
+        if (DiagOn()) {
             static int sdn = 0;
-            if (DiagOn() && sdn < 20) {
+            if (sdn < 20) {
                 sdn++;
-                std::printf("[strdup] %08x \"%.48s\"\n", a0, s ? s : "?");
+                std::printf("[strdup] %08x \"%.48s\"\n", a0,
+                            std::string(H<const char>(a0), std::min<std::uint32_t>(len, 48)).c_str());
             }
         }
-        std::size_t len = std::strlen(s);
-        if (n == "strndup" && a1 < len) {
-            len = a1;
-        }
-        const std::uint32_t out = GuestMalloc(static_cast<std::uint32_t>(len + 1));
+        const std::uint32_t out = GuestMalloc(len + 1);
         if (out) {
-            std::memcpy(H(out), s, len);
-            *H<std::uint8_t>(out + static_cast<std::uint32_t>(len)) = 0;
+            std::memcpy(H(out), H<const char>(a0), len);
+            *H<std::uint8_t>(out + len) = 0;
+        } else {
+            SetGuestErrno(ENOMEM);
         }
         Ret(regs, out);
         return;
@@ -2210,91 +2247,79 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "strlen" || n == "strnlen") {
-        std::size_t len = std::strlen(GuestStr(a0));
-        if (n == "strnlen" && a1 < len) {
-            len = a1;
+        std::uint32_t len = 0;
+        if (!GuestStrnlen(a0, n == "strnlen" ? a1 : 0xFFFFFFFFu, &len)) {
+            goto bad_ptr;
         }
-        Ret(regs, static_cast<std::uint32_t>(len));
+        Ret(regs, len);
         return;
     }
     if (n == "strcmp" || n == "strncmp" || n == "strcasecmp" || n == "strncasecmp") {
-        // NOTE: two separate buffers — GuestStr reuses one scratch area.
-        const std::string sa(GuestStr(a0));
-        const std::string sb(GuestStr(a1));
+        // Compare in guest memory. Both strings are validated up to their NUL
+        // (or up to n for the n-variants), so the host compare never reads an
+        // unmapped byte.
+        const bool bounded = (n == "strncmp" || n == "strncasecmp");
+        const std::uint32_t lim = bounded ? a2 : 0xFFFFFFFFu;
+        std::uint32_t la = 0, lb = 0;
+        if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
+            goto bad_ptr;
+        }
+        const char* pa = H<const char>(a0);
+        const char* pb = H<const char>(a1);
         int r = 0;
         if (n == "strcmp") {
-            r = std::strcmp(sa.c_str(), sb.c_str());
+            r = std::strcmp(pa, pb);
         } else if (n == "strncmp") {
-            r = std::strncmp(sa.c_str(), sb.c_str(), a2);
+            r = std::strncmp(pa, pb, a2);
         } else if (n == "strcasecmp") {
-            r = strcasecmp(sa.c_str(), sb.c_str());
+            r = strcasecmp(pa, pb);
         } else {
-            r = strncasecmp(sa.c_str(), sb.c_str(), a2);
+            r = strncasecmp(pa, pb, a2);
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
     if (n == "strcpy" || n == "strncpy" || n == "strcat" || n == "strncat") {
-        // Bounded guest strlen first (max 1MB), then range-check both sides.
-        auto bounded_len = [&](std::uint32_t s, std::uint32_t cap) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < cap; i++) {
-                if (!CheckRange(s + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(s + i) == '\0') {
-                    return i;
-                }
+        // All four work in guest memory. Source and destination are validated
+        // for exactly the bytes the real function touches:
+        //   strcpy:  src up to NUL; dst [0, slen]
+        //   strcat:  dst up to its NUL (dlen); dst [dlen, dlen+slen]
+        //   strncpy: src up to NUL or n; dst [0, n) (zero padded, no NUL
+        //            added when src has >= n bytes)
+        //   strncat: src up to NUL or n; dst [dlen, dlen+min(slen,n)] + NUL
+        // ClampHeapWrite is the optional overflow firewall (off by default);
+        // when it shortens a write the result is still NUL terminated.
+        const bool cat = (n == "strcat" || n == "strncat");
+        const bool bounded = (n == "strncpy" || n == "strncat");
+        std::uint32_t slen = 0, dlen = 0;
+        if (!GuestStrnlen(a1, bounded ? a2 : 0xFFFFFFFFu, &slen)) {
+            goto bad_ptr;
+        }
+        if (cat && !GuestStrnlen(a0, 0xFFFFFFFFu, &dlen)) {
+            goto bad_ptr;
+        }
+        const std::uint32_t dst = a0 + dlen;
+        // Bytes written at dst: strncpy writes exactly n; the others copy the
+        // string plus a terminating NUL.
+        const std::uint64_t want = (n == "strncpy") ? std::uint64_t(a2) : std::uint64_t(slen) + 1;
+        if (want > 0xFFFFFFFFu || !CheckRange(dst, static_cast<std::size_t>(want), true)) {
+            goto bad_ptr;
+        }
+        const std::uint32_t room =
+            ClampHeapWrite(dst, static_cast<std::uint32_t>(want), n.c_str());
+        if (n == "strncpy") {
+            const std::uint32_t copy = std::min(slen, room);
+            std::memmove(H(dst), H<const void>(a1), copy);
+            if (room > copy) {
+                std::memset(H(dst + copy), 0, room - copy);
             }
-            return 0xFFFFFFFFu;
-        };
-        if (n == "strcpy" || n == "strcat") {
-            const std::uint32_t slen = bounded_len(a1, 0x100000u);
-            std::uint32_t dlen = 0;
-            if (n == "strcat") {
-                dlen = bounded_len(a0, 0x100000u);
-                if (dlen == 0xFFFFFFFFu) {
-                    goto bad_ptr;
-                }
+            if (room < want && room > 0) {
+                *H<char>(dst + room - 1) = '\0';  // firewall truncation
             }
-            if (slen == 0xFFFFFFFFu || !CheckRange(a0 + dlen, slen + 1, true)) {
-                goto bad_ptr;
-            }
-            // Overflow firewall (same class as memcpy): clamp to the mapped
-            // allocation; force NUL on truncation so downstream stays bounded.
-            const std::uint32_t wlen = ClampHeapWrite(a0 + dlen, slen + 1, n.c_str());
-            if (wlen <= slen) {
-                if (wlen > 0) {
-                    std::memcpy(H(a0 + dlen), H<const void>(a1), wlen - 1);
-                    *H<char>(a0 + dlen + wlen - 1) = '\0';
-                } else if (CheckRange(a0 + dlen, 1, true)) {
-                    *H<char>(a0 + dlen) = '\0';  // zero room: empty string, still terminated
-                }
-            } else if (n == "strcpy") {
-                std::strcpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1));
-            } else {
-                std::strcat(reinterpret_cast<char*>(H(a0)), GuestStr(a1));
-            }
-        } else {
-            if (!CheckRange(a0, a2 + (n == "strncpy" ? 0 : 1), true) ||
-                !CheckRange(a1, a2, false)) {
-                goto bad_ptr;
-            }
-            const std::uint32_t wlen = ClampHeapWrite(a0, a2 + (n == "strncpy" ? 0 : 1),
-                                                      n.c_str());
-            if (n == "strncpy") {
-                const std::uint32_t wn = wlen < a2 ? wlen : a2;
-                std::strncpy(reinterpret_cast<char*>(H(a0)), GuestStr(a1), wn);
-                if (wn < a2 && wn > 0) {
-                    H(a0)[wn - 1] = 0;  // truncated: terminate (strncpy wouldn't)
-                }
-            } else {
-                if (wlen == 0) {
-                    Ret(regs, a0);  // zero room: skip (strncat would write NUL past end)
-                    return;
-                }
-                std::strncat(reinterpret_cast<char*>(H(a0)), GuestStr(a1),
-                             wlen < a2 + 1 ? wlen - 1 : a2);
-            }
+        } else if (room > 0) {
+            const std::uint32_t copy = std::min(slen, room - 1);
+            std::memmove(H(dst), H<const void>(a1), copy);
+            *H<char>(dst + copy) = '\0';
         }
         Ret(regs, a0);
         return;
@@ -6222,7 +6247,9 @@ bad_ptr:
         std::printf("    [%08x-%08x] prot=%d\n", m.start, m.end, m.prot);
     }
     stop_step_ = true;
-    ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+    if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+        jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+    }
 }
 
 std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj) {

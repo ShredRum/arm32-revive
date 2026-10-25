@@ -124,6 +124,12 @@ struct RuntimeTestAccess {
         return rt.tls_map_.find((static_cast<std::uint64_t>(key) << 32) | tid) != rt.tls_map_.end();
     }
     static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
+    static bool InMapping(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, false); }
+    static bool TakeStopped(Runtime& rt) {
+        const bool s = rt.stop_step_;
+        rt.stop_step_ = false;
+        return s;
+    }
 };
 }  // namespace abr
 
@@ -257,6 +263,10 @@ int main() {
     mod.imports.push_back(abr::Import{"strtoul", true, 0, 0, 0});         // 42
     mod.imports.push_back(abr::Import{"atoi", true, 0, 0, 0});            // 43
     mod.imports.push_back(abr::Import{"nanosleep", true, 0, 0, 0});       // 44
+    mod.imports.push_back(abr::Import{"strlen", true, 0, 0, 0});          // 45
+    mod.imports.push_back(abr::Import{"strncpy", true, 0, 0, 0});         // 46
+    mod.imports.push_back(abr::Import{"strncat", true, 0, 0, 0});         // 47
+    mod.imports.push_back(abr::Import{"strcmp", true, 0, 0, 0});          // 48
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1508,6 +1518,51 @@ int main() {
         std::memcpy(rt.H(kTs), ts, 8);
         const std::uint32_t a_ok[4] = {kTs, kTs, 0, 0};
         Expect("nanosleep(1 ms) = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 44, a_ok)), "0");
+    }
+
+    // --- string family works on guest memory: no 64 KiB cap, unreadable
+    //     memory halts the guest, only the touched bytes are validated.
+    {
+        const std::uint32_t kBig = 0x10100000;
+        std::memset(rt.H(kBig), 'a', 100000);
+        *rt.H<char>(kBig + 100000) = 0;
+        const std::uint32_t a_big[4] = {kBig, 0, 0, 0};
+        Expect("strlen of 100000 bytes", std::to_string(abr::RuntimeTestAccess::Call(rt, 45, a_big)),
+               "100000");
+        Expect("strlen ok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        const std::uint32_t a_bad[4] = {0xE0000000u, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 45, a_bad);
+        Expect("strlen(unmapped) halts the guest", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0",
+               "1");
+        // "ab" in the last 3 bytes of the heap mapping: strncpy(dst, src, 8)
+        // reads only up to the NUL, so it must not halt.
+        const std::uint32_t kTail = 0x50000000u - 3;
+        if (abr::RuntimeTestAccess::InMapping(rt, kTail, 3) &&
+            !abr::RuntimeTestAccess::InMapping(rt, kTail, 4)) {
+            put(kTail, "ab");
+            const std::uint32_t kDst = 0x10101000;
+            std::memset(rt.H(kDst), 0x55, 16);
+            const std::uint32_t a_ncpy[4] = {kDst, kTail, 8, 0};
+            abr::RuntimeTestAccess::Call(rt, 46, a_ncpy);
+            Expect("strncpy src at mapping end does not halt",
+                   abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+            const std::uint8_t* d = rt.H<std::uint8_t>(kDst);
+            const bool padded = d[0] == 'a' && d[1] == 'b' && d[2] == 0 && d[7] == 0 && d[8] == 0x55;
+            Expect("strncpy copies and zero-pads exactly n", padded ? "1" : "0", "1");
+        } else {
+            Expect("heap mapping ends at 0x50000000 (test premise)", "0", "1");
+        }
+        const std::uint32_t kD = 0x10102000, kS = 0x10102100;
+        put(kD, "x");
+        put(kS, "yz");
+        const std::uint32_t a_ncat[4] = {kD, kS, 0xFFFFFFFFu, 0};
+        abr::RuntimeTestAccess::Call(rt, 47, a_ncat);
+        Expect("strncat(n=(size_t)-1)", std::string(rt.H<const char>(kD)), "xyz");
+        Expect("strncat does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        put(kS, "xyy");
+        const std::uint32_t a_cmp[4] = {kD, kS, 0, 0};
+        Expect("strcmp(xyz, xyy) > 0",
+               static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 48, a_cmp)) > 0 ? "1" : "0", "1");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

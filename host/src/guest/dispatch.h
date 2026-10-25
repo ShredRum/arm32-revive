@@ -124,6 +124,11 @@ public:
     }
 
     const char* GuestStr(std::uint32_t guest);
+    // strnlen over guest memory without a size cap: scans mapping by mapping
+    // with memchr. Returns false if a byte before the NUL (or before max) is
+    // not readable -- the caller must then halt the guest, as a real libc
+    // would fault. On success *len = min(strlen, max).
+    bool GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* len);
 
     // Guest printf vararg cursor. Two shapes share it: inline APCS words then
     // stack (ai starts at the first free core reg; stack = regs[13] at entry),
