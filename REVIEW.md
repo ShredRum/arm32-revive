@@ -214,3 +214,17 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | H-05 | S3 | scripts/devgate.sh | tombstones counted without sudo; grep -w matched star-wars-ii-amz; md5 mismatch not fatal | fixed ccd4747 |
 | H-06 | S3 | thirdparty/dynarmic | commit a46601580d55 (azahar-emu) not recorded in the repo | open |
 | H-07..H-14 | S4 | see report | no -Wall (9 dead-code warnings), all symbols exported, system llvm-strip and no unstripped lib per build-id, dead strip.libs loop, gen_apphost.py float/double/$ gaps, stale profile/script comments, deploy.sh greps 5 markers, review reports unversioned | open |
+
+**E — GL** (report: work/review/E-gl.md). All six titles import the same 68 gl*; none imports glGetError.
+
+| id | sev | where | finding | status |
+|---|---|---|---|---|
+| E-01 | S1 | realgl glGetUniformfv | passes a uniform LOCATION as an index to glGetActiveUniform and sizes the host buffer by element count, not floats: vec4/mat4 overflow the host heap by 12/60 B (Rio 5 call sites) | open |
+| E-02 | S2 | glCopyTexImage2D | falls into the fake shim (never executed, logs UNHANDLED); Rio 0x2522e0 | open |
+| E-03 | S2 | realgl bound-buffer tracking | one per process, but bindings are per GL context (context loss / shared contexts) -> 32-bit offset taken as host pointer (SUSPECTED) | open |
+| E-04 | S2 | client vertex arrays | only 1 byte checked at glVertexAttribPointer, nothing at draw time; bad pointer silently NULL | open |
+| E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | open |
+| E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | open |
+| E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | open |
+| E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | open |
+| E-08.. | S3/S4 | see report | glBufferData size zero-extension, glGetString slot capacity, fake shim on context-less threads, NOBLEND per draw, unexplained \x01 shader rewrite, dead glGetError code | open |
