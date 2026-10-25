@@ -20,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mapping_table.h"
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
 #include "dynarmic/interface/exclusive_monitor.h"
@@ -126,9 +127,11 @@ public:
     std::uint32_t GuestRealloc(std::uint32_t addr, std::uint32_t size);
     void GuestFree(std::uint32_t addr);
 
-    // Guest mmap arena.
-    std::uint32_t GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags, int fd,
-                            std::uint32_t offset);
+    // Guest mmap/munmap inside the mmap arena [kMmapArenaBase, kTrampBase).
+    // host_fd < 0 = anonymous. Returns the guest address, or 0xFFFFFFFF
+    // (MAP_FAILED) with the guest errno set.
+    std::uint32_t GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags,
+                            int host_fd, std::uint64_t offset);
     int GuestMunmap(std::uint32_t addr, std::uint32_t size);
 
     // Host pointer from guest address (no checks; callbacks validate first).
@@ -493,7 +496,7 @@ private:
     };
     std::vector<QEnt> quarantine_;
     std::unordered_set<std::uint32_t> quarantine_set_;  // O(1) double-free check (vector scan was O(n^2))
-    std::uint32_t mmap_next_ = 0x70000000u;
+    std::uint32_t mmap_next_ = kMmapArenaBase;
     std::recursive_mutex mutex_;
     std::unordered_map<std::string, std::uint64_t> stub_hits_;
 
@@ -783,11 +786,7 @@ private:
     std::unordered_map<std::uint32_t, std::uint32_t> asset_mgr_map_;  // mgr -> 1
     std::unordered_map<std::uint32_t, std::uint32_t> jni_array_lens_;  // handle -> len
 
-    struct Mapping {
-        std::uint32_t start, end;
-        int prot;
-    };
-    std::vector<Mapping> mappings_;
+    MappingTable mappings_;  // thread-safe, see mapping_table.h
     // RELRO-style write guard: guest writes into these ranges are refused (and
     // named, capped) instead of silently corrupting a function pointer. The
     // loader registers the module's PT_GNU_RELRO here once relocations are done.

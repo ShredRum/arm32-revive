@@ -213,7 +213,10 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
 }
 
 void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
-    mappings_.push_back({start, start + size, prot});
+    if (!mappings_.Add(start, start + size, prot)) {
+        std::printf("[mmap] LOUD mapping table full (%zu entries), [%08x+%x) not recorded\n",
+                    MappingTable::kCapacity, start, size);
+    }
 }
 
 void Runtime::AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what) {
@@ -456,41 +459,29 @@ std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, cons
 
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
     const std::uint64_t end = std::uint64_t(addr) + size;
-    // Last-hit cache (perf): string/scan loops probe per byte, each probe a
-    // linear walk over mappings_. Mappings only ever grow (AddMapping push;
-    // GuestMunmap never erases), so a cached by-value extent stays valid
-    // forever; thread_local needs no locking. Early-true only: on miss fall
-    // through to the full scan (mappings may overlap).
-    thread_local std::uint32_t hit_s = 1, hit_e = 0;
+    // Last-hit cache (perf): string/scan loops probe per byte. The cached
+    // extent is valid while the table's epoch is unchanged (it moves when an
+    // entry's protection changes, e.g. munmap).
+    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_epoch = 0;
     thread_local int hit_p = 0;
-    if (addr >= hit_s && end <= hit_e) {
-        if (exec) {
-            if (hit_p & PROT_EXEC) {
-                return true;
-            }
-        } else if (write) {
-            if (hit_p & PROT_WRITE) {
-                return true;
-            }
-        } else if (hit_p & PROT_READ) {
-            return true;
+    const std::uint32_t ep = mappings_.epoch();
+    if (ep != hit_epoch || !(addr >= hit_s && end <= hit_e)) {
+        const MappingTable::Hit h = mappings_.Find(addr, size);
+        if (h.end == 0) {
+            return false;
         }
+        hit_s = h.start;
+        hit_e = h.end;
+        hit_p = h.prot;
+        hit_epoch = ep;
     }
-    for (const auto& m : mappings_) {
-        if (addr >= m.start && end <= m.end) {
-            hit_s = m.start;
-            hit_e = m.end;
-            hit_p = m.prot;
-            if (exec) {
-                return (m.prot & PROT_EXEC) != 0;
-            }
-            if (write) {
-                return (m.prot & PROT_WRITE) != 0;
-            }
-            return (m.prot & PROT_READ) != 0;
-        }
+    if (exec) {
+        return (hit_p & PROT_EXEC) != 0;
     }
-    return false;
+    if (write) {
+        return (hit_p & PROT_WRITE) != 0;
+    }
+    return (hit_p & PROT_READ) != 0;
 }
 
 static std::uint32_t PadGlobal() {
@@ -922,71 +913,106 @@ void Runtime::GuestFree(std::uint32_t addr) {
     }
 }
 
-std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int /*flags*/,
-                                 int /*fd*/, std::uint32_t /*offset*/) {
+std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags,
+                                 int host_fd, std::uint64_t offset) {
+    // Guest flag/prot values are the Linux ones on both ABIs (asm-generic
+    // mman: MAP_SHARED 1, MAP_PRIVATE 2, MAP_FIXED 0x10, MAP_ANONYMOUS 0x20).
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    size = (size + 0xFFFu) & ~std::uint32_t(0xFFFu);
-    int hprot = 0;
-    if (prot & 1) {
-        hprot |= PROT_READ;
-    }
-    if (prot & 2) {
-        hprot |= PROT_WRITE;
-    }
-    if (prot & 4) {
-        hprot |= PROT_EXEC;
-    }
-    if (addr != 0) {
-        // MAP_FIXED-style: must land inside our reservation, outside modules.
-        if (addr < 0x10000000u || addr + size > 0xF0000000u) {
-            return 0xFFFFFFFFu;
-        }
-        // Never let a FIXED map shadow the guest heap: it would silently steal
-        // the arena's address space (allocations keep "succeeding" while the
-        // mapping is clobbered). LOUD once per call site is cheap; refusals are
-        // already the failure mode for out-of-range requests above.
-        if (addr < heap_base_ + kHeapSize) {
-            std::printf("[mmap] LOUD FIXED %08x+%x overlaps heap [%08x,%08x) -- refusing\n", addr,
-                        size, heap_base_, heap_base_ + kHeapSize);
-            return 0xFFFFFFFFu;
-        }
-        if (!mem_.Map(addr, size, hprot)) {
-            return 0xFFFFFFFFu;
-        }
-        AddMapping(addr, size, hprot);
-        return addr;
-    }
-    mmap_next_ = (mmap_next_ + 0xFFFFu) & ~std::uint32_t(0xFFFFu);
-    if (mmap_next_ + size > 0xF0000000u) {
+    const bool anon = (flags & MAP_ANONYMOUS) != 0;
+    const int share = flags & (MAP_SHARED | MAP_PRIVATE);
+    if (size == 0 || (share != MAP_SHARED && share != MAP_PRIVATE) || (!anon && host_fd < 0) ||
+        (offset & 0xFFFu) != 0) {
+        SetGuestErrno(anon || host_fd >= 0 ? EINVAL : EBADF);
         return 0xFFFFFFFFu;
     }
-    const std::uint32_t out = mmap_next_;
-    mmap_next_ += size;
-    if (!mem_.Map(out, size, hprot)) {
+    const std::uint64_t len = (std::uint64_t(size) + 0xFFFu) & ~std::uint64_t(0xFFFu);
+    const int hprot = prot & (PROT_READ | PROT_WRITE | PROT_EXEC);
+    std::uint32_t out = 0;
+    if (flags & MAP_FIXED) {
+        // Only inside the mmap arena, and only over free space or exactly over
+        // an earlier mmap (the table cannot split entries).
+        const std::uint64_t end = std::uint64_t(addr) + len;
+        if ((addr & 0xFFFu) != 0 || addr < kMmapArenaBase || end > kTrampBase) {
+            std::printf("[mmap] LOUD MAP_FIXED %08x+%llx outside the mmap arena -- refused\n", addr,
+                        (unsigned long long)len);
+            SetGuestErrno(EINVAL);
+            return 0xFFFFFFFFu;
+        }
+        bool exact = false, overlap = false;
+        mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int) {
+            if (st == addr && en == end) {
+                exact = true;
+            } else if (st < end && addr < en) {
+                overlap = true;
+            }
+        });
+        if (overlap) {
+            std::printf("[mmap] LOUD MAP_FIXED %08x+%llx partially overlaps a mapping -- refused\n",
+                        addr, (unsigned long long)len);
+            SetGuestErrno(EINVAL);
+            return 0xFFFFFFFFu;
+        }
+        out = addr;
+        if (!exact && !mappings_.Add(addr, static_cast<std::uint32_t>(end), 0)) {
+            SetGuestErrno(ENOMEM);
+            return 0xFFFFFFFFu;
+        }
+    } else {
+        // addr without MAP_FIXED is only a hint: allocate in the arena.
+        const std::uint64_t next = (std::uint64_t(mmap_next_) + 0xFFFFu) & ~std::uint64_t(0xFFFFu);
+        if (next + len > kTrampBase) {
+            SetGuestErrno(ENOMEM);
+            return 0xFFFFFFFFu;
+        }
+        out = static_cast<std::uint32_t>(next);
+        if (!mappings_.Add(out, static_cast<std::uint32_t>(next + len), 0)) {
+            SetGuestErrno(ENOMEM);
+            return 0xFFFFFFFFu;
+        }
+        mmap_next_ = static_cast<std::uint32_t>(next + len);
+    }
+    // Map the host pages: a file mapping maps the real file (MAP_SHARED writes
+    // reach it, MAP_PRIVATE is copy-on-write), exactly like the kernel would.
+    void* want = H(out);
+    void* r = anon ? ::mmap(want, len, hprot, share | MAP_ANONYMOUS | MAP_FIXED, -1, 0)
+                   : ::mmap(want, len, hprot, share | MAP_FIXED, host_fd, static_cast<off_t>(offset));
+    if (r == MAP_FAILED) {
+        const int e = errno;
+        ::mmap(want, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        SetGuestErrno(e);
         return 0xFFFFFFFFu;
     }
-    AddMapping(out, size, hprot);
+    mappings_.SetProt(out, static_cast<std::uint32_t>(out + len), hprot);
     return out;
 }
 
 int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
-    size = (size + 0xFFFu) & ~std::uint32_t(0xFFFu);
-    // Known gap (G3.1, 2026-10-18): this leaves the mappings_ entry behind, so
-    // CheckAccess/CheckRange would still allow access to the (now PROT_NONE)
-    // range. Unreachable for THIS guest -- the .so imports neither mmap nor
-    // munmap (readelf --dyn-syms) -- so it is left as-is: the D3 last-hit cache
-    // relies on "mappings only ever grow", and a correct fix would need epoch
-    // invalidation. LOUD keeps a future guest that does call it from being
-    // silent about a stale mapping.
-    static std::atomic<bool> loud{false};
-    if (!loud.exchange(true)) {
-        std::printf("[mmap] LOUD munmap(%08x+%x) -- mappings_ keeps the old prot (G3.1)\n", addr,
-                    size);
-    }
-    // Don't actually release (arena reuse later); just revoke access.
-    if (!mem_.Protect(addr, size, PROT_NONE)) {
+    // Releases exactly one earlier mmap: the host pages become PROT_NONE
+    // (the address range is not reused) and the table entry loses its
+    // protection, so a later guest access halts cleanly instead of faulting
+    // the host. Partial unmaps are refused (the table cannot split entries).
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const std::uint64_t len = (std::uint64_t(size) + 0xFFFu) & ~std::uint64_t(0xFFFu);
+    const std::uint64_t end = std::uint64_t(addr) + len;
+    if (size == 0 || (addr & 0xFFFu) != 0 || addr < kMmapArenaBase || end > kTrampBase) {
+        SetGuestErrno(EINVAL);
         return -1;
     }
+    bool exact = false;
+    mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int) {
+        if (st == addr && en == end) {
+            exact = true;
+        }
+    });
+    if (!exact) {
+        std::printf("[mmap] LOUD munmap(%08x+%x) does not match one mmap -- refused\n", addr, size);
+        SetGuestErrno(EINVAL);
+        return -1;
+    }
+    // Revoke in the table first: from here on guest accesses halt instead of
+    // reaching the pages being replaced.
+    mappings_.SetProt(addr, static_cast<std::uint32_t>(end), 0);
+    ::mmap(H(addr), len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     return 0;
 }
 
@@ -1024,21 +1050,13 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
         if (cur < s) {
             return false;  // wrapped past 4 GB
         }
-        // Readable extent that contains cur (mappings_ only grows; same
-        // first-match rule as CheckRange).
-        std::uint64_t ext_end = 0;
-        for (const auto& m : mappings_) {
-            if (cur >= m.start && cur < m.end) {
-                if ((m.prot & PROT_READ) == 0) {
-                    return false;
-                }
-                ext_end = m.end;
-                break;
-            }
-        }
-        if (ext_end == 0) {
+        // Readable extent that contains cur (same first-match rule as
+        // CheckRange).
+        const MappingTable::Hit h = mappings_.Find(cur, 1);
+        if (h.end == 0 || (h.prot & PROT_READ) == 0) {
             return false;
         }
+        const std::uint64_t ext_end = h.end;
         const std::uint64_t avail = ext_end - cur;
         const std::uint32_t chunk =
             static_cast<std::uint32_t>(std::min<std::uint64_t>(avail, max - done));
@@ -1059,38 +1077,26 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (size == 0) {
         return true;
     }
-    // Ranges must not wrap and both ends must be in one mapping.
+    // Ranges must not wrap and must lie inside one mapping.
     const std::uint64_t end = std::uint64_t(guest) + size;
     if (end > 0x100000000ULL) {
         return false;
     }
-    // D3 (2026-10-17): same last-hit cache as CheckAccess. String/scan loops
-    // and JNI pointer validation probe the same mapping over and over, each
-    // probe a linear walk over mappings_. Mappings only ever grow (AddMapping
-    // pushes, GuestMunmap never erases), so a cached by-value extent stays
-    // valid forever; thread_local needs no locking. Semantics unchanged: an
-    // early hit returns exactly what the scan would (the scan returns on the
-    // FIRST containing mapping, and the cache is only consulted for a range
-    // inside that same mapping) -- the one assumption is that a later mapping
-    // never lies strictly inside an earlier one, which CheckAccess already
-    // assumes for its identical early-true cache. On a miss we fall through to
-    // the full scan.
-    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_p = 0;
-    if (guest >= hit_s && end <= hit_e) {
-        return write ? ((hit_p & PROT_WRITE) != 0) : ((hit_p & PROT_READ) != 0);
-    }
-    for (const auto& m : mappings_) {
-        if (guest >= m.start && end <= m.end) {
-            hit_s = m.start;
-            hit_e = m.end;
-            hit_p = static_cast<std::uint32_t>(m.prot);
-            if (write) {
-                return (m.prot & PROT_WRITE) != 0;
-            }
-            return (m.prot & PROT_READ) != 0;
+    // Same epoch-checked last-hit cache as CheckAccess.
+    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_epoch = 0;
+    thread_local int hit_p = 0;
+    const std::uint32_t ep = mappings_.epoch();
+    if (ep != hit_epoch || !(guest >= hit_s && end <= hit_e)) {
+        const MappingTable::Hit h = mappings_.Find(guest, size);
+        if (h.end == 0) {
+            return false;
         }
+        hit_s = h.start;
+        hit_e = h.end;
+        hit_p = h.prot;
+        hit_epoch = ep;
     }
-    return false;
+    return write ? ((hit_p & PROT_WRITE) != 0) : ((hit_p & PROT_READ) != 0);
 }
 
 void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
@@ -1120,12 +1126,8 @@ bool Runtime::IsCodeAddress(std::uint32_t va) {
     if (va >= kTrampBase && va < kTrampBase + kTrampSize) {
         return true;
     }
-    for (const auto& m : mappings_) {
-        if (va >= m.start && va < m.end && (m.prot & PROT_EXEC)) {
-            return true;
-        }
-    }
-    return false;
+    const MappingTable::Hit h = mappings_.Find(va, 1);
+    return h.end != 0 && (h.prot & PROT_EXEC) != 0;
 }
 
 // Bulk-write watchpoint: scan a just-written guest range for the WP value.
@@ -1833,7 +1835,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "mmap" || n == "mmap64") {
-        Ret(regs, GuestMmap(a0, a1, a2, a3, 0, 0));
+        // mmap(addr, len, prot, flags, int fd, off_t off): fd at [sp], the
+        // 32-bit off_t at [sp+4]. mmap64's off64_t is 8-aligned at [sp+8].
+        const bool m64 = (n == "mmap64");
+        if (!CheckRange(regs[13], m64 ? 16 : 8, false)) {
+            goto bad_ptr;
+        }
+        std::int32_t gfd = 0;
+        std::memcpy(&gfd, H(regs[13]), 4);
+        std::uint64_t off = 0;
+        if (m64) {
+            std::memcpy(&off, H(regs[13] + 8), 8);
+        } else {
+            std::uint32_t o32 = 0;
+            std::memcpy(&o32, H(regs[13] + 4), 4);
+            off = o32;  // off_t is signed, but a negative offset is EINVAL anyway
+            if (static_cast<std::int32_t>(o32) < 0) {
+                off = ~std::uint64_t(0);
+            }
+        }
+        int hfd = -1;
+        if (!(a3 & MAP_ANONYMOUS) && gfd >= 0) {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(static_cast<std::uint32_t>(gfd));
+            if (it != fd_map_.end()) {
+                hfd = it->second;
+            }
+        }
+        Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, off));
         return;
     }
     if (n == "munmap") {
@@ -6266,9 +6295,9 @@ bad_ptr:
         }
     }
     std::printf("[svc] mappings:\n");
-    for (const auto& m : mappings_) {
-        std::printf("    [%08x-%08x] prot=%d\n", m.start, m.end, m.prot);
-    }
+    mappings_.ForEach([](std::uint32_t st, std::uint32_t en, int pr) {
+        std::printf("    [%08x-%08x] prot=%d\n", st, en, pr);
+    });
     stop_step_ = true;
     if (Dynarmic::A32::Jit* jit = ActiveJit()) {
         jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);

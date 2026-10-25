@@ -10,6 +10,8 @@ inline constexpr std::uint32_t kHeapBase = 0x10000000u;
 // Arena ends 0x50000000, the mmap arena starts 0x70000000: no overlap. Mapped
 // NORESERVE, so the size is virtual only (AGENTS §51; live usage ~250 MB).
 inline constexpr std::uint32_t kHeapSize = 0x40000000u;
+// Guest mmap() results live in [kMmapArenaBase, kTrampBase), above the heap.
+inline constexpr std::uint32_t kMmapArenaBase = 0x70000000u;
 inline constexpr std::uint32_t kTrampBase = 0xF0000000u;
 inline constexpr std::uint32_t kTrampSize = 0x00010000u;  // 64KB
 inline constexpr std::uint32_t kJniTableBase = 0xF0010000u;

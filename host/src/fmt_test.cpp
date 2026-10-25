@@ -42,6 +42,7 @@
 #include <sys/mman.h>
 #include <chrono>
 #include <dirent.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -277,6 +278,9 @@ int main() {
     mod.imports.push_back(abr::Import{"malloc", true, 0, 0, 0});          // 49
     mod.imports.push_back(abr::Import{"calloc", true, 0, 0, 0});          // 50
     mod.imports.push_back(abr::Import{"realloc", true, 0, 0, 0});         // 51
+    mod.imports.push_back(abr::Import{"mmap", true, 0, 0, 0});            // 52
+    mod.imports.push_back(abr::Import{"munmap", true, 0, 0, 0});          // 53
+    mod.imports.push_back(abr::Import{"open", true, 0, 0, 0});            // 54
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1649,6 +1653,57 @@ int main() {
         Expect("realloc(p, huge) = NULL", std::to_string(abr::RuntimeTestAccess::Call(rt, 51, r_huge)), "0");
         Expect("realloc failure keeps the block", abr::RuntimeTestAccess::GuestLiveSize(rt, z1) ? "1" : "0",
                "1");
+    }
+
+    // --- mmap: a file mapping shows the file (fd/offset/flags were dropped,
+    //     returning zero pages); munmap revokes the range; MAP_FIXED outside
+    //     the arena is refused.
+    {
+        const std::string host_dir = "/tmp/opencode/abr-mmaptest";
+        std::filesystem::create_directories(host_dir);
+        {
+            std::FILE* f = std::fopen((host_dir + "/m.bin").c_str(), "wb");
+            std::string blob(8192, 'x');
+            blob.replace(4096, 5, "HELLO");
+            if (f) {
+                std::fwrite(blob.data(), 1, blob.size(), f);
+                std::fclose(f);
+            }
+        }
+        rt.SetFilesDir("/data/data/abr.mmap/files", host_dir);
+        const std::uint32_t kPath = 0x10008100, kSp = 0x10008200;
+        put(kPath, "/data/data/abr.mmap/files/m.bin");
+        const std::uint32_t oargs[4] = {kPath, O_RDONLY, 0, 0};
+        const std::uint32_t gfd = abr::RuntimeTestAccess::Call(rt, 54, oargs);
+        Expect("open for mmap", static_cast<std::int32_t>(gfd) >= 0 ? "1" : "0", "1");
+        abr::RuntimeTestAccess::RegsView in{};
+        in[13] = kSp;
+        const std::uint32_t stk[2] = {gfd, 4096};  // fd, offset
+        std::memcpy(rt.H(kSp), stk, 8);
+        const std::uint32_t margs[4] = {0, 4096, PROT_READ, MAP_PRIVATE};
+        const std::uint32_t m = abr::RuntimeTestAccess::Call(rt, 52, margs, in, nullptr);
+        Expect("file mmap succeeds", (m != 0xFFFFFFFFu && m >= 0x70000000u) ? "1" : "0", "1");
+        if (m != 0xFFFFFFFFu) {
+            Expect("file mmap shows the file at the offset", std::string(rt.H<const char>(m), 5), "HELLO");
+            Expect("mapped range is readable", abr::RuntimeTestAccess::InMapping(rt, m, 4096) ? "1" : "0", "1");
+            const std::uint32_t uargs[4] = {m, 4096, 0, 0};
+            Expect("munmap returns 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 53, uargs)), "0");
+            Expect("munmapped range is no longer readable",
+                   abr::RuntimeTestAccess::InMapping(rt, m, 4) ? "1" : "0", "0");
+        }
+        const std::uint32_t anon_stk[2] = {0xFFFFFFFFu, 0};
+        std::memcpy(rt.H(kSp), anon_stk, 8);
+        const std::uint32_t aargs[4] = {0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS};
+        const std::uint32_t am = abr::RuntimeTestAccess::Call(rt, 52, aargs, in, nullptr);
+        Expect("anonymous mmap is zeroed and writable",
+               (am != 0xFFFFFFFFu && *rt.H<std::uint8_t>(am + 100) == 0 &&
+                abr::RuntimeTestAccess::InMapping(rt, am, 8192))
+                   ? "1"
+                   : "0",
+               "1");
+        const std::uint32_t fargs[4] = {0x10000000u, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED};
+        Expect("MAP_FIXED over the heap is refused",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 52, fargs, in, nullptr)), "4294967295");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
