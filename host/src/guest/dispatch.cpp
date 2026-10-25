@@ -6480,7 +6480,7 @@ bad_ptr:
 // a recursive/errorcheck host mutex answers EPERM and stays locked. Making
 // every guest mutex recursive (as before) also turned a self-relock or
 // trylock of a normal mutex into a silent success.
-static pthread_mutex_t* NewHostMutex(int type) {
+static std::shared_ptr<pthread_mutex_t> NewHostMutex(int type) {
     auto* m = new pthread_mutex_t;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -6489,7 +6489,10 @@ static pthread_mutex_t* NewHostMutex(int type) {
                                                  : PTHREAD_MUTEX_NORMAL);
     pthread_mutex_init(m, &attr);
     pthread_mutexattr_destroy(&attr);
-    return m;
+    return std::shared_ptr<pthread_mutex_t>(m, [](pthread_mutex_t* p) {
+        pthread_mutex_destroy(p);
+        delete p;
+    });
 }
 
 std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr) {
@@ -6498,7 +6501,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     // game mutex (held by a halted worker, or ABBA with a guest critical
     // section spanning an SVC) froze every mutex_-touching thread
     // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
-    pthread_mutex_t* m = nullptr;
+    std::shared_ptr<pthread_mutex_t> m;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (n == "pthread_mutex_init") {
@@ -6562,7 +6565,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
                     return 0;
                 }
                 m = it->second;
-                if (pthread_mutex_trylock(m) != 0) {
+                if (pthread_mutex_trylock(m.get()) != 0) {
                     // Still held by someone: pthread_mutex_destroy on a held
                     // mutex is undefined, and freeing it would leave the
                     // holder with a dangling futex. Leak it.
@@ -6570,12 +6573,8 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
                     mutex_destroy_skipped_++;
                     return 0;
                 }
-                pthread_mutex_unlock(m);
-                mutex_map_.erase(it);
-            }
-            if (m) {
-                pthread_mutex_destroy(m);
-                delete m;
+                pthread_mutex_unlock(m.get());
+                mutex_map_.erase(it);  // freed when the last user lets go
             }
             return 0;
         }
@@ -6596,7 +6595,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     if (n == "pthread_mutex_lock") {
         pend_lock_obj_ = obj;
         pend_lock_tid_ = GuestTid();
-        const int r = pthread_mutex_lock(m);
+        const int r = pthread_mutex_lock(m.get());
         if (r == 0) {
             // The owner is recorded WHILE the pending witness is still set,
             // and the witness is cleared only afterwards: a destroy in the
@@ -6621,7 +6620,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         // with pending-lock:none is a distinct shape worth naming).
         pend_lock_obj_ = obj;
         pend_lock_tid_ = GuestTid();
-        const int r = pthread_mutex_unlock(m);
+        const int r = pthread_mutex_unlock(m.get());
         pend_lock_obj_ = 0;
         pend_lock_tid_ = 0;
         if (r == 0) {
@@ -6630,7 +6629,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_mutex_trylock") {
-        const int r = pthread_mutex_trylock(m);
+        const int r = pthread_mutex_trylock(m.get());
         if (r == 0) {
             MutexNoteLocked(obj, GuestTid());
         }
@@ -6639,55 +6638,53 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     return 22;
 }
 
+static std::shared_ptr<pthread_rwlock_t> NewHostRwlock() {
+    auto* r = new pthread_rwlock_t;
+    pthread_rwlock_init(r, nullptr);
+    return std::shared_ptr<pthread_rwlock_t>(r, [](pthread_rwlock_t* p) {
+        pthread_rwlock_destroy(p);
+        delete p;
+    });
+}
+
 std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
-    // Same discipline as PthreadMutex: resolve under guard, operate outside.
-    // Lazy-creates static initializers (PTHREAD_RWLOCK_INITIALIZER).
-    pthread_rwlock_t* rw = nullptr;
+    // Same discipline as PthreadMutex: resolve under guard (taking a
+    // reference), operate outside. Lazy-creates static initializers
+    // (PTHREAD_RWLOCK_INITIALIZER).
+    std::shared_ptr<pthread_rwlock_t> rw;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (n == "pthread_rwlock_init") {
-            auto* r = new pthread_rwlock_t;
-            pthread_rwlock_init(r, nullptr);
-            rwlock_map_[obj] = r;
+            rwlock_map_[obj] = NewHostRwlock();
             return 0;
         }
         if (n == "pthread_rwlock_destroy") {
-            auto it = rwlock_map_.find(obj);
-            if (it != rwlock_map_.end()) {
-                rw = it->second;
-                rwlock_map_.erase(it);
-            }
-            if (rw) {
-                pthread_rwlock_destroy(rw);
-                delete rw;
-            }
+            rwlock_map_.erase(obj);  // freed when the last user lets go
             return 0;
         }
         auto it = rwlock_map_.find(obj);
         if (it == rwlock_map_.end()) {
-            auto* r = new pthread_rwlock_t;
-            pthread_rwlock_init(r, nullptr);
-            rwlock_map_[obj] = r;
-            it = rwlock_map_.find(obj);
+            it = rwlock_map_.emplace(obj, NewHostRwlock()).first;
         }
         rw = it->second;
     }  // guard released: blocking rdlock/wrlock below must not hold mutex_.
+    pthread_rwlock_t* r = rw.get();
     if (n == "pthread_rwlock_rdlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_rdlock(rw));
+        return static_cast<std::uint32_t>(pthread_rwlock_rdlock(r));
     }
     if (n == "pthread_rwlock_wrlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_wrlock(rw));
+        return static_cast<std::uint32_t>(pthread_rwlock_wrlock(r));
     }
     if (n == "pthread_rwlock_unlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_unlock(rw));
+        return static_cast<std::uint32_t>(pthread_rwlock_unlock(r));
     }
     if (n == "pthread_rwlock_tryrdlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_tryrdlock(rw));
+        return static_cast<std::uint32_t>(pthread_rwlock_tryrdlock(r));
     }
     if (n == "pthread_rwlock_trywrlock") {
-        return static_cast<std::uint32_t>(pthread_rwlock_trywrlock(rw));
+        return static_cast<std::uint32_t>(pthread_rwlock_trywrlock(r));
     }
-    return 22;
+    return EINVAL;
 }
 
 // Host condition variables always run on CLOCK_MONOTONIC so that a wall-clock
@@ -6697,14 +6694,17 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
 // call at 0x38f530) passes a CLOCK_MONOTONIC deadline; plain
 // pthread_cond_timedwait passes a CLOCK_REALTIME one, converted below. No
 // title imports pthread_condattr_setclock, so cond attributes carry no clock.
-static pthread_cond_t* NewHostCond() {
+static std::shared_ptr<pthread_cond_t> NewHostCond() {
     auto* c = new pthread_cond_t;
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     pthread_cond_init(c, &attr);
     pthread_condattr_destroy(&attr);
-    return c;
+    return std::shared_ptr<pthread_cond_t>(c, [](pthread_cond_t* p) {
+        pthread_cond_destroy(p);
+        delete p;
+    });
 }
 
 std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
@@ -6714,12 +6714,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         if (n == "pthread_cond_init") {
             cond_map_[cond] = NewHostCond();
         } else {
-            auto it = cond_map_.find(cond);
-            if (it != cond_map_.end()) {
-                pthread_cond_destroy(it->second);
-                delete it->second;
-                cond_map_.erase(it);
-            }
+            cond_map_.erase(cond);  // freed when the last waiter lets go
         }
         return 0;
     }
@@ -6729,20 +6724,24 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
         it = cond_map_.emplace(cond, NewHostCond()).first;
     }
+    // Own references: the cond and mutex stay alive while this thread waits,
+    // even if another thread destroys them meanwhile.
+    const std::shared_ptr<pthread_cond_t> cv = it->second;
     if (n == "pthread_cond_signal") {
-        return static_cast<std::uint32_t>(pthread_cond_signal(it->second));
+        return static_cast<std::uint32_t>(pthread_cond_signal(cv.get()));
     }
     if (n == "pthread_cond_broadcast") {
-        return static_cast<std::uint32_t>(pthread_cond_broadcast(it->second));
+        return static_cast<std::uint32_t>(pthread_cond_broadcast(cv.get()));
     }
     auto mit = mutex_map_.find(arg1);
     if (mit == mutex_map_.end()) {
         return EINVAL;
     }
+    const std::shared_ptr<pthread_mutex_t> mx = mit->second;
     if (n == "pthread_cond_wait") {
         // Untimed wait: block until signalled, as bionic does.
         mutex_.unlock();
-        const int r = pthread_cond_wait(it->second, mit->second);
+        const int r = pthread_cond_wait(cv.get(), mx.get());
         mutex_.lock();
         return static_cast<std::uint32_t>(r);
     }
@@ -6778,7 +6777,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             ts.tv_nsec = static_cast<long>(mono_ns % 1000000000LL);
         }
         mutex_.unlock();
-        const int r = pthread_cond_timedwait(it->second, mit->second, &ts);
+        const int r = pthread_cond_timedwait(cv.get(), mx.get(), &ts);
         mutex_.lock();
         return static_cast<std::uint32_t>(r);
     }

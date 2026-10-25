@@ -508,9 +508,14 @@ private:
     std::unordered_map<std::string, std::uint64_t> stub_hits_;
 
     // Host-side pthread object maps (guest addr -> host object).
-    std::unordered_map<std::uint32_t, pthread_mutex_t*> mutex_map_;
-    std::unordered_map<std::uint32_t, pthread_rwlock_t*> rwlock_map_;
-    std::unordered_map<std::uint32_t, pthread_cond_t*> cond_map_;
+    // Host sync objects behind guest mutex/rwlock/cond addresses. Shared
+    // ownership: every operation takes its own reference under mutex_ before
+    // it blocks, so a guest *_destroy (which only drops the map entry) can
+    // never free an object another thread is still waiting in. The deleter
+    // runs pthread_*_destroy when the last user lets go.
+    std::unordered_map<std::uint32_t, std::shared_ptr<pthread_mutex_t>> mutex_map_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<pthread_cond_t>> cond_map_;
     std::unordered_map<std::uint32_t, pthread_key_t> key_map_;
     std::uint32_t next_key_ = 1;
     std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value

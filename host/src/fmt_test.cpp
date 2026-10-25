@@ -293,6 +293,7 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_mutexattr_init", true, 0, 0, 0});     // 64
     mod.imports.push_back(abr::Import{"pthread_mutexattr_settype", true, 0, 0, 0});  // 65
     mod.imports.push_back(abr::Import{"pthread_mutex_trylock", true, 0, 0, 0});      // 66
+    mod.imports.push_back(abr::Import{"pthread_cond_destroy", true, 0, 0, 0});       // 67
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1903,6 +1904,39 @@ int main() {
         Expect("static recursive initializer: relock", std::to_string(call(9, kMs)), "0");
         call(11, kMs);
         call(11, kMs);
+    }
+
+    // --- destroying a cond while another thread waits in it must not free
+    //     the host object under the waiter (it now holds a reference).
+    {
+        const std::uint32_t kM2 = 0x10008C00, kC2 = 0x10008C40, kTs2 = 0x10008C80;
+        std::uint32_t wr = 0;
+        std::atomic<bool> waiting{false};
+        std::thread waiter([&] {
+            const std::uint32_t mi[4] = {kM2, 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 8, mi);
+            abr::RuntimeTestAccess::Call(rt, 9, mi);
+            struct timespec now {};
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            const std::int64_t ns = static_cast<std::int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec +
+                                    300000000LL;
+            const std::uint32_t ts[2] = {static_cast<std::uint32_t>(ns / 1000000000LL),
+                                         static_cast<std::uint32_t>(ns % 1000000000LL)};
+            std::memcpy(rt.H(kTs2), ts, 8);
+            const std::uint32_t w[4] = {kC2, kM2, kTs2, 0};
+            waiting = true;
+            wr = abr::RuntimeTestAccess::Call(rt, 39, w);
+            abr::RuntimeTestAccess::Call(rt, 11, mi);
+        });
+        while (!waiting) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const std::uint32_t d[4] = {kC2, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 67, d);  // destroy under the waiter
+        waiter.join();
+        Expect("waiter survives a concurrent cond destroy (ETIMEDOUT)", std::to_string(wr),
+               std::to_string(ETIMEDOUT));
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
