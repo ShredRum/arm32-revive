@@ -246,11 +246,15 @@
         } else if (n == "remainder") {
             r = remainder(xd, yd);
         } else {
-            // AAPCS32: a double-word argument takes an EVEN-numbered register
-            // pair. fma takes three doubles, so the third one follows r2:r3 in
-            // the next even pair, r4:r5 -- reading it from r2:r3 (as this did)
-            // silently used the SECOND argument as the addend.
-            r = fma(xd, yd, f64(regs[4], regs[5]));
+            // AAPCS32: only r0-r3 carry arguments. x and y fill r0:r1 and
+            // r2:r3, so the third double goes on the stack at [sp], 8-byte
+            // aligned (sp is 8-aligned at a public call).
+            if (!CheckRange(regs[13], 8, false)) {
+                goto bad_ptr;
+            }
+            std::uint32_t z[2] = {0, 0};
+            std::memcpy(z, H(regs[13]), 8);
+            r = fma(xd, yd, f64(z[0], z[1]));
         }
         ret64(r);
         return;
@@ -388,11 +392,16 @@
         return;
     }
     if (n == "remquo" || n == "remquof") {
-        // AAPCS32: the third argument (int *quo) follows the two doubles
-        // (r0:r1 and r2:r3) in the next core register, r4. Reading it from
-        // r2 (as this did) pointed at the low word of the second double --
-        // an unmapped guest address, i.e. a loud "BAD guest pointer" halt.
-        const std::uint32_t qp = regs[4];
+        // AAPCS32: remquo(double, double, int*) fills r0-r3 with the doubles,
+        // so quo is on the stack at [sp]; remquof(float, float, int*) passes
+        // quo in r2.
+        std::uint32_t qp = a2;
+        if (n == "remquo") {
+            if (!CheckRange(regs[13], 4, false)) {
+                goto bad_ptr;
+            }
+            std::memcpy(&qp, H(regs[13]), 4);
+        }
         if (n == "remquo") {
             if (!CheckRange(qp, 4, true)) {
                 goto bad_ptr;

@@ -281,6 +281,9 @@ int main() {
     mod.imports.push_back(abr::Import{"mmap", true, 0, 0, 0});            // 52
     mod.imports.push_back(abr::Import{"munmap", true, 0, 0, 0});          // 53
     mod.imports.push_back(abr::Import{"open", true, 0, 0, 0});            // 54
+    mod.imports.push_back(abr::Import{"fma", true, 0, 0, 0});             // 55
+    mod.imports.push_back(abr::Import{"remquo", true, 0, 0, 0});          // 56
+    mod.imports.push_back(abr::Import{"remquof", true, 0, 0, 0});         // 57
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1741,6 +1744,52 @@ int main() {
         Expect("longjmp restores FPSCR", std::to_string(jit.Fpscr() & 0x03000000u), std::to_string(0x03000000u));
         rt.ThreadEnter(nullptr, 0);
         rt.ReleaseCpuId(id);
+    }
+
+    // --- AAPCS32 math args: fma's third double and remquo's quo pointer are
+    //     on the stack; remquof's quo is in r2 (r4 was read before).
+    {
+        auto dw = [](double d, std::uint32_t* lo, std::uint32_t* hi) {
+            std::uint64_t b = 0;
+            std::memcpy(&b, &d, 8);
+            *lo = static_cast<std::uint32_t>(b);
+            *hi = static_cast<std::uint32_t>(b >> 32);
+        };
+        auto fromw = [](std::uint32_t lo, std::uint32_t hi) {
+            const std::uint64_t b = (std::uint64_t(hi) << 32) | lo;
+            double d = 0;
+            std::memcpy(&d, &b, 8);
+            return d;
+        };
+        const std::uint32_t kSp = 0x10008600, kQ = 0x10008700;
+        abr::RuntimeTestAccess::RegsView in{}, out{};
+        in[4] = 0xDEADBEEF;
+        in[5] = 0xDEADBEEF;
+        in[13] = kSp;
+        std::uint32_t a[4], z[2];
+        dw(2.0, &a[0], &a[1]);
+        dw(3.0, &a[2], &a[3]);
+        dw(10.0, &z[0], &z[1]);
+        std::memcpy(rt.H(kSp), z, 8);
+        abr::RuntimeTestAccess::Call(rt, 55, a, in, &out);
+        Expect("fma(2,3,10) third arg from [sp]", std::to_string(fromw(out[0], out[1])), "16.000000");
+        dw(7.0, &a[0], &a[1]);
+        dw(2.0, &a[2], &a[3]);
+        std::memcpy(rt.H(kSp), &kQ, 4);
+        std::memset(rt.H(kQ), 0, 4);
+        abr::RuntimeTestAccess::Call(rt, 56, a, in, &out);
+        std::int32_t q = 0;
+        std::memcpy(&q, rt.H(kQ), 4);
+        Expect("remquo(7,2) remainder", std::to_string(fromw(out[0], out[1])), "-1.000000");
+        Expect("remquo quo via [sp]", std::to_string(q & 7), "4");
+        float fx = 7.0f, fy = 2.0f;
+        std::uint32_t fa[4] = {0, 0, kQ, 0};
+        std::memcpy(&fa[0], &fx, 4);
+        std::memcpy(&fa[1], &fy, 4);
+        std::memset(rt.H(kQ), 0, 4);
+        abr::RuntimeTestAccess::Call(rt, 57, fa, in, &out);
+        std::memcpy(&q, rt.H(kQ), 4);
+        Expect("remquof quo via r2", std::to_string(q & 7), "4");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
