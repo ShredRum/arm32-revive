@@ -9021,11 +9021,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     }  // release gate lock before case thunks (they lock themselves)
     // JNI function table indices (jni.h JNINativeInterface, INCLUDES the 4
     // reserved0-3 slots at 0-3; verified against NDK r27 jni.h 2026-10-09).
-    // fn >= 0x100: JavaVM table (JNIInvokeInterface incl. reserved0-2):
-    // 4 AttachCurrentThread, 6 GetEnv.
+    // fn >= 0x100: JavaVM table (JNIInvokeInterface, jni.h: 3 reserved,
+    // 3 DestroyJavaVM, 4 AttachCurrentThread, 5 DetachCurrentThread,
+    // 6 GetEnv, 7 AttachCurrentThreadAsDaemon). Guest threads share the one
+    // mock JNIEnv, so attach/detach have nothing else to do.
     if (fn >= 0x100) {
         const std::uint32_t jfn = fn - 0x100;
-        if (jfn == 6 || jfn == 4) {  // GetEnv / AttachCurrentThread
+        if (jfn == 5) {  // DetachCurrentThread
+            Ret(regs, 0);  // JNI_OK
+            return;
+        }
+        if (jfn == 3) {  // DestroyJavaVM: not allowed for an app
+            Ret(regs, static_cast<std::uint32_t>(-1));  // JNI_ERR
+            return;
+        }
+        if (jfn == 6 || jfn == 4 || jfn == 7) {  // GetEnv / Attach / AttachAsDaemon
             if (!CheckRange(a1, 4, true)) {
                 std::printf("[jvm] fn#%u BAD env_out %08x -- halting\n", jfn, a1);
                 stop_step_ = true;
@@ -9657,14 +9667,31 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         return;
     }
-    case 171: {  // GetArrayLength(env, array) -> jsize        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        const auto it = jni_array_lens_.find(a1);
-        if (it == jni_array_lens_.end()) {
-            std::printf("[jni] LOUD GetArrayLength unknown array %08x -- halting\n", a1);
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
-            return;
+    case 171: {  // GetArrayLength(env, array) -> jsize
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = jni_array_lens_.find(a1);
+            if (it != jni_array_lens_.end()) {
+                Ret(regs, it->second);
+                return;
+            }
         }
-        Ret(regs, it->second);
+#ifdef __ANDROID__
+        // A real Java array handed to the guest (wrapped handle): ask the JVM.
+        if (void* real = UnwrapObject(a1)) {
+            if (JNIEnv* re = RealEnv()) {
+                const jsize n = re->GetArrayLength(static_cast<jarray>(real));
+                if (re->ExceptionCheck()) {
+                    re->ExceptionClear();
+                }
+                Ret(regs, static_cast<std::uint32_t>(n));
+                return;
+            }
+        }
+#endif
+        std::printf("[jni] LOUD GetArrayLength unknown array %08x -- halting\n", a1);
+        stop_step_ = true;
+        ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
     }
     case 117:  // CallStaticBooleanMethod(V/A)(env, class, method, ...) -> jboolean
@@ -9690,8 +9717,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 if (CheckRange(a3, 4, false)) {
                     std::memcpy(&h, H(a3), 4);
                 }
-            } else if (CheckRange(regs[13], 4, false)) {
-                std::memcpy(&h, H(regs[13]), 4);
+            } else {
+                // Plain "..." form: env, clazz, method fill r0-r2, so the
+                // first variadic argument is in r3 (AAPCS32), not at [sp].
+                h = a3;
             }
             const auto it = h ? jni_strings_.find(h) : jni_strings_.end();
             if (it != jni_strings_.end()) {
