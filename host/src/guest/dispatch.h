@@ -59,6 +59,11 @@ inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 // control flow. Kept as one constant so all four UserConfig sites stay in sync.
 inline constexpr bool kJitCycleCounting = false;
 
+// Bionic arm32 struct dirent: d_name starts after u64 d_ino, s64 d_off,
+// u16 d_reclen and u8 d_type (NDK dirent.h; offsetof checked with the NDK
+// clang for armv7a). Guest code reads names at +19 (Rio 0x2c67b8, 0x508ed0).
+inline constexpr std::uint32_t kGuestDirentNameOff = 19;
+
 // The JNI guest-data arena has two disjoint bump regions. Strings must never
 // grow into the handle table: the old check only looked at kGuestDataSize and
 // let a long enough string overwrite jni_obj_next_'s region.
@@ -722,14 +727,6 @@ private:
     }
     struct HostDir {
         DIR* d = nullptr;
-        // CPU-topology listing (/sys/devices/system/cpu): the game's only
-        // consumer filters cpuN itself, but Bionic readdir_r writes a 280B
-        // struct dirent while the guest passes a 24B buffer (game bug,
-        // faithfully reproduced = heap corruption of neighbors: Fox BAD
-        // 0x78616D63 + crash3 0x73344545, both entry-name bytes at buf+24).
-        // Mitigation: serve only short cpuN/dot entries (a kernel without
-        // long nodes; the game's own filter accepts nothing else).
-        bool cpu_topo = false;
         std::string path;
     };
     std::unordered_map<std::uint32_t, HostDir> dir_map_;  // guest DIR* -> host

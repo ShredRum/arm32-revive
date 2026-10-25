@@ -37,6 +37,8 @@
 #include <vector>
 
 #include "jni_call_words.h"
+#include <dirent.h>
+
 #include "guest/dispatch.h"
 #include "guest/bsd_random.h"
 #include "guest/elf_loader.h"
@@ -232,6 +234,9 @@ int main() {
     mod.imports.push_back(abr::Import{"gmtime", true, 0, 0, 0});          // 23
     mod.imports.push_back(abr::Import{"AAssetManager_fromJava", true, 0, 0, 0});  // 24
     mod.imports.push_back(abr::Import{"AAssetManager_open", true, 0, 0, 0});      // 25
+    mod.imports.push_back(abr::Import{"opendir", true, 0, 0, 0});         // 26
+    mod.imports.push_back(abr::Import{"readdir_r", true, 0, 0, 0});       // 27
+    mod.imports.push_back(abr::Import{"closedir", true, 0, 0, 0});        // 28
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1158,6 +1163,58 @@ int main() {
                std::to_string(abr::RuntimeTestAccess::GuestLiveSize(rt, copy)), "0");
         Expect("tracked UTF map cleared", std::to_string(abr::RuntimeTestAccess::UtfCharCount(rt)),
                "0");
+    }
+
+    // --- readdir_r: bionic arm32 dirent (name @19, type @18, d_reclen
+    //     bytes copied, nothing past the record).
+    {
+        const std::string host_dir = "/tmp/opencode/abr-dirtest";
+        std::filesystem::remove_all(host_dir);
+        std::filesystem::create_directories(host_dir);
+        std::FILE* f = std::fopen((host_dir + "/abc").c_str(), "w");
+        if (f) {
+            std::fclose(f);
+        }
+        rt.SetFilesDir("/data/data/abr.dir/files", host_dir);
+        const std::uint32_t kPath = 0x10007000, kEnt = 0x10007100, kRes = 0x10007300;
+        put(kPath, "/data/data/abr.dir/files");
+        const std::uint32_t oargs[4] = {kPath, 0, 0, 0};
+        const std::uint32_t d = abr::RuntimeTestAccess::Call(rt, 26, oargs);
+        Expect("opendir returns a DIR*", d ? "1" : "0", "1");
+        bool found = false, clean_tail = true, type_ok = false, reclen_ok = false;
+        for (int i = 0; i < 8 && d; i++) {
+            std::memset(rt.H<std::uint8_t>(kEnt), 0xAB, 0x200);
+            const std::uint32_t rargs[4] = {d, kEnt, kRes, 0};
+            const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 27, rargs);
+            std::uint32_t res = 0;
+            std::memcpy(&res, rt.H(kRes), 4);
+            if (r != 0 || res == 0) {
+                Expect("readdir_r end returns 0 and NULL", std::to_string(r) + "/" + std::to_string(res),
+                       "0/0");
+                break;
+            }
+            const std::uint8_t* e = rt.H<std::uint8_t>(kEnt);
+            std::uint16_t rl = 0;
+            std::memcpy(&rl, e + 16, 2);
+            for (std::uint32_t k = rl; k < 0x200; k++) {
+                if (e[k] != 0xAB) {
+                    clean_tail = false;
+                }
+            }
+            if (std::strcmp(reinterpret_cast<const char*>(e + 19), "abc") == 0) {
+                found = true;
+                type_ok = (e[18] == DT_REG);
+                reclen_ok = (rl == 24);
+            }
+        }
+        Expect("readdir_r name at +19", found ? "1" : "0", "1");
+        Expect("readdir_r d_type at +18", type_ok ? "1" : "0", "1");
+        Expect("readdir_r d_reclen = align8(19+len+1)", reclen_ok ? "1" : "0", "1");
+        Expect("readdir_r writes nothing past d_reclen", clean_tail ? "1" : "0", "1");
+        if (d) {
+            const std::uint32_t cargs[4] = {d, 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 28, cargs);
+        }
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

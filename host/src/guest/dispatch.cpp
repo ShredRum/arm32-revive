@@ -5325,134 +5325,57 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 HostDir hd;
                 hd.d = d;
                 hd.path = hp;
-                hd.cpu_topo = (hp == "/sys/devices/system/cpu");
                 dir_map_[h] = hd;
             }
             Ret(regs, h);
             return;
         }
         if (n == "readdir_r") {
-            // args: DIR*(a0), dirent*(a1), dirent**(a2). Guest dirent (bionic):
-            // u64 ino@0, i64 off@8, u16 reclen@16, u8 type@17, name[256]@18.
+            // readdir_r(DIR* a0, struct dirent* a1, struct dirent** a2) -> 0 or
+            // an error number. Bionic arm32 struct dirent (NDK dirent.h,
+            // checked with offsetof): u64 d_ino@0, s64 d_off@8, u16 d_reclen@16,
+            // u8 d_type@18, char d_name[256]@19; sizeof 280. Like bionic's
+            // readdir_r, copy exactly d_reclen bytes: the header, the name and
+            // its NUL, padded to 8. Guest callers size the buffer from
+            // pathconf(_PC_NAME_MAX) + 20 (Rio 0x2c65f4), so a full 280-byte
+            // write would overrun them.
             DIR* dd = nullptr;
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 const auto it = dir_map_.find(a0);
                 if (it == dir_map_.end()) {
-                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    Ret(regs, static_cast<std::uint32_t>(EBADF));
                     return;
                 }
                 dd = it->second.d;
             }
-            // Pre-check is minimal on purpose (guest buffers can be smaller
-            // than a full 280B dirent, e.g. the 24B cpu-topology buffer):
-            // the sized check happens at the bounded write below.
-            if (!CheckRange(a1, 19, true) || !CheckRange(a2, 4, true)) {
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+            if (!CheckRange(a2, 4, true)) {
+                goto bad_ptr;
             }
             errno = 0;
-            struct dirent* de = ::readdir(dd);
-            bool cpu_topo = false;
-            {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                const auto dit = dir_map_.find(a0);
-                if (dit != dir_map_.end()) {
-                    cpu_topo = dit->second.cpu_topo;
-                }
-            }
-            if (cpu_topo) {
-                // Skip entries the game's own filter rejects AND that don't
-                // fit its 24B buffer (18B header + name + NUL): dots + cpuN
-                // pass (game skips dots itself via strcmp, keeps cpuN).
-                // Bounded write below (19+len <= 24) can never touch buf+24.
-                static int skiplog = 0;
-                for (;;) {
-                    if (!de) {
-                        break;
-                    }
-                    const char* nm = de->d_name;
-                    bool keep = false;
-                    if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0))) {
-                        keep = true;
-                    } else if (nm[0] == 'c' && nm[1] == 'p' && nm[2] == 'u') {
-                        int nd = 0;
-                        keep = true;
-                        for (int i = 3; nm[i]; i++) {
-                            if (nm[i] < '0' || nm[i] > '9' || ++nd > 2) {
-                                keep = false;
-                                break;
-                            }
-                        }
-                        if (nd < 1) {
-                            keep = false;
-                        }
-                    }
-                    if (keep) {
-                        break;
-                    }
-                    if (skiplog < 5) {
-                        skiplog++;
-                        std::printf("[files]%s readdir skip \"%s\" (cpu topo, long/non-cpu)%s\n",
-                                    GuestTid() == 1 ? "" : "(T2+)", nm,
-                                    skiplog == 5 ? " (quiet henceforth)" : "");
-                    }
-                    errno = 0;
-                    de = ::readdir(dd);
-                }
-            } else {
-                // Tripwire for future victims: names far beyond any sane
-                // dirent consumer get LOUD-logged (behavior unchanged).
-                if (de && std::strlen(de->d_name) > 64) {
-                    static int longlog = 0;
-                    if (longlog < 5) {
-                        longlog++;
-                        std::printf("[files]%s readdir LONG \"%s\" (%zu)%s\n",
-                                    GuestTid() == 1 ? "" : "(T2+)", de->d_name,
-                                    std::strlen(de->d_name),
-                                    longlog == 5 ? " (quiet henceforth)" : "");
-                    }
-                }
-            }
+            const struct dirent* de = ::readdir(dd);
             if (!de) {
-                std::uint32_t z = 0;
+                const std::uint32_t z = 0;
                 std::memcpy(H(a2), &z, 4);
-                Ret(regs, errno ? errno : 0);
+                Ret(regs, static_cast<std::uint32_t>(errno));
                 return;
             }
-            // Bounded write: cpu-topo entries fit 19+len (<=24, the game's
-            // buffer); other dirs keep the faithful 280B struct.
-            const std::size_t nm_len = std::strlen(de->d_name);
-            const std::size_t wn = cpu_topo ? (19 + nm_len) : 280;
-            if (!CheckRange(a1, wn, true)) {
-                // Capped loud (a too-small buffer for a kept entry would
-                // previously corrupt neighbors silently).
-                static int smalllog = 0;
-                if (smalllog < 5) {
-                    smalllog++;
-                    std::printf("[files]%s readdir SMALLBUF need=%zu%s\n",
-                                GuestTid() == 1 ? "" : "(T2+)", wn,
-                                smalllog == 5 ? " (quiet henceforth)" : "");
-                }
-                Ret(regs, static_cast<std::uint32_t>(-1));
-                return;
+            const std::size_t nm_len = ::strnlen(de->d_name, 255);
+            const std::uint32_t reclen =
+                static_cast<std::uint32_t>((kGuestDirentNameOff + nm_len + 1 + 7) & ~std::size_t(7));
+            if (!CheckRange(a1, reclen, true)) {
+                goto bad_ptr;
             }
             std::uint8_t* p = H<std::uint8_t>(a1);
-            std::memset(p, 0, wn);
-            std::uint64_t ino = de->d_ino;
-            std::memcpy(p, &ino, 8);
-            std::int64_t off = de->d_off;
+            std::memset(p, 0, reclen);
+            const std::uint64_t ino = de->d_ino;
+            const std::int64_t off = de->d_off;
+            const std::uint16_t rl = static_cast<std::uint16_t>(reclen);
+            std::memcpy(p + 0, &ino, 8);
             std::memcpy(p + 8, &off, 8);
-            if (cpu_topo) {
-                const std::uint16_t rl = static_cast<std::uint16_t>(wn);
-                std::memcpy(p + 16, &rl, 2);
-            } else {
-                std::uint16_t rl = de->d_reclen;
-                std::memcpy(p + 16, &rl, 2);
-            }
-            p[17] = de->d_type;
-            std::strncpy(reinterpret_cast<char*>(p + 18), de->d_name,
-                         cpu_topo ? (nm_len + 1) : 255);
+            std::memcpy(p + 16, &rl, 2);
+            p[18] = de->d_type;
+            std::memcpy(p + kGuestDirentNameOff, de->d_name, nm_len);
             std::memcpy(H(a2), &a1, 4);
             Ret(regs, 0);
             return;
