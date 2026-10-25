@@ -1481,6 +1481,17 @@ int main() {
         Expect("atoi(99999999999) saturates", std::to_string(conv(43, "99999999999", &e)), "2147483647");
     }
 
+    // --- TAB is blank but not printable: no _B bit (only SPACE has it).
+    {
+        const std::uint32_t t_print[4] = {'\t', 8, 0, 0};
+        const std::uint32_t s_print[4] = {' ', 8, 0, 0};
+        const std::uint32_t t_blank[4] = {'\t', 3, 0, 0};
+        Expect("iswctype(TAB, print) = 0", std::to_string(abr::RuntimeTestAccess::Call(rt, 20, t_print)), "0");
+        Expect("iswctype(SPACE, print) = _B",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 20, s_print)), "128");
+        Expect("iswctype(TAB, blank) = 1", std::to_string(abr::RuntimeTestAccess::Call(rt, 20, t_blank)), "1");
+    }
+
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead
     //     of halting (Rio filled the arena in 160 s of play, 2026-10-25).
     {

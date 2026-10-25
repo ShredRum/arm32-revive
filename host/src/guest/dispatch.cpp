@@ -1672,7 +1672,10 @@ static std::uint8_t BionicCtypeClass(int c) {
     // test but makes the byte table (and the exact return value) wrong.
     const bool xd = (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
     const bool sp = (c == ' ' || (c >= '\t' && c <= '\r'));
-    const bool bl = (c == ' ' || c == '\t');
+    // _B is part of the printable mask _CTYPE_R (NDK ctype.h:65), so only
+    // SPACE carries it; TAB is _C|_S (BSD ctype_.c). isblank() is a separate
+    // explicit SPACE/TAB test (iswctype case 3).
+    const bool bl = (c == ' ');
     const bool ct = (c < 0x20 || c == 0x7F);
     const bool gr = (c > 0x20 && c < 0x7F);
     if (up) {
