@@ -294,6 +294,10 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_mutexattr_settype", true, 0, 0, 0});  // 65
     mod.imports.push_back(abr::Import{"pthread_mutex_trylock", true, 0, 0, 0});      // 66
     mod.imports.push_back(abr::Import{"pthread_cond_destroy", true, 0, 0, 0});       // 67
+    mod.imports.push_back(abr::Import{"vasprintf", true, 0, 0, 0});       // 68
+    mod.imports.push_back(abr::Import{"fnmatch", true, 0, 0, 0});         // 69
+    mod.imports.push_back(abr::Import{"basename", true, 0, 0, 0});        // 70
+    mod.imports.push_back(abr::Import{"wcslen", true, 0, 0, 0});          // 71
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1937,6 +1941,33 @@ int main() {
         waiter.join();
         Expect("waiter survives a concurrent cond destroy (ETIMEDOUT)", std::to_string(wr),
                std::to_string(ETIMEDOUT));
+    }
+
+    // --- imports that used to answer 0 from the generic stub (G-02).
+    {
+        const std::uint32_t kP = 0x10008D00, kF = 0x10008D40, kVa = 0x10008D80, kS = 0x10008E00;
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t args[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        put(kF, "x=%d");
+        const std::uint32_t v42 = 42;
+        std::memcpy(rt.H(kVa), &v42, 4);
+        std::memset(rt.H(kP), 0, 4);
+        Expect("vasprintf returns the length", std::to_string(call(68, kP, kF, kVa)), "4");
+        std::uint32_t sp = 0;
+        std::memcpy(&sp, rt.H(kP), 4);
+        Expect("vasprintf allocates the string", sp ? std::string(rt.H<const char>(sp)) : "NULL", "x=42");
+        put(kF, "*.png");
+        put(kS, "a/b.png");
+        Expect("fnmatch without PATHNAME matches across /", std::to_string(call(69, kF, kS, 0)), "0");
+        Expect("fnmatch with PATHNAME (bionic 0x2) does not", std::to_string(call(69, kF, kS, 2)), "1");
+        put(kS, "/data/files/save.lua/");
+        const std::uint32_t b = call(70, kS);
+        Expect("basename strips the trailing slash", b ? std::string(rt.H<const char>(b)) : "NULL", "save.lua");
+        const std::uint32_t w[4] = {'a', 'b', 'c', 0};
+        std::memcpy(rt.H(kS), w, sizeof(w));
+        Expect("wcslen counts 4-byte units", std::to_string(call(71, kS)), "3");
     }
 
     // --- Mock jstrings past the 3840-byte arena go to the guest heap instead

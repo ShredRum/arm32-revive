@@ -27,6 +27,7 @@
 #include <sys/vfs.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <fnmatch.h>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #endif
@@ -3481,6 +3482,240 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // no-ops, so every buffer it formatted (its Lua error text, symbol names,
     // JSON fragments) came out untouched/garbage. C99 truncation semantics:
     // at most cap-1 chars + NUL, return = untruncated length.
+    // --- libc calls that used to fall into the generic 0-stub ("success")
+    //     although all six titles import them (G-02). Layouts from the NDK
+    //     headers, sizes checked with the NDK clang for armv7a: struct
+    //     sigaction 16 B, sigset_t 4 B, wchar_t 4 B.
+    if (n == "vasprintf") {
+        // int vasprintf(char** strp, const char* fmt, va_list ap)
+        if (!CheckRange(a0, 4, true) || !CheckRange(a1, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string fmt(GuestStr(a1));
+        GuestFmtArgs st;
+        st.gargs[0] = a0;
+        st.gargs[1] = a1;
+        st.gargs[2] = a2;
+        st.gargs[3] = a3;
+        st.ai = 2;
+        st.via_va = true;
+        st.stack = a2;
+        const std::string out = ExpandPrintf(fmt, st);
+        const std::uint32_t buf = GuestMalloc(static_cast<std::uint32_t>(out.size() + 1));
+        if (!buf) {
+            SetGuestErrno(ENOMEM);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        std::memcpy(H(buf), out.c_str(), out.size() + 1);
+        std::memcpy(H(a0), &buf, 4);
+        Ret(regs, static_cast<std::uint32_t>(out.size()));
+        return;
+    }
+    if (n == "fnmatch") {
+        // Guest (bionic) flags: NOESCAPE 1, PATHNAME 2, PERIOD 4 -- glibc
+        // numbers them differently, so translate. FNM_NOMATCH = 1 in both.
+        std::uint32_t lp = 0, ls = 0;
+        if (!GuestStrnlen(a0, 0xFFFFFFFFu, &lp) || !GuestStrnlen(a1, 0xFFFFFFFFu, &ls)) {
+            goto bad_ptr;
+        }
+        int hf = 0;
+        if (a2 & 0x1u) hf |= FNM_NOESCAPE;
+        if (a2 & 0x2u) hf |= FNM_PATHNAME;
+        if (a2 & 0x4u) hf |= FNM_PERIOD;
+        const int r = ::fnmatch(H<const char>(a0), H<const char>(a1), hf);
+        Ret(regs, r == 0 ? 0u : 1u);
+        return;
+    }
+    if (n == "basename") {
+        // POSIX basename: last path component, "/" for all-slash input, "."
+        // for NULL/"". The result lives in a per-thread guest buffer (bionic
+        // also returns thread-local storage).
+        std::string path;
+        if (a0 != 0) {
+            std::uint32_t len = 0;
+            if (!GuestStrnlen(a0, 0xFFFFFFFFu, &len)) {
+                goto bad_ptr;
+            }
+            path.assign(H<const char>(a0), len);
+        }
+        std::string base;
+        if (path.empty()) {
+            base = ".";
+        } else {
+            std::size_t e = path.find_last_not_of('/');
+            if (e == std::string::npos) {
+                base = "/";
+            } else {
+                const std::size_t b = path.find_last_of('/', e);
+                base = path.substr(b == std::string::npos ? 0 : b + 1, e - (b == std::string::npos ? 0 : b + 1) + 1);
+            }
+        }
+        thread_local std::uint32_t tbuf = 0;
+        constexpr std::uint32_t kBasenameBuf = 4096;  // PATH_MAX
+        if (base.size() >= kBasenameBuf) {
+            SetGuestErrno(ENAMETOOLONG);
+            Ret(regs, 0);
+            return;
+        }
+        if (!tbuf) {
+            tbuf = GuestMalloc(kBasenameBuf);
+        }
+        if (!tbuf) {
+            Ret(regs, 0);
+            return;
+        }
+        std::memcpy(H(tbuf), base.c_str(), base.size() + 1);
+        Ret(regs, tbuf);
+        return;
+    }
+    if (n == "setlocale") {
+        // Only the "C"/"POSIX" locale exists for the guest (bionic of that era
+        // had no others): query or set "C" -> "C", anything else -> NULL.
+        static std::uint32_t c_str = 0;
+        bool want_c = true;
+        if (a1 != 0) {
+            std::uint32_t len = 0;
+            if (!GuestStrnlen(a1, 256, &len)) {
+                goto bad_ptr;
+            }
+            const std::string loc(H<const char>(a1), len);
+            want_c = loc.empty() || loc == "C" || loc == "POSIX";
+        }
+        if (!want_c) {
+            Ret(regs, 0);
+            return;
+        }
+        if (!c_str) {
+            c_str = GuestMalloc(2);
+            if (c_str) {
+                std::memcpy(H(c_str), "C", 2);
+            }
+        }
+        Ret(regs, c_str);
+        return;
+    }
+    if (n == "sigaction" || n == "sigprocmask") {
+        // Guest signal handlers are never delivered (signals belong to the
+        // host process); report "no previous handler / empty mask" instead
+        // of leaving the out-parameter unwritten.
+        const std::uint32_t old = a2;
+        const std::size_t sz = (n == "sigaction") ? 16 : 4;
+        if (old != 0) {
+            if (!CheckRange(old, sz, true)) {
+                goto bad_ptr;
+            }
+            std::memset(H(old), 0, sz);
+        }
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "raise") {
+        if (a0 == 0) {
+            Ret(regs, 0);  // signal 0: existence check only
+            return;
+        }
+        // Fatal-by-default signals end the process on a real device (the
+        // guests raise SIGFPE from __aeabi_ldiv0 and SIGABRT on abort paths):
+        // halt. Others would only reach a handler, and guest handlers are
+        // never installed (sigaction above), so they are ignored.
+        // ARM Linux numbers: ILL 4, TRAP 5, ABRT 6, BUS 7, FPE 8, KILL 9, SEGV 11.
+        const bool fatal = (a0 == 4 || a0 == 5 || a0 == 6 || a0 == 7 || a0 == 8 || a0 == 9 ||
+                            a0 == 11);
+        if (!fatal) {
+            Ret(regs, 0);
+            return;
+        }
+        std::printf("[svc] FATAL raise(%u) pc=%08x lr=%08x -- halting\n", a0, regs[15] - 4, regs[14]);
+        stop_step_ = true;
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->HaltExecution(Dynarmic::HaltReason::UserDefined3);
+        }
+        return;
+    }
+    if (n == "geteuid") {
+        Ret(regs, static_cast<std::uint32_t>(::geteuid()));
+        return;
+    }
+    if (n == "towlower" || n == "towupper") {
+        // C locale: only ASCII letters change.
+        std::uint32_t c = a0;
+        if (n == "towlower" && c >= 'A' && c <= 'Z') c += 32;
+        if (n == "towupper" && c >= 'a' && c <= 'z') c -= 32;
+        Ret(regs, c);
+        return;
+    }
+    if (n == "wcslen") {
+        std::uint32_t i = 0;
+        for (;; i++) {
+            if (!CheckRange(a0 + i * 4, 4, false)) {
+                goto bad_ptr;
+            }
+            std::uint32_t w = 0;
+            std::memcpy(&w, H(a0 + i * 4), 4);
+            if (w == 0) {
+                break;
+            }
+        }
+        Ret(regs, i);
+        return;
+    }
+    if (n == "wmemchr" || n == "wmemcmp" || n == "wmemcpy" || n == "wmemmove" || n == "wmemset") {
+        // n counts 4-byte wchar_t units.
+        const std::uint64_t bytes = std::uint64_t(a2) * 4;
+        if (bytes > 0xFFFFFFFFu) {
+            goto bad_ptr;
+        }
+        const std::size_t nb = static_cast<std::size_t>(bytes);
+        if (n == "wmemset") {
+            if (nb && !CheckRange(a0, nb, true)) {
+                goto bad_ptr;
+            }
+            for (std::uint32_t i = 0; i < a2; i++) {
+                std::memcpy(H(a0 + i * 4), &a1, 4);
+            }
+            Ret(regs, a0);
+            return;
+        }
+        if (n == "wmemcpy" || n == "wmemmove") {
+            if (nb && (!CheckRange(a0, nb, true) || !CheckRange(a1, nb, false))) {
+                goto bad_ptr;
+            }
+            std::memmove(H(a0), H(a1), nb);
+            Ret(regs, a0);
+            return;
+        }
+        if (n == "wmemcmp") {
+            if (nb && (!CheckRange(a0, nb, false) || !CheckRange(a1, nb, false))) {
+                goto bad_ptr;
+            }
+            for (std::uint32_t i = 0; i < a2; i++) {
+                std::int32_t x = 0, y = 0;  // bionic wchar_t is signed 32-bit
+                std::memcpy(&x, H(a0 + i * 4), 4);
+                std::memcpy(&y, H(a1 + i * 4), 4);
+                if (x != y) {
+                    Ret(regs, x < y ? 0xFFFFFFFFu : 1u);
+                    return;
+                }
+            }
+            Ret(regs, 0);
+            return;
+        }
+        // wmemchr(s, c, n)
+        for (std::uint32_t i = 0; i < a2; i++) {
+            if (!CheckRange(a0 + i * 4, 4, false)) {
+                goto bad_ptr;
+            }
+            std::uint32_t w = 0;
+            std::memcpy(&w, H(a0 + i * 4), 4);
+            if (w == a1) {
+                Ret(regs, a0 + i * 4);
+                return;
+            }
+        }
+        Ret(regs, 0);
+        return;
+    }
     if (n == "snprintf" || n == "vsnprintf" || n == "sprintf" || n == "vsprintf") {
         const bool sized = (n == "snprintf" || n == "vsnprintf");
         const bool via_va = (n == "vsnprintf" || n == "vsprintf");
