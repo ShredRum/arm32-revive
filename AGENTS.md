@@ -52,7 +52,13 @@ scripts/build-lib.sh --native          # PC: harness, fmt_test, other tests
 ./host/build-native/fmt_test           # expect "ALL OK"
 ./host/build-native/harness <guest.so> # expect the init line from REVIEW.md
 scripts/deploy.sh <id>                 # arm64 lib + signed APK + device commands
+scripts/build-lib.sh && scripts/swap-lib.sh <id>...   # host-only change: ~1 s per APK
+scripts/devgate.sh <id> [seconds]      # sandbox install + boot gate (default 40 s) + screenshot
 ```
+
+Device gate policy: an ordinary change -> rio + seasons; a core-wide change
+(memory, threads, JNI, loader, network) -> all six. Always look at the
+screenshots: a wrong game state (dialog, black screen) does not raise markers.
 
 Guest `.so` for the harness: `unzip -p <original apk> lib/armeabi-v7a/<lib>`, or
 the copy under `games/<id>/work/**/armeabi-v7a/`; verify its sha256 against

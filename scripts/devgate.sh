@@ -4,7 +4,7 @@
 # Never writes to /storage/emulated (host phone storage).
 set -euo pipefail
 cd "/home/shredrum/Рабочий стол/ab-port"
-G=$1; WAIT=${2:-60}
+G=$1; WAIT=${2:-40}
 DEV=${DEV:-u0_a41@192.168.1.202}; P=8022
 PKG=$(python3 scripts/profile.py $G apk.package)
 APK=games/$G/work/apk_signed.apk
