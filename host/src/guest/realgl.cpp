@@ -236,6 +236,25 @@ static std::uint64_t PixelBytes(std::uint32_t fmt, std::uint32_t typ) {
     }
 }
 
+// Bytes the driver reads or writes for a w x h image of `bpp`-byte pixels
+// with rows aligned to `pname` (GL_UNPACK_ALIGNMENT or GL_PACK_ALIGNMENT,
+// default 4): align_up(w*bpp)*(h-1) + w*bpp (GLES2 3.6.2, 4.3.1; E-05).
+// 0 when bpp is unknown or the image is empty.
+static std::uint64_t ImageBytes(std::uint64_t w, std::uint64_t h, std::uint64_t bpp,
+                                GLenum pname) {
+    if (w == 0 || h == 0 || bpp == 0) {
+        return 0;
+    }
+    GLint a = 4;
+    glGetIntegerv(pname, &a);
+    if (a != 1 && a != 2 && a != 4 && a != 8) {
+        a = 4;
+    }
+    const std::uint64_t row = w * bpp;
+    const std::uint64_t stride = (row + (std::uint64_t)a - 1) / (std::uint64_t)a * (std::uint64_t)a;
+    return stride * (h - 1) + row;
+}
+
 // Index byte size for DrawElements type; 0 = unknown.
 static std::uint64_t IndexSize(std::uint32_t typ) {
     if (typ == 0x1401u) {
@@ -707,7 +726,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // NULL (black texture) + LOUD instead of death.
         std::uint32_t h = Stk(r, sp, 0), fmt = Stk(r, sp, 2), typ = Stk(r, sp, 3),
                       dat = Stk(r, sp, 4);
-        const std::uint64_t need = (std::uint64_t)a3 * h * PixelBytes(fmt, typ);
+        const std::uint64_t need = ImageBytes(a3, h, PixelBytes(fmt, typ), GL_UNPACK_ALIGNMENT);
         const void* p = nullptr;
         if (dat && need > 0 && need < 0x10000000u &&
             r->CheckRange(dat, (std::size_t)need, false)) {
@@ -741,7 +760,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // Same bulk-check reasoning as TexImage2D.
         std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2), typ = Stk(r, sp, 3),
                       dat = Stk(r, sp, 4);
-        const std::uint64_t need = (std::uint64_t)w * h * PixelBytes(fmt, typ);
+        const std::uint64_t need = ImageBytes(w, h, PixelBytes(fmt, typ), GL_UNPACK_ALIGNMENT);
         const void* p = nullptr;
         if (dat && need > 0 && need < 0x10000000u &&
             r->CheckRange(dat, (std::size_t)need, false)) {
@@ -980,7 +999,10 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // graceful path) + LOUD.
         std::uint32_t fmt = Stk(r, sp, 0), typ = Stk(r, sp, 1), dat = Stk(r, sp, 2);
         const std::uint64_t need =
-            (std::uint64_t)(GLsizei)a2 * (GLsizei)a3 * PixelBytes(fmt, typ);
+            (GLsizei)a2 > 0 && (GLsizei)a3 > 0
+                ? ImageBytes((std::uint32_t)a2, (std::uint32_t)a3, PixelBytes(fmt, typ),
+                             GL_PACK_ALIGNMENT)
+                : 0;
         void* p = nullptr;
         if (dat && need > 0 && need < 0x10000000u &&
             r->CheckRange(dat, (std::size_t)need, true)) {
@@ -1047,7 +1069,6 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // lesson: the guest passes exact-size buffers; the old always-16B
         // write smashed neighbors, e.g. the 0x26219C canary slot via a 4B
         // local_2c at glGetIntegerv(0x8B4D) -> 198 identical deaths).
-        GLint v[64] = {0};
         int cnt = 1;
         switch (a0) {
             case 0x0D3A: cnt = 2; break;  // MAX_VIEWPORT_DIMS
@@ -1058,18 +1079,20 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             case 0x0BA2: cnt = 4; break;  // VIEWPORT
             case 0x0C22: cnt = 4; break;  // COLOR_CLEAR_VALUE
             case 0x0C23: cnt = 4; break;  // COLOR_WRITEMASK
-            default: break;               // scalars: 1 (unknown -> 1 + LOUD)
+            case 0x8005: cnt = 4; break;  // BLEND_COLOR
+            default: break;               // scalars
         }
         if (n == "glGetIntegerv") {
-            if (a0 == 0x86A3) {
-                // COMPRESSED_TEXTURE_FORMATS: variable count; ask first.
-                // v[] sized 64 with clamped copy (was v[16] with an
-                // unconditional driver query -> host stack smash at nn>16).
+            // The two variable-length lists: as many values as the driver
+            // reports (COMPRESSED_TEXTURE_FORMATS can exceed 64 on modern
+            // drivers, so the buffer is sized from the count, E-06).
+            if (a0 == 0x86A3 || a0 == 0x8DF8) {
                 GLint nn = 0;
-                glGetIntegerv(0x86A2, &nn);
-                cnt = (nn > 0 && nn < 64) ? nn : 0;
+                glGetIntegerv(a0 == 0x86A3 ? 0x86A2 : 0x8DF9, &nn);
+                cnt = (nn > 0 && nn <= 4096) ? nn : 0;
             }
-            glGetIntegerv((GLenum)a0, v);
+            std::vector<GLint> v(static_cast<std::size_t>(cnt < 4 ? 4 : cnt), 0);
+            glGetIntegerv((GLenum)a0, v.data());
             if (r->CheckRange(a1, (std::uint32_t)(cnt * 4), true)) {
                 for (int i = 0; i < cnt; i++) {
                     std::uint32_t w = (std::uint32_t)v[i];

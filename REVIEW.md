@@ -234,8 +234,8 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | E-02 | S2 | glCopyTexImage2D | falls into the fake shim (never executed, logs UNHANDLED); Rio 0x2522e0 | fixed 6adfb9e |
 | E-03 | S2 | realgl bound-buffer tracking | one per process, but bindings are per GL context (context loss / shared contexts) -> 32-bit offset taken as host pointer (SUSPECTED) | fixed: bindings are asked from the driver at the point of use (no host copy); gate incl. background/resume of all five |
 | E-04 | S2 | client vertex arrays | only 1 byte checked at glVertexAttribPointer, nothing at draw time; bad pointer silently NULL | open |
-| E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | open |
-| E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | open |
+| E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | fixed: ImageBytes uses the driver's UNPACK/PACK_ALIGNMENT |
+| E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | fixed: buffer sized from the driver's count; BLEND_COLOR and SHADER_BINARY_FORMATS counted |
 | E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | open |
 | E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | fixed 4ae3709 (fast path + own lock; enum dispatch still open) |
 | E-08.. | S3/S4 | see report | glBufferData size zero-extension, glGetString slot capacity, fake shim on context-less threads, NOBLEND per draw, unexplained \x01 shader rewrite, dead glGetError code | open |
