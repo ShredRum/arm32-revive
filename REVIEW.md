@@ -38,7 +38,7 @@ USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 
 ## Next steps (as of 2026-10-27)
 
-1. Shipping-path leftovers: nativeDeinit Java-stack forensics (G-06), TEMP-DIAG hexdumps, fake GL shim under #ifndef __ANDROID__ (G-10), HARNESS_FASTMEM/REALGL as config (G-13), Rio diag VAs/pin (F-pin, R-001, G-05), leftover HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE).
+1. Diag-only leftovers (no effect on shipping builds): Rio diag VAs armed for every title under HARNESS_DIAG (G-05/G-11, F-34), build-id pin (F-pin, R-001), HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE), remaining DiagOn-gated TEMP-DIAG logs.
 2. Reliability: F-24/F-25, C-09/10/11/22, E-03..E-07, D-08/D-12/D-13, static fields 145-151, R-003, G-08/G-09/G-14, H-04, F-35/F-36; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
 3. S3/S4 leftovers per area; docs: games/*/JOURNAL.md stale AGENTS section references.
 
@@ -267,10 +267,11 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | fixed 2dadd39 |
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
 | G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | open |
+| G-06 | S3 | apphost nativeDeinit | Java-stack forensics ran ungated on every exit (FindClass/NewObject/3000-char log, leaked refs) | fixed dbcb76c |
 | G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
 | G-09 | S3 | unwind nest guard | leftover racy crutch | open |
-| G-10 | S3 | fake GL shim | still reachable on device (context-less threads, names RealGL doesn't handle) | open |
+| G-10 | S3 | fake GL shim | still reachable on device (context-less threads, names RealGL doesn't handle) | fixed dbcb76c: shim is PC-only; Android sends every gl* to the driver, with or without a context |
 | G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | fixed with R-005 (offline policy, rewrite removed) |
-| G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | open |
+| G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | fixed dbcb76c: fastmem and RealGL hardwired on Android (JitFastmemOn), env only on the PC |
 | G-14 | S3 | fcntl | lock commands report success without doing anything | open |
 | G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | fixed 850c027..6f762fd (-4168 lines; shipping-path TEMP-DIAG/fake GL/nativeDeinit forensics remain) |
