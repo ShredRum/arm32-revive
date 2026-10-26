@@ -29,6 +29,8 @@ library `libabhost.so`:
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
 space, star-wars, star-wars-ii, star-wars-ii-amz. One shared host core.
+Plain `star-wars-ii` is retired (its content servers are dead, R-004): not built,
+not gated; the folder stays. "All titles" below means the other five.
 
 ## 2. Layout
 
@@ -57,7 +59,7 @@ scripts/devgate.sh <id> [seconds]      # sandbox install + boot gate (default 40
 ```
 
 Device gate policy: an ordinary change -> rio + seasons; a core-wide change
-(memory, threads, JNI, loader, network) -> all six. Always look at the
+(memory, threads, JNI, loader, network) -> all five live titles. Always look at the
 screenshots: a wrong game state (dialog, black screen) does not raise markers.
 
 Guest `.so` for the harness: `unzip -p <original apk> lib/armeabi-v7a/<lib>`, or
