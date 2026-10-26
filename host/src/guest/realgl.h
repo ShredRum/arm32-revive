@@ -43,9 +43,6 @@ class RealGL {
     std::uint64_t xwin_ = 0;
     // HARNESS_EGLDEV=N: force EGL device index (default: first that reads
     // back correctly; device list via eglQueryDevicesEXT).
-    // Bound-buffer tracking for offset-vs-pointer duality.
-    std::uint32_t array_buf_ = 0;
-    std::uint32_t element_buf_ = 0;
     std::uint32_t active_tex_ = 0;  // (informational logging only)
     std::uint32_t bound_tex2d_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     // TEMP-DIAG: uploaded texture sizes (w | h<<16) by real handle.

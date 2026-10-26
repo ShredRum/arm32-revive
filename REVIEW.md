@@ -232,7 +232,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 |---|---|---|---|---|
 | E-01 | S1 | realgl glGetUniformfv | passes a uniform LOCATION as an index to glGetActiveUniform and sizes the host buffer by element count, not floats: vec4/mat4 overflow the host heap by 12/60 B (Rio 5 call sites) | fixed 6adfb9e |
 | E-02 | S2 | glCopyTexImage2D | falls into the fake shim (never executed, logs UNHANDLED); Rio 0x2522e0 | fixed 6adfb9e |
-| E-03 | S2 | realgl bound-buffer tracking | one per process, but bindings are per GL context (context loss / shared contexts) -> 32-bit offset taken as host pointer (SUSPECTED) | open |
+| E-03 | S2 | realgl bound-buffer tracking | one per process, but bindings are per GL context (context loss / shared contexts) -> 32-bit offset taken as host pointer (SUSPECTED) | fixed: bindings are asked from the driver at the point of use (no host copy); gate incl. background/resume of all five |
 | E-04 | S2 | client vertex arrays | only 1 byte checked at glVertexAttribPointer, nothing at draw time; bad pointer silently NULL | open |
 | E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | open |
 | E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | open |

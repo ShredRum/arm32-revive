@@ -250,6 +250,14 @@ static std::uint64_t IndexSize(std::uint32_t typ) {
     return 0;
 }
 
+// The buffer bound to `binding` (GL_ARRAY_BUFFER_BINDING or
+// GL_ELEMENT_ARRAY_BUFFER_BINDING) in the current context.
+static GLuint BoundBuffer(GLenum binding) {
+    GLint v = 0;
+    glGetIntegerv(binding, &v);
+    return static_cast<GLuint>(v);
+}
+
 bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std::uint32_t a1,
                     std::uint32_t a2, std::uint32_t a3) {
     if (!Ensure()) {
@@ -570,20 +578,6 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             is_del ? glDeleteTextures((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenTextures((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (n == "glGenBuffers" || n == "glDeleteBuffers") {
-            // Drop stale duality tracking (else a reused handle makes a later
-            // guest VA read as a VBO offset -> wild pointer/crash).
-            if (is_del) {
-                for (std::uint64_t i = 0; i < a0; i++) {
-                    std::uint32_t hd = 0;
-                    std::memcpy(&hd, r->H(a1 + (std::uint32_t)(i * 4)), 4);
-                    if (hd == array_buf_) {
-                        array_buf_ = 0;
-                    }
-                    if (hd == element_buf_) {
-                        element_buf_ = 0;
-                    }
-                }
-            }
             is_del ? glDeleteBuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (n == "glGenFramebuffers" || n == "glDeleteFramebuffers") {
@@ -845,13 +839,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    // --- buffers + draws (bound-buffer tracking resolves offset duality) ---
+    // --- buffers + draws. A vertex/index pointer is a buffer offset when a
+    // buffer is bound, else a guest address. The binding is asked from the
+    // driver at the point of use: bindings are per-context state (GLES2 2.9),
+    // and Android recreates the context when the app is paused, so a copy
+    // kept here could go stale (E-03).
     if (n == "glBindBuffer") {
-        if (a0 == 0x8892u) {
-            array_buf_ = a1;
-        } else if (a0 == 0x8893u) {
-            element_buf_ = a1;
-        }
         glBindBuffer((GLenum)a0, (GLuint)a1);
         r->Ret(regs, 0);
         return true;
@@ -885,7 +878,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // pointer is guest VA unless an array buffer is bound (raw offset).
         std::uint32_t stride = Stk(r, sp, 0), gp = Stk(r, sp, 1);
         const void* p = nullptr;
-        if (array_buf_ != 0) {
+        const bool vbo = BoundBuffer(GL_ARRAY_BUFFER_BINDING) != 0;
+        if (vbo) {
             p = (const void*)(std::uintptr_t)gp;  // VBO offset passthrough
         } else if (gp && r->CheckRange(gp, 1, false)) {
             p = (const void*)r->H(gp);
@@ -894,7 +888,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                               p);
         // TEMP-DIAG (black frame): dump first vertex for float attribs.
         // Gated default-off (was per-attrib-setup printf).
-        if (!array_buf_ && a2 == 0x1406u && p && EnvOn("HARNESS_GLDRAWLOG") &&
+        if (!vbo && a2 == 0x1406u && p && EnvOn("HARNESS_GLDRAWLOG") &&
             r->CheckRange(gp, 16, false)) {
             const float* f = (const float*)p;
             std::printf("%s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", tag, a0, a1,
@@ -909,11 +903,6 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glDrawArrays" || n == "glDrawElements") {
-        // TEMP-DIAG (black frame): HARNESS_NOBLEND=1 disables blending to
-        // test the alpha-kill hypothesis.
-        if (EnvOn("HARNESS_NOBLEND")) {
-            glDisable(GL_BLEND);
-        }
         // TEMP-DIAG (black frame): dump real draw state. ~10 GL round-trips
         // + 4 printfs PER DRAW — gated default-off (old investigation).
         if (EnvOn("HARNESS_GLDRAWLOG")) {
@@ -956,7 +945,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             // byte: driver reads count*sizeof(type) past short buffers ->
             // host SIGSEGV). Short -> skip draw + LOUD instead of death.
             const void* p = nullptr;
-            if (element_buf_ != 0) {
+            const bool ibo = BoundBuffer(GL_ELEMENT_ARRAY_BUFFER_BINDING) != 0;
+            if (ibo) {
                 p = (const void*)(std::uintptr_t)a3;
             } else if (a3) {
                 const std::uint64_t isz = IndexSize(a2);
@@ -971,7 +961,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                                 a2, (unsigned long long)need);
                 }
             }
-            if (p || element_buf_ != 0) {
+            if (p || ibo) {
                 glDrawElements((GLenum)a0, (GLsizei)a1, (GLenum)a2, p);
             }
         }
