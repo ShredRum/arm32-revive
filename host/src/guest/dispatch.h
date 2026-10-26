@@ -54,6 +54,9 @@ bool DiagOn();
 // now the default). Keep all four UserConfig sites + the `flags:` print on this
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
+// One code cache for all Jits (Runtime::NewJit); HARNESS_NOJITSHARE=1 gives
+// every Jit its own cache again.
+inline bool JitShareOn() { return !EnvOn("HARNESS_NOJITSHARE"); }
 
 // G1.1 (2026-10-18, PLAN.md): JIT cycle counting is pure overhead here. The
 // A32 callbacks make AddTicks a no-op and GetTicksRemaining return a constant
@@ -126,6 +129,12 @@ public:
     Dynarmic::ExclusiveMonitor& Monitor() { return monitor_; }
     bool AcquireCpuId(std::size_t* id);
     void ReleaseCpuId(std::size_t id);
+    // Every guest Jit comes from here. Jits whose config differs only in
+    // processor_id share one code cache, so a block is compiled once per
+    // process: a new thread runs code other threads already ran at full
+    // speed instead of compiling it again (60-160 ms per thread measured,
+    // which turned a benign engine race into a self-join abort; R-005).
+    std::unique_ptr<Dynarmic::A32::Jit> NewJit(const Dynarmic::A32::UserConfig& cfg);
 
     // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
@@ -459,6 +468,13 @@ private:
     Dynarmic::ExclusiveMonitor monitor_{kMaxGuestCpus};
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
+    // One shared code cache per Jit configuration (NewJit).
+    struct CodeCacheEntry {
+        Dynarmic::A32::UserConfig cfg;
+        std::shared_ptr<Dynarmic::A32::SharedCodeCache> cache;
+    };
+    std::mutex code_cache_mu_;
+    std::vector<CodeCacheEntry> code_caches_;
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
     std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
     std::uint64_t heap_used_ = 0;          // live bytes telemetry (OOM log)

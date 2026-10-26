@@ -36,8 +36,9 @@ games/seasons/JOURNAL.md); device gate on the sandbox
 (`ssh -p 8022 u0_a41@192.168.1.202`, markers HEAPCORRUPT/HEAPASSERT/CHUNKD/
 USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 
-## Next steps (as of 2026-10-26)
+## Next steps (as of 2026-10-27)
 
+0. R-005 network policy, DECIDED 2026-10-27 (owner): (A) the engine is offline by default, with a per-title switch (profile.toml `network = "offline" | "online"`, default offline) carried into the APK so one title can be given the network. Then drop the TLS rewrite and the connect crutch (B-12). A ready offline implementation (connect/sendto refusal + rcs networkType mock) is saved in work/review/r005/offline-and-diag.diff.
 1. Remaining S2: F-22 RELRO guard under fastmem, H-01/H-02/F-11 16 KB pages, G-01/D-01/D-11 JNI mocks vs real Java (quitRequested is safe to forward), G-02 0-stub imports (vasprintf, fnmatch, ...), C-09/10/11/22, E-03/04/05/06/07, B-12, R-003, R-004.
 2. Dead-code cleanup per work/review/G-crutches.md (~4000 lines), starting with zero-risk deletions.
 3. Then per-title work and docs (games/*/JOURNAL.md stale references to AGENTS sections).
@@ -67,7 +68,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | confirmed |
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
 | R-004 | S2 | star-wars-ii | boot ends at "Asset downloading failed": the ORIGINAL APK does the same on a real device (content servers are dead); star-wars-ii-amz ships the assets and is the playable build | wontfix (original behaviour); 2026-10-26 owner: plain star-wars-ii is no longer built or gated, `games/star-wars-ii/` is kept |
-| R-005 | S1 | TLS ClientHello rewrite (B-14/G-12) | LOAD-BEARING: it breaks the handshake with the live Rovio servers, which is what keeps every title on its offline path. Removing it (tried 2026-10-26, reverted, never committed) let Space reach a server that answers 573 "App is disabled" -> uncaught system_error (EDEADLK) -> abort, and star-wars-ii-amz got "Signed out" and SAVED that state (fusion.registry), so it kept aborting until the app data was cleared. Correct fix: an explicit offline mode (refuse connects to the network by design), then drop the rewrite | open |
+| R-005 | S1 | TLS ClientHello rewrite (B-14/G-12) | LOAD-BEARING: it breaks the handshake with the live Rovio servers, which is what keeps every title on its offline path. Removing it (tried 2026-10-26, reverted, never committed) let Space reach a server that answers 573 "App is disabled" -> uncaught system_error (EDEADLK) -> abort, and star-wars-ii-amz got "Signed out" and SAVED that state (fusion.registry), so it kept aborting until the app data was cleared. 2026-10-27: the EDEADLK abort is not network-specific. With connect() failing (phone offline) Star Wars and Space aborted in ~1/4-1/6 boots on the SHIPPING build too, while the original 32-bit APK under the same strace-injected ENETUNREACH booted 6/6. Cause: the engine's HTTP worker signals "done" and only then drops its reference to the object that owns its own std::thread; if the main thread drops its reference in between, the worker holds the last one and its destructor joins itself (bionic EDEADLK, gnustl throws). Natively the window is microseconds; here a new worker spent 60-90 ms of its ~100 ms life compiling ~2800 blocks again in its own Jit. Fixed by the shared code cache (jitshare, patches/dynarmic): 17/17 offline boots clean. Still open: the network policy (explicit offline mode vs honest network; owner to decide), then drop the rewrite | race fixed; policy open |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
 
 ### Device gates
@@ -81,6 +82,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | 2026-10-25 | Oct 25 2026 15:47:17 (md5 c8f95ed1) | + Rio init #22 runs | rio boots to the menu, markers 0 |
 | 2026-10-26 | lib md5 137e5cdf | + JNI batch (fields, float/J marshalling, JavaVM, GetArrayLength), GL fast path, glGetUniformfv, glCopyTex | rio, seasons, space, star-wars render the menu and run 100 s, markers 0, death.log 0 B, no new tombstones |
 | 2026-10-26 | dead-code removal (5 commits) on top of 16 KB loader, RELRO, G-02, real-first JNI | all six titles boot, markers 0, death.log 0 B; user played one level in each title on the previous build: all OK, scale improved |
+| 2026-10-27 | shared JIT code cache (jitshare=on) + F-23 | five live titles boot to their menus, markers 0, death.log 0 B, no new tombstones; offline (strace-injected ENETUNREACH on connect) Star Wars 16/16 + Space 10/10 boots clean (was ~1/4-1/6 aborts); arm64 fmt_test on the sandbox: shared cache + 4-thread LDREX 800000/800000 x3; steady-state frame time unchanged, boot +~0.1 s |
 | 2026-10-25 | Oct 25 2026 19:24:21 | + shared sync objects, once ordering, key_create, pthread_create/threads_ hardening, g_upd_jit | rio, seasons, space, star-wars alive at the menu after 100 s, markers 0, death.log 0 B, no tombstones |
 
 ### Wave 1 (areas A-D, 2026-10-25)
@@ -221,7 +223,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | H-03 | S3 | apphost.cpp:1230 | stdout "w" + stderr "a" on one log: stdout overwrote stderr lines (= D-16) | fixed 12082e2 |
 | H-04 | S3 | build API 26 vs sandbox API 25, minSdk 16 | lib really needs API 24; build for android-24 and declare minSdk 24 | open |
 | H-05 | S3 | scripts/devgate.sh | tombstones counted without sudo; grep -w matched star-wars-ii-amz; md5 mismatch not fatal | fixed ccd4747 |
-| H-06 | S3 | thirdparty/dynarmic | commit a46601580d55 (azahar-emu) not recorded in the repo | open |
+| H-06 | S3 | thirdparty/dynarmic | commit a46601580d55 (azahar-emu) not recorded in the repo | fixed: patches/dynarmic/README.md records it with the local patch |
 | H-07..H-14 | S4 | see report | no -Wall (9 dead-code warnings), all symbols exported, system llvm-strip and no unstripped lib per build-id, dead strip.libs loop, gen_apphost.py float/double/$ gaps, stale profile/script comments, deploy.sh greps 5 markers, review reports unversioned | open |
 
 **E — GL** (report: work/review/E-gl.md). All six titles import the same 68 gl*; none imports glGetError.

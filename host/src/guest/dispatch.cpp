@@ -7800,7 +7800,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             }
             cfg.global_monitor = &monitor_;
             cfg.processor_id = cpu_id;
-            slot->jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
+            slot->jit = NewJit(cfg);
         }
     }
     if (!slot) {
@@ -7906,6 +7906,26 @@ bool Runtime::AcquireCpuId(std::size_t* id) {
     return false;
 }
 
+std::unique_ptr<Dynarmic::A32::Jit> Runtime::NewJit(const Dynarmic::A32::UserConfig& cfg) {
+    if (!JitShareOn()) {
+        return std::make_unique<Dynarmic::A32::Jit>(cfg);
+    }
+    std::lock_guard<std::mutex> l(code_cache_mu_);
+    for (const CodeCacheEntry& e : code_caches_) {
+        const Dynarmic::A32::UserConfig& c = e.cfg;
+        if (cfg.callbacks == c.callbacks && cfg.global_monitor == c.global_monitor &&
+            cfg.fastmem_pointer == c.fastmem_pointer && cfg.optimizations == c.optimizations &&
+            cfg.enable_cycle_counting == c.enable_cycle_counting) {
+            return std::make_unique<Dynarmic::A32::Jit>(cfg, e.cache);
+        }
+    }
+    auto jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
+    if (auto cache = jit->GetSharedCodeCache()) {  // nullptr: backend cannot share
+        code_caches_.push_back({cfg, std::move(cache)});
+    }
+    return jit;
+}
+
 void Runtime::ReleaseCpuId(std::size_t id) {
     if (id >= kMaxGuestCpus) {
         return;
@@ -7977,7 +7997,8 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         cfg.global_monitor = &monitor_;
         cfg.processor_id = cpu_id;
-        Dynarmic::A32::Jit jit(cfg);
+        const std::unique_ptr<Dynarmic::A32::Jit> jit_owner = NewJit(cfg);
+        Dynarmic::A32::Jit& jit = *jit_owner;
         t_active_jit = &jit;
         // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
         // workers; racy values, liveness only — same caveat as main beat).

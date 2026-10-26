@@ -52,6 +52,12 @@
 #include "guest/elf_loader.h"
 #include "guest/guest_memory.h"
 
+// Scratch directory for file tests: $TMPDIR (Termux has no /tmp), else /tmp.
+static std::string TestTmp() {
+    const char* t = std::getenv("TMPDIR");
+    return (t && *t) ? std::string(t) : std::string("/tmp");
+}
+
 namespace abr {
 // Test-only bridge to the private import dispatcher (see dispatch.h).
 struct RuntimeTestAccess {
@@ -1059,7 +1065,7 @@ int main() {
     {
         const std::uint32_t kFdPath = 0x10006000;
         const std::uint32_t kFdMode = 0x10006100;
-        const std::string host_dir = "/tmp/opencode/abr-fdtest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-fdtest";
         const std::string host_file = host_dir + "/fd-loop.txt";
         std::filesystem::create_directories(host_dir);
         std::filesystem::remove(host_file);
@@ -1173,7 +1179,7 @@ int main() {
     // --- AAssetManager_open failure: a bad deflate entry must free the
     //     guest buffer it allocated before reporting NULL.
     {
-        const std::string bad_zip = "/tmp/opencode/abr-asset-bad.zip";
+        const std::string bad_zip = TestTmp() + "/opencode/abr-asset-bad.zip";
         const std::vector<std::uint8_t> zip = MakeBadAssetZip();
         FILE* zf = std::fopen(bad_zip.c_str(), "wb");
         Expect("bad asset zip written", zf ? "1" : "0", "1");
@@ -1233,7 +1239,7 @@ int main() {
     // --- readdir_r: bionic arm32 dirent (name @19, type @18, d_reclen
     //     bytes copied, nothing past the record).
     {
-        const std::string host_dir = "/tmp/opencode/abr-dirtest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-dirtest";
         std::filesystem::remove_all(host_dir);
         std::filesystem::create_directories(host_dir);
         std::FILE* f = std::fopen((host_dir + "/abc").c_str(), "w");
@@ -1284,7 +1290,7 @@ int main() {
 
     // --- stat: bionic arm32 struct stat is 104 bytes, st_size at +48.
     {
-        const std::string host_dir = "/tmp/opencode/abr-stattest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-stattest";
         std::filesystem::create_directories(host_dir);
         {
             std::FILE* f = std::fopen((host_dir + "/sz").c_str(), "wb");
@@ -1320,7 +1326,7 @@ int main() {
     // --- fseek: the guest long is signed 32-bit; a negative offset must
     //     move backwards (it used to be zero-extended to ~+4 GB).
     {
-        const std::string host_dir = "/tmp/opencode/abr-seektest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-seektest";
         std::filesystem::create_directories(host_dir);
         rt.SetFilesDir("/data/data/abr.seek/files", host_dir);
         const std::uint32_t kPath = 0x10007600, kMode = 0x10007700, kData = 0x10007800;
@@ -1389,7 +1395,7 @@ int main() {
     // --- statfs: reachable (it used to fall into the 0 stub) and fills the
     //     88-byte bionic arm32 struct statfs with 64-bit counts.
     {
-        rt.SetFilesDir("/data/data/abr.sfs/files", "/tmp/opencode/abr-stattest");
+        rt.SetFilesDir("/data/data/abr.sfs/files", TestTmp() + "/opencode/abr-stattest");
         const std::uint32_t kPath = 0x10007B00, kBuf = 0x10007C00;
         put(kPath, "/data/data/abr.sfs/files");
         std::memset(rt.H<std::uint8_t>(kBuf), 0xAB, 0x100);
@@ -1603,7 +1609,8 @@ int main() {
     // --- LDREX/STREX are atomic across threads: 4 Jits on the shared monitor,
     //     each with its own processor id, increment one counter 200000 times
     //     (ldrex/add/strex/bne loop, assembled with the NDK clang). A lost
-    //     update makes the total come out short.
+    //     update makes the total come out short. The Jits come from NewJit,
+    //     so on arm64 they also run from one shared code cache.
     {
         const std::uint32_t kCode = 0x60000000u, kCounter = 0x60000800u;
         abr::RuntimeTestAccess::MapRwx(rt, kCode, 0x1000);
@@ -1616,6 +1623,7 @@ int main() {
         constexpr std::uint32_t kIters = 200000;
         std::vector<std::thread> ths;
         std::atomic<int> halted_ok{0};
+        std::shared_ptr<Dynarmic::A32::SharedCodeCache> caches[kThreads];
         for (int t = 0; t < kThreads; t++) {
             ths.emplace_back([&, t]() {
                 std::size_t id = 0;
@@ -1626,7 +1634,9 @@ int main() {
                 cfg.callbacks = &cb;
                 cfg.global_monitor = &rt.Monitor();
                 cfg.processor_id = id;
-                Dynarmic::A32::Jit jit(cfg);
+                const auto jit_owner = rt.NewJit(cfg);
+                Dynarmic::A32::Jit& jit = *jit_owner;
+                caches[t] = jit.GetSharedCodeCache();
                 rt.ThreadEnter(&jit, 500 + t);
                 jit.Regs()[0] = kCounter;
                 jit.Regs()[3] = kIters;
@@ -1648,6 +1658,13 @@ int main() {
                std::to_string(kThreads * kIters));
         Expect("all increment threads halted cleanly", std::to_string(halted_ok.load()),
                std::to_string(kThreads));
+        // x64 cannot share (nullptr everywhere); arm64 must use one cache.
+        bool one_cache = true;
+        for (int t = 1; t < kThreads; t++) {
+            one_cache = one_cache && caches[t] == caches[0];
+        }
+        Expect("the increment Jits use one code cache (or none can share)",
+               one_cache ? "1" : "0", "1");
         abr::RuntimeTestAccess::TakeStopped(rt);
     }
 
@@ -1711,7 +1728,7 @@ int main() {
     //     returning zero pages); munmap revokes the range; MAP_FIXED outside
     //     the arena is refused.
     {
-        const std::string host_dir = "/tmp/opencode/abr-mmaptest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-mmaptest";
         std::filesystem::create_directories(host_dir);
         {
             std::FILE* f = std::fopen((host_dir + "/m.bin").c_str(), "wb");
@@ -1849,7 +1866,7 @@ int main() {
             std::memcpy(&e, rt.H(rt.ErrnoSlot()), 4);
             return e;
         };
-        const std::string host_dir = "/tmp/opencode/abr-errnotest";
+        const std::string host_dir = TestTmp() + "/opencode/abr-errnotest";
         std::filesystem::remove_all(host_dir);
         std::filesystem::create_directories(host_dir);
         rt.SetFilesDir("/data/data/abr.errno/files", host_dir);

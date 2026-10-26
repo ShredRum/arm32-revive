@@ -618,7 +618,7 @@ std::shared_ptr<HostThread> Enter() {
     }
     cfg.global_monitor = &g_rt->Monitor();  // one monitor for every Jit
     cfg.processor_id = st->cpu_id;
-    st->jit = new Dynarmic::A32::Jit(cfg);
+    st->jit = g_rt->NewJit(cfg).release();
     // Real attach: Java-created threads are attached already; our workers not.
     JNIEnv* env = nullptr;
     if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
@@ -1078,7 +1078,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         }
     }
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
-        "jitopt=%s",
+        "jitopt=%s jitshare=%s",
         std::getenv("HARNESS_FASTMEM") ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
@@ -1086,7 +1086,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         std::getenv("HARNESS_NORELEASE") ? "on" : "off",
         ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
-        JitSafeOpts() ? "safe" : "none");
+        JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off");
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");

@@ -1,0 +1,528 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index bbdf925..ce53676 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "dynarmic/backend/arm64/a32_address_space.h"
+ 
++#include <mcl/assert.hpp>
++
+ #include "dynarmic/backend/arm64/a32_jitstate.h"
+ #include "dynarmic/backend/arm64/abi.h"
+ #include "dynarmic/backend/arm64/devirtualize.h"
+@@ -20,6 +22,8 @@
+ 
+ namespace Dynarmic::Backend::Arm64 {
+ 
++thread_local A32ThreadBinding tls_a32_binding;
++
+ template<auto mfp, typename T>
+ static void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
+     using namespace oaknut::util;
+@@ -78,7 +82,7 @@ static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const
+     oaknut::Label l_addr, l_this;
+ 
+     auto fn = [](const A32::UserConfig& conf, A32::VAddr vaddr) -> T {
+-        return conf.global_monitor->ReadAndMark<T>(conf.processor_id, vaddr, [&]() -> T {
++        return conf.global_monitor->ReadAndMark<T>(tls_a32_binding.processor_id, vaddr, [&]() -> T {
+             return (conf.callbacks->*callback)(vaddr);
+         });
+     };
+@@ -133,7 +137,7 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
+     oaknut::Label l_addr, l_this;
+ 
+     auto fn = [](const A32::UserConfig& conf, A32::VAddr vaddr, T value) -> u32 {
+-        return conf.global_monitor->DoExclusiveOperation<T>(conf.processor_id, vaddr,
++        return conf.global_monitor->DoExclusiveOperation<T>(tls_a32_binding.processor_id, vaddr,
+                                                             [&](T expected) -> bool {
+                                                                 return (conf.callbacks->*callback)(vaddr, value, expected);
+                                                             })
+@@ -181,7 +185,23 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+     return ir_block;
+ }
+ 
++CodePtr A32AddressSpace::GetOrEmitForThread(IR::LocationDescriptor descriptor) {
++    if (CodePtr entry = GetOrEmit(descriptor)) {
++        return entry;
++    }
++    // Shared cache full: this thread continues in its own cache. Blocks only
++    // link within their cache, and a private cache is never shared, so its
++    // GetOrEmit always succeeds (clearing itself when full, as upstream).
++    A32ThreadBinding& b = tls_a32_binding;
++    ASSERT(b.conf && b.overflow);
++    if (!*b.overflow) {
++        *b.overflow = std::make_unique<A32AddressSpace>(*b.conf);
++    }
++    return (*b.overflow)->GetOrEmit(descriptor);
++}
++
+ void A32AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges) {
++    std::unique_lock lock{cache_mutex};
+     InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+ }
+ 
+@@ -323,7 +343,7 @@ void A32AddressSpace::EmitPrelude() {
+         code.BR(X0);
+ 
+         const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+-            return self.GetOrEmit(context.GetLocationDescriptor());
++            return self.GetOrEmitForThread(context.GetLocationDescriptor());
+         };
+ 
+         code.align(8);
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.h b/src/dynarmic/backend/arm64/a32_address_space.h
+index 3b9e9fb..7b798fd 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -5,6 +5,8 @@
+ 
+ #pragma once
+ 
++#include <memory>
++
+ #include "dynarmic/backend/arm64/address_space.h"
+ #include "dynarmic/backend/block_range_information.h"
+ #include "dynarmic/interface/A32/config.h"
+@@ -12,6 +14,18 @@
+ namespace Dynarmic::Backend::Arm64 {
+ 
+ struct EmittedBlockInfo;
++class A32AddressSpace;
++
++// The Jit running on this thread (set by Jit::Run/Step, restored after, so
++// nested runs of another Jit work). A shared AddressSpace holds one config;
++// what differs per Jit comes from here: the exclusive-monitor processor id,
++// and the private overflow cache used once the shared one is full.
++struct A32ThreadBinding {
++    std::size_t processor_id = 0;
++    const A32::UserConfig* conf = nullptr;
++    std::unique_ptr<A32AddressSpace>* overflow = nullptr;
++};
++extern thread_local A32ThreadBinding tls_a32_binding;
+ 
+ class A32AddressSpace final : public AddressSpace {
+ public:
+@@ -19,6 +33,10 @@ public:
+ 
+     IR::Block GenerateIR(IR::LocationDescriptor) const override;
+ 
++    // GetOrEmit, falling back to this thread's overflow cache when a shared
++    // cache is full. Never returns nullptr.
++    CodePtr GetOrEmitForThread(IR::LocationDescriptor descriptor);
++
+     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+ 
+ protected:
+diff --git a/src/dynarmic/backend/arm64/a32_core.h b/src/dynarmic/backend/arm64/a32_core.h
+index 86f6f28..558a4e5 100644
+--- a/src/dynarmic/backend/arm64/a32_core.h
++++ b/src/dynarmic/backend/arm64/a32_core.h
+@@ -16,13 +16,13 @@ public:
+ 
+     HaltReason Run(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
+         const auto location_descriptor = thread_ctx.GetLocationDescriptor();
+-        const auto entry_point = process.GetOrEmit(location_descriptor);
++        const auto entry_point = process.GetOrEmitForThread(location_descriptor);
+         return process.prelude_info.run_code(entry_point, &thread_ctx, halt_reason);
+     }
+ 
+     HaltReason Step(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
+         const auto location_descriptor = A32::LocationDescriptor{thread_ctx.GetLocationDescriptor()}.SetSingleStepping(true);
+-        const auto entry_point = process.GetOrEmit(location_descriptor);
++        const auto entry_point = process.GetOrEmitForThread(location_descriptor);
+         return process.prelude_info.step_code(entry_point, &thread_ctx, halt_reason);
+     }
+ };
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+index 6b38c41..0e19d26 100644
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -21,12 +21,35 @@ namespace Dynarmic::A32 {
+ 
+ using namespace Backend::Arm64;
+ 
++struct SharedCodeCache {
++    explicit SharedCodeCache(const UserConfig& conf)
++            : space(conf) {}
++    A32AddressSpace space;
++};
++
+ struct Jit::Impl final {
+-    Impl(Jit* jit_interface, A32::UserConfig conf)
++    Impl(Jit* jit_interface, A32::UserConfig conf, std::shared_ptr<SharedCodeCache> shared)
+             : jit_interface(jit_interface)
+             , conf(conf)
+-            , current_address_space(conf)
+-            , core(conf) {}
++            , cache(shared ? std::move(shared) : std::make_shared<SharedCodeCache>(conf))
++            , current_address_space(cache->space)
++            , core(conf) {
++        current_address_space.AddSharer();
++    }
++
++    ~Impl() {
++        current_address_space.RemoveSharer();
++    }
++
++    // Points this thread's shared-cache context at this Jit for one Run/Step.
++    struct BindThread {
++        explicit BindThread(Impl& impl)
++                : saved(tls_a32_binding) {
++            tls_a32_binding = {impl.conf.processor_id, &impl.conf, &impl.overflow};
++        }
++        ~BindThread() { tls_a32_binding = saved; }
++        A32ThreadBinding saved;
++    };
+ 
+     HaltReason Run() {
+         ASSERT(!jit_interface->is_executing);
+@@ -36,6 +59,7 @@ struct Jit::Impl final {
+         SCOPE_EXIT {
+             jit_interface->is_executing = false;
+         };
++        BindThread bind{*this};
+ 
+         HaltReason hr = core.Run(current_address_space, current_state, &halt_reason);
+ 
+@@ -52,6 +76,7 @@ struct Jit::Impl final {
+         SCOPE_EXIT {
+             jit_interface->is_executing = false;
+         };
++        BindThread bind{*this};
+ 
+         HaltReason hr = core.Step(current_address_space, current_state, &halt_reason);
+ 
+@@ -126,6 +151,10 @@ struct Jit::Impl final {
+         ASSERT_FALSE("Unimplemented");
+     }
+ 
++    std::shared_ptr<SharedCodeCache> GetSharedCodeCache() const {
++        return cache;
++    }
++
+ private:
+     void PerformRequestedCacheInvalidation(HaltReason hr) {
+         if (Has(hr, HaltReason::CacheInvalidation)) {
+@@ -153,7 +182,9 @@ private:
+     Jit* jit_interface;
+     A32::UserConfig conf;
+     A32JitState current_state{};
+-    A32AddressSpace current_address_space;
++    std::shared_ptr<SharedCodeCache> cache;
++    A32AddressSpace& current_address_space;
++    std::unique_ptr<A32AddressSpace> overflow;  // see A32AddressSpace::GetOrEmitForThread
+     A32Core core;
+ 
+     volatile u32 halt_reason = 0;
+@@ -164,7 +195,14 @@ private:
+ };
+ 
+ Jit::Jit(UserConfig conf)
+-        : impl(std::make_unique<Impl>(this, conf)) {}
++        : impl(std::make_unique<Impl>(this, conf, nullptr)) {}
++
++Jit::Jit(UserConfig conf, std::shared_ptr<SharedCodeCache> code_cache)
++        : impl(std::make_unique<Impl>(this, conf, std::move(code_cache))) {}
++
++std::shared_ptr<SharedCodeCache> Jit::GetSharedCodeCache() const {
++    return impl->GetSharedCodeCache();
++}
+ 
+ Jit::~Jit() = default;
+ 
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae77..bbfcc0a 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -60,17 +60,68 @@ CodePtr AddressSpace::ReverseGetEntryPoint(CodePtr host_pc) {
+     return nullptr;
+ }
+ 
++// Per-thread memo of shared-cache lookups, so a dispatch does not touch the
++// shared lock (an atomic RMW on one cache line all cores contend for). A
++// shared cache is never cleared; any invalidation bumps `generation`, which
++// empties every memo on its next use (a plain load, no contention).
++namespace {
++struct LookupMemo {
++    const AddressSpace* space = nullptr;
++    u64 generation = 0;
++    tsl::robin_map<u64, CodePtr> map;
++};
++thread_local LookupMemo tls_lookup_memo;
++}  // namespace
++
+ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
+-    if (CodePtr block_entry = Get(descriptor)) {
+-        return block_entry;
++    const bool memo_ok = IsShared();
++    LookupMemo& memo = tls_lookup_memo;
++    if (memo_ok) {
++        const u64 gen = generation.load(std::memory_order_acquire);
++        if (memo.space != this || memo.generation != gen) {
++            memo.space = this;
++            memo.generation = gen;
++            memo.map.clear();
++        }
++        if (const auto it = memo.map.find(descriptor.Value()); it != memo.map.end()) {
++            return it->second;
++        }
++    }
++    {
++        std::shared_lock lock{cache_mutex};
++        if (CodePtr block_entry = Get(descriptor)) {
++            if (memo_ok) {
++                memo.map.emplace(descriptor.Value(), block_entry);
++            }
++            return block_entry;
++        }
+     }
+ 
++    // Translation and IR optimization (most of the compile time) read only
++    // guest memory and the config, so threads do them in parallel; only the
++    // emission into the cache is serialized. Two threads may translate the
++    // same block at once: the later one finds it emitted and drops its IR.
+     IR::Block ir_block = GenerateIR(descriptor);
++
++    std::unique_lock lock{cache_mutex};
++    if (CodePtr block_entry = Get(descriptor)) {
++        return block_entry;  // another thread compiled it meanwhile
++    }
++    // Emit clears a full cache (below 1 MiB left); a shared one must not be
++    // cleared, so it stops taking code a little earlier.
++    if (IsShared() && GetRemainingSize() < 2 * 1024 * 1024) {
++        return nullptr;
++    }
++
+     const EmittedBlockInfo block_info = Emit(std::move(ir_block));
++    if (memo_ok) {
++        memo.map.emplace(descriptor.Value(), block_info.entry_point);
++    }
+     return block_info.entry_point;
+ }
+ 
+ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors) {
++    generation.fetch_add(1, std::memory_order_acq_rel);
+     UnprotectCodeMemory();
+ 
+     for (const auto& descriptor : descriptors) {
+@@ -90,6 +141,12 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
+ }
+ 
+ void AddressSpace::ClearCache() {
++    std::unique_lock lock{cache_mutex};
++    ClearCacheLocked();
++}
++
++void AddressSpace::ClearCacheLocked() {
++    generation.fetch_add(1, std::memory_order_acq_rel);
+     block_entries.clear();
+     reverse_block_entries.clear();
+     block_infos.clear();
+@@ -109,7 +166,7 @@ size_t AddressSpace::GetRemainingSize() {
+ 
+ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
+     if (GetRemainingSize() < 1024 * 1024) {
+-        ClearCache();
++        ClearCacheLocked();
+     }
+ 
+     UnprotectCodeMemory();
+@@ -121,9 +178,11 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
+     ASSERT(block_infos.insert({block_info.entry_point, block_info}).second);
+ 
+     Link(block_info);
++    // Make the new block coherent before any existing block branches to it:
++    // with a shared cache another thread may follow the relinked branch at once.
++    mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
+     RelinkForDescriptor(block.Location(), block_info.entry_point);
+ 
+-    mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
+     ProtectCodeMemory();
+ 
+     RegisterNewBasicBlock(block, block_info);
+@@ -287,13 +346,12 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+                 c.NOP();
+             }
+             break;
+-        case BlockRelocationType::MoveToScratch1:
+-            if (target_ptr) {
+-                c.ADRL(Xscratch1, (void*)target_ptr);
+-            } else {
+-                c.ADRL(Xscratch1, prelude_info.return_to_dispatcher);
+-            }
++        case BlockRelocationType::MoveToScratch1: {
++            // An aligned 64-bit literal (see EmitBlockLinkRelocation).
++            const u64 target = mcl::bit_cast<u64>(target_ptr ? (void*)target_ptr : prelude_info.return_to_dispatcher);
++            __atomic_store_n(reinterpret_cast<u64*>(entry_point + ptr_offset), target, __ATOMIC_RELEASE);
+             break;
++        }
+         default:
+             ASSERT_FALSE("Invalid BlockRelocationType");
+         }
+@@ -316,6 +374,10 @@ void AddressSpace::RelinkForDescriptor(IR::LocationDescriptor target_descriptor,
+ 
+ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
+     {
++        // Runs in the SIGSEGV handler of a thread that faulted in JIT code,
++        // where it holds no cache lock; another thread may be emitting.
++        std::unique_lock lock{cache_mutex};
++
+         const auto host_ptr = mcl::bit_cast<CodePtr>(host_pc);
+ 
+         const auto entry_point = ReverseGetEntryPoint(host_ptr);
+diff --git a/src/dynarmic/backend/arm64/address_space.h b/src/dynarmic/backend/arm64/address_space.h
+index 835566b..9258047 100644
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -5,8 +5,10 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <map>
+ #include <optional>
++#include <shared_mutex>
+ 
+ #include <mcl/stdint.hpp>
+ #include <oaknut/code_block.hpp>
+@@ -29,6 +31,10 @@ public:
+ 
+     virtual IR::Block GenerateIR(IR::LocationDescriptor) const = 0;
+ 
++    // Thread safety (ab-port): several Jits may share one AddressSpace and run
++    // concurrently. cache_mutex guards every table below and all code
++    // emission; running code takes no lock. Get, ReverseGet*, Invalidate-
++    // BasicBlocks and the private helpers expect the caller to hold it.
+     CodePtr Get(IR::LocationDescriptor descriptor);
+ 
+     // Returns "most likely" LocationDescriptor assocated with the emitted code at that location
+@@ -37,12 +43,21 @@ public:
+     // Returns "most likely" entry_point associated with the emitted code at that location
+     CodePtr ReverseGetEntryPoint(CodePtr host_pc);
+ 
++    // Locks. Returns nullptr only when the cache is shared and too full to
++    // emit into (a shared cache is never cleared: other threads may be
++    // running its code); the caller then uses a private overflow cache.
+     CodePtr GetOrEmit(IR::LocationDescriptor descriptor);
+ 
+     void InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors);
+ 
++    // Locks.
+     void ClearCache();
+ 
++    // Number of Jits using this cache; more than one makes it shared.
++    void AddSharer() { sharers.fetch_add(1); }
++    void RemoveSharer() { sharers.fetch_sub(1); }
++    bool IsShared() const { return sharers.load() > 1; }
++
+     void DumpDisassembly() const;
+ 
+ protected:
+@@ -62,14 +77,21 @@ protected:
+     }
+ 
+     size_t GetRemainingSize();
++    void ClearCacheLocked();
+     EmittedBlockInfo Emit(IR::Block ir_block);
+     void Link(EmittedBlockInfo& block);
++    // Safe while the block runs on another thread: a branch site is one
++    // instruction (B/NOP; a concurrent fetch sees the old or the new one,
++    // both valid) and an RSB address is one aligned 64-bit literal.
+     void LinkBlockLinks(const CodePtr entry_point, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list);
+     void RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
+ 
+     FakeCall FastmemCallback(u64 host_pc);
+ 
+     const size_t code_cache_size;
++    std::shared_mutex cache_mutex;
++    std::atomic<int> sharers{0};
++    std::atomic<u64> generation{0};  // bumped by every invalidation/clear
+     oaknut::CodeBlock mem;
+     oaknut::CodeGenerator code;
+ 
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.cpp b/src/dynarmic/backend/arm64/emit_arm64.cpp
+index 1ecb542..341bdab 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64.cpp
+@@ -273,15 +273,26 @@ void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget li
+ }
+ 
+ void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
+-    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
+     switch (type) {
+     case BlockRelocationType::Branch:
++        ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
+         code.NOP();
+         break;
+-    case BlockRelocationType::MoveToScratch1:
+-        code.BRK(0);
+-        code.NOP();
++    case BlockRelocationType::MoveToScratch1: {
++        // ab-port: the address is an aligned 8-byte literal (the relocation
++        // points at it), loaded by one LDR. Relinking it is a single atomic
++        // 64-bit store, safe while other threads run this block (a shared
++        // code cache); the upstream ADRP+ADD pair could be seen half-patched.
++        oaknut::Label literal, over;
++        code.LDR(Xscratch1, literal);
++        code.B(over);
++        code.align(8);
++        code.l(literal);
++        ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
++        code.dx(0);
++        code.l(over);
+         break;
++    }
+     default:
+         UNREACHABLE();
+     }
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+index d690aad..f7f0fab 100644
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -270,6 +270,13 @@ private:
+ Jit::Jit(UserConfig conf)
+         : impl(std::make_unique<Impl>(this, std::move(conf))) {}
+ 
++Jit::Jit(UserConfig conf, std::shared_ptr<SharedCodeCache>)
++        : Jit(std::move(conf)) {}
++
++std::shared_ptr<SharedCodeCache> Jit::GetSharedCodeCache() const {
++    return nullptr;
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index e1c5b40..35eadc4 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -17,11 +17,27 @@
+ namespace Dynarmic {
+ namespace A32 {
+ 
++/// Compiled code shared by several Jits (ab-port extension, arm64 backend).
++struct SharedCodeCache;
++
+ class Jit final {
+ public:
+     explicit Jit(UserConfig conf);
++    /**
++     * Creates a Jit that compiles into and runs from `code_cache` (taken from
++     * another Jit with GetSharedCodeCache), so code compiled by one thread is
++     * reused by all. The UserConfig must equal the other Jit's in everything
++     * but processor_id. Jits that share a cache may run concurrently; their
++     * cache is never cleared, and a Jit that finds it full compiles into a
++     * private overflow cache instead. ClearCache/InvalidateCacheRange must not
++     * be used on shared Jits. Backends without support ignore `code_cache`.
++     */
++    Jit(UserConfig conf, std::shared_ptr<SharedCodeCache> code_cache);
+     ~Jit();
+ 
++    /// This Jit's code cache, for sharing; nullptr if the backend cannot share.
++    std::shared_ptr<SharedCodeCache> GetSharedCodeCache() const;
++
+     /**
+      * Runs the emulated CPU.
+      * Cannot be recursively called.

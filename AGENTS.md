@@ -44,7 +44,8 @@ not gated; the folder stays. "All titles" below means the other five.
   `deploy.sh <id>` (both + prints device commands; never touches the device),
   `prepare-tree.sh <id>` (decode + port edits), `profile.py <id> <key>`.
 - `tools/` (gitignored) — Android SDK, NDK r27 (27.2.12479018), build-tools 35,
-  apktool. `thirdparty/` (gitignored) — dynarmic, boost headers.
+  apktool. `thirdparty/` (gitignored) — dynarmic, boost headers. Our dynarmic
+  changes (shared code cache) live in `patches/dynarmic/` with the base commit.
 - `keys/` (gitignored) — the signing keystore installed devices trust. Keep a backup.
 
 ## 3. Build and verify
@@ -90,7 +91,13 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on mallocpad=0 zerofill=off heapwatch=off norelease=off
-clampwrite=off(+jni bound) diag=off jitopt=safe`.
+clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on`.
+
+- `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
+  `patches/dynarmic/README.md`); `HARNESS_NOJITSHARE=1` restores per-thread
+  caches. PC builds use dynarmic's x64 backend, which cannot share: run
+  `fmt_test` on the sandbox (`cmake --build host/build-android --target
+  fmt_test`, copy, run with Termux `TMPDIR`) to test the arm64 path.
 
 - One diagnostics switch: `HARNESS_DIAG` (env or `files/abflags.txt`, a
   KEY=VALUE override file read at boot). Never leave `abflags.txt` on a device.

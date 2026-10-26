@@ -1,0 +1,47 @@
+# Local dynarmic patches
+
+`thirdparty/dynarmic` is not in git. It is a checkout of
+https://github.com/azahar-emu/dynarmic at commit
+`a46601580d5512d324104f985b5f0209dc980ddc` with the patches below applied
+in order (`git -C thirdparty/dynarmic apply ../../patches/dynarmic/NNNN-*.patch`).
+After changing the checkout, refresh the patch with `git -C thirdparty/dynarmic diff`.
+
+## 0001-shared-code-cache.patch
+
+Jits created with `Jit(conf, other.GetSharedCodeCache())` compile into and
+run from one code cache (arm64 backend; the x64 backend ignores it, so PC
+builds keep private caches). Used by `Runtime::NewJit` for every guest Jit.
+Why: each guest thread used to compile all the code it ran again, 60-160 ms
+for a new worker, which opened a race window in the engine's HTTP code
+(R-005 in REVIEW.md).
+
+What makes sharing safe:
+
+- `AddressSpace::cache_mutex` (shared_mutex) guards the block tables and
+  emission; lookups take it shared, emission and the fastmem SIGSEGV callback
+  exclusively. Running code takes no lock. Translation to IR (most of the
+  compile time) runs outside the lock, in parallel; a thread that loses the
+  race to emit a block drops its IR.
+- Each thread memoizes its lookups (`tls_lookup_memo`), so dispatching does
+  not contend on the lock; any invalidation bumps `generation`, which empties
+  the memos.
+- A new block is made coherent (`mem.invalidate`) before existing blocks are
+  relinked to it.
+- Relinking is safe while the block runs elsewhere: a branch site is one
+  instruction (B/NOP), and the RSB return address is an aligned 64-bit
+  literal loaded by one LDR and rewritten by one atomic store (upstream used
+  an ADRP+ADD pair, which a concurrent fetch could see half-patched).
+- The exclusive monitor processor id comes from the running Jit
+  (`tls_a32_binding`, set by `Jit::Run/Step`), not from the shared config.
+- A shared cache is never cleared (other threads may be inside it). When it
+  has less than 2 MiB left, a thread continues in its own private overflow
+  cache, which behaves like upstream (clears itself when full).
+- `ClearCache`/`InvalidateCacheRange` must not be used on shared Jits (the
+  host never calls them).
+
+Measured on the sandbox (Star Wars): steady-state frame time unchanged
+(500 frames 12.2-12.5 s either way); boot to the 100th frame ~0.1 s slower
+(3.4-3.6 s vs 3.3-3.4 s); a new worker no longer spends 60-160 ms compiling.
+
+Kill switch: `HARNESS_NOJITSHARE=1` (env or `files/abflags.txt`); the boot
+`flags:` line shows `jitshare=on|off`.
