@@ -79,6 +79,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | 2026-10-25 | Oct 25 2026 15:34:38 (md5 c5247c11) | + guest mutex types, single tid counter | all six titles reach their usual first screen (star-wars-ii/amz: R-004 dialog), markers 0, death.log 0 B |
 | 2026-10-25 | Oct 25 2026 15:47:17 (md5 c8f95ed1) | + Rio init #22 runs | rio boots to the menu, markers 0 |
 | 2026-10-26 | lib md5 137e5cdf | + JNI batch (fields, float/J marshalling, JavaVM, GetArrayLength), GL fast path, glGetUniformfv, glCopyTex | rio, seasons, space, star-wars render the menu and run 100 s, markers 0, death.log 0 B, no new tombstones |
+| 2026-10-26 | dead-code removal (5 commits) on top of 16 KB loader, RELRO, G-02, real-first JNI | all six titles boot, markers 0, death.log 0 B; user played one level in each title on the previous build: all OK, scale improved |
 | 2026-10-25 | Oct 25 2026 19:24:21 | + shared sync objects, once ordering, key_create, pthread_create/threads_ hardening, g_upd_jit | rio, seasons, space, star-wars alive at the menu after 100 s, markers 0, death.log 0 B, no tombstones |
 
 ### Wave 1 (areas A-D, 2026-10-25)
@@ -269,4 +270,4 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | open |
 | G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | open |
 | G-14 | S3 | fcntl | lock commands report success without doing anything | open |
-| G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | open |
+| G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | fixed 850c027..6f762fd (-4168 lines; shipping-path TEMP-DIAG/fake GL/nativeDeinit forensics remain) |
