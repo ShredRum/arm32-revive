@@ -1,6 +1,8 @@
 // RealGL implementation. See realgl.h for the design contract.
 #include "realgl.h"
 
+#include <atomic>
+
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
@@ -10,6 +12,7 @@
 #include <X11/Xutil.h>
 #endif
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,22 +125,19 @@ bool RealGL::Ensure() {
     return true;
 }
 #else
-// ---- Android: use the caller's GL context (SingleThread model: updates
-// run on the GL thread with Java's context current). No EGL init, no
-// pbuffer, no share group. Presentation is free (Java swaps its own
-// surface after onDrawFrame). Worker threads (no context) -> fake.
+// ---- Android: always the real driver, in the caller's GL context
+// (SingleThread model: updates run on the GL thread with Java's context
+// current). No EGL init, no pbuffer, no share group. Presentation is free
+// (Java swaps its own surface after onDrawFrame). A call from a thread with
+// no current context goes to the driver too, which ignores it as it would
+// for the original library (never seen on the five titles).
 bool RealGL::Ensure() {
-    static const bool enabled = std::getenv("HARNESS_REALGL") != nullptr;  // read once
-    if (!enabled) {
-        return false;
-    }
     if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
-        static int nolog = 0;
-        if (nolog < 3) {
-            nolog++;
-            std::printf("[realgl] android: no current ctx -> fake\n");
+        static std::atomic<int> nolog{0};
+        if (nolog.fetch_add(1) < 3) {
+            std::printf("[realgl] android: gl call without a current context (driver ignores it)\n");
         }
-        return false;
+        return true;
     }
     {
         static int yeslog = 0;

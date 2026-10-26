@@ -613,7 +613,7 @@ std::shared_ptr<HostThread> Enter() {
     cfg.optimizations =
         JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     cfg.enable_cycle_counting = kJitCycleCounting;
-    if (std::getenv("HARNESS_FASTMEM")) {
+    if (JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
     }
     cfg.global_monitor = &g_rt->Monitor();  // one monitor for every Jit
@@ -884,38 +884,6 @@ std::string FindApk() {
 }  // namespace
 
 std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* thiz, ...) {
-#ifdef __ANDROID__
-    // Deinit forensics: who calls nativeDeinit (orderly-suicide chain)?
-    // Dump the Java stack via real ART (no race: runs synchronously).
-    if (std::strstr(name, "nativeDeinit") && abr::GuestCallbacks::g_real_env_hook) {
-        JNIEnv* re = static_cast<JNIEnv*>(abr::GuestCallbacks::g_real_env_hook());
-        if (re && !re->ExceptionCheck()) {
-            jclass exCls = re->FindClass("java/lang/Exception");
-            jmethodID exCtor = exCls ? re->GetMethodID(exCls, "<init>", "()V") : nullptr;
-            jobject ex = (exCls && exCtor) ? re->NewObject(exCls, exCtor) : nullptr;
-            jclass logCls = re->FindClass("android/util/Log");
-            jmethodID strace = logCls ? re->GetStaticMethodID(logCls, "getStackTraceString",
-                                                              "(Ljava/lang/Throwable;)Ljava/lang/String;")
-                                      : nullptr;
-            jstring js = (logCls && strace && ex)
-                             ? static_cast<jstring>(re->CallStaticObjectMethod(logCls, strace, ex))
-                             : nullptr;
-            if (js && !re->ExceptionCheck()) {
-                const char* c = re->GetStringUTFChars(js, nullptr);
-                if (c) {
-                    Log("deinit-JAVA-STACK:\n%.3000s", c);
-                    re->ReleaseStringUTFChars(js, c);
-                }
-                re->DeleteLocalRef(js);
-            } else {
-                re->ExceptionClear();
-            }
-            if (ex) {
-                re->DeleteLocalRef(ex);
-            }
-        }
-    }
-#endif
     va_list ap;
     va_start(ap, thiz);
     static int calln = 0;
@@ -1034,16 +1002,12 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     if (diag) {
         setenv("HARNESS_DIAG", "1", 1);
     }
-    // Fastmem on (proven neutral; a no-fastmem boot is ~10x slower).
-    setenv("HARNESS_FASTMEM", "1", 1);
     // Experiments go through files/abflags.txt (applied after these defaults,
     // logged as overrides), so the log always states what was actually on.
     // Per-thread last import for the stuck-update watchdog dump.
     if (diag) setenv("HARNESS_LASTSVC", "1", 1);
     // Worker import traffic (THREADLOG is capped at 5/import).
     if (diag) setenv("HARNESS_THREADLOG", "1", 1);
-    // Real GLES on device (shared Handle; caller's context, no EGL init).
-    setenv("HARNESS_REALGL", "1", 1);
     // Device-side experiment flags: <files>/abflags.txt, one KEY=VALUE per
     // line ('#' comments ok), applied AFTER the shipping defaults so a pushed
     // file overrides them without a rebuild. Every override is logged, so a
@@ -1079,7 +1043,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     }
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
         "jitopt=%s jitshare=%s",
-        std::getenv("HARNESS_FASTMEM") ? "on" : "off",
+        JitFastmemOn() ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",

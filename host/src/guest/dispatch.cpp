@@ -2344,17 +2344,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
         }
-        // TEMP-DIAG (font wall): log len-3 compares to catch the PVR one.
-        // Silenced on Android (logd IPC per line taxes the slow JIT loop).
-#ifndef __ANDROID__
-        if (a2 == 3) {
-            const std::uint8_t* p0 = H<const std::uint8_t>(a0);
-            const std::uint8_t* p1 = H<const std::uint8_t>(a1);
-            std::printf("[memcmp3] %08x: %02x %02x %02x vs %08x: %02x %02x %02x -> %d\n",
-                        a0, p0[0], p0[1], p0[2], a1, p1[0], p1[1], p1[2],
-                        std::memcmp(p0, p1, 3));
-        }
-#endif
         Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
         return;
     }
@@ -4044,8 +4033,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // and the original throw is ~512 levels up, intact for forensics.
             std::printf("[unwind] LOUD nesting %u deep at pc=%08x sp=%08x -- halting\n", tr.depth,
                         a0, a1);
-            // TEMP-DIAG (spiral root cause): dump R7 + the 6 words the SU16
-            // pop-frame reads ([R7-12..R7+8]): stale self-ref vs valid frame?
+            // Forensics for this fatal halt: R7 and the words the SU16
+            // pop-frame reads ([R7-12..R7+8]).
             {
                 std::uint32_t r7v = regs[7];
                 std::printf("[unwind] R7=%08x SP=%08x LR=%08x : ", r7v, regs[13], regs[14]);
@@ -5218,9 +5207,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                (socklen_t)addrlen);
             if (r < 0) {
                 set_guest_errno(errno);
-                // TEMP-DIAG (network bring-up): errors are the signal.
-                std::printf("[netsock]%s %s(gfd %u %uB) -> -1 errno %d\n",
-                            GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a2, errno);
+                if (DiagOn()) {
+                    std::printf("[netsock]%s %s(gfd %u %uB) -> -1 errno %d\n",
+                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a2, errno);
+                }
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -5965,7 +5955,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- libm: PURE-MATH-BEGIN ---
 #include "math_thunks.inc"
     // --- libm: PURE-MATH-END ---
-    // --- GLES fake-success shim (bring-up ONLY): lets shader/program setup
+#ifndef __ANDROID__
+    // --- GLES fake-success shim, PC harness only (no GL there). On Android
+    // every gl* import the titles have goes to the driver (RealGL), with or
+    // without a current context, exactly as the original library would.
+    // Bring-up history: it let shader/program setup
     // pass so update->render progresses to the first frame. Real GLES thunks
     // (surfaceless EGL + host forwarding) come next; this shim is LOUD about
     // what it fakes. Nonzero handles, status queries report GL_TRUE, logs
@@ -6179,6 +6173,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
+#endif  // !__ANDROID__
     if (n == "__system_property_get") {
         // int __system_property_get(const char* name, char* value): copies the
         // value (at most PROP_VALUE_MAX = 92 bytes incl. NUL) and returns its
@@ -7630,7 +7625,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
             cfg.optimizations =
                 JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
             cfg.enable_cycle_counting = kJitCycleCounting;
-            if (std::getenv("HARNESS_FASTMEM")) {
+            if (JitFastmemOn()) {
                 cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
             }
             // Comparator slots are permanent: their ids are never released.
@@ -7835,7 +7830,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         cfg.optimizations =
             JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
         cfg.enable_cycle_counting = kJitCycleCounting;
-        if (std::getenv("HARNESS_FASTMEM")) {
+        if (JitFastmemOn()) {
             cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
         }
         cfg.global_monitor = &monitor_;
@@ -9522,9 +9517,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (DiagOn()) {
             std::printf("[jni] NewObject%s %s -> %08x\n", vtag, mdesc.c_str(), o);
         }
-        // TEMP-DIAG (audio): log the native audio handle. NewObjectV
-        // varargs live at the va_list pointer (a3), NOT at sp.
-        if (mdesc.find("AudioOutput.<init>") != std::string::npos) {
+        // The native audio handle (NewObjectV varargs live at the va_list
+        // pointer a3, not at sp).
+        if (DiagOn() && mdesc.find("AudioOutput.<init>") != std::string::npos) {
             std::uint32_t w0 = 0, w1 = 0;
             if (CheckRange(a3, 4, false)) {
                 std::memcpy(&w0, H(a3), 4);
@@ -9847,9 +9842,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
         }
         const char* vtag = (fn == 117) ? "" : ((fn == 118) ? "V" : "A");
-        // TEMP-DIAG (mock audit): log the feature string arg (jstring).
-        // V/A pass args behind a pointer (va_list / jvalue*); plain reads
-        // the jstring handle from the stack.
+        // The feature string argument (jstring) of hasSystemFeature. V/A
+        // pass args behind a pointer (va_list / jvalue*).
         std::string farg;
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -10444,19 +10438,6 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
                         t_tid, exec ? "exec" : "read", addr, sizeof(T),
                         rt_->ActiveJit()->Regs()[15], rt_->ActiveJit()->Regs()[14],
                         rt_->ActiveJit()->Regs()[4]);
-            // TEMP-DIAG (sessions epilogue crash): hexdump around r4 (r8+40
-            // shared_ptr block) to see the struct layout.
-            {
-                const std::uint32_t badr4 = rt_->ActiveJit()->Regs()[4];
-                if (rt_->CheckRange(badr4 - 64, 80, false)) {
-                    const std::uint8_t* p = rt_->H<const std::uint8_t>(badr4 - 64);
-                    std::printf("[mem] r4-64:");
-                    for (int j = 0; j < 80; j++) {
-                        std::printf(" %02x", p[j]);
-                    }
-                    std::printf("\n");
-                }
-            }
             rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
@@ -10715,17 +10696,19 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
             const std::uint32_t need = (a0 == 10 /*AF_INET6*/) ? 46u : 16u;
             if ((a0 != 2 && a0 != 10) || a3 < need || !CheckRange(a1, 4, false) ||
                 !CheckRange(a2, need, true)) {
-                // TEMP-DIAG: which check fails?
-                const std::uint8_t* sp2 =
-                    (a1 && CheckRange(a1, 16, false)) ? H<const std::uint8_t>(a1) : nullptr;
-                std::printf("[netsock] ntop-FAIL af=%u size=%u src=%08x dst=%08x%s", a0, a3, a1,
-                            a2, sp2 ? " bytes:" : " (src unreadable)");
-                if (sp2) {
-                    for (int q = 0; q < 16; q++) {
-                        std::printf(" %02x", sp2[q]);
+                if (DiagOn()) {  // which check failed
+                    const std::uint8_t* sp2 =
+                        (a1 && CheckRange(a1, 16, false)) ? H<const std::uint8_t>(a1) : nullptr;
+                    std::printf("[netsock] ntop-FAIL af=%u size=%u src=%08x dst=%08x%s", a0, a3,
+                                a1, a2, sp2 ? " bytes:" : " (src unreadable)");
+                    if (sp2) {
+                        for (int q = 0; q < 16; q++) {
+                            std::printf(" %02x", sp2[q]);
+                        }
                     }
+                    std::printf("\n");
                 }
-                std::printf("\n");
+                SetGuestErrno(a0 != 2 && a0 != 10 ? EAFNOSUPPORT : ENOSPC);
                 Ret(regs, 0);
                 return;
             }

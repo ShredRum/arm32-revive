@@ -1,6 +1,6 @@
-// RealGL: host GLES2 backend for the Dynarmic guest (PC harness first,
-// same code forwards to the real driver on device). Behind HARNESS_REALGL=1
-// until stable; the fake-success shim stays the default.
+// RealGL: host GLES2 backend for the Dynarmic guest. On Android it is always
+// on and forwards every gl* to the real driver; on the PC harness it is
+// opt-in (HARNESS_REALGL=1), the fake-success shim being the default there.
 // Design: game handles ARE real host handles (Create*/Gen* call straight
 // through) — no mapping tables. Guest pointers are translated to host
 // pointers at call time (guest heap is bump-stable, so GL-retained client

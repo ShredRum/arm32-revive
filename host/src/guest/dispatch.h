@@ -54,6 +54,15 @@ bool DiagOn();
 // now the default). Keep all four UserConfig sites + the `flags:` print on this
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
+// Fastmem (direct host access for guest loads/stores): always on in the
+// product, where a boot without it is ~10x slower; opt-in on the PC harness.
+inline bool JitFastmemOn() {
+#ifdef __ANDROID__
+    return true;
+#else
+    return std::getenv("HARNESS_FASTMEM") != nullptr;
+#endif
+}
 // One code cache for all Jits (Runtime::NewJit); HARNESS_NOJITSHARE=1 gives
 // every Jit its own cache again.
 inline bool JitShareOn() { return !EnvOn("HARNESS_NOJITSHARE"); }

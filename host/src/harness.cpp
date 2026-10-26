@@ -751,7 +751,7 @@ int main(int argc, char** argv) {
     // 4GB reservation; faults fall back to callbacks (BAD halting
     // preserved via slow path). Diags that sniff callbacks (WP/ScanWP/
     // HEXFIND/memcmp3) go blind under fastmem. Default off.
-    if (std::getenv("HARNESS_FASTMEM")) {
+    if (abr::JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());
     }
     std::size_t main_cpu = 0;
