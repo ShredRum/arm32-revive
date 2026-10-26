@@ -39,7 +39,7 @@ USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 ## Next steps (as of 2026-10-27)
 
 1. Diag-only leftovers (no effect on shipping builds): Rio diag VAs armed for every title under HARNESS_DIAG (G-05/G-11, F-34), build-id pin (F-pin, R-001), HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE), remaining DiagOn-gated TEMP-DIAG logs.
-2. Reliability: F-24/F-25, C-09/10/11/22, E-03..E-07, D-08/D-12/D-13, static fields 145-151, R-003, G-08/G-09/G-14, H-04, F-35/F-36; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
+2. Reliability (owner 2026-10-27: only fixes with no runtime cost; guards against cases that do not occur are not worth a cost): F-24/F-25, C-09, C-22 (risky: may stop a title that reads NULL today), D-08/D-12/D-13, static fields 145-151, G-08/G-09/G-14, H-04, F-35/F-36; E-04 and C-11 need a measured cost first; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
 3. S3/S4 leftovers per area; docs: games/*/JOURNAL.md stale AGENTS section references.
 
 ## Areas and waves
@@ -68,7 +68,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
 | R-004 | S2 | star-wars-ii | boot ends at "Asset downloading failed": the ORIGINAL APK does the same on a real device (content servers are dead); star-wars-ii-amz ships the assets and is the playable build | wontfix (original behaviour); 2026-10-26 owner: plain star-wars-ii is no longer built or gated, `games/star-wars-ii/` is kept |
 | R-005 | S1 | TLS ClientHello rewrite (B-14/G-12) | LOAD-BEARING: it breaks the handshake with the live Rovio servers, which is what keeps every title on its offline path. Removing it (tried 2026-10-26, reverted, never committed) let Space reach a server that answers 573 "App is disabled" -> uncaught system_error (EDEADLK) -> abort, and star-wars-ii-amz got "Signed out" and SAVED that state (fusion.registry), so it kept aborting until the app data was cleared. 2026-10-27: the EDEADLK abort is not network-specific. With connect() failing (phone offline) Star Wars and Space aborted in ~1/4-1/6 boots on the SHIPPING build too, while the original 32-bit APK under the same strace-injected ENETUNREACH booted 6/6. Cause: the engine's HTTP worker signals "done" and only then drops its reference to the object that owns its own std::thread; if the main thread drops its reference in between, the worker holds the last one and its destructor joins itself (bionic EDEADLK, gnustl throws). Natively the window is microseconds; here a new worker spent 60-90 ms of its ~100 ms life compiling ~2800 blocks again in its own Jit. Fixed by the shared code cache (jitshare, patches/dynarmic): 17/17 offline boots clean. Network policy (owner, 2026-10-27): offline by default with a per-title switch (profile.toml host.network, packaged as assets/guestlib/<abi>/network); offline titles refuse connect/sendto to non-loopback addresses with ENETUNREACH and keep rcs networkType() on the "" mock. The ClientHello rewrite and the 10 s connect crutch are gone | fixed |
-| R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
+| R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | wontfix 2026-10-27 (owner): real local/global ref lifetimes risk use-after-free for ~2 MB/day |
 
 ### Device gates
 
@@ -161,7 +161,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | C-07 | S2 | guest tids | collide with Java thread ids (from 1000) after 998 pthread_create -> shared errno/TLS | fixed 0df4897 |
 | C-08 | S2 | pthread_once | "done" published without memory ordering | fixed 500d528 |
 | C-09 | S2 | pthread_once | Java threads never release once controls after an abnormal halt | open |
-| C-10 | S2 | thread stacks | in the heap with no guard page | open |
+| C-10 | S2 | thread stacks | in the heap with no guard page | wontfix 2026-10-27 (owner): a guard needs its own MappingTable entry per thread (linear Find, no removal) = a cost on every pointer check, for a case that does not occur |
 | C-11 | S2 | dlmalloc | 64-bit host pointers in guest-writable memory: wild guest write -> host write | open |
 | C-12 | S2 | Rio init #22 | still parked; its "wild" pointer 0xFFFF0FA0 is the kuser barrier the host now emulates; 0x1aeb24 is a real flag-guarded initializer also called lazily from 4 sites -> un-park and retest | fixed a200ffe |
 | C-13 | S2 | mmap | = A-02 (file mappings come back zeroed; Rio MemoryMappedFile, 3 callers of 0x2cd2b8) | fixed a1bbccd |
@@ -236,7 +236,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | E-04 | S2 | client vertex arrays | only 1 byte checked at glVertexAttribPointer, nothing at draw time; bad pointer silently NULL | open |
 | E-05 | S2 | tex/readback sizes | GL_UNPACK/PACK_ALIGNMENT ignored | fixed: ImageBytes uses the driver's UNPACK/PACK_ALIGNMENT |
 | E-06 | S2 | glGetIntegerv(COMPRESSED_TEXTURE_FORMATS) | fixed 64-entry host array still overflowable (latent) | fixed: buffer sized from the driver's count; BLEND_COLOR and SHADER_BINARY_FORMATS counted |
-| E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | open |
+| E-07 | S2 | GL error paths | SHORTBUF/SHORTIDX/BAD-PTR/SMALLBUF/UNHANDLED neither halt nor print LOUD | fixed: LOUD + HaltGuest on every GL bad-pointer/short-buffer path; svc bad_ptr line says LOUD |
 | E-perf | S2 | gl path | ~241 name compares + uncached getenv + std::string alloc + snprintf per call (~0.4 us desktop, est. 1-2 ms/frame); global mutex_ held across slow driver calls blocks other threads' malloc/pthread/JNI. Design: resolve gl imports to an enum at load, drop mutex_ from the GL path, per-context state | fixed 4ae3709 (fast path + own lock; enum dispatch still open) |
 | E-08.. | S3/S4 | see report | glBufferData size zero-extension, glGetString slot capacity, fake shim on context-less threads, NOBLEND per draw, unexplained \x01 shader rewrite, dead glGetError code | open |
 

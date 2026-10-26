@@ -435,8 +435,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                             cnt, i);
             }
         }
-        if (DiagOn() || !ok) {  // a BAD-PTR stays visible without the flag
-            std::printf("%s shader=%u parts=%u %s\n", tag, s, cnt, ok ? "ok" : "BAD-PTR");
+        if (!ok) {  // a wild guest pointer: LOUD + halt (AGENTS §6, E-07)
+            std::printf("%s LOUD BAD-PTR shader=%u parts=%u -- halting\n", tag, s, cnt);
+            r->HaltGuest();
+        } else if (DiagOn()) {
+            std::printf("%s shader=%u parts=%u ok\n", tag, s, cnt);
         }
         r->Ret(regs, 0);
         return true;
@@ -734,8 +737,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
             p = (const void*)r->H(dat);  // unknown fmt/typ: legacy probe
         } else if (dat) {
-            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, a3, h, fmt,
-                        typ, (unsigned long long)need);
+            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+                        a3, h, fmt, typ, (unsigned long long)need);
+            r->HaltGuest();
+            r->Ret(regs, 0);
+            return true;
         }
         glTexImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLsizei)a3, (GLsizei)h, 0, (GLenum)fmt,
                      (GLenum)typ, p);
@@ -768,8 +774,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
             p = (const void*)r->H(dat);
         } else if (dat) {
-            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, w, h, fmt, typ,
-                        (unsigned long long)need);
+            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+                        w, h, fmt, typ, (unsigned long long)need);
+            r->HaltGuest();
+            r->Ret(regs, 0);
+            return true;
         }
         glTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w, (GLsizei)h,
                         (GLenum)fmt, (GLenum)typ, p);
@@ -976,8 +985,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                 } else if (isz == 0 && r->CheckRange(a3, 1, false)) {
                     p = (const void*)r->H(a3);  // unknown type: legacy probe
                 } else {
-                    std::printf("%s SHORTIDX count=%d type=%04x need=%llu\n", tag, (GLsizei)a1,
-                                a2, (unsigned long long)need);
+                    std::printf("%s LOUD SHORTIDX count=%d type=%04x need=%llu -- halting\n", tag,
+                                (GLsizei)a1, a2, (unsigned long long)need);
+                    r->HaltGuest();
                 }
             }
             if (p || ibo) {
@@ -1010,8 +1020,9 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, true)) {
             p = (void*)r->H(dat);  // unknown fmt/typ: legacy probe
         } else if (dat) {
-            std::printf("%s SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu\n", tag, a2, a3, fmt,
-                        typ, (unsigned long long)need);
+            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+                        a2, a3, fmt, typ, (unsigned long long)need);
+            r->HaltGuest();
         }
         if (p) {
             glReadPixels((GLint)a0, (GLint)a1, (GLsizei)a2, (GLsizei)a3, (GLenum)fmt, (GLenum)typ,
@@ -1099,7 +1110,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                     std::memcpy(r->H(a1 + (std::uint32_t)(i * 4)), &w, 4);
                 }
             } else if (cnt > 0) {
-                std::printf("%s(%04x) SMALLBUF need=%d\n", tag, a0, cnt * 4);
+                std::printf("%s(%04x) LOUD SMALLBUF need=%d -- halting\n", tag, a0, cnt * 4);
+                r->HaltGuest();
             }
             if (DiagOn()) {
                 std::printf("%s(%04x) -> %d,%d,%d,%d\n", tag, a0, v[0], v[1], v[2], v[3]);
@@ -1198,7 +1210,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                     glUniform4iv((GLint)a0, (GLsizei)cnt, (const GLint*)p);
                 }
             } else {
-                std::printf("%s BAD-PTR loc=%u cnt=%u\n", tag, a0, cnt);
+                std::printf("%s LOUD BAD-PTR loc=%u cnt=%u -- halting\n", tag, a0, cnt);
+                r->HaltGuest();
             }
             r->Ret(regs, 0);
             return true;

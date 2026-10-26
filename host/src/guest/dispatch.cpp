@@ -6457,7 +6457,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
 
     // Wild guest pointer in a bulk-memory thunk: halt cleanly, never segfault.
 bad_ptr:
-    std::printf("[svc] BAD guest pointer in %s(%08x %08x %08x %08x) lr=%08x -- halting\n", n.c_str(),
+    std::printf("[svc] LOUD BAD guest pointer in %s(%08x %08x %08x %08x) lr=%08x -- halting\n", n.c_str(),
                 a0, a1, a2, a3, regs[14]);
     // HARNESS_BADCTX=1: caller context forensics (regs + stack top) at the
     // faulting import. Catches state bugs the JIT probes miss (e.g. calls

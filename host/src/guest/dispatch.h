@@ -404,6 +404,16 @@ public:
     // (which once faked a clean render pass). Ignored by Run().
     bool stop_step_ = false;
 
+    // Stops the guest thread that made the current call once it returns (a
+    // wild pointer or an impossible request): the clean-halt half of
+    // "LOUD + HaltExecution" (AGENTS §6).
+    void HaltGuest() {
+        stop_step_ = true;
+        if (Dynarmic::A32::Jit* j = ActiveJit()) {
+            j->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        }
+    }
+
     // True for the first few bad accesses (log), false once flooding.
     bool NoteBad() {
         bad_count++;
