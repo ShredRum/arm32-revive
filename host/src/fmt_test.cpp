@@ -1651,6 +1651,37 @@ int main() {
         abr::RuntimeTestAccess::TakeStopped(rt);
     }
 
+    // --- code that runs off the end of its mapping faults at the first
+    //     unreadable instruction: the instructions before it execute, the
+    //     thread halts (F-23: a zero word used to be translated and run).
+    {
+        const std::uint32_t kPage = 0x61000000u;
+        abr::RuntimeTestAccess::MapRwx(rt, kPage, 0x1000);
+        const std::uint32_t tail[] = {0xe3a00001, 0xe3a01002};  // mov r0,#1; mov r1,#2
+        std::memcpy(rt.H(kPage + 0xFF8), tail, sizeof(tail));
+        abr::GuestCallbacks cb3(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb3;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        Dynarmic::A32::Jit jit(cfg);
+        rt.ThreadEnter(&jit, 701);
+        jit.Regs()[15] = kPage + 0xFF8;
+        jit.SetCpsr(0x10);
+        jit.Run();
+        Expect("code before the unmapped word ran",
+               std::to_string(jit.Regs()[0]) + "," + std::to_string(jit.Regs()[1]), "1,2");
+        // Dynarmic leaves pc after the faulting word; ExceptionRaised gets its address.
+        Expect("halted at the unmapped word",
+               std::string(abr::RuntimeTestAccess::TakeStopped(rt) ? "stopped" : "ran on") + "," +
+                   std::to_string(jit.Regs()[15] - kPage),
+               "stopped,4100");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReleaseCpuId(id);
+    }
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.

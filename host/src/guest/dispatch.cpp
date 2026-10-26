@@ -10758,14 +10758,17 @@ void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
     }
 }
 
-std::optional<std::uint32_t> GuestCallbacks::MemoryReadCode(VAddr a) {    if (!rt_->CheckAccess(a & ~std::uint32_t(3), 4, false, true)) {
+std::optional<std::uint32_t> GuestCallbacks::MemoryReadCode(VAddr a) {
+    // Unreadable or non-executable code: no word. Dynarmic then ends the
+    // block with a NoExecuteFault that is raised only if a thread reaches
+    // that instruction (ExceptionRaised halts it). Returning 0 used to cache
+    // a block of "andeq r0, r0, r0" that ran on for any later caller (F-23).
+    if (!rt_->CheckAccess(a & ~std::uint32_t(3), 4, false, true)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem] BAD exec @ %08x -- halting\n", a);
+            std::printf("[mem] BAD exec @ %08x (faults when reached)\n", a);
             rt_->DumpEventRing();
         }
-        rt_->stop_step_ = true;
-        rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
-        return 0;
+        return std::nullopt;
     }
     std::uint32_t v = 0;
     std::memcpy(&v, rt_->H(a & ~std::uint32_t(3)), 4);
