@@ -33,6 +33,7 @@ abi          = "arm64-v8a"
 lib          = "libabhost.so"
 jni_package  = "com.rovio.fusion"   # framework shared by the whole series
 jni_exports  = 63
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
 
 [strip]
 # Dead ad/analytics SDK libs. PROVEN byte-identical across the series

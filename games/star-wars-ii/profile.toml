@@ -32,6 +32,7 @@ abi          = "arm64-v8a"
 lib          = "libabhost.so"
 jni_package  = "com.rovio.fusion"
 jni_exports  = 74                # NOTE: includes CameraWrapper (telepods/QR)
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
 
 [strip]
 libs = ["libjs.so", "libadcolony.so"]

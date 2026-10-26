@@ -1242,6 +1242,28 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_rt->ProtectRelro(*g_mod);
     g_rt->SetFilesDir(GuestFilesDir(), g_files);
     g_rt->SetApkPath(g_apk);
+    // Network policy (R-005): the packaging writes "offline" or "online" from
+    // profile.toml into <guestlib dir>/network. Anything else, or no file:
+    // offline, the safe side.
+    {
+        const std::size_t slash = guest_entry.find_last_of('/');
+        const std::string entry =
+            (slash == std::string::npos ? std::string() : guest_entry.substr(0, slash + 1)) +
+            "network";
+        const std::string path = g_files + "/network";
+        char word[16] = {0};
+        if (ZipExtractStored(g_apk, entry, path)) {
+            if (FILE* f = std::fopen(path.c_str(), "rb")) {
+                if (std::fscanf(f, "%15s", word) != 1) {
+                    word[0] = 0;
+                }
+                std::fclose(f);
+            }
+        }
+        const bool online = std::strcmp(word, "online") == 0;
+        g_rt->SetNetworkAllowed(online);
+        Log("network: %s (packaging: %s)", online ? "online" : "offline", word[0] ? word : "none");
+    }
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
     g_rt->set_callbacks(&callbacks);

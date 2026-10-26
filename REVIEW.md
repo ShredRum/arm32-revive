@@ -38,10 +38,9 @@ USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 
 ## Next steps (as of 2026-10-27)
 
-0. R-005 network policy, DECIDED 2026-10-27 (owner): (A) the engine is offline by default, with a per-title switch (profile.toml `network = "offline" | "online"`, default offline) carried into the APK so one title can be given the network. Then drop the TLS rewrite and the connect crutch (B-12). A ready offline implementation (connect/sendto refusal + rcs networkType mock) is saved in work/review/r005/offline-and-diag.diff.
-1. Remaining S2: F-22 RELRO guard under fastmem, H-01/H-02/F-11 16 KB pages, G-01/D-01/D-11 JNI mocks vs real Java (quitRequested is safe to forward), G-02 0-stub imports (vasprintf, fnmatch, ...), C-09/10/11/22, E-03/04/05/06/07, B-12, R-003, R-004.
-2. Dead-code cleanup per work/review/G-crutches.md (~4000 lines), starting with zero-risk deletions.
-3. Then per-title work and docs (games/*/JOURNAL.md stale references to AGENTS sections).
+1. Shipping-path leftovers: nativeDeinit Java-stack forensics (G-06), TEMP-DIAG hexdumps, fake GL shim under #ifndef __ANDROID__ (G-10), HARNESS_FASTMEM/REALGL as config (G-13), Rio diag VAs/pin (F-pin, R-001, G-05), leftover HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE).
+2. Reliability: F-24/F-25, C-09/10/11/22, E-03..E-07, D-08/D-12/D-13, static fields 145-151, R-003, G-08/G-09/G-14, H-04, F-35/F-36; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
+3. S3/S4 leftovers per area; docs: games/*/JOURNAL.md stale AGENTS section references.
 
 ## Areas and waves
 
@@ -68,7 +67,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | confirmed |
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
 | R-004 | S2 | star-wars-ii | boot ends at "Asset downloading failed": the ORIGINAL APK does the same on a real device (content servers are dead); star-wars-ii-amz ships the assets and is the playable build | wontfix (original behaviour); 2026-10-26 owner: plain star-wars-ii is no longer built or gated, `games/star-wars-ii/` is kept |
-| R-005 | S1 | TLS ClientHello rewrite (B-14/G-12) | LOAD-BEARING: it breaks the handshake with the live Rovio servers, which is what keeps every title on its offline path. Removing it (tried 2026-10-26, reverted, never committed) let Space reach a server that answers 573 "App is disabled" -> uncaught system_error (EDEADLK) -> abort, and star-wars-ii-amz got "Signed out" and SAVED that state (fusion.registry), so it kept aborting until the app data was cleared. 2026-10-27: the EDEADLK abort is not network-specific. With connect() failing (phone offline) Star Wars and Space aborted in ~1/4-1/6 boots on the SHIPPING build too, while the original 32-bit APK under the same strace-injected ENETUNREACH booted 6/6. Cause: the engine's HTTP worker signals "done" and only then drops its reference to the object that owns its own std::thread; if the main thread drops its reference in between, the worker holds the last one and its destructor joins itself (bionic EDEADLK, gnustl throws). Natively the window is microseconds; here a new worker spent 60-90 ms of its ~100 ms life compiling ~2800 blocks again in its own Jit. Fixed by the shared code cache (jitshare, patches/dynarmic): 17/17 offline boots clean. Still open: the network policy (explicit offline mode vs honest network; owner to decide), then drop the rewrite | race fixed; policy open |
+| R-005 | S1 | TLS ClientHello rewrite (B-14/G-12) | LOAD-BEARING: it breaks the handshake with the live Rovio servers, which is what keeps every title on its offline path. Removing it (tried 2026-10-26, reverted, never committed) let Space reach a server that answers 573 "App is disabled" -> uncaught system_error (EDEADLK) -> abort, and star-wars-ii-amz got "Signed out" and SAVED that state (fusion.registry), so it kept aborting until the app data was cleared. 2026-10-27: the EDEADLK abort is not network-specific. With connect() failing (phone offline) Star Wars and Space aborted in ~1/4-1/6 boots on the SHIPPING build too, while the original 32-bit APK under the same strace-injected ENETUNREACH booted 6/6. Cause: the engine's HTTP worker signals "done" and only then drops its reference to the object that owns its own std::thread; if the main thread drops its reference in between, the worker holds the last one and its destructor joins itself (bionic EDEADLK, gnustl throws). Natively the window is microseconds; here a new worker spent 60-90 ms of its ~100 ms life compiling ~2800 blocks again in its own Jit. Fixed by the shared code cache (jitshare, patches/dynarmic): 17/17 offline boots clean. Network policy (owner, 2026-10-27): offline by default with a per-title switch (profile.toml host.network, packaged as assets/guestlib/<abi>/network); offline titles refuse connect/sendto to non-loopback addresses with ENETUNREACH and keep rcs networkType() on the "" mock. The ClientHello rewrite and the 10 s connect crutch are gone | fixed |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | open |
 
 ### Device gates
@@ -83,6 +82,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | 2026-10-26 | lib md5 137e5cdf | + JNI batch (fields, float/J marshalling, JavaVM, GetArrayLength), GL fast path, glGetUniformfv, glCopyTex | rio, seasons, space, star-wars render the menu and run 100 s, markers 0, death.log 0 B, no new tombstones |
 | 2026-10-26 | dead-code removal (5 commits) on top of 16 KB loader, RELRO, G-02, real-first JNI | all six titles boot, markers 0, death.log 0 B; user played one level in each title on the previous build: all OK, scale improved |
 | 2026-10-27 | shared JIT code cache (jitshare=on) + F-23 | five live titles boot to their menus, markers 0, death.log 0 B, no new tombstones; offline (strace-injected ENETUNREACH on connect) Star Wars 16/16 + Space 10/10 boots clean (was ~1/4-1/6 aborts); arm64 fmt_test on the sandbox: shared cache + 4-thread LDREX 800000/800000 x3; steady-state frame time unchanged, boot +~0.1 s |
+| 2026-10-27 | offline network policy (R-005), rewrite removed, APKs rebuilt with host.network=offline | five titles boot to their menus (network: offline in the log), markers 0, death.log 0 B; Star Wars and Space booted twice each |
 | 2026-10-25 | Oct 25 2026 19:24:21 | + shared sync objects, once ordering, key_create, pthread_create/threads_ hardening, g_upd_jit | rio, seasons, space, star-wars alive at the menu after 100 s, markers 0, death.log 0 B, no tombstones |
 
 ### Wave 1 (areas A-D, 2026-10-25)
@@ -141,9 +141,9 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | B-09 | S2 | read/write/lseek/close | errno never set on failure | fixed 52120ed |
 | B-10 | S2 | dup/freopen/utime | fall to the 0-stub; dup() makes the guest use fd 0 | fixed 52120ed (dup/utime/fflush; freopen open) |
 | B-11 | S2 | mkstemp | suffix written at host path length, can overflow guest buffer | fixed 52120ed |
-| B-12 | S2 | connect | non-blocking connect made synchronous, forced 10 s socket timeouts | open |
+| B-12 | S2 | connect | non-blocking connect made synchronous, forced 10 s socket timeouts | fixed with R-005 (offline policy, rewrite removed) |
 | B-13 | S2 | MapGuestPath | unmapped path halts the thread instead of ENOENT; `..` can escape the files dir | fixed 52120ed (ENOENT; .. escape open) |
-| B-14 | S3 | sockets | always-on TLS ClientHello rewrite of the guest buffer in shared code | open |
+| B-14 | S3 | sockets | always-on TLS ClientHello rewrite of the guest buffer in shared code | fixed with R-005 (offline policy, rewrite removed) |
 | B-15 | S3 | __system_property_get | hardcoded values ("izan", sdk 21, DNS 8.8.8.8) | fixed 52120ed (on device real props) |
 | B-16 | S3 | poll, FIFO read | 5 s caps (crutches) | fixed 52120ed (FIFO cap; poll done) |
 | B-17 | S3 | zipfile.cpp ZipExtractStored | fwrite result ignored: partial seed file can persist | open |
@@ -270,7 +270,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
 | G-09 | S3 | unwind nest guard | leftover racy crutch | open |
 | G-10 | S3 | fake GL shim | still reachable on device (context-less threads, names RealGL doesn't handle) | open |
-| G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | open |
+| G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | fixed with R-005 (offline policy, rewrite removed) |
 | G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | open |
 | G-14 | S3 | fcntl | lock commands report success without doing anything | open |
 | G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | fixed 850c027..6f762fd (-4168 lines; shipping-path TEMP-DIAG/fake GL/nativeDeinit forensics remain) |

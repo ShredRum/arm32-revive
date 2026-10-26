@@ -49,6 +49,7 @@ abi          = "arm64-v8a"
 lib          = "libabhost.so"
 jni_package  = "com.rovio.fusion"
 jni_exports  = 74      # 5 of them are the Amazon payment provider (new to the union)
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
 
 [strip]
 # This build ships no libjs.so / libadcolony.so (the Amazon build has no

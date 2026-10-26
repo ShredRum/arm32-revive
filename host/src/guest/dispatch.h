@@ -317,6 +317,9 @@ public:
     StackScan ScanStackForReturnAddresses(std::uint32_t sp, std::uint32_t max_bytes,
                                          StackHit* hits, unsigned hit_cap);
     void SetApkPath(const std::string& path);
+    // Per-title network policy from the packaging (default offline, R-005).
+    void SetNetworkAllowed(bool on) { network_allowed_ = on; }
+    bool NetworkAllowed() const { return network_allowed_; }
 
     // __gnu_Unwind_Find_exidx: binary search of .ARM.exidx (prel31), returns
     // entry VA or 0. Lets the in-module unwinder do its real job instead of
@@ -468,6 +471,7 @@ private:
     Dynarmic::ExclusiveMonitor monitor_{kMaxGuestCpus};
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
+    bool network_allowed_ = false;  // SetNetworkAllowed
     // One shared code cache per Jit configuration (NewJit).
     struct CodeCacheEntry {
         Dynarmic::A32::UserConfig cfg;

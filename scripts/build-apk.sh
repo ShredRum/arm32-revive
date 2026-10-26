@@ -149,6 +149,18 @@ if [ -f "$GUEST" ]; then
     sed -i "\|^[^-]*- *$GDIRREL/guest\.sha256$|d" "$TREE/apktool.yml"
     sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/guest.sha256|" "$TREE/apktool.yml"
     echo "guest fingerprint: $GUEST_SHA -> $GDIRREL/guest.sha256"
+    # Network policy (REVIEW R-005): host.network = "offline" (default) or
+    # "online". The host reads it from the APK at start; anything but
+    # "online" keeps the engine off the network.
+    NETWORK="$("${PROF[@]}" host.network 2>/dev/null || echo offline)"
+    case "$NETWORK" in
+        offline|online) ;;
+        *) echo "build-apk: host.network must be offline or online, not '$NETWORK'" >&2; exit 1 ;;
+    esac
+    printf '%s\n' "$NETWORK" > "$GDIR/network"
+    sed -i "\|^[^-]*- *$GDIRREL/network$|d" "$TREE/apktool.yml"
+    sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/network|" "$TREE/apktool.yml"
+    echo "network: $NETWORK -> $GDIRREL/network"
 fi
 java -jar "$APKTOOL" b -o "$UNS" "$TREE" >/dev/null
 

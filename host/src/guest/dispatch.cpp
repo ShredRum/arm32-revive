@@ -4256,11 +4256,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::memcpy(H(s), &v, 4);
             }
         };
-        auto wait_fd = [&](int hfd, short ev, int ms) -> int {
-            struct pollfd p {};
-            p.fd = hfd;
-            p.events = ev;
-            return ::poll(&p, 1, ms);
+        // Offline by design (R-005): unless the title's packaging enabled the
+        // network (profile.toml `network = "online"`), the engine never talks
+        // to Rovio's servers. Some are dead; live ones answer with states these
+        // old builds cannot survive (Space: 573 "App is disabled" -> abort;
+        // SW2 amz: "Signed out", saved, aborting on every boot). As on a phone
+        // in airplane mode, a connect (TCP or UDP) or sendto to a non-loopback
+        // IPv4/IPv6 address fails at once with ENETUNREACH; the bundled DNS
+        // resolver then reports "Could not contact DNS servers", the shape of
+        // the original Rio's airplane-mode logcat. The guest sockaddr layout is
+        // the host's (family u16 LE, port BE, then the address).
+        auto offline_refuses = [&](std::uint32_t addr, std::uint32_t len) -> bool {
+            if (network_allowed_) {
+                return false;
+            }
+            const std::uint8_t* sa = H<const std::uint8_t>(addr);
+            const unsigned fam = len >= 2 ? (sa[0] | (sa[1] << 8)) : 0u;
+            bool remote = false;
+            if (fam == AF_INET && len >= 8) {
+                remote = sa[4] != 127;
+            } else if (fam == AF_INET6 && len >= 24) {
+                static const std::uint8_t kLoop6[16] = {0, 0, 0, 0, 0, 0, 0, 0,
+                                                        0, 0, 0, 0, 0, 0, 0, 1};
+                static const std::uint8_t kMapped4[12] = {0, 0, 0, 0, 0, 0,
+                                                          0, 0, 0, 0, 0xFF, 0xFF};
+                const std::uint8_t* ad = sa + 8;
+                remote = std::memcmp(ad, kLoop6, 16) != 0 &&
+                         !(std::memcmp(ad, kMapped4, 12) == 0 && ad[12] == 127);
+            }
+            if (remote) {
+                static std::atomic<int> logged{0};
+                if (logged.fetch_add(1) < 8) {
+                    std::printf("[net] offline: %s to %s port %u refused\n", n.c_str(),
+                                fam == AF_INET ? "IPv4" : "IPv6",
+                                (unsigned)((sa[2] << 8) | sa[3]));
+                }
+            }
+            return remote;
         };
         auto fill_stat = [&](std::uint32_t dst, const struct stat& st) -> bool {
             // Bionic arm32 struct stat, 104 bytes (NDK sys/stat.h; offsets
@@ -4879,43 +4911,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            // HARNESS_NONET=1: airplane-faithful — writes to sockets fail
-            // (ENETUNREACH); pipes/files are unaffected (local IPC works
-            // offline). The TLS stack writes via write(), not send().
-            if (n == "write" && EnvOn("HARNESS_NONET")) {
-                struct stat fw {};
-                if (::fstat(hfd, &fw) == 0 && S_ISSOCK(fw.st_mode)) {
-                    set_guest_errno(ENETUNREACH);
-                    Ret(regs, static_cast<std::uint32_t>(-1));
-                    return;
-                }
-            }
             // Unlocked: pipes/sockets block here; the map lock must be free
             // so other threads keep running (2026-10-10 deadlock fix). A read
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
-            // TLS ClientHello version bump for write() path (the in-module
-            // TLS stack uses plain write, not send — same fix as send()).
-            // Pattern first (cheap), fstat only on match (not per-write).
-            if (n == "write" && !EnvOn("HARNESS_NOTLSFIX") && a2 >= 11 &&
-                CheckRange(a1, 11, true)) {
-                std::uint8_t* q = H(a1);
-                if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
-                    struct stat fst {};
-                    if (::fstat(hfd, &fst) == 0 && S_ISSOCK(fst.st_mode)) {
-                        if (DiagOn()) {
-                            std::printf(
-                                "[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> "
-                                "0301/0301 (write path)\n",
-                                GuestTid() == 1 ? "" : "(T2+)", q[1], q[2], q[9], q[10]);
-                        }
-                        q[1] = 0x03;
-                        q[2] = 0x01;
-                        q[9] = 0x03;
-                        q[10] = 0x01;
-                    }
-                }
-            }
             ssize_t r = (n == "read") ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped). Skip
@@ -5030,34 +5029,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // the generic stub ->0 (socket()=0 ALIASED STDIN; connect()=fake
         // success; send/recv()=0 = empty replies -> 4x retry then null-call).
         // Real host sockets: Bionic/Linux errno values + sockaddr layout
-        // match, so forward directly. Sockets stay O_NONBLOCK; every op is
-        // poll-capped (5s I/O, 10s TCP connect) so dead endpoints degrade to
-        // the offline path (EAGAIN/ETIMEDOUT) instead of hanging.
-        // HARNESS_NONET=1: socket() -> -1/ENETUNREACH (fast offline tests).
-        // NOTE: fcntl/ioctl are still stub->0 (fake success, mode unchanged);
-        // game retries cover it. sendmsg/recvmsg NOT marshalled (guest msghdr
-        // is 32-bit layout) -> LOUD if ever called.
-        // (set_guest_errno/wait_fd live with the fd helpers above.)
+        // match, so forward directly, with the blocking/timeout semantics the
+        // guest set itself (fcntl, setsockopt). Network destinations are
+        // refused unless the title is online (offline_refuses above).
+        // sendmsg/recvmsg NOT marshalled (guest msghdr is 32-bit layout) ->
+        // LOUD if ever called.
         if (n == "socket") {
-            // HARNESS_NONET=1: airplane-mode-faithful failure (socket()
-            // itself SUCCEEDS on device — no network needed to create one;
-            // connect()/send()/recv() fail below). Failing socket() outright
-            // sent the game down a never-tested path (BAD read @0x1A343C).
-            if (EnvOn("HARNESS_NONET")) {
-                std::printf("[netsock]%s NONET: socket layer down (connect/recv will fail)\n",
-                            GuestTid() == 1 ? "" : "(T2+)");
-            }
             int hfd = ::socket((int)a0, (int)a1, (int)a2);
             if (hfd < 0) {
                 set_guest_errno(errno);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            // BLOCKING by default (faithful Bionic semantics: recv waits for
-            // the full length). O_NONBLOCK only during connect (below), then
-            // restored; stuck peers are bounded by SO_RCVTIMEO/SO_SNDTIMEO.
-            // (Leaving sockets nonblocking caused short reads: the TLS stack
-            // got 5B of a 115B ServerHello -> fatal alert 47. 2026-10-10.)
             const std::uint32_t g = alloc_guest_fd(hfd);
             if (DiagOn()) {
                 std::printf("[netsock] socket(%u %u %u) -> gfd %u\n", a0, a1, a2, g);
@@ -5077,89 +5060,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            // Nonblocking dance for the 10s cap, then RESTORE blocking +
-            // arm SO_RCVTIMEO/SO_SNDTIMEO (10s) so failed peers surface as
-            // EAGAIN instead of hanging, while healthy I/O keeps full
-            // blocking (short-read) semantics the game expects.
-            int fl = ::fcntl(hfd, F_GETFL, 0);
-            if (fl >= 0) {
-                ::fcntl(hfd, F_SETFL, fl | O_NONBLOCK);
+            if (offline_refuses(a1, a2)) {
+                set_guest_errno(ENETUNREACH);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
             }
-            // HARNESS_PORTMAP=1: rewrite TCP dst port 443 -> 8443 (lets a
-            // non-root fake origin serve the game's https:// URLs; the game
-            // itself always dials 443).
-            if (EnvOn("HARNESS_PORTMAP") && a2 >= 4 && CheckRange(a1, 4, true)) {
-                std::uint8_t* q = H(a1);
-                if (q[0] == 2 /*AF_INET*/ && q[1] == 0 && q[2] == 0x01 && q[3] == 0xBB) {
-                    q[2] = 0x20;
-                    q[3] = 0xFB;  // 8443
-                    std::printf("[netsock]%s portmap 443 -> 8443\n",
-                                GuestTid() == 1 ? "" : "(T2+)");
-                }
-            }
-            int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
-                              (socklen_t)a2);
-            // TEMP-DIAG (DNS bring-up): who are we connecting to?
-            {
-                static int cl = 0;
-                if (cl < 12 && a2 >= 8) {
-                    cl++;
-                    const std::uint8_t* p = H<const std::uint8_t>(a1);
-                    std::uint16_t fam = (std::uint16_t)p[0] | ((std::uint16_t)p[1] << 8);
-                    std::uint16_t port = ((std::uint16_t)p[2] << 8) | p[3];
-                    if (DiagOn()) {
-                        std::printf("[netsock]%s connect(gfd %u) fam=%u %u.%u.%u.%u:%u%s\n",
-                                    GuestTid() == 1 ? "" : "(T2+)", a0, fam, p[4], p[5], p[6], p[7],
-                                    port, cl == 12 ? " (quiet henceforth)" : "");
-                    }
-                }
-            }
-            if (EnvOn("HARNESS_NONET")) {
-                // Airplane-faithful: UDP connect() SUCCEEDS on Linux (no
-                // packets sent; only sets the default remote). Only TCP
-                // connect fails (ENETUNREACH). Failing UDP connect sent the
-                // bundled resolver down a never-on-device path (it aborts
-                // before send with "Could not contact DNS server", while on
-                // device it proceeds to sendto-fail/timeout = "no answer").
-                int st = 0;
-                socklen_t sl = sizeof(st);
-                if (::getsockopt(hfd, SOL_SOCKET, SO_TYPE, &st, &sl) == 0 &&
-                    st == SOCK_DGRAM) {
-                    // Leave r as-is (real UDP connect outcome: success).
-                } else {
-                    // Airplane mode: TCP connect never succeeds
-                    // (server unreachable). Instant, no 10s waits.
-                    errno = ENETUNREACH;
-                    r = -1;
-                }
-            } else if (r != 0 && errno == EINPROGRESS) {
-                const int w = wait_fd(hfd, POLLOUT, 10000);
-                if (w > 0) {
-                    int se = 0;
-                    socklen_t sl = sizeof(se);
-                    ::getsockopt(hfd, SOL_SOCKET, SO_ERROR, &se, &sl);
-                    if (se == 0) {
-                        r = 0;
-                    } else {
-                        errno = se;
-                        r = -1;
-                    }
-                } else {
-                    if (w == 0) {
-                        errno = ETIMEDOUT;
-                    }
-                    r = -1;
-                }
-            }
+            const int r = ::connect(hfd, reinterpret_cast<const struct sockaddr*>(H(a1)),
+                                    (socklen_t)a2);
             if (r != 0) {
                 set_guest_errno(errno);
-            } else if (fl >= 0) {
-                // Connected: back to blocking + kernel timeouts.
-                ::fcntl(hfd, F_SETFL, fl);
-                struct timeval tv {};
-                tv.tv_sec = 10;
-                ::setsockopt(hfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                ::setsockopt(hfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             }
             if (DiagOn()) {
                 std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
@@ -5290,79 +5199,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
                 }
+                if (addr != 0 && offline_refuses(addr, addrlen)) {
+                    set_guest_errno(ENETUNREACH);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
             }
             if (!CheckRange(a1, a2, false)) {
                 set_guest_errno(EFAULT);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            // HARNESS_NONET=1: airplane-faithful traffic failure. Sockets
-            // create fine and UDP connects (above), but no packet can leave:
-            // send/sendto fail ENETUNREACH (no route), recv waits out the
-            // kernel timeout below (EAGAIN). Previously sends went out over
-            // the HOST uplink even under NONET (unfaithful).
-            // HARNESS_DNSALLOW=1: punch UDP/53 past NONET (real 8.8.8.8
-            // replies for the custom resolver; ordinary userspace traffic).
-            if (EnvOn("HARNESS_NONET")) {
-                bool dns53 = false;
-                {
-                    int st = 0;
-                    socklen_t sl = sizeof(st);
-                    struct sockaddr_storage ss {};
-                    socklen_t slen = sizeof(ss);
-                    if (::getsockopt(hfd, SOL_SOCKET, SO_TYPE, &st, &sl) == 0 &&
-                        st == SOCK_DGRAM &&
-                        ::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&ss),
-                                      &slen) == 0 &&
-                        ss.ss_family == AF_INET) {
-                        const auto* sa = reinterpret_cast<const struct sockaddr_in*>(&ss);
-                        if (ntohs(sa->sin_port) == 53) {
-                            dns53 = true;
-                        }
-                    }
-                }
-                // HARNESS_DNSHUSH=1: device-airplane DNS shape (PROVEN by
-                // device logcat: "Could not resolve ... (Could not contact DNS
-                // servers)" -> HttpRequestException(6) -> caught -> menu).
-                // Queries are swallowed (fake full send, nothing leaves), no
-                // reply ever arrives -> resolver times out instead of taking
-                // the immediate-ENETUNREACH silent-park branch.
-                if (dns53 && EnvOn("HARNESS_DNSHUSH")) {
-                    std::printf("[netsock] dnshush swallowed %uB [t%u]\n", a2, GuestTid());
-                    Ret(regs, a2);
-                    return;
-                }
-                bool dnsout = dns53 && EnvOn("HARNESS_DNSALLOW");
-                if (!dnsout) {
-                    set_guest_errno(ENETUNREACH);
-                    Ret(regs, static_cast<std::uint32_t>(-1));
-                    return;
-                }
-            }
-            // TLS version DOWNGRADE (harness bridge): the in-module stack
-            // is capped at TLS 1.0 (any 0303 ServerHello record -> fatal
-            // alert 47 illegal_parameter, even though the hello body says
-            // 0303). Force offer 0301/0301 so a 1.0-tolerant server answers
-            // 0301. HARNESS_NOTLSFIX=1 disables (parity experiments).
-            // NOTE: needs a server whose policy still allows TLS 1.0;
-            // modern CloudFront usually does for old distributions.
-            if (!EnvOn("HARNESS_NOTLSFIX") && a2 >= 11 && CheckRange(a1, 11, true)) {
-                std::uint8_t* q = H(a1);
-                if (q[0] == 0x16 && q[1] == 0x03 && q[2] < 0x03 && q[5] == 0x01) {
-                    if (DiagOn()) {
-                        std::printf("[netsock]%s TLS ClientHello version %02x%02x/%02x%02x -> 0301/0301\n",
-                                    GuestTid() == 1 ? "" : "(T2+)", q[1], q[2], q[9], q[10]);
-                    }
-                    q[1] = 0x03;
-                    q[2] = 0x01;
-                    q[9] = 0x03;
-                    q[10] = 0x01;
-                }
-            }
-            // Blocking I/O with kernel SO_RCVTIMEO/SO_SNDTIMEO (set at
-            // connect): full short-read semantics; timeouts surface as
-            // EAGAIN via errno. No poll short-circuit (it caused short
-            // reads on nonblocking fds -> TLS alert 47).
             ssize_t r =
                 (n == "send")
                     ? ::send(hfd, H(a1), a2, (int)a3)
@@ -5411,10 +5258,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            // Blocking I/O with kernel SO_RCVTIMEO (set at connect):
-            // full short-read semantics; timeout surfaces as EAGAIN.
-            // (The old poll short-circuit on nonblocking fds caused short
-            // reads -> TLS alert 47.)
             struct sockaddr_storage ss {};
             socklen_t sl = (socklen_t)(addrlen != 0 ? addrlen : sizeof(ss));
             ssize_t r =
@@ -8443,6 +8286,12 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
     }
     const std::string argstr = sig.substr(1, rp - 1);
     const std::string retstr = sig.substr(rp + 1);
+    // An offline title must not learn the phone's real network state from
+    // rcs.core.Utils.networkType() (wifi/cellular): the mock answers like a
+    // phone without network (see offline_refuses).
+    if (!network_allowed_ && cls == "com/rovio/rcs/core/Utils" && name == "networkType") {
+        return false;
+    }
     // Real class (global-cached) + method (per-cookie cached).
     jclass rclazz = nullptr;
     {
@@ -9855,12 +9704,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     content = d;
                 }
             }
-            // networkType must be a valid token ("" stalls network-state
-            // waits). NONE = offline degrade (no socket attempts against our
-            // stubs, which fake success and could hang); HARNESS_NETTYPE
-            // overrides (e.g. WIFI if real socket forwarding lands).
+            // rcs.core.Utils.networkType() of an offline title (an online
+            // one asks the real method): "" is what the real method returns
+            // without network (getActiveNetworkInfo() == null -> exception
+            // -> ""), next to "wifi" and "cellular". HARNESS_NETTYPE overrides.
             if (mdesc.find("networkType") != std::string::npos) {
-                content = "NONE";
+                content = "";
                 if (const char* d = std::getenv("HARNESS_NETTYPE")) {
                     content = d;
                 }

@@ -36,7 +36,10 @@ not gated; the folder stays. "All titles" below means the other five.
 
 - `host/` — CMake project. `src/guest/` = the core; `src/fmt_test.cpp` = unit
   tests of thunks; `src/harness.cpp` = PC runner of a guest `.so` (init only).
-- `games/<id>/profile.toml` — package, versions, guest lib name + sha256.
+- `games/<id>/profile.toml` — package, versions, guest lib name + sha256,
+  `host.network` = `offline` (default) or `online`: whether the engine may
+  use the network (R-005; packaged into the APK by `build-apk.sh`, read at
+  boot, logged as `network:`; `swap-lib.sh` keeps the packaged value).
   `games/<id>/original/` (gitignored) = original Rovio APK, read-only.
   `games/<id>/seeds/` = first-launch files. `games/<id>/work/` (gitignored) =
   decoded tree `apk_prod/`, `apk_signed.apk`, analysis leftovers.
