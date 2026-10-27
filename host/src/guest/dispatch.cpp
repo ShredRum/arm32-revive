@@ -6817,6 +6817,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             const std::string hp = map_path(a0);
+            if (EnvOn("HARNESS_PATHLOG")) {
+                std::printf("[files] %s(\"%s\") -> host \"%s\"\n", n.c_str(),
+                            CheckRange(a0, 1, false) ? GuestStr(a0) : "?", hp.c_str());
+            }
             if (!need_host(hp, n.c_str())) {
                 return;
             }
@@ -13454,6 +13458,18 @@ void Runtime::SetFilesDir(const std::string& guest_prefix, const std::string& ho
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     files_prefix_ = guest_prefix;
     files_hostbase_ = host_base;
+    // /data/data/<pkg>/files or /data/user/<N>/<pkg>/files: the package names
+    // the app's external dir (Context.getExternalFilesDir and Unity's
+    // persistentDataPath when the storage permission is granted).
+    std::string pkg;
+    const std::filesystem::path gp(guest_prefix);
+    if (gp.filename() == "files" && gp.has_parent_path()) {
+        pkg = gp.parent_path().filename().string();
+    }
+    if (!pkg.empty() && !host_base.empty()) {
+        ext_tail_ = "/Android/data/" + pkg;
+        ext_hostbase_ = std::filesystem::path(host_base).parent_path().string() + "/ext";
+    }
     std::printf("[files] guest \"%s\" -> host \"%s\"\n", guest_prefix.c_str(), host_base.c_str());
 }
 
@@ -16319,6 +16335,24 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             if (pk != std::string::npos) {
                 return std::filesystem::path(files_hostbase_).parent_path().string() +
                        g.substr(pk);
+            }
+        }
+        // The app's own external dir under any storage root
+        // (/storage/emulated/<N>, /sdcard, /mnt/sdcard ...): the guest keeps
+        // the path Android gave it, the bytes live in the app's data dir
+        // (removed with the app, like the real one; nothing is written to
+        // shared storage).
+        if (!ext_tail_.empty() && (g.compare(0, 9, "/storage/") == 0 ||
+                                   g.compare(0, 7, "/sdcard") == 0 ||
+                                   g.compare(0, 5, "/mnt/") == 0)) {
+            const std::size_t at = g.find(ext_tail_);
+            const std::size_t end = at + ext_tail_.size();
+            if (at != std::string::npos && (g.size() == end || g[end] == '/')) {
+                std::call_once(ext_made_, [this] {
+                    std::error_code ec;
+                    std::filesystem::create_directories(ext_hostbase_, ec);
+                });
+                return ext_hostbase_ + g.substr(end);
             }
         }
         // Bare relative names (no leading '/'): the game opens seeds like

@@ -988,6 +988,12 @@ private:
     // knows, and the file bridge also matches the package tail either way.
     std::string files_prefix_ = GuestFilesPrefix();
     std::string files_hostbase_;  // set by harness (SetFilesDir)
+    // The app's own external dir, "<storage root>/Android/data/<pkg>": the
+    // guest's spelling tail and its host home inside the app's data dir
+    // (SetFilesDir), created on first use.
+    std::string ext_tail_;
+    std::string ext_hostbase_;
+    std::once_flag ext_made_;
     struct HostFile {
         FILE* f = nullptr;
         std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*

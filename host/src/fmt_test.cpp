@@ -1767,6 +1767,16 @@ int main() {
         Expect("stat st_size at +48", std::to_string(size), "12345");
         Expect("stat st_mode is a regular file", S_ISREG(mode) ? "1" : "0", "1");
         Expect("stat writes exactly 104 bytes", tail ? "1" : "0", "1");
+        // The app's external dir (Unity's persistentDataPath with the storage
+        // permission) lands in the app's data dir; other apps' dirs do not.
+        const std::string ext = std::filesystem::path(host_dir).parent_path().string() + "/ext";
+        Expect("external app dir maps to <data>/ext",
+               rt.MapGuestPathString("/storage/emulated/0/Android/data/abr.stat/files/s"),
+               ext + "/files/s");
+        Expect("external app dir exists",
+               std::filesystem::is_directory(ext) ? "1" : "0", "1");
+        Expect("another app's external dir stays unmapped",
+               rt.MapGuestPathString("/storage/emulated/0/Android/data/abr.statx/files"), "");
     }
 
     // --- fseek: the guest long is signed 32-bit; a negative offset must
