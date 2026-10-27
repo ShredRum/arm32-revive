@@ -64,6 +64,7 @@ namespace abr {
 struct RuntimeTestAccess {
     using RegsView = std::array<std::uint32_t, 16>;
     // Call the dispatcher with the given argument registers; returns r0.
+    static void SetSignalsInUse(Runtime& rt, bool on) { rt.signals_in_use_ = on; }
     static std::uint32_t Call(Runtime& rt, std::uint32_t idx, const std::uint32_t args[4]) {
         Runtime::Regs regs{};
         regs[0] = args[0];
@@ -372,6 +373,8 @@ int main() {
     mod.imports.push_back(abr::Import{"inet_aton", true, 0, 0, 0});  // 103
     mod.imports.push_back(abr::Import{"mmap", true, 0, 0, 0});  // 104
     mod.imports.push_back(abr::Import{"mremap", true, 0, 0, 0});  // 105
+    mod.imports.push_back(abr::Import{"pthread_cond_signal", true, 0, 0, 0});  // 106
+    mod.imports.push_back(abr::Import{"pthread_cond_wait", true, 0, 0, 0});    // 107
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -2445,6 +2448,64 @@ int main() {
         waiter.join();
         Expect("waiter survives a concurrent cond destroy (ETIMEDOUT)", std::to_string(wr),
                std::to_string(ETIMEDOUT));
+    }
+
+    // --- cond wakes: a signal with nobody waiting is not kept, and a signal
+    //     after the waiter went to sleep always reaches it, also in the
+    //     sliced waits used while guest signals are in use (a slice timing
+    //     out across the wake used to lose it: Unity hung for good).
+    {
+        const std::uint32_t kM3 = 0x10008D00, kC3 = 0x10008D40, kTs3 = 0x10008D80;
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0,
+                        std::uint32_t z = 0) {
+            const std::uint32_t args[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        auto deadline_in = [&](std::int64_t ms) {
+            struct timespec now {};
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            const std::int64_t ns = static_cast<std::int64_t>(now.tv_sec) * 1000000000LL +
+                                    now.tv_nsec + ms * 1000000LL;
+            const std::uint32_t ts[2] = {static_cast<std::uint32_t>(ns / 1000000000LL),
+                                         static_cast<std::uint32_t>(ns % 1000000000LL)};
+            std::memcpy(rt.H(kTs3), ts, 8);
+        };
+        call(8, kM3);
+        call(106, kC3);  // nobody waits
+        call(9, kM3);
+        deadline_in(50);
+        Expect("cond: a signal before the wait is not kept",
+               std::to_string(call(39, kC3, kM3, kTs3)), std::to_string(ETIMEDOUT));
+        call(11, kM3);
+        int lost = 0;
+        for (int sliced = 0; sliced < 2; sliced++) {
+            abr::RuntimeTestAccess::SetSignalsInUse(rt, sliced == 1);
+            for (int i = 0; i < 150; i++) {
+                std::atomic<bool> in{false};
+                std::uint32_t r = 1;
+                std::thread w([&] {
+                    call(9, kM3);
+                    in = true;
+                    r = call(107, kC3, kM3);
+                    call(11, kM3);
+                });
+                while (!in) {
+                    std::this_thread::yield();
+                }
+                call(9, kM3);  // the waiter has let it go: it sleeps
+                if (i % 2) {
+                    call(11, kM3);
+                    call(106, kC3);  // signal outside the mutex
+                } else {
+                    call(106, kC3);
+                    call(11, kM3);
+                }
+                w.join();
+                lost += r != 0;
+            }
+        }
+        abr::RuntimeTestAccess::SetSignalsInUse(rt, false);
+        Expect("cond: 300 signals after the wait, none lost", std::to_string(lost), "0");
     }
 
     // --- imports that used to answer 0 from the generic stub (G-02).

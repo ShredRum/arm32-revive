@@ -8528,15 +8528,11 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
 // call at 0x38f530) passes a CLOCK_MONOTONIC deadline; plain
 // pthread_cond_timedwait passes a CLOCK_REALTIME one, converted below. No
 // title imports pthread_condattr_setclock, so cond attributes carry no clock.
-static std::shared_ptr<pthread_cond_t> NewHostCond() {
-    auto* c = new pthread_cond_t;
-    pthread_condattr_t attr;
-    pthread_condattr_init(&attr);
-    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-    pthread_cond_init(c, &attr);
-    pthread_condattr_destroy(&attr);
-    return std::shared_ptr<pthread_cond_t>(c, [](pthread_cond_t* p) {
-        pthread_cond_destroy(p);
+static std::shared_ptr<Runtime::HostCond> NewHostCond() {
+    auto* c = new Runtime::HostCond;
+    pthread_mutex_init(&c->m, nullptr);
+    return std::shared_ptr<Runtime::HostCond>(c, [](Runtime::HostCond* p) {
+        pthread_mutex_destroy(&p->m);
         delete p;
     });
 }
@@ -8563,51 +8559,130 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     }
     // Own references: the cond and mutex stay alive while this thread waits,
     // even if another thread destroys them meanwhile.
-    const std::shared_ptr<pthread_cond_t> cv = it->second;
-    if (n == "pthread_cond_signal") {
-        return static_cast<std::uint32_t>(pthread_cond_signal(cv.get()));
-    }
-    if (n == "pthread_cond_broadcast") {
-        return static_cast<std::uint32_t>(pthread_cond_broadcast(cv.get()));
+    const std::shared_ptr<HostCond> hc = it->second;
+    using Waiter = HostCond::Waiter;
+    auto unlink = [&](Waiter* w) {
+        (w->prev ? w->prev->next : hc->head) = w->next;
+        (w->next ? w->next->prev : hc->tail) = w->prev;
+        w->next = w->prev = nullptr;
+    };
+    if (n == "pthread_cond_signal" || n == "pthread_cond_broadcast") {
+        // The oldest sleeper (a broadcast: every sleeper) takes a wake; with
+        // nobody asleep the wake is gone, as POSIX says.
+        pthread_mutex_lock(&hc->m);
+        if (hc->head) {
+            hc->last_tid.store(GuestTid(), std::memory_order_relaxed);
+        }
+        while (Waiter* w = hc->head) {
+            unlink(w);
+            w->woken = true;
+            hc->wakes++;
+            pthread_cond_signal(&w->cv);
+            if (n == "pthread_cond_signal") {
+                break;
+            }
+        }
+        pthread_mutex_unlock(&hc->m);
+        return 0;
     }
     auto mit = mutex_map_.find(arg1);
     if (mit == mutex_map_.end()) {
         return EINVAL;
     }
     const std::shared_ptr<pthread_mutex_t> mx = mit->second;
-    // While guest signals are in use, a wait sleeps in short slices; a
-    // pending signal then runs its handler with the mutex released (as the
-    // kernel runs it while the thread sleeps in the futex) and the wait
-    // returns 0, a spurious wakeup the caller's predicate loop absorbs.
-    auto sliced = [&](const struct timespec* deadline_mono) -> int {
+    // The guest mutex back, interruptibly while guest signals are in use
+    // (as PthreadMutex locks it).
+    auto relock = [&] {
+        if (!SignalsInUse()) {
+            pthread_mutex_lock(mx.get());
+            return;
+        }
         for (;;) {
-            struct timespec now {};
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            struct timespec slice = now;
-            slice.tv_nsec += kSigSliceNs;
-            if (slice.tv_nsec >= 1000000000L) {
-                slice.tv_nsec -= 1000000000L;
-                slice.tv_sec++;
-            }
-            const bool last = deadline_mono && !Before(slice, *deadline_mono);
-            const int r = pthread_cond_timedwait(cv.get(), mx.get(), last ? deadline_mono : &slice);
-            if (r != ETIMEDOUT || last) {
-                return r;
+            const struct timespec slice = RealtimeIn(kSigSliceNs);
+            if (pthread_mutex_timedlock(mx.get(), &slice) != ETIMEDOUT) {
+                return;
             }
             if (SignalDeliverable()) {
-                pthread_mutex_unlock(mx.get());
                 DeliverPendingSignals();
-                pthread_mutex_lock(mx.get());
-                return 0;
             }
         }
     };
+    // The wait: queued under the cond's own lock BEFORE the guest mutex is
+    // let go, so a wake that follows the caller's unlock reaches it. While
+    // guest signals are in use it sleeps in short slices; a pending signal
+    // runs its handler and the wait returns 0, as bionic's does when the
+    // futex wait is interrupted (EINTR -> 0), and the caller's predicate loop
+    // looks again. A sleeper leaving without a wake (timeout, handler) leaves
+    // the queue; a wake that came first is taken instead.
+    auto wait = [&](const struct timespec* deadline_mono) -> int {
+        Waiter me;
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        pthread_cond_init(&me.cv, &attr);
+        pthread_condattr_destroy(&attr);
+        pthread_mutex_lock(&hc->m);
+        me.prev = hc->tail;
+        (hc->tail ? hc->tail->next : hc->head) = &me;
+        hc->tail = &me;
+        if (t_sig) {
+            t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
+            t_sig->wait_cv.store(hc.get());
+        }
+        mutex_.unlock();
+        pthread_mutex_unlock(mx.get());
+        int r = 0;
+        while (!me.woken) {
+            struct timespec now {};
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (deadline_mono && !Before(now, *deadline_mono)) {
+                r = ETIMEDOUT;
+                break;
+            }
+            const struct timespec* until = deadline_mono;
+            struct timespec slice {};
+            if (SignalsInUse()) {
+                slice = now;
+                slice.tv_nsec += kSigSliceNs;
+                if (slice.tv_nsec >= 1000000000L) {
+                    slice.tv_nsec -= 1000000000L;
+                    slice.tv_sec++;
+                }
+                if (!deadline_mono || Before(slice, *deadline_mono)) {
+                    until = &slice;
+                }
+            }
+            if (until) {
+                pthread_cond_timedwait(&me.cv, &hc->m, until);
+            } else {
+                pthread_cond_wait(&me.cv, &hc->m);
+            }
+            if (!me.woken && SignalDeliverable()) {
+                r = -1;  // a handler to run first
+                break;
+            }
+        }
+        if (me.woken) {
+            r = 0;
+        } else {
+            unlink(&me);
+        }
+        if (t_sig) {
+            t_sig->wait_cv.store(nullptr);
+        }
+        pthread_mutex_unlock(&hc->m);
+        pthread_cond_destroy(&me.cv);
+        if (r < 0) {
+            DeliverPendingSignals();
+            r = 0;
+        }
+        relock();
+        mutex_.lock();
+        return r;
+    };
     if (n == "pthread_cond_wait") {
         // Untimed wait: block until signalled, as bionic does.
-        mutex_.unlock();
-        const int r = SignalsInUse() ? sliced(nullptr) : pthread_cond_wait(cv.get(), mx.get());
-        mutex_.lock();
-        return static_cast<std::uint32_t>(r);
+        return static_cast<std::uint32_t>(wait(nullptr));
     }
     if (n == "pthread_cond_timedwait") {
         // Guest struct timespec is {long tv_sec; long tv_nsec;}, 2 x 32 bits.
@@ -8640,11 +8715,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             ts.tv_sec = static_cast<time_t>(mono_ns / 1000000000LL);
             ts.tv_nsec = static_cast<long>(mono_ns % 1000000000LL);
         }
-        mutex_.unlock();
-        const int r =
-            SignalsInUse() ? sliced(&ts) : pthread_cond_timedwait(cv.get(), mx.get(), &ts);
-        mutex_.lock();
-        return static_cast<std::uint32_t>(r);
+        return static_cast<std::uint32_t>(wait(&ts));
     }
     return EINVAL;
 }
@@ -12030,10 +12101,36 @@ void Runtime::DumpGuestThreads() {
                 }
             }
         }
-        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s pending=%08x%s%s\n",
+        // A guest cond wait: its cond and mutex, and whether the host cond it
+        // sleeps on is still the one the guest cond maps to (a signal goes to
+        // the mapped one).
+        std::string wait;
+        if (const void* wcv = st->wait_cv.load(); wcv && outside && !parked) {
+            const std::uint32_t gc = st->snap[0];
+            const char* same = "?";
+            std::uint64_t wakes = 0;
+            std::uint32_t last_by = 0;
+            std::unique_lock<std::recursive_mutex> g(mutex_, std::try_to_lock);
+            if (g.owns_lock()) {
+                const auto it = cond_map_.find(gc);
+                same = it == cond_map_.end() ? "unmapped" : it->second.get() == wcv ? "yes" : "NO";
+                if (it != cond_map_.end() && pthread_mutex_trylock(&it->second->m) == 0) {
+                    wakes = it->second->wakes;
+                    pthread_mutex_unlock(&it->second->m);
+                    last_by = it->second->last_tid.load();
+                }
+            }
+            char b[160];
+            std::snprintf(b, sizeof b,
+                          " cond=%08x mutex=%08x mapped-same=%s wakes=%llu at-sleep=%llu last-by=%u",
+                          gc, st->snap[1], same, (unsigned long long)wakes,
+                          (unsigned long long)st->wait_wakes.load(), last_by);
+            wait = b;
+        }
+        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s%s pending=%08x%s%s\n",
                     tid, st->host_tid.load(), parked ? "in-host" : outside ? "host-call" : "guest", pc,
-                    lr, sp, imp.empty() ? "" : " import=", imp.c_str(), st->pending.load(),
-                    samples.empty() ? "" : " samples:", samples.c_str());
+                    lr, sp, imp.empty() ? "" : " import=", imp.c_str(), wait.c_str(),
+                    st->pending.load(), samples.empty() ? "" : " samples:", samples.c_str());
     }
 }
 

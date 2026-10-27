@@ -254,6 +254,9 @@ public:
         // are in use); otherwise the thread's Jit registers are its state.
         std::atomic<bool> snap_valid{false};
         std::uint32_t stack_top = 0;
+        // The HostCond this thread sleeps on in a guest cond wait (dump).
+        std::atomic<const void*> wait_cv{nullptr};
+        std::atomic<std::uint64_t> wait_wakes{0};  // the cond's wakeup count when it slept
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
@@ -617,6 +620,25 @@ public:
     // jit_). GuestTid() is 1 on main, worker ids otherwise.
     Dynarmic::A32::Jit* ActiveJit();
     std::uint32_t GuestTid();
+    // A guest cond's host cond, with its signals + broadcasts so far: a
+    // sliced wait that timed out sees whether a wake came meanwhile (the
+    // timeout may have taken it), and the dump shows the last sender.
+    struct HostCond {
+        // The sleepers, oldest first, under m. A signal hands its wake to the
+        // oldest one (a broadcast to all) and wakes exactly that one through
+        // its own cv: no wake is lost and no sleeper wakes for another's.
+        struct Waiter {
+            pthread_cond_t cv;  // CLOCK_MONOTONIC, used with m
+            bool woken = false;
+            Waiter* next = nullptr;
+            Waiter* prev = nullptr;
+        };
+        pthread_mutex_t m;
+        Waiter* head = nullptr;
+        Waiter* tail = nullptr;
+        std::uint64_t wakes = 0;  // wakes handed out (dump)
+        std::atomic<std::uint32_t> last_tid{0};
+    };
     // Product host (apphost): bind a caller-created Jit + tid to this thread
     // (Java-created threads have no bridge ThreadState; same routing).
     void ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid);
@@ -809,7 +831,7 @@ private:
     // runs pthread_*_destroy when the last user lets go.
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_mutex_t>> mutex_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
-    std::unordered_map<std::uint32_t, std::shared_ptr<pthread_cond_t>> cond_map_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
     std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)
     std::uint32_t next_key_ = 1;
     std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value
