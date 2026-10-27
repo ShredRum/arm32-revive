@@ -12407,6 +12407,7 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
     JNIEnv* re = RealEnv();
     jobject m = static_cast<jobject>(UnwrapObject(member));
     if (!re || !m) {
+        std::printf("[jni] FromReflected %08x: cannot describe it (step 1)\n", member);
         return 0;
     }
     // Calls an instance method with no arguments by name and signature.
@@ -12458,6 +12459,7 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
     };
     jobject decl = call_obj(m, "getDeclaringClass", "()Ljava/lang/Class;");
     if (!decl) {
+        std::printf("[jni] FromReflected %08x: cannot describe it (step 2)\n", member);
         return 0;
     }
     std::string cname = str(call_obj(decl, "getName", "()Ljava/lang/String;"));
@@ -12483,6 +12485,7 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
             re->DeleteLocalRef(type);
         }
         if (name.empty() || d.empty()) {
+            std::printf("[jni] FromReflected %08x: cannot describe it (step 3)\n", member);
             return 0;
         }
         text = "field " + cname + "." + name + ":" + d;
@@ -12510,6 +12513,7 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
             }
         }
         if (name.empty() || sig.back() == ')') {
+            std::printf("[jni] FromReflected %08x: cannot describe it (step 4)\n", member);
             return 0;
         }
         text = std::string(is_static ? "static " : "") + cname + "." + name + sig;
@@ -12518,12 +12522,16 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::uint32_t c = 0;
     if (!JniAllocObjectHandle(&c)) {
+        std::printf("[jni] FromReflected %08x: cannot describe it (step 5)\n", member);
         return 0;
     }
     std::memcpy(H(c), &c, 4);
     jni_methods_[c] = text;
-    if (DiagOn()) {
-        std::printf("[jni] FromReflected %s -> %08x\n", text.c_str(), c);
+    {
+        static std::atomic<int> said{0};
+        if (said.fetch_add(1) < 60) {
+            std::printf("[jni] FromReflected %s -> %08x\n", text.c_str(), c);
+        }
     }
     return c;
 #else
@@ -12885,6 +12893,10 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                         }
                     }
                     if (!ro) {
+                        // A class the guest got from FindClass: its real class.
+                        ro = static_cast<jobject>(JavaObjectFor(w));
+                    }
+                    if (!ro) {
                         ok = false;
                         break;
                     }
@@ -13241,6 +13253,10 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
                     if (known) {
                         ro = re->NewStringUTF(sv.c_str());
                     }
+                }
+                if (!ro) {
+                    // A class the guest got from FindClass: its real class.
+                    ro = static_cast<jobject>(JavaObjectFor(w));
                 }
                 if (!ro) {
                     ok = false;
