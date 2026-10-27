@@ -20,6 +20,10 @@
 #include <filesystem>
 #include <optional>
 #include <poll.h>
+#include <pwd.h>
+#include <grp.h>
+#include <sched.h>
+#include <sys/prctl.h>
 #include <pthread.h>
 #include <set>
 #include <arpa/inet.h>
@@ -34,6 +38,7 @@
 #endif
 #include <utime.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -7190,6 +7195,218 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
+    if (n == "usleep" || n == "sleep") {
+        // Signal-aware like nanosleep; the full time always elapses.
+        GuestSleepUs(n == "usleep" ? std::uint64_t(a0) : std::uint64_t(a0) * 1000000u);
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "sched_get_priority_max" || n == "sched_get_priority_min") {
+        // Policy numbers are the kernel's on both sides.
+        const int r = n == "sched_get_priority_max" ? ::sched_get_priority_max(static_cast<int>(a0))
+                                                    : ::sched_get_priority_min(static_cast<int>(a0));
+        if (r < 0) {
+            SetGuestErrno(errno);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return;
+    }
+    if (n == "pthread_getschedparam" || n == "pthread_setschedparam") {
+        // Guest threads keep the policy they started with, SCHED_OTHER at
+        // priority 0 (an app's threads); asking for a real-time policy is
+        // refused as Android refuses it to an app (EPERM).
+        // get(thread, int* policy, sched_param* p); set(thread, policy, p).
+        const bool get = (n == "pthread_getschedparam");
+        if (!CheckRange(a2, 4, get) || (get && !CheckRange(a1, 4, true))) {
+            goto bad_ptr;
+        }
+        if (get) {
+            const std::uint32_t z = 0;
+            std::memcpy(H(a1), &z, 4);  // SCHED_OTHER
+            std::memcpy(H(a2), &z, 4);
+            Ret(regs, 0);
+            return;
+        }
+        std::int32_t prio = 0;
+        std::memcpy(&prio, H(a2), 4);
+        Ret(regs, (a1 == SCHED_OTHER && prio == 0) ? 0u : static_cast<std::uint32_t>(EPERM));
+        return;
+    }
+    if (n == "getpriority" || n == "setpriority") {
+        // (which, who[, prio]). A PRIO_PROCESS `who` is a thread id on Linux:
+        // a guest tid (gettid) maps to its host thread; 0 and the process id
+        // pass through, other ids are unknown (ESRCH).
+        int who = static_cast<int>(a1);
+        if (a0 == PRIO_PROCESS && who != 0 && who != ::getpid()) {
+            who = HostTidOf(a1);
+            if (who == 0) {
+                SetGuestErrno(ESRCH);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+        }
+        errno = 0;
+        const int r = n == "getpriority"
+                          ? ::getpriority(static_cast<int>(a0), static_cast<id_t>(who))
+                          : ::setpriority(static_cast<int>(a0), static_cast<id_t>(who),
+                                          static_cast<int>(a2));
+        if (errno != 0) {
+            SetGuestErrno(errno);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return;
+    }
+    if (n == "getrusage") {
+        // Guest struct rusage (LP32, NDK): two timevals of 2 longs, then 14
+        // longs; 72 bytes. Values are truncated to 32 bits like the kernel's
+        // compat layer does.
+        if (!CheckRange(a1, 72, true)) {
+            goto bad_ptr;
+        }
+        struct rusage ru {};
+        if (::getrusage(static_cast<int>(a0), &ru) != 0) {
+            SetGuestErrno(errno);
+            Ret(regs, static_cast<std::uint32_t>(-1));
+            return;
+        }
+        const long v[18] = {ru.ru_utime.tv_sec, ru.ru_utime.tv_usec, ru.ru_stime.tv_sec,
+                            ru.ru_stime.tv_usec, ru.ru_maxrss, ru.ru_ixrss, ru.ru_idrss,
+                            ru.ru_isrss, ru.ru_minflt, ru.ru_majflt, ru.ru_nswap, ru.ru_inblock,
+                            ru.ru_oublock, ru.ru_msgsnd, ru.ru_msgrcv, ru.ru_nsignals,
+                            ru.ru_nvcsw, ru.ru_nivcsw};
+        for (int i = 0; i < 18; i++) {
+            const std::int32_t w = static_cast<std::int32_t>(v[i]);
+            std::memcpy(H(a1 + static_cast<std::uint32_t>(i) * 4), &w, 4);
+        }
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "prctl") {
+        // Only the thread name (PR_SET_NAME / PR_GET_NAME: 16 bytes with the
+        // NUL) reaches the host thread; other options are not offered.
+        if (a0 == PR_SET_NAME || a0 == PR_GET_NAME) {
+            if (!CheckRange(a1, 16, a0 == PR_GET_NAME)) {
+                goto bad_ptr;
+            }
+            char nm[16] = {};
+            if (a0 == PR_SET_NAME) {
+                std::memcpy(nm, H(a1), 15);
+                ::prctl(PR_SET_NAME, nm, 0, 0, 0);
+            } else {
+                ::prctl(PR_GET_NAME, nm, 0, 0, 0);
+                std::memcpy(H(a1), nm, 16);
+            }
+            Ret(regs, 0);
+            return;
+        }
+        std::printf("[svc] prctl(%u) is not offered -> EINVAL\n", a0);
+        SetGuestErrno(EINVAL);
+        Ret(regs, static_cast<std::uint32_t>(-1));
+        return;
+    }
+    if (n == "getuid") {
+        Ret(regs, static_cast<std::uint32_t>(::getuid()));
+        return;
+    }
+    if (n == "getresuid") {
+        if (!CheckRange(a0, 4, true) || !CheckRange(a1, 4, true) || !CheckRange(a2, 4, true)) {
+            goto bad_ptr;
+        }
+        uid_t r = 0, e = 0, sv = 0;
+        ::getresuid(&r, &e, &sv);
+        const std::uint32_t w[3] = {r, e, sv};
+        std::memcpy(H(a0), &w[0], 4);
+        std::memcpy(H(a1), &w[1], 4);
+        std::memcpy(H(a2), &w[2], 4);
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "getpwuid" || n == "getpwnam" || n == "getgrgid" || n == "getgrnam") {
+        // The host's answer (on a device the system's own bionic), in the
+        // guest's LP32 structs: passwd {name, passwd, uid, gid, dir, shell}
+        // = 24 bytes (pw_gecos aliases the NULL pw_passwd), group {name,
+        // passwd, gid, mem} = 16 bytes. Like bionic, one result buffer per
+        // thread, overwritten by the next call.
+        const bool by_name = (n == "getpwnam" || n == "getgrnam");
+        if (by_name && !CheckRange(a0, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string key = by_name ? std::string(GuestStr(a0)) : std::string();
+        std::vector<std::string> strs;  // passwd: name dir shell; group: name, members...
+        std::uint32_t id1 = 0, id2 = 0;
+        const bool pw = (n == "getpwuid" || n == "getpwnam");
+        if (pw) {
+            const struct passwd* p = by_name ? ::getpwnam(key.c_str()) : ::getpwuid(a0);
+            if (p) {
+                strs = {p->pw_name ? p->pw_name : "", p->pw_dir ? p->pw_dir : "/",
+                        p->pw_shell ? p->pw_shell : "/system/bin/sh"};
+                id1 = p->pw_uid;
+                id2 = p->pw_gid;
+            }
+        } else {
+            const struct group* g = by_name ? ::getgrnam(key.c_str()) : ::getgrgid(a0);
+            if (g) {
+                strs = {g->gr_name ? g->gr_name : ""};
+                for (char** m = g->gr_mem; m && *m && strs.size() < 64; m++) {
+                    strs.push_back(*m);
+                }
+                id1 = g->gr_gid;
+            }
+        }
+        if (strs.empty()) {
+            SetGuestErrno(ENOENT);
+            Ret(regs, 0);
+            return;
+        }
+        // Layout: struct, member array (group), strings.
+        const std::uint32_t head = pw ? 24u : 16u;
+        const std::uint32_t members = pw ? 0u : static_cast<std::uint32_t>(strs.size()) * 4u;
+        std::uint32_t need = head + members;
+        for (const std::string& x : strs) {
+            need += static_cast<std::uint32_t>(x.size() + 1);
+        }
+        thread_local std::uint32_t buf = 0, buf_size = 0;
+        if (buf_size < need) {
+            if (buf) {
+                GuestFree(buf);
+            }
+            buf = GuestMalloc(need);
+            buf_size = buf ? need : 0;
+            if (!buf) {
+                SetGuestErrno(ENOMEM);
+                Ret(regs, 0);
+                return;
+            }
+        }
+        std::memset(H(buf), 0, need);
+        std::uint32_t at = buf + head + members;
+        std::vector<std::uint32_t> ptrs;
+        for (const std::string& x : strs) {
+            std::memcpy(H(at), x.c_str(), x.size() + 1);
+            ptrs.push_back(at);
+            at += static_cast<std::uint32_t>(x.size() + 1);
+        }
+        auto put32 = [&](std::uint32_t off, std::uint32_t v) { std::memcpy(H(buf + off), &v, 4); };
+        if (pw) {
+            put32(0, ptrs[0]);
+            put32(8, id1);
+            put32(12, id2);
+            put32(16, ptrs[1]);
+            put32(20, ptrs[2]);
+        } else {
+            put32(0, ptrs[0]);
+            put32(8, id1);
+            put32(12, buf + head);
+            // gr_mem: the members, NULL-terminated (the slot of the name
+            // string becomes the terminator).
+            for (std::size_t i = 1; i < ptrs.size(); i++) {
+                put32(head + static_cast<std::uint32_t>(i - 1) * 4u, ptrs[i]);
+            }
+            put32(head + static_cast<std::uint32_t>(ptrs.size() - 1) * 4u, 0);
+        }
+        Ret(regs, buf);
+        return;
+    }
     {
         // Locked: worker threads share stub_hits_ with main. Diagnostic layer
         // (PLAN.md A5/B13): with DIAG off this skips the per-call map probe on
@@ -8587,8 +8804,15 @@ void Runtime::RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit) {
         e = std::make_shared<SigThread>();
     }
     e->jit.store(jit, std::memory_order_release);
+    e->host_tid.store(static_cast<int>(::syscall(SYS_gettid)), std::memory_order_relaxed);
     t_sig = e;
     t_rt = this;
+}
+
+int Runtime::HostTidOf(std::uint32_t tid) {
+    std::lock_guard<std::mutex> l(sig_mu_);
+    const auto it = sig_threads_.find(tid);
+    return it != sig_threads_.end() ? it->second->host_tid.load(std::memory_order_relaxed) : 0;
 }
 
 namespace {

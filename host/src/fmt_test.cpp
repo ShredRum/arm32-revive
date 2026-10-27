@@ -345,6 +345,10 @@ int main() {
     mod.imports.push_back(abr::Import{"strsep", true, 0, 0, 0});  // 77
     mod.imports.push_back(abr::Import{"strxfrm", true, 0, 0, 0});  // 78
     mod.imports.push_back(abr::Import{"div", true, 0, 0, 0});  // 79
+    mod.imports.push_back(abr::Import{"getuid", true, 0, 0, 0});  // 80
+    mod.imports.push_back(abr::Import{"getpwuid", true, 0, 0, 0});  // 81
+    mod.imports.push_back(abr::Import{"getgrgid", true, 0, 0, 0});  // 82
+    mod.imports.push_back(abr::Import{"sched_get_priority_max", true, 0, 0, 0});  // 83
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1155,6 +1159,37 @@ int main() {
         std::int32_t qr[2] = {0, 0};
         std::memcpy(qr, mem.host(q), 8);
         Expect("div(-7, 2)", std::to_string(qr[0]) + " " + std::to_string(qr[1]), "-3 -1");
+    }
+
+    // --- user database in the guest's LP32 structs: passwd uid at +8 and a
+    //     name string at +0; group gid at +8, gr_mem NULL-terminated at +12.
+    {
+        const std::uint32_t none[4] = {0, 0, 0, 0};
+        const std::uint32_t uid = abr::RuntimeTestAccess::Call(rt, 80, none);
+        const std::uint32_t ua[4] = {uid, 0, 0, 0};
+        const std::uint32_t pw = abr::RuntimeTestAccess::Call(rt, 81, ua);
+        std::uint32_t w[4] = {0, 0, 0, 0};
+        if (pw) {
+            std::memcpy(w, mem.host(pw), 12);
+        }
+        Expect("getpwuid(getuid()): uid, name", pw && w[2] == uid && *rt.H<const char>(w[0]) ? "1" : "0",
+               "1");
+        const std::uint32_t ga[4] = {static_cast<std::uint32_t>(::getgid()), 0, 0, 0};
+        const std::uint32_t gr = abr::RuntimeTestAccess::Call(rt, 82, ga);
+        bool term = false;
+        if (gr) {
+            std::memcpy(w, mem.host(gr), 16);
+            for (std::uint32_t i = 0; i < 64 && !term; i++) {
+                std::uint32_t m = 1;
+                std::memcpy(&m, mem.host(w[3] + i * 4), 4);
+                term = (m == 0);
+            }
+        }
+        Expect("getgrgid(getgid()): gid, gr_mem ends", gr && w[2] == ga[0] && term ? "1" : "0", "1");
+        const std::uint32_t fifo[4] = {1, 0, 0, 0};
+        Expect("sched_get_priority_max(SCHED_FIFO)",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 83, fifo)),
+               "99");
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read

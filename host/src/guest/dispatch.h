@@ -205,7 +205,10 @@ public:
         std::atomic<std::uint32_t> pending{0};
         std::atomic<std::uint32_t> blocked{0};
         std::atomic<Dynarmic::A32::Jit*> jit{nullptr};
+        std::atomic<int> host_tid{0};  // the kernel tid of the host thread
     };
+    // The kernel tid running guest thread `tid`, or 0 when it is unknown.
+    int HostTidOf(std::uint32_t tid);
     void RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit);
     // The thread's Jit is being deleted: signals must no longer touch it.
     void ForgetSigThreadJit(std::uint32_t tid);
