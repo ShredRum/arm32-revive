@@ -11552,8 +11552,25 @@ void Runtime::ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid) {
     }
 }
 
+// A nested Run (a callback Jit, or a Java -> native call made from inside a
+// JNI call) makes host calls of its own, which overwrite the thread's
+// register snapshot; the outer host call's snapshot (its r4-r11 may hold the
+// only references to live objects, which a GC must see) is put back when the
+// nested Run ends.
+namespace {
+struct SnapSave {
+    std::array<std::uint32_t, 16> regs;
+    std::uint32_t cpsr;
+    bool valid;
+};
+thread_local std::vector<SnapSave> t_snap_stack;
+}  // namespace
+
 void GuestSigEnterJit() {
     t_jit_depth++;
+    if (t_jit_depth > 1 && t_sig && !t_is_proxy) {
+        t_snap_stack.push_back({t_sig->snap, t_sig->snap_cpsr, t_sig->snap_valid.load()});
+    }
     GuestSigResumeJit();
 }
 
@@ -11577,6 +11594,13 @@ void GuestSigLeaveJit() {
         return;
     }
     // Back in a host call (a callback Jit ended) or back in the host.
+    if (t_jit_depth > 0 && !t_snap_stack.empty()) {
+        const SnapSave& sv = t_snap_stack.back();
+        t_sig->snap = sv.regs;
+        t_sig->snap_cpsr = sv.cpsr;
+        t_sig->snap_valid.store(sv.valid, std::memory_order_relaxed);
+        t_snap_stack.pop_back();
+    }
     t_sig->parked.store(t_jit_depth <= 0, std::memory_order_relaxed);
     t_sig->outside.store(true, std::memory_order_release);
 }
