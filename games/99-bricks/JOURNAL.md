@@ -192,7 +192,7 @@ truncate, prctl, select, epoll_*, sendfile, dlerror, wide-char), zlib
 mipmaps...), process/network refusals (fork/exec/popen/system, getaddrinfo...),
 then NDK input/looper/configuration/sensors/window and EGL (device).
 
-## GC and threads outside the guest (found 2026-10-27, open)
+## GC and threads outside the guest (found and fixed 2026-10-27)
 
 Test: `mono_thread_create(domain, mono_gc_collect, 0)` while the guestrun main
 thread sleeps in the host (`@sleep`). The new thread's stop-the-world signals the
@@ -209,3 +209,13 @@ stopped). Also: key destructors do not run when a Java-attached thread exits
 
 Fixed the same day: waits became interruptible only with the first signal sent, so
 Mono's finalizer, already blocked in sem_wait, never acked (906d206).
+
+Fix: proxy delivery. A thread outside guest code (in a host call, or back in the
+host) is marked `outside`; a signal for it starts a proxy host thread that runs the
+handler as that guest thread (tid, TLS, errno, mask) on its guest stack: below the
+sp of its host call with its r4-r11, or from its stack top when parked. A per-thread
+token (recursive mutex) is held by whoever runs a handler for the thread; the thread
+takes it before executing guest code again, so it stays stopped while the handler
+waits in sigsuspend for the restart signal. Only while signals are in use. Test:
+the worker's collection now ends while the main thread still sleeps; 5/5 runs of six
+thread+GC rounds pass.

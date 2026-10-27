@@ -65,6 +65,16 @@ thread_local std::uint32_t t_exit_value = 0;
 thread_local Dynarmic::A32::Jit* t_worker_jit = nullptr;
 thread_local std::uint32_t t_stack_lo = 0;
 thread_local std::uint32_t t_stack_size = 0;
+// RunJit nesting on this thread (a callback Jit inside a host call adds one).
+thread_local int t_jit_depth = 0;
+// Set while a proxy delivers: the interrupted registers of the thread it
+// stands in for (DeliverPendingSignals uses them instead of the active Jit's).
+// Only the proxy's first delivery uses them: once a handler runs, a nested
+// delivery (a signal taken inside the handler's own wait) goes below the
+// handler's frame, like on the thread itself. t_is_proxy marks the thread.
+thread_local const std::array<std::uint32_t, 16>* t_proxy_regs = nullptr;
+thread_local std::uint32_t t_proxy_cpsr = 0x10;
+thread_local bool t_is_proxy = false;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
@@ -1125,6 +1135,9 @@ int Runtime::GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot) {
 void Runtime::SetThreadStack(std::uint32_t lo, std::uint32_t size) {
     t_stack_lo = lo;
     t_stack_size = size;
+    if (t_sig) {
+        t_sig->stack_top = lo + size;  // where a proxy runs for a parked thread
+    }
 }
 
 std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
@@ -9206,6 +9219,9 @@ void Runtime::RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit) {
     }
     e->jit.store(jit, std::memory_order_release);
     e->host_tid.store(static_cast<int>(::syscall(SYS_gettid)), std::memory_order_relaxed);
+    if (t_stack_size) {
+        e->stack_top = t_stack_lo + t_stack_size;
+    }
     t_sig = e;
     t_rt = this;
 }
@@ -9406,6 +9422,10 @@ bool Runtime::DeliverPendingSignals() {
     if (!t_sig) {
         return true;
     }
+    // One handler at a time per guest thread, whether it runs on the thread
+    // itself or on a proxy (recursive: a handler's own waits deliver more).
+    const std::shared_ptr<SigThread> me = t_sig;
+    std::lock_guard<std::recursive_mutex> tok(me->token);
     for (;;) {
         const std::uint32_t avail = t_sig->pending.load(std::memory_order_acquire) &
                                     ~t_sig->blocked.load(std::memory_order_relaxed);
@@ -9431,10 +9451,11 @@ bool Runtime::DeliverPendingSignals() {
             return false;
         }
         Dynarmic::A32::Jit* cur = t_active_jit;
-        if (!cur) {
+        if (!cur && !t_proxy_regs) {
             return true;
         }
-        const auto& regs = cur->Regs();
+        const std::array<std::uint32_t, 16>* const proxy_regs = t_proxy_regs;
+        const auto& regs = proxy_regs ? *proxy_regs : cur->Regs();
         std::uint32_t saved[8];
         for (int i = 0; i < 8; i++) {
             saved[i] = regs[4 + i];
@@ -9460,7 +9481,7 @@ bool Runtime::DeliverPendingSignals() {
         for (int i = 0; i < 16; i++) {
             std::memcpy(H(uc + 32 + 4 * i), &regs[i], 4);
         }
-        const std::uint32_t cpsr = cur->Cpsr();
+        const std::uint32_t cpsr = proxy_regs ? t_proxy_cpsr : cur->Cpsr();
         std::memcpy(H(uc + 96), &cpsr, 4);
         std::memcpy(H(uc + 104), &old_blocked, 4);  // uc_sigmask
         std::uint32_t during = old_blocked | act.mask;
@@ -9468,11 +9489,13 @@ bool Runtime::DeliverPendingSignals() {
             during |= kSigBit(sig);  // SA_NODEFER clear: block it while it runs
         }
         t_sig->blocked.store(during & ~kUnblockable, std::memory_order_relaxed);
+        t_proxy_regs = nullptr;  // deliveries inside the handler use its own frame
         const bool ok = RunNestedOnStack(act.handler, sig, info, uc, uc & ~7u, saved);
+        t_proxy_regs = proxy_regs;
         t_sig->blocked.store(old_blocked, std::memory_order_relaxed);
         if (!ok) {
-            std::printf("[signal] LOUD handler %08x for signal %u did not return -- halting\n",
-                        act.handler, sig);
+            std::printf("[signal] LOUD handler %08x for signal %u did not return (hr=%d) -- "
+                        "halting\n", act.handler, sig, cb_last_hr_);
             HaltGuest();
             return false;
         }
@@ -9580,11 +9603,108 @@ std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
         return 0;  // discarded at generation, as the kernel does
     }
     signals_in_use_.store(true, std::memory_order_release);
-    it->second->pending.fetch_or(kSigBit(sig), std::memory_order_acq_rel);
-    if (Dynarmic::A32::Jit* j = it->second->jit.load(std::memory_order_acquire)) {
-        j->HaltExecution(kSignalHalt);
+    const std::shared_ptr<SigThread> st = it->second;
+    st->pending.fetch_or(kSigBit(sig), std::memory_order_acq_rel);
+    if (Dynarmic::A32::Jit* j = st->jit.load(std::memory_order_acquire)) {
+        j->HaltExecution(kSignalHalt);  // taken at its next block boundary
+    }
+    // Checked after the halt: a thread that went outside meanwhile is not
+    // missed (a proxy finding nothing left to deliver is harmless).
+    if (st->outside.load(std::memory_order_acquire) &&
+        !st->proxy.exchange(true, std::memory_order_acq_rel)) {
+        try {
+            std::thread([this, st, tid]() { ProxyDeliver(st, tid); }).detach();
+        } catch (const std::system_error&) {
+            st->proxy.store(false, std::memory_order_release);
+            std::printf("[signal] LOUD no host thread for a proxy delivery to tid %u\n", tid);
+        }
     }
     return 0;
+}
+
+// On a proxy (t_is_proxy) the thread's state stays as the proxy found
+// it: the handler's own host calls and Run levels are the proxy's, not the
+// thread's.
+void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr) {
+    if (!t_sig || t_is_proxy) {
+        return;
+    }
+    t_sig->snap = regs;
+    t_sig->snap_cpsr = cpsr;
+    t_sig->parked.store(false, std::memory_order_relaxed);
+    t_sig->outside.store(true, std::memory_order_release);
+}
+
+void Runtime::SigLeaveHostCall() {
+    if (!t_sig || t_is_proxy) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+    t_sig->outside.store(false, std::memory_order_release);
+}
+
+void Runtime::ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid) {
+    for (;;) {
+        {
+            std::lock_guard<std::recursive_mutex> tok(st->token);
+            const bool deliverable = (st->pending.load(std::memory_order_acquire) &
+                                      ~st->blocked.load(std::memory_order_relaxed)) != 0;
+            if (deliverable && st->outside.load(std::memory_order_acquire)) {
+                // Stand in for the thread: its guest identity, and the
+                // registers it left guest code with (none when parked).
+                std::array<std::uint32_t, 16> regs = st->snap;
+                std::uint32_t cpsr = st->snap_cpsr;
+                if (st->parked.load(std::memory_order_relaxed)) {
+                    regs.fill(0);
+                    const std::uint32_t top = st->stack_top ? st->stack_top : kStackTop;
+                    regs[13] = (top - 0x400u) & ~7u;
+                    cpsr = 0x10;
+                }
+                t_sig = st;
+                t_rt = this;
+                t_tid = tid;
+                t_proxy_regs = &regs;
+                t_proxy_cpsr = cpsr;
+                t_is_proxy = true;
+                DeliverPendingSignals();
+                t_is_proxy = false;
+                t_proxy_regs = nullptr;
+                t_tid = 0;
+                t_sig.reset();
+            }
+        }
+        st->proxy.store(false, std::memory_order_release);
+        const bool again = (st->pending.load(std::memory_order_acquire) &
+                            ~st->blocked.load(std::memory_order_relaxed)) != 0 &&
+                           st->outside.load(std::memory_order_acquire);
+        if (!again || st->proxy.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+    }
+}
+
+void GuestSigEnterJit() {
+    t_jit_depth++;
+    GuestSigResumeJit();
+}
+
+void GuestSigResumeJit() {
+    if (!t_rt || !t_sig || t_is_proxy || !t_rt->SignalsInUse()) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+    t_sig->parked.store(false, std::memory_order_relaxed);
+    t_sig->outside.store(false, std::memory_order_release);
+}
+
+void GuestSigLeaveJit() {
+    t_jit_depth--;
+    if (!t_rt || !t_sig || t_is_proxy || !t_rt->SignalsInUse()) {
+        return;
+    }
+    // Back in a host call (a callback Jit ended) or back in the host.
+    t_sig->parked.store(t_jit_depth <= 0, std::memory_order_relaxed);
+    t_sig->outside.store(true, std::memory_order_release);
 }
 
 std::uint32_t Runtime::GuestSigsuspend(std::uint32_t mask_ptr) {
@@ -12710,8 +12830,15 @@ void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
 }
 
 void GuestCallbacks::CallSVC(std::uint32_t swi) {
-    auto& regs = rt_->ActiveJit()->Regs();
+    Dynarmic::A32::Jit* jit = rt_->ActiveJit();
+    auto& regs = jit->Regs();
+    if (!rt_->SignalsInUse()) {
+        rt_->OnSvc(swi, regs);
+        return;
+    }
+    rt_->SigEnterHostCall(regs, jit->Cpsr());
     rt_->OnSvc(swi, regs);
+    rt_->SigLeaveHostCall();
 }
 
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:

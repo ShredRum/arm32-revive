@@ -60,6 +60,13 @@ inline constexpr Dynarmic::HaltReason kSignalHalt = Dynarmic::HaltReason::UserDe
 // Runs the guest handlers of this thread's pending, unblocked signals (no-op
 // when there are none or no Runtime is bound to the thread).
 void DeliverGuestSignalsHere();
+// While guest signals are in use, a thread tells the runtime when it starts
+// and stops executing guest code (see Runtime::SigThread): entering waits
+// until no handler is running on its behalf; resuming does the same without
+// counting a new run level.
+void GuestSigEnterJit();
+void GuestSigResumeJit();
+void GuestSigLeaveJit();
 
 // Jit::Run, resumed after a code-cache invalidation or a guest signal. A
 // guest that writes code (a JIT such as Mono's) calls cacheflush; the Jit
@@ -70,13 +77,16 @@ void DeliverGuestSignalsHere();
 inline Dynarmic::HaltReason RunJit(Dynarmic::A32::Jit& jit) {
     constexpr auto kResume = static_cast<std::uint32_t>(Dynarmic::HaltReason::CacheInvalidation) |
                              static_cast<std::uint32_t>(kSignalHalt);
+    GuestSigEnterJit();
     for (;;) {
         const auto raw = static_cast<std::uint32_t>(jit.Run());
         if (raw & static_cast<std::uint32_t>(kSignalHalt)) {
             DeliverGuestSignalsHere();
+            GuestSigResumeJit();
         }
         const std::uint32_t hr = raw & ~kResume;
         if (hr != 0) {
+            GuestSigLeaveJit();
             return static_cast<Dynarmic::HaltReason>(hr);
         }
     }
@@ -193,20 +203,45 @@ public:
     int GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot);
 
     // --- Guest signals (arm32 numbering; sigset_t = 32 bits, signals 1-32).
-    // Off until a guest thread sends a signal (tkill/pthread_kill/kill): the
-    // Rovio titles never do, so their waits and run loops are unchanged.
+    // Off until a guest installs a handler for a non-fault signal or sends
+    // one (tkill/pthread_kill/kill): the Rovio titles never do, so their
+    // waits, host calls and run loops are unchanged.
     // sigaction/sigprocmask keep the guest's dispositions and masks; a sent
-    // signal is pending on the target thread and runs its handler at the
-    // next delivery point: the target's Run stops (kSignalHalt), or a wait in
-    // a host call wakes between short slices (SignalsInUse). The handler runs
-    // on a callback Jit, on the target thread's own guest stack, seeded with
+    // signal is pending on the target thread. A thread executing guest code
+    // stops at its next block boundary (kSignalHalt) and runs the handler; a
+    // thread in an interruptible wait (2 ms slices) runs it between slices;
+    // any other thread outside guest code gets a proxy (below). The handler
+    // runs on a callback Jit, on the thread's own guest stack, seeded with
     // its callee-saved registers (a GC that scans the stack sees them).
+    //
+    // A thread that is not executing guest code -- inside a host call, or
+    // back in the host altogether (a Java thread between two native calls)
+    // -- cannot stop for a signal itself. Such a thread is `outside`; a
+    // signal for it is delivered by a proxy host thread that runs the
+    // handler as that guest thread (its tid, TLS, errno, mask), on its guest
+    // stack: below the sp it had when it made the host call, with its r4-r11
+    // (`snap`), or from its stack top when it has no guest frames (`parked`).
+    // `token` is held by whoever runs a handler for the thread; the thread
+    // takes it before it executes guest code again, so it stays stopped while
+    // a handler runs for it (a GC's stop-the-world needs exactly that).
     struct SigThread {
         std::atomic<std::uint32_t> pending{0};
         std::atomic<std::uint32_t> blocked{0};
         std::atomic<Dynarmic::A32::Jit*> jit{nullptr};
         std::atomic<int> host_tid{0};  // the kernel tid of the host thread
+        std::recursive_mutex token;
+        std::atomic<bool> outside{true};
+        std::atomic<bool> parked{true};
+        std::atomic<bool> proxy{false};  // a proxy is scheduled or running
+        std::array<std::uint32_t, 16> snap{};
+        std::uint32_t snap_cpsr = 0x10;
+        std::uint32_t stack_top = 0;
     };
+    // CallSVC: the thread leaves guest code for a host call / comes back.
+    void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr);
+    void SigLeaveHostCall();
+    // Runs the deliverable signals of an outside thread on its behalf.
+    void ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid);
     // The kernel tid running guest thread `tid`, or 0 when it is unknown.
     int HostTidOf(std::uint32_t tid);
     void RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit);
