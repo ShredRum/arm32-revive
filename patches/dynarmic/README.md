@@ -36,11 +36,14 @@ What makes sharing safe:
 - A shared cache is never cleared (other threads may be inside it). When it
   has less than 2 MiB left, a thread continues in its own private overflow
   cache, which behaves like upstream (clears itself when full).
-- `ClearCache` must not be used on shared Jits. `InvalidateCacheRange` is
-  safe (blocks are unlinked and dropped from the tables, their code stays
-  in place for threads still inside it; every thread's memo is emptied);
-  the host uses it for a guest's cacheflush (a guest JIT such as Mono).
-  A thread's private overflow cache is not invalidated by other threads.
+- `ClearCache` must not be used on shared Jits. `InvalidateCacheRange` on a
+  shared cache is NOT reliable for a guest that rewrites code (REVIEW R-007):
+  with Mono (99 Bricks) stale translations ran, 4 boots in 10 broke; with
+  private caches 0 in 20. Known gaps: the ranges are applied only when the
+  flushing thread's Run stops, and a thread's private overflow cache is not
+  invalidated by other threads. A title whose guest has a JIT sets
+  `host.jitshare = "off"` in its profile; the host then sends every
+  cacheflush to every live Jit.
 
 Measured on the sandbox (Star Wars): steady-state frame time unchanged
 (500 frames 12.2-12.5 s either way); boot to the 100th frame ~0.1 s slower
