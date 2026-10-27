@@ -5,6 +5,7 @@
 #endif
 
 #include "guest/bsd_random.h"
+#include "guest/sha1.h"
 #include "realgl.h"
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
@@ -7409,6 +7410,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, e == 0 ? 0u : 0xFFFFFFFFu);
         return;
     }
+    if (n == "crc32" || n == "inflate" || n == "inflateInit_" || n == "inflateInit2_" ||
+        n == "inflateEnd" || n == "inflateReset" || n == "deflate" || n == "deflateInit2_" ||
+        n == "deflateEnd" || n == "deflateReset") {
+        if (!ZlibCall(n, regs)) {
+            goto bad_ptr;
+        }
+        return;
+    }
+    if (n == "SHA1Init" || n == "SHA1Update" || n == "SHA1Final") {
+        if (!Sha1Call(n, regs)) {
+            goto bad_ptr;
+        }
+        return;
+    }
     // --- processes. The emulator cannot give a guest a child process (a
     //     fork would duplicate the whole host, exec would replace it), so
     //     these fail the way a system without the facility answers.
@@ -9411,6 +9426,166 @@ std::uint32_t Runtime::GuestSetenv(const std::string& key, const std::string* va
 
 void Runtime::SetGuestEnv(const std::string& key, const std::string& value) {
     GuestSetenv(key, &value, true);
+}
+
+// zlib for guest streams. The guest's z_stream is the 32-bit zlib layout
+// (NDK, measured): next_in @0, avail_in @4, total_in @8, next_out @12,
+// avail_out @16, total_out @20, msg @24, state @28, zalloc @32, zfree @36,
+// opaque @40, data_type @44, adler @48, reserved @52; 56 bytes. Each guest
+// stream has a host z_stream (zstreams_, keyed by the guest address); every
+// call copies the fields in, runs host zlib on the guest buffers, and copies
+// them back. The guest's zalloc/zfree are not used: the host stream's memory
+// is the host's. `state` reads as the guest stream itself (non-NULL while
+// initialised, as zlib callers test), msg as a guest copy of the host text.
+bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
+    const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2];
+    if (n == "crc32") {
+        // uLong crc32(uLong crc, const Bytef* buf, uInt len); buf NULL -> 0.
+        if (a1 == 0) {
+            Ret(regs, 0);
+            return true;
+        }
+        if (a2 && !CheckRange(a1, a2, false)) {
+            return false;
+        }
+        Ret(regs, static_cast<std::uint32_t>(::crc32(a0, H<const Bytef>(a1), a2)));
+        return true;
+    }
+    if (!CheckRange(a0, 56, true)) {
+        return false;
+    }
+    std::uint32_t g[14];
+    std::memcpy(g, H(a0), 56);
+    std::lock_guard<std::mutex> l(zlib_mu_);
+    const bool init = n == "inflateInit_" || n == "inflateInit2_" || n == "deflateInit2_";
+    if (init) {
+        // The version/size handshake is with the guest's zlib.h: the major
+        // version must match and the size must be the 32-bit z_stream.
+        const std::uint32_t ver = n == "inflateInit_" ? a1 : n == "inflateInit2_" ? a2 : 0;
+        std::uint32_t ver_ptr = ver, size = n == "inflateInit_" ? a2 : regs[3];
+        if (n == "deflateInit2_") {
+            // (strm, level, method, windowBits, memLevel, strategy, version,
+            // stream_size): the last four on the stack.
+            if (!CheckRange(regs[13], 16, false)) {
+                return false;
+            }
+            std::memcpy(&ver_ptr, H(regs[13] + 8), 4);
+            std::memcpy(&size, H(regs[13] + 12), 4);
+        }
+        if (!ver_ptr || !CheckRange(ver_ptr, 1, false) || *H<const char>(ver_ptr) != ZLIB_VERSION[0] ||
+            size != 56) {
+            Ret(regs, static_cast<std::uint32_t>(Z_VERSION_ERROR));
+            return true;
+        }
+        auto zs = std::make_unique<z_stream>();
+        int r = Z_OK;
+        if (n == "inflateInit_") {
+            r = ::inflateInit(zs.get());
+        } else if (n == "inflateInit2_") {
+            r = ::inflateInit2(zs.get(), static_cast<int>(a1));
+        } else {
+            std::int32_t mem_level = 0, strategy = 0;
+            std::memcpy(&mem_level, H(regs[13]), 4);
+            std::memcpy(&strategy, H(regs[13] + 4), 4);
+            r = ::deflateInit2(zs.get(), static_cast<int>(a1), static_cast<int>(a2),
+                               static_cast<int>(regs[3]), mem_level, strategy);
+        }
+        if (r == Z_OK) {
+            zstreams_[a0] = std::move(zs);
+            g[7] = a0;  // state
+            g[2] = g[5] = 0;
+            g[6] = 0;   // msg
+            std::memcpy(H(a0), g, 56);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    const auto it = zstreams_.find(a0);
+    if (it == zstreams_.end()) {
+        Ret(regs, static_cast<std::uint32_t>(Z_STREAM_ERROR));
+        return true;
+    }
+    z_stream* zs = it->second.get();
+    if (n == "inflateEnd" || n == "deflateEnd") {
+        const int r = n == "inflateEnd" ? ::inflateEnd(zs) : ::deflateEnd(zs);
+        zstreams_.erase(it);
+        g[7] = 0;
+        std::memcpy(H(a0), g, 56);
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    // Buffers: avail_* bytes at next_* (a zero length needs no pointer).
+    const std::uint32_t in = g[0], in_len = g[1], out = g[3], out_len = g[4];
+    if ((in_len && !CheckRange(in, in_len, false)) || (out_len && !CheckRange(out, out_len, true))) {
+        return false;
+    }
+    zs->next_in = in_len ? H<Bytef>(in) : nullptr;
+    zs->avail_in = in_len;
+    zs->next_out = out_len ? H<Bytef>(out) : nullptr;
+    zs->avail_out = out_len;
+    zs->total_in = g[2];
+    zs->total_out = g[5];
+    zs->data_type = static_cast<int>(g[11]);
+    int r = Z_STREAM_ERROR;
+    if (n == "inflate") {
+        r = ::inflate(zs, static_cast<int>(a1));
+    } else if (n == "deflate") {
+        r = ::deflate(zs, static_cast<int>(a1));
+    } else if (n == "inflateReset") {
+        r = ::inflateReset(zs);
+    } else if (n == "deflateReset") {
+        r = ::deflateReset(zs);
+    }
+    const std::uint32_t used_in = in_len - zs->avail_in, used_out = out_len - zs->avail_out;
+    g[0] = in + (in_len ? used_in : 0);
+    g[1] = zs->avail_in;
+    g[2] = static_cast<std::uint32_t>(zs->total_in);
+    g[3] = out + (out_len ? used_out : 0);
+    g[4] = zs->avail_out;
+    g[5] = static_cast<std::uint32_t>(zs->total_out);
+    g[11] = static_cast<std::uint32_t>(zs->data_type);
+    g[12] = static_cast<std::uint32_t>(zs->adler);
+    g[6] = 0;
+    if (zs->msg) {
+        std::uint32_t& m = zlib_msgs_[zs->msg];
+        if (!m) {
+            const std::size_t len = std::strlen(zs->msg) + 1;
+            m = GuestMalloc(static_cast<std::uint32_t>(len));
+            if (m) {
+                std::memcpy(H(m), zs->msg, len);
+            }
+        }
+        g[6] = m;
+    }
+    std::memcpy(H(a0), g, 56);
+    Ret(regs, static_cast<std::uint32_t>(r));
+    return true;
+}
+
+bool Runtime::Sha1Call(const std::string& n, Regs& regs) {
+    // SHA1Init(ctx); SHA1Update(ctx, data, len); SHA1Final(digest[20], ctx).
+    const std::uint32_t ctx = n == "SHA1Final" ? regs[1] : regs[0];
+    if (!CheckRange(ctx, sizeof(GuestSha1Ctx), true)) {
+        return false;
+    }
+    GuestSha1Ctx c;
+    std::memcpy(&c, H(ctx), sizeof(c));
+    if (n == "SHA1Init") {
+        Sha1Init(&c);
+    } else if (n == "SHA1Update") {
+        if (regs[2] && !CheckRange(regs[1], regs[2], false)) {
+            return false;
+        }
+        Sha1Update(&c, regs[2] ? H<const std::uint8_t>(regs[1]) : nullptr, regs[2]);
+    } else {
+        if (!CheckRange(regs[0], 20, true)) {
+            return false;
+        }
+        Sha1Final(H<std::uint8_t>(regs[0]), &c);
+    }
+    std::memcpy(H(ctx), &c, sizeof(c));
+    RetVoid(regs);
+    return true;
 }
 
 // bionic's __cxa_guard (ARM): 0 = not constructed, bit 0 = constructed; we

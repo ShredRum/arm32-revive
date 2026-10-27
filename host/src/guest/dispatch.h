@@ -7,6 +7,7 @@
 #include <bitset>
 #include <atomic>
 #include <semaphore.h>
+#include <zlib.h>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -269,6 +270,14 @@ public:
     // Returns acquire's result (1 = the caller constructs), 0 for release and
     // abort, or kSemBadPtr for a wild guard pointer.
     std::uint32_t CxaGuard(const std::string& n, std::uint32_t guard);
+    // zlib (inflate*/deflate*/crc32) over guest z_streams and bionic's
+    // SHA1Init/Update/Final over a guest SHA1_CTX. False: a wild guest
+    // pointer (the caller halts).
+    bool ZlibCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool Sha1Call(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    std::mutex zlib_mu_;
+    std::unordered_map<std::uint32_t, std::unique_ptr<z_stream>> zstreams_;
+    std::unordered_map<std::string, std::uint32_t> zlib_msgs_;  // host msg -> guest copy
     std::mutex guard_mu_;
     std::condition_variable guard_cv_;
     // Guest semaphores; kSemBadPtr asks the caller to halt on a wild pointer.

@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <zlib.h>
 
 #include "jni_call_words.h"
 #include <thread>
@@ -355,6 +356,13 @@ int main() {
     mod.imports.push_back(abr::Import{"getenv", true, 0, 0, 0});  // 87
     mod.imports.push_back(abr::Import{"setenv", true, 0, 0, 0});  // 88
     mod.imports.push_back(abr::Import{"unsetenv", true, 0, 0, 0});  // 89
+    mod.imports.push_back(abr::Import{"SHA1Init", true, 0, 0, 0});  // 90
+    mod.imports.push_back(abr::Import{"SHA1Update", true, 0, 0, 0});  // 91
+    mod.imports.push_back(abr::Import{"SHA1Final", true, 0, 0, 0});  // 92
+    mod.imports.push_back(abr::Import{"crc32", true, 0, 0, 0});  // 93
+    mod.imports.push_back(abr::Import{"inflateInit_", true, 0, 0, 0});  // 94
+    mod.imports.push_back(abr::Import{"inflate", true, 0, 0, 0});  // 95
+    mod.imports.push_back(abr::Import{"inflateEnd", true, 0, 0, 0});  // 96
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1230,6 +1238,60 @@ int main() {
         got += std::to_string(call(87, kK)) + " " + env0();
         Expect("getenv/setenv/unsetenv/environ", got, "0 one ABR_K=one 0 NULL");
         rt.environ_var_ = 0;
+    }
+
+    // --- SHA1 over a guest SHA1_CTX (FIPS 180 "abc" vector), crc32, and a
+    //     guest z_stream inflating what host zlib deflated: output, then
+    //     next_in/avail_in/next_out/avail_out/total_out as zlib leaves them.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t a[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        const std::uint32_t ctx = kScratch + 0xB00, msg = kScratch + 0xB80, dg = kScratch + 0xBA0;
+        put(msg, "abc");
+        call(90, ctx);
+        call(91, ctx, msg, 3);
+        call(92, dg, ctx);
+        std::string hex;
+        for (int i = 0; i < 20; i++) {
+            char b[3];
+            std::snprintf(b, sizeof b, "%02x", *rt.H<std::uint8_t>(dg + static_cast<std::uint32_t>(i)));
+            hex += b;
+        }
+        Expect("SHA1(abc)", hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        char crc[12];
+        std::snprintf(crc, sizeof crc, "%08x", call(93, 0, msg, 3));
+        Expect("crc32(abc)", crc, "352441c2");
+        const std::string plain(3000, 'z');
+        std::vector<Bytef> packed(compressBound(static_cast<uLong>(plain.size())));
+        uLongf plen = static_cast<uLongf>(packed.size());
+        ::compress(packed.data(), &plen, reinterpret_cast<const Bytef*>(plain.data()),
+                   static_cast<uLong>(plain.size()));
+        const std::uint32_t zs = kScratch + 0xC00, zin = 0x10008000, zout = 0x10009000,
+                            zver = kScratch + 0xC80;
+        std::memcpy(mem.host(zin), packed.data(), plen);
+        put(zver, ZLIB_VERSION);
+        std::memset(mem.host(zs), 0, 56);
+        const std::uint32_t r_init = call(94, zs, zver, 56);
+        std::uint32_t f[14];
+        std::memcpy(f, mem.host(zs), 56);
+        f[0] = zin;
+        f[1] = static_cast<std::uint32_t>(plen);
+        f[3] = zout;
+        f[4] = 4096;
+        std::memcpy(mem.host(zs), f, 56);
+        const std::uint32_t r_inf = call(95, zs, Z_FINISH);
+        std::memcpy(f, mem.host(zs), 56);
+        const bool same = std::memcmp(mem.host(zout), plain.data(), plain.size()) == 0;
+        const std::uint32_t r_end = call(96, zs);
+        char got[160];
+        std::snprintf(got, sizeof got, "%u %u %u same=%d in+%u avail_in=%u out+%u avail_out=%u total=%u",
+                      r_init, r_inf, r_end, same ? 1 : 0, f[0] - zin, f[1], f[3] - zout, f[4], f[5]);
+        char want[160];
+        std::snprintf(want, sizeof want, "0 1 0 same=1 in+%u avail_in=0 out+3000 avail_out=1096 total=3000",
+                      static_cast<unsigned>(plen));
+        Expect("guest z_stream inflate", got, want);
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read
