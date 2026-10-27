@@ -464,6 +464,17 @@ public:
     // a wrapped object, a mock jstring as a new String, a mock jclass as its
     // real class. Null for 0 or an unknown handle. Product host only.
     void* JavaObjectFor(std::uint32_t handle);
+    std::string JniClassName(std::uint32_t handle);
+    // Direct ByteBuffers (GetDirectBufferAddress): their memory is the
+    // host's, outside the guest. Each gets a guest shadow of its capacity,
+    // filled from the buffer when the guest asks for the address; whatever
+    // the guest wrote goes back when the Java -> native call that handed the
+    // buffer over returns (FlushDirectBuffers, called by the host then).
+    void FlushDirectBuffers();
+    struct DirectBuf {
+        std::uint32_t guest = 0, size = 0;
+    };
+    std::unordered_map<void*, DirectBuf> direct_bufs_;
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -901,7 +912,8 @@ private:
         void* real_arr = nullptr;
         void* host_elems = nullptr;
         std::uint32_t guest_buf = 0;
-        std::uint32_t len = 0;
+        std::uint32_t len = 0;   // bytes
+        int type = 1;            // 0 boolean .. 7 double (JNI table order); 1 = byte
     };
     std::unordered_map<std::uint32_t, ArrayPin> array_pins_;
 #endif

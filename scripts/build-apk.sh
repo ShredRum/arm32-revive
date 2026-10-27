@@ -161,6 +161,36 @@ if [ -f "$GUEST" ]; then
     sed -i "\|^[^-]*- *$GDIRREL/network$|d" "$TREE/apktool.yml"
     sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/network|" "$TREE/apktool.yml"
     echo "network: $NETWORK -> $GDIRREL/network"
+    # Several guest libraries (guest.deps): every one is checked, and
+    # guest.libs lists them in guest.load_order as "<sha256> <name>", the
+    # primary (guest.lib) marked; the host loads them in that order.
+    DEPS="$("${PROF[@]}" guest.deps 2>/dev/null || true)"
+    if [ -n "$DEPS" ]; then
+        DSHAS=($("${PROF[@]}" guest.deps_sha256))
+        declare -A SHA_OF=(["$GUEST_LIB"]="$GUEST_SHA")
+        i=0
+        for l in $DEPS; do
+            GOT="$(sha256sum "$GDIR/$l" | cut -d' ' -f1)"
+            if [ "$GOT" != "${DSHAS[$i]}" ]; then
+                echo "build-apk: guest $l mismatch: want ${DSHAS[$i]} got $GOT" >&2
+                exit 1
+            fi
+            SHA_OF["$l"]="$GOT"
+            i=$((i + 1))
+        done
+        : > "$GDIR/guest.libs"
+        for l in $("${PROF[@]}" guest.load_order); do
+            [ -n "${SHA_OF[$l]:-}" ] || { echo "build-apk: load_order names unknown $l" >&2; exit 1; }
+            if [ "$l" = "$GUEST_LIB" ]; then
+                printf '%s %s primary\n' "${SHA_OF[$l]}" "$l" >> "$GDIR/guest.libs"
+            else
+                printf '%s %s\n' "${SHA_OF[$l]}" "$l" >> "$GDIR/guest.libs"
+            fi
+        done
+        sed -i "\|^[^-]*- *$GDIRREL/guest\.libs$|d" "$TREE/apktool.yml"
+        sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/guest.libs|" "$TREE/apktool.yml"
+        echo "guest libraries: $(wc -l < "$GDIR/guest.libs") -> $GDIRREL/guest.libs"
+    fi
 fi
 java -jar "$APKTOOL" b -o "$UNS" "$TREE" >/dev/null
 

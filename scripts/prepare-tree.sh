@@ -6,9 +6,12 @@
 # The edits are the *minimal* set (PROVEN for rio by diffing a fresh decode of
 # original/ against the shipped work/apk_prod -- nothing else differs):
 #   1. lib/armeabi-v7a/<guest>.so -> assets/guestlib/armeabi-v7a/<guest>.so
+#      (and every guest.deps library of a several-library title, e.g. Unity)
 #   2. delete lib/armeabi-v7a/ and lib/x86/   (guest moved out; x86 unused)
 #   3. copy seeds/ -> assets/seeds/
 #   4. smali/com/rovio/fusionapp/Gen.smali: loaded lib name -> "abhost"
+#      (skipped when tree.smali_lib_name_orig is "": the host then carries
+#      the name Java loads, host.lib)
 #   5. apktool.yml doNotCompress += the guest .so and the seeds
 #      (the loader reads them STORED, so they must not be deflated)
 # lib/arm64-v8a/libabhost.so is *not* created here -- build-apk.sh drops it in.
@@ -60,9 +63,14 @@ rm -rf "$TREE"
 echo "== apktool d $ORIG =="
 java -jar "$APKTOOL" d -f -o "$TREE" "$ORIG" >/dev/null
 
+# A title with several guest libraries (Unity) lists the others in guest.deps.
+GUEST_DEPS="$("${PROF[@]}" guest.deps 2>/dev/null || true)"
+
 echo "== moving the guest .so into assets (stored) =="
 mkdir -p "$TREE/assets/guestlib/armeabi-v7a"
-mv "$TREE/lib/armeabi-v7a/$GUEST_LIB" "$TREE/assets/guestlib/armeabi-v7a/$GUEST_LIB"
+for l in "$GUEST_LIB" $GUEST_DEPS; do
+    mv "$TREE/lib/armeabi-v7a/$l" "$TREE/assets/guestlib/armeabi-v7a/$l"
+done
 rm -rf "$TREE/lib/armeabi-v7a" "$TREE/lib/x86"
 mkdir -p "$TREE/lib/arm64-v8a"
 
@@ -74,6 +82,9 @@ else
     echo "prepare-tree: note: no $SEEDS (fresh game: capture seeds on first run)"
 fi
 
+if [ -z "$SMALI_ORIG" ]; then
+    echo "== no smali edit (the host carries the name Java loads) =="
+else
 echo "== patching $GEN ($SMALI_ORIG -> abhost) =="
 [ -f "$TREE/$GEN" ] || {
     echo "prepare-tree: $GEN not found -- check tree.smali_lib_name_orig / the smali layout" >&2
@@ -90,13 +101,14 @@ if n == 0:
 open(path, "w", encoding="utf-8").write(new)
 print(f"patched {n} occurrence(s)")
 PY
+fi
 
 echo "== apktool.yml doNotCompress =="
-python3 - "$TREE/apktool.yml" "assets/guestlib/armeabi-v7a/$GUEST_LIB" "$SEEDS" "$TREE/assets/seeds" <<'PY'
+python3 - "$TREE/apktool.yml" "$SEEDS" "$TREE/assets/seeds" "$GUEST_LIB" $GUEST_DEPS <<'PY'
 import os, sys
-yml, guest, seeds_dir, tree_seeds = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+yml, seeds_dir, tree_seeds = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(yml, encoding="utf-8").read().splitlines()
-entries = [guest]
+entries = [f"assets/guestlib/armeabi-v7a/{g}" for g in sys.argv[4:]]
 if os.path.isdir(tree_seeds):
     entries += [f"assets/seeds/{n}" for n in sorted(os.listdir(tree_seeds))]
 add = [f"- {e}" for e in entries if f"- {e}" not in lines]
@@ -121,4 +133,17 @@ GOT="$(sha256sum "$TREE/assets/guestlib/armeabi-v7a/$GUEST_LIB" | cut -d' ' -f1)
     exit 1
 }
 echo "guest sha256 ok: $GOT"
+if [ -n "$GUEST_DEPS" ]; then
+    i=0
+    SHAS=($("${PROF[@]}" guest.deps_sha256))
+    for l in $GUEST_DEPS; do
+        GOT="$(sha256sum "$TREE/assets/guestlib/armeabi-v7a/$l" | cut -d' ' -f1)"
+        [ "$GOT" = "${SHAS[$i]}" ] || {
+            echo "prepare-tree: $l sha256 mismatch: want ${SHAS[$i]} got $GOT" >&2
+            exit 1
+        }
+        echo "guest $l sha256 ok"
+        i=$((i + 1))
+    done
+fi
 echo "tree ready: $TREE"

@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — 99 Bricks Wizard Academy (Unity 4.7, Mono)
+# VERIFIED data only (unzip | sha256sum of the original APK). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "99-bricks"
+title        = "99 Bricks Wizard Academy"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
+
+[apk]
+package      = "nl.weirdbeard.brickswizardacademy"
+version_name = "2.5.0"
+version_code = 18
+# The original says min 10 / target 21; Android 14+ refuses to install a
+# package that targets below 24, and arm64-only devices start at 24 anyway.
+min_sdk      = 24
+target_sdk   = 24
+original     = "original/99_Bricks_base.apk"
+activity     = "com.prime31.UnityPlayerNativeActivity"  # launcher (devgate)
+
+[guest]
+abi    = "armeabi-v7a"
+# The library Java loads (NativeActivity "main", System.loadLibrary("main")).
+lib    = "libmain.so"
+sha256 = "fe070c56a80bb8365069fe1674a629ed32249821a006ff7e136ce1dd7440321e"
+# The other guest libraries, in load order around the primary one: libmono
+# first (libunity needs it), libunity last (needs libmono and libmain).
+deps        = ["libmono.so", "libunity.so"]
+deps_sha256 = ["e5bcfc774d3f0db2d6b10741973ef37349f7fdf1cd366510d8ba93be75988edb",
+               "24707020e7025f81f21283784fc8412e8984f81cf50d34d3d628071c2930205f"]
+# guest.libs order: deps before the primary when they are listed first here.
+load_order  = ["libmono.so", "libmain.so", "libunity.so"]
+
+[host]
+abi          = "arm64-v8a"
+# Our host IS the activity's native code: the framework and Unity's Java both
+# load "main", so no smali edit is needed.
+lib          = "libmain.so"
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+
+[strip]
+libs = []
+
+[tree]
+# Edit set: the three guest libraries -> assets/guestlib/armeabi-v7a (STORED),
+# rm lib/armeabi-v7a lib/x86, host as lib/arm64-v8a/libmain.so, guest.libs.
+smali_lib_name_orig = ""   # no smali edit

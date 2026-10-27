@@ -68,6 +68,8 @@ namespace abr {
 
 // This thread's pthread_cleanup list head (guest address) and guest stack.
 thread_local std::uint32_t t_cleanup_head = 0;
+// Direct buffers this thread handed to the guest during the current call.
+thread_local std::vector<void*> t_direct_used;
 // pthread_exit was called: the worker's Run stopped with kThreadExitHalt.
 thread_local bool t_thread_exiting = false;
 thread_local std::uint32_t t_exit_value = 0;
@@ -12134,6 +12136,78 @@ void* Runtime::UnwrapObject(std::uint32_t mock) {
     return it != obj_rev_.end() ? it->second : nullptr;
 }
 
+// The class name ("a/b/C") behind a jclass handle: a mock class from
+// FindClass, or a real Class object Java handed in (a native's jclass or
+// Class argument), named through Class.getName() once and then cached --
+// with the object itself as the real class, found by Java's own loader.
+std::string Runtime::JniClassName(std::uint32_t handle) {
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = jni_classes_.find(handle);
+        if (it != jni_classes_.end()) {
+            return it->second;
+        }
+    }
+#ifdef __ANDROID__
+    JNIEnv* re = RealEnv();
+    void* obj = UnwrapObject(handle);
+    if (!re || !obj) {
+        return "";
+    }
+    jclass cls_class = re->FindClass("java/lang/Class");
+    if (!cls_class || !re->IsInstanceOf(static_cast<jobject>(obj), cls_class)) {
+        re->ExceptionClear();
+        return "";
+    }
+    jmethodID get_name = re->GetMethodID(cls_class, "getName", "()Ljava/lang/String;");
+    jstring js = get_name ? static_cast<jstring>(re->CallObjectMethod(static_cast<jobject>(obj), get_name))
+                          : nullptr;
+    re->DeleteLocalRef(cls_class);
+    if (!js || re->ExceptionCheck()) {
+        re->ExceptionClear();
+        return "";
+    }
+    const char* utf = re->GetStringUTFChars(js, nullptr);
+    std::string name = utf ? utf : "";
+    if (utf) {
+        re->ReleaseStringUTFChars(js, utf);
+    }
+    re->DeleteLocalRef(js);
+    std::replace(name.begin(), name.end(), '.', '/');
+    if (!name.empty()) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        jni_classes_[handle] = name;
+        if (real_classes_.find(name) == real_classes_.end()) {
+            real_classes_[name] = re->NewGlobalRef(static_cast<jobject>(obj));
+        }
+    }
+    return name;
+#else
+    return "";
+#endif
+}
+
+void Runtime::FlushDirectBuffers() {
+    if (t_direct_used.empty()) {
+        return;
+    }
+    for (void* host : t_direct_used) {
+        DirectBuf db;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = direct_bufs_.find(host);
+            if (it == direct_bufs_.end()) {
+                continue;
+            }
+            db = it->second;
+        }
+        if (db.guest && CheckRange(db.guest, db.size, false)) {
+            std::memcpy(host, H(db.guest), db.size);
+        }
+    }
+    t_direct_used.clear();
+}
+
 void* Runtime::JavaObjectFor(std::uint32_t handle) {
     if (!handle) {
         return nullptr;
@@ -13427,6 +13501,96 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
 #endif
         Ret(regs, a1);
         return;
+    case 32: {  // IsInstanceOf(env, obj, clazz) -> jboolean (NULL: true)
+        if (a1 == 0) {
+            Ret(regs, 1);
+            return;
+        }
+        std::uint32_t r = 0;
+#ifdef __ANDROID__
+        if (JNIEnv* re = RealEnv()) {
+            const std::string cname = JniClassName(a2);
+            void* obj = JavaObjectFor(a1);
+            jclass rc = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
+            if (obj && rc) {
+                r = re->IsInstanceOf(static_cast<jobject>(obj), rc) ? 1u : 0u;
+            }
+            re->ExceptionClear();
+        }
+#endif
+        Ret(regs, r);
+        return;
+    }
+    case 230:    // GetDirectBufferAddress(env, buf) -> guest shadow address
+    case 231: {  // GetDirectBufferCapacity(env, buf) -> jlong (r0:r1)
+        std::uint32_t addr = 0;
+        std::int64_t cap = -1;
+#ifdef __ANDROID__
+        if (JNIEnv* re = RealEnv()) {
+            jobject b = static_cast<jobject>(UnwrapObject(a1));
+            void* host = b ? re->GetDirectBufferAddress(b) : nullptr;
+            cap = b ? re->GetDirectBufferCapacity(b) : -1;
+            if (fn == 230 && host && cap > 0 && cap < 0x10000000) {
+                DirectBuf db;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    db = direct_bufs_[host];
+                }
+                if (db.size != static_cast<std::uint32_t>(cap)) {
+                    if (db.guest) {
+                        GuestFree(db.guest);
+                    }
+                    db.guest = GuestMalloc(static_cast<std::uint32_t>(cap));
+                    db.size = db.guest ? static_cast<std::uint32_t>(cap) : 0;
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    direct_bufs_[host] = db;
+                }
+                if (db.guest) {
+                    std::memcpy(H(db.guest), host, db.size);
+                    t_direct_used.push_back(host);
+                    addr = db.guest;
+                }
+            }
+        }
+#endif
+        if (fn == 230) {
+            Ret(regs, addr);
+        } else {
+            Ret(regs, static_cast<std::uint32_t>(cap), static_cast<std::uint32_t>(static_cast<std::uint64_t>(cap) >> 32));
+        }
+        return;
+    }
+    case 18: {  // FatalError(env, msg): the JVM aborts the process
+        std::printf("[jni] FATAL FatalError(\"%s\") -- halting\n",
+                    CheckRange(a1, 1, false) ? GuestStr(a1) : "?");
+        HaltGuest();
+        return;
+    }
+    case 19:  // PushLocalFrame(env, capacity) -> 0
+    case 26:  // EnsureLocalCapacity(env, capacity) -> 0
+        // Every object the guest holds is a global ref (WrapObject): local
+        // frames and capacity do not limit it, so they always succeed.
+        Ret(regs, 0);
+        return;
+    case 20:  // PopLocalFrame(env, result) -> result, valid as before
+        Ret(regs, a1);
+        return;
+    case 216: {  // UnregisterNatives(env, clazz) -> jint
+        std::string cname;
+        cname = JniClassName(a1);
+        std::int32_t r = 0;
+#ifdef __ANDROID__
+        if (JNIEnv* re = RealEnv(); re && !cname.empty()) {
+            if (jclass rc = static_cast<jclass>(RealClass(re, cname))) {
+                r = re->UnregisterNatives(rc);
+                re->ExceptionClear();
+            }
+        }
+#endif
+        std::printf("[jni] UnregisterNatives %s -> %d\n", cname.empty() ? "?" : cname.c_str(), r);
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return;
+    }
     case 17:  // ExceptionClear(env) -> void (mock never raises)
         Ret(regs, 0);
         return;
@@ -14071,6 +14235,139 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, a1);  // handle IS the buffer
         return;
     }
+    case 183: case 185: case 186: case 187: case 188: case 189: case 190:
+    case 191: case 193: case 194: case 195: case 196: case 197: case 198:
+    case 199: case 200: case 201: case 202: case 203: case 204: case 205: case 206:
+    case 207: case 208: case 209: case 210: case 211: case 212: case 213: case 214: {
+        // The other primitive arrays (the byte ones keep their own path
+        // above): Get<T>ArrayElements 183-190 / Release 191-198 pin a guest
+        // copy of a real array, copied back per mode; Get/Set<T>ArrayRegion
+        // 199-206 / 207-214 copy a range. Types in JNI order: boolean, byte,
+        // char, short, int, long, float, double.
+        static const std::uint32_t kSize[8] = {1, 1, 2, 2, 4, 8, 4, 8};
+        const bool get_el = fn >= 183 && fn <= 190, rel = fn >= 191 && fn <= 198;
+        const bool get_rg = fn >= 199 && fn <= 206;
+        const int t = static_cast<int>(get_el ? fn - 183 : rel ? fn - 191 : get_rg ? fn - 199 : fn - 207);
+        const std::uint32_t es = kSize[t];
+#ifdef __ANDROID__
+        JNIEnv* re = RealEnv();
+        jarray ra = static_cast<jarray>(UnwrapObject(a1));
+        if (re && ra) {
+            if (get_el) {
+                const jsize n = re->GetArrayLength(ra);
+                void* hp = nullptr;
+                switch (t) {
+                    case 0: hp = re->GetBooleanArrayElements(static_cast<jbooleanArray>(ra), nullptr); break;
+                    case 2: hp = re->GetCharArrayElements(static_cast<jcharArray>(ra), nullptr); break;
+                    case 3: hp = re->GetShortArrayElements(static_cast<jshortArray>(ra), nullptr); break;
+                    case 4: hp = re->GetIntArrayElements(static_cast<jintArray>(ra), nullptr); break;
+                    case 5: hp = re->GetLongArrayElements(static_cast<jlongArray>(ra), nullptr); break;
+                    case 6: hp = re->GetFloatArrayElements(static_cast<jfloatArray>(ra), nullptr); break;
+                    case 7: hp = re->GetDoubleArrayElements(static_cast<jdoubleArray>(ra), nullptr); break;
+                    default: break;
+                }
+                const std::uint64_t bytes = static_cast<std::uint64_t>(n > 0 ? n : 0) * es;
+                const std::uint32_t gb = (hp && bytes < 0x10000000u) ? GuestMalloc(static_cast<std::uint32_t>(bytes ? bytes : 1)) : 0;
+                if (!gb) {
+                    re->ExceptionClear();
+                    Ret(regs, 0);
+                    return;
+                }
+                std::memcpy(H(gb), hp, static_cast<std::size_t>(bytes));
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    array_pins_[gb] = ArrayPin{ra, hp, gb, static_cast<std::uint32_t>(bytes), t};
+                }
+                if (a2 && CheckRange(a2, 1, true)) {
+                    *H<std::uint8_t>(a2) = 1;  // isCopy
+                }
+                Ret(regs, gb);
+                return;
+            }
+            if (rel) {
+                // (env, array, elems, mode): the pin is keyed by the guest copy.
+                ArrayPin pin;
+                bool have = false;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    const auto it = array_pins_.find(a2);
+                    if (it != array_pins_.end()) {
+                        pin = it->second;
+                        if (a3 != 1) {
+                            array_pins_.erase(it);
+                        }
+                        have = true;
+                    }
+                }
+                if (have) {
+                    if ((a3 == 0 || a3 == 1) && CheckRange(pin.guest_buf, pin.len, false)) {
+                        std::memcpy(pin.host_elems, H(pin.guest_buf), pin.len);
+                    }
+                    const jint mode = static_cast<jint>(a3);
+                    switch (pin.type) {
+                        case 0: re->ReleaseBooleanArrayElements(static_cast<jbooleanArray>(pin.real_arr), static_cast<jboolean*>(pin.host_elems), mode); break;
+                        case 2: re->ReleaseCharArrayElements(static_cast<jcharArray>(pin.real_arr), static_cast<jchar*>(pin.host_elems), mode); break;
+                        case 3: re->ReleaseShortArrayElements(static_cast<jshortArray>(pin.real_arr), static_cast<jshort*>(pin.host_elems), mode); break;
+                        case 4: re->ReleaseIntArrayElements(static_cast<jintArray>(pin.real_arr), static_cast<jint*>(pin.host_elems), mode); break;
+                        case 5: re->ReleaseLongArrayElements(static_cast<jlongArray>(pin.real_arr), static_cast<jlong*>(pin.host_elems), mode); break;
+                        case 6: re->ReleaseFloatArrayElements(static_cast<jfloatArray>(pin.real_arr), static_cast<jfloat*>(pin.host_elems), mode); break;
+                        case 7: re->ReleaseDoubleArrayElements(static_cast<jdoubleArray>(pin.real_arr), static_cast<jdouble*>(pin.host_elems), mode); break;
+                        default: break;
+                    }
+                    if (a3 != 1) {
+                        GuestFree(pin.guest_buf);
+                    }
+                }
+                re->ExceptionClear();
+                Ret(regs, 0);
+                return;
+            }
+            // Region: (env, array, start, len, buf@[sp])
+            std::uint32_t buf = 0;
+            if (!CheckRange(regs[13], 4, false)) {
+                goto jni_bad;
+            }
+            std::memcpy(&buf, H(regs[13]), 4);
+            const std::uint64_t bytes = std::uint64_t(a3) * es;
+            if (bytes > 0x10000000u || (bytes && !CheckRange(buf, static_cast<std::uint32_t>(bytes), get_rg))) {
+                goto jni_bad;
+            }
+            void* hb = bytes ? H(buf) : nullptr;
+            const jsize st = static_cast<jsize>(a2), n = static_cast<jsize>(a3);
+            switch (t + (get_rg ? 0 : 8)) {
+                case 0: re->GetBooleanArrayRegion(static_cast<jbooleanArray>(ra), st, n, static_cast<jboolean*>(hb)); break;
+                case 1: re->GetByteArrayRegion(static_cast<jbyteArray>(ra), st, n, static_cast<jbyte*>(hb)); break;
+                case 2: re->GetCharArrayRegion(static_cast<jcharArray>(ra), st, n, static_cast<jchar*>(hb)); break;
+                case 3: re->GetShortArrayRegion(static_cast<jshortArray>(ra), st, n, static_cast<jshort*>(hb)); break;
+                case 4: re->GetIntArrayRegion(static_cast<jintArray>(ra), st, n, static_cast<jint*>(hb)); break;
+                case 5: re->GetLongArrayRegion(static_cast<jlongArray>(ra), st, n, static_cast<jlong*>(hb)); break;
+                case 6: re->GetFloatArrayRegion(static_cast<jfloatArray>(ra), st, n, static_cast<jfloat*>(hb)); break;
+                case 7: re->GetDoubleArrayRegion(static_cast<jdoubleArray>(ra), st, n, static_cast<jdouble*>(hb)); break;
+                case 8: re->SetBooleanArrayRegion(static_cast<jbooleanArray>(ra), st, n, static_cast<const jboolean*>(hb)); break;
+                case 9: re->SetByteArrayRegion(static_cast<jbyteArray>(ra), st, n, static_cast<const jbyte*>(hb)); break;
+                case 10: re->SetCharArrayRegion(static_cast<jcharArray>(ra), st, n, static_cast<const jchar*>(hb)); break;
+                case 11: re->SetShortArrayRegion(static_cast<jshortArray>(ra), st, n, static_cast<const jshort*>(hb)); break;
+                case 12: re->SetIntArrayRegion(static_cast<jintArray>(ra), st, n, static_cast<const jint*>(hb)); break;
+                case 13: re->SetLongArrayRegion(static_cast<jlongArray>(ra), st, n, static_cast<const jlong*>(hb)); break;
+                case 14: re->SetFloatArrayRegion(static_cast<jfloatArray>(ra), st, n, static_cast<const jfloat*>(hb)); break;
+                case 15: re->SetDoubleArrayRegion(static_cast<jdoubleArray>(ra), st, n, static_cast<const jdouble*>(hb)); break;
+                default: break;
+            }
+            if (re->ExceptionCheck()) {
+                re->ExceptionClear();  // ArrayIndexOutOfBounds: nothing copied
+            }
+            Ret(regs, 0);
+            return;
+        }
+#endif
+        std::printf("[jni] LOUD array fn#%u on a non-Java array %08x -- halting\n", fn, a1);
+        HaltGuest();
+        return;
+    jni_bad:
+        std::printf("[jni] LOUD array region fn#%u: bad guest buffer -- halting\n", fn);
+        HaltGuest();
+        return;
+    }
     case 192: {  // ReleaseByteArrayElements(env, array, elems, mode) -> void
 #ifdef __ANDROID__
         // Pinned real array: copy back per mode. JNI modes: 0 = copy back and
@@ -14132,13 +14429,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // guest function; the real RegisterNatives result is returned. PC
         // tools (no real JVM) only log the table and return JNI_OK.
         std::string cname;
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            const auto it = jni_classes_.find(a1);
-            if (it != jni_classes_.end()) {
-                cname = it->second;
-            }
-        }
+        cname = JniClassName(a1);
         struct Entry {
             std::string name, sig;
             std::uint32_t fn;
@@ -14239,13 +14530,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         const std::string mname = GuestStr(a2);
         const std::string msig = GuestStr(a3);
-        std::string cname = "?";
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            const auto it = jni_classes_.find(a1);
-            if (it != jni_classes_.end()) {
-                cname = it->second;
-            }
+        std::string cname = JniClassName(a1);
+        if (cname.empty()) {
+            cname = "?";
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint32_t c = 0;
@@ -14955,6 +15242,11 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             }
         }
         if (g == "/dev/null" || g == "/dev/zero" || g == "/dev/urandom") {
+            return g;
+        }
+        // The app's own APK (Unity reads its data and assemblies out of it):
+        // an app may read it; the directory is not writable by the app.
+        if (!apk_path_.empty() && g == apk_path_) {
             return g;
         }
         if (g == "/dev/alarm") {

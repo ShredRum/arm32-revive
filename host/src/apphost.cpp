@@ -775,6 +775,7 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
     auto& regs = st->jit->Regs();
     const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words);
+    g_rt->FlushDirectBuffers();  // what the guest wrote into direct buffers
     if (is_update) {
         g_upd_done_ms = WallMs();
     }
