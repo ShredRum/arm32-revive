@@ -587,6 +587,8 @@ public:
     // Per-title network policy from the packaging (default offline, R-005).
     void SetNetworkAllowed(bool on) { network_allowed_ = on; }
     bool NetworkAllowed() const { return network_allowed_; }
+    // The original app's targetSdkVersion (0 = unknown: current behaviour).
+    void SetGuestTargetSdk(int sdk) { guest_target_sdk_ = sdk; }
 
     // __gnu_Unwind_Find_exidx: binary search of .ARM.exidx (prel31), returns
     // entry VA or 0. Lets the in-module unwinder do its real job instead of
@@ -772,6 +774,7 @@ private:
     bool RunNested(std::uint32_t entry, std::uint32_t r0, std::uint32_t r1, std::uint32_t r2,
                    std::uint32_t sp, const std::uint32_t* r4_r11, std::int32_t& out);
     bool network_allowed_ = false;  // SetNetworkAllowed
+    int guest_target_sdk_ = 0;      // SetGuestTargetSdk
     // One shared code cache per Jit configuration (NewJit).
     struct CodeCacheEntry {
         Dynarmic::A32::UserConfig cfg;

@@ -1572,9 +1572,9 @@ static bool Boot(JavaVM* vm) {
     // offline, the safe side.
     {
         const std::size_t slash = guest_entry.find_last_of('/');
-        const std::string entry =
-            (slash == std::string::npos ? std::string() : guest_entry.substr(0, slash + 1)) +
-            "network";
+        const std::string dir =
+            slash == std::string::npos ? std::string() : guest_entry.substr(0, slash + 1);
+        const std::string entry = dir + "network";
         const std::string path = g_files + "/network";
         char word[16] = {0};
         if (ZipExtractStored(g_apk, entry, path)) {
@@ -1588,6 +1588,20 @@ static bool Boot(JavaVM* vm) {
         const bool online = std::strcmp(word, "online") == 0;
         g_rt->SetNetworkAllowed(online);
         Log("network: %s (packaging: %s)", online ? "online" : "offline", word[0] ? word : "none");
+        // The original app's targetSdkVersion, packaged next to it: the libc
+        // behaviour the guest was built for. No file: 0, the current one.
+        const std::string sdk_path = g_files + "/target_sdk";
+        int sdk = 0;
+        if (ZipExtractStored(g_apk, dir + "target_sdk", sdk_path)) {
+            if (FILE* f = std::fopen(sdk_path.c_str(), "rb")) {
+                if (std::fscanf(f, "%d", &sdk) != 1) {
+                    sdk = 0;
+                }
+                std::fclose(f);
+            }
+        }
+        g_rt->SetGuestTargetSdk(sdk);
+        Log("guest target sdk: %d", sdk);
     }
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;

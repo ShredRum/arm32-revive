@@ -161,6 +161,16 @@ if [ -f "$GUEST" ]; then
     sed -i "\|^[^-]*- *$GDIRREL/network$|d" "$TREE/apktool.yml"
     sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/network|" "$TREE/apktool.yml"
     echo "network: $NETWORK -> $GDIRREL/network"
+    # The ORIGINAL app's targetSdkVersion (ours may be raised to install):
+    # the guest was built against the libc behaviour of that target (bionic
+    # sem_wait returns EINTR only from target 24 on). Read from the original.
+    ORIG_APK="games/$GAME/$("${PROF[@]}" apk.original)"
+    ORIG_TSDK="$("$BT/aapt" dump badging "$ORIG_APK" | sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p")"
+    [ -n "$ORIG_TSDK" ] || { echo "build-apk: no targetSdkVersion in $ORIG_APK" >&2; exit 1; }
+    printf '%s\n' "$ORIG_TSDK" > "$GDIR/target_sdk"
+    sed -i "\|^[^-]*- *$GDIRREL/target_sdk$|d" "$TREE/apktool.yml"
+    sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/target_sdk|" "$TREE/apktool.yml"
+    echo "guest target sdk: $ORIG_TSDK -> $GDIRREL/target_sdk"
     # Several guest libraries (guest.deps): every one is checked, and
     # guest.libs lists them in guest.load_order as "<sha256> <name>", the
     # primary (guest.lib) marked; the host loads them in that order.

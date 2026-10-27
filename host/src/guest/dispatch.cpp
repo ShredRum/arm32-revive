@@ -1346,7 +1346,12 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
         }
     } else if (n == "sem_wait" && SignalsInUse()) {
         // Interruptible: a handler runs between slices, then EINTR (sem_wait
-        // is never restarted after a handler, whatever SA_RESTART says).
+        // is never restarted after a handler, whatever SA_RESTART says) --
+        // for an app targeting 24 or later. Below that bionic waits on
+        // (semaphore.cpp, the target-SDK check in sem_wait), and an engine
+        // built then takes a -1 for "not acquired" (Unity's Semaphore logs
+        // "Failed to wait on a semaphore" and runs on without it).
+        const bool eintr = guest_target_sdk_ == 0 || guest_target_sdk_ >= 24;
         for (;;) {
             const struct timespec slice = RealtimeIn(kSigSliceNs);
             r = ::sem_timedwait(s.get(), &slice);
@@ -1355,9 +1360,11 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
             }
             if (SignalDeliverable()) {
                 DeliverPendingSignals();
-                errno = EINTR;
-                r = -1;
-                break;
+                if (eintr) {
+                    errno = EINTR;
+                    r = -1;
+                    break;
+                }
             }
         }
     } else if (n == "sem_wait") {
