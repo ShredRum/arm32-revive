@@ -22,6 +22,13 @@
 #include <optional>
 #include <netdb.h>
 #include <poll.h>
+#ifdef __ANDROID__
+#include <android/configuration.h>
+#include <android/input.h>
+#include <android/looper.h>
+#include <android/native_window_jni.h>
+#include <android/sensor.h>
+#endif
 #include <sys/epoll.h>
 #include <pwd.h>
 #include <grp.h>
@@ -7058,94 +7065,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // every import that reached this point, and a 32 MB inflate, against all
     // other guest threads). apk_index_ is built once and then only read.
     {
-        auto ensure_index = [&]() -> bool {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            if (apk_indexed_) {
-                return !apk_index_.empty();
-            }
-            apk_indexed_ = true;
-            if (apk_path_.empty()) {
-                return false;
-            }
-            FILE* f = std::fopen(apk_path_.c_str(), "rb");
-            if (!f) {
-                return false;
-            }
-            std::fseek(f, 0, SEEK_END);
-            long size = std::ftell(f);
-            const long scan = size > 65558 ? 65558 : size;
-            std::vector<std::uint8_t> tail((std::size_t)scan);
-            std::fseek(f, size - scan, SEEK_SET);
-            if (std::fread(tail.data(), 1, tail.size(), f) != tail.size()) {
-                std::fclose(f);
-                return false;
-            }
-            long eocd = -1;
-            for (long i = (long)tail.size() - 22; i >= 0; i--) {
-                if (tail[(std::size_t)i] == 0x50 && tail[(std::size_t)i + 1] == 0x4B &&
-                    tail[(std::size_t)i + 2] == 0x05 && tail[(std::size_t)i + 3] == 0x06) {
-                    eocd = i;
-                    break;
-                }
-            }
-            if (eocd < 0) {
-                std::fclose(f);
-                return false;
-            }
-            auto rd16 = [&](long o) -> std::uint32_t {
-                return (std::uint32_t)tail[(std::size_t)o] |
-                       ((std::uint32_t)tail[(std::size_t)o + 1] << 8);
-            };
-            auto rd32 = [&](long o) -> std::uint32_t {
-                return rd16(o) | (rd16(o + 2) << 16);
-            };
-            const std::uint32_t count = rd16(eocd + 10);
-            const std::uint32_t cdoff = rd32(eocd + 16);
-            std::fclose(f);
-            FILE* g = std::fopen(apk_path_.c_str(), "rb");
-            if (!g) {
-                return false;
-            }
-            for (std::uint32_t i = 0, off = cdoff; i < count; i++) {
-                std::uint8_t hdr[46];
-                std::fseek(g, (long)off, SEEK_SET);
-                if (std::fread(hdr, 1, 46, g) != 46 || hdr[0] != 0x50 || hdr[1] != 0x4B ||
-                    hdr[2] != 0x01 || hdr[3] != 0x02) {
-                    break;
-                }
-                auto h16 = [&](int o) -> std::uint32_t { return hdr[o] | (hdr[o + 1] << 8); };
-                auto h32 = [&](int o) -> std::uint32_t { return h16(o) | (h16(o + 2) << 16); };
-                const std::uint32_t nlen = h16(28), elen = h16(30), clen = h16(32);
-                std::string name(nlen, '\0');
-                std::fseek(g, (long)(off + 46), SEEK_SET);
-                if (nlen && std::fread(name.data(), 1, nlen, g) != nlen) {
-                    break;
-                }
-                off += 46 + nlen + elen + clen;
-                ApkEntry e;
-                e.name = name;
-                e.method = h16(10);
-                e.csize = h32(20);
-                e.usize = h32(24);
-                const std::uint32_t lho = h32(42);
-                std::uint8_t lh[30];
-                std::fseek(g, (long)lho, SEEK_SET);
-                if (std::fread(lh, 1, 30, g) != 30 || lh[0] != 0x50 || lh[1] != 0x4B ||
-                    lh[2] != 0x03 || lh[3] != 0x04) {
-                    continue;
-                }
-                auto l16 = [&](int o) -> std::uint32_t { return lh[o] | (lh[o + 1] << 8); };
-                e.data_off = (std::uint64_t)lho + 30 + l16(26) + l16(28);
-                (void)elen;
-                (void)clen;
-                apk_index_[e.name] = e;
-            }
-            std::fclose(g);
-            std::printf("[asset] indexed %zu entries from apk\n", apk_index_.size());
-            return !apk_index_.empty();
-        };
         if (n == "AAssetManager_fromJava") {
-            if (!ensure_index()) {
+            if (!EnsureApkIndex()) {
                 std::printf("[asset] LOUD no apk index -- halting\n");
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -7825,6 +7746,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!ZlibCall(n, regs)) {
             goto bad_ptr;
         }
+        return;
+    }
+    if (n[0] == 'A' && NdkCall(n, regs)) {
         return;
     }
     if (n == "getaddrinfo" || n == "freeaddrinfo" || n == "gai_strerror" || n == "gethostbyname" ||
@@ -10695,6 +10619,424 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         return true;
     }
     return true;
+}
+
+// Builds the APK's asset index once (the central directory: name -> stored
+// or deflated entry); false when there is no APK or no entry.
+bool Runtime::EnsureApkIndex() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (apk_indexed_) {
+            return !apk_index_.empty();
+        }
+        apk_indexed_ = true;
+        if (apk_path_.empty()) {
+            return false;
+        }
+        FILE* f = std::fopen(apk_path_.c_str(), "rb");
+        if (!f) {
+            return false;
+        }
+        std::fseek(f, 0, SEEK_END);
+        long size = std::ftell(f);
+        const long scan = size > 65558 ? 65558 : size;
+        std::vector<std::uint8_t> tail((std::size_t)scan);
+        std::fseek(f, size - scan, SEEK_SET);
+        if (std::fread(tail.data(), 1, tail.size(), f) != tail.size()) {
+            std::fclose(f);
+            return false;
+        }
+        long eocd = -1;
+        for (long i = (long)tail.size() - 22; i >= 0; i--) {
+            if (tail[(std::size_t)i] == 0x50 && tail[(std::size_t)i + 1] == 0x4B &&
+                tail[(std::size_t)i + 2] == 0x05 && tail[(std::size_t)i + 3] == 0x06) {
+                eocd = i;
+                break;
+            }
+        }
+        if (eocd < 0) {
+            std::fclose(f);
+            return false;
+        }
+        auto rd16 = [&](long o) -> std::uint32_t {
+            return (std::uint32_t)tail[(std::size_t)o] |
+                   ((std::uint32_t)tail[(std::size_t)o + 1] << 8);
+        };
+        auto rd32 = [&](long o) -> std::uint32_t {
+            return rd16(o) | (rd16(o + 2) << 16);
+        };
+        const std::uint32_t count = rd16(eocd + 10);
+        const std::uint32_t cdoff = rd32(eocd + 16);
+        std::fclose(f);
+        FILE* g = std::fopen(apk_path_.c_str(), "rb");
+        if (!g) {
+            return false;
+        }
+        for (std::uint32_t i = 0, off = cdoff; i < count; i++) {
+            std::uint8_t hdr[46];
+            std::fseek(g, (long)off, SEEK_SET);
+            if (std::fread(hdr, 1, 46, g) != 46 || hdr[0] != 0x50 || hdr[1] != 0x4B ||
+                hdr[2] != 0x01 || hdr[3] != 0x02) {
+                break;
+            }
+            auto h16 = [&](int o) -> std::uint32_t { return hdr[o] | (hdr[o + 1] << 8); };
+            auto h32 = [&](int o) -> std::uint32_t { return h16(o) | (h16(o + 2) << 16); };
+            const std::uint32_t nlen = h16(28), elen = h16(30), clen = h16(32);
+            std::string name(nlen, '\0');
+            std::fseek(g, (long)(off + 46), SEEK_SET);
+            if (nlen && std::fread(name.data(), 1, nlen, g) != nlen) {
+                break;
+            }
+            off += 46 + nlen + elen + clen;
+            ApkEntry e;
+            e.name = name;
+            e.method = h16(10);
+            e.csize = h32(20);
+            e.usize = h32(24);
+            const std::uint32_t lho = h32(42);
+            std::uint8_t lh[30];
+            std::fseek(g, (long)lho, SEEK_SET);
+            if (std::fread(lh, 1, 30, g) != 30 || lh[0] != 0x50 || lh[1] != 0x4B ||
+                lh[2] != 0x03 || lh[3] != 0x04) {
+                continue;
+            }
+            auto l16 = [&](int o) -> std::uint32_t { return lh[o] | (lh[o + 1] << 8); };
+            e.data_off = (std::uint64_t)lho + 30 + l16(26) + l16(28);
+            (void)elen;
+            (void)clen;
+            apk_index_[e.name] = e;
+        }
+        std::fclose(g);
+        std::printf("[asset] indexed %zu entries from apk\n", apk_index_.size());
+        return !apk_index_.empty();
+}
+
+std::uint32_t Runtime::NewGuestAssetManager() {
+    if (!EnsureApkIndex()) {
+        return 0;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const std::uint32_t m = next_asset_mgr_++;
+    asset_mgr_map_[m] = 1;
+    return m;
+}
+
+std::uint32_t Runtime::PtrHandle(void* p) {
+    if (!p) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> l(ptr_mu_);
+    const auto it = ptr_fwd_.find(p);
+    if (it != ptr_fwd_.end()) {
+        return it->second;
+    }
+    std::uint32_t h = 0;
+    if (!ptr_free_.empty()) {
+        h = ptr_free_.back();
+        ptr_free_.pop_back();
+    } else {
+        h = ptr_next_;
+        ptr_next_ += 4;
+    }
+    ptr_fwd_[p] = h;
+    ptr_rev_[h] = p;
+    return h;
+}
+
+void* Runtime::PtrOf(std::uint32_t h) {
+    std::lock_guard<std::mutex> l(ptr_mu_);
+    const auto it = ptr_rev_.find(h);
+    return it == ptr_rev_.end() ? nullptr : it->second;
+}
+
+void Runtime::DropHandle(std::uint32_t h) {
+    std::lock_guard<std::mutex> l(ptr_mu_);
+    const auto it = ptr_rev_.find(h);
+    if (it == ptr_rev_.end()) {
+        return;
+    }
+    ptr_fwd_.erase(it->second);
+    ptr_rev_.erase(it);
+    ptr_free_.push_back(h);
+}
+
+bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    const bool ours = n.compare(0, 7, "ALooper") == 0 || n.compare(0, 11, "AInputQueue") == 0 ||
+                      n.compare(0, 11, "AInputEvent") == 0 || n.compare(0, 12, "AMotionEvent") == 0 ||
+                      n.compare(0, 9, "AKeyEvent") == 0 || n.compare(0, 14, "AConfiguration") == 0 ||
+                      n.compare(0, 13, "ANativeWindow") == 0 || n.compare(0, 7, "ASensor") == 0;
+    if (!ours) {
+        return false;
+    }
+#ifndef __ANDROID__
+    // No Android framework on the PC: every NDK object is absent.
+    std::printf("[ndk] %s: no NDK on this host -> 0\n", n.c_str());
+    Ret(regs, 0);
+    return true;
+#else
+    const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    auto ret_f = [&](float f) {
+        std::uint32_t w = 0;
+        std::memcpy(&w, &f, 4);
+        Ret(regs, w);
+    };
+    auto ret_64 = [&](std::int64_t v) {
+        Ret(regs, static_cast<std::uint32_t>(v), static_cast<std::uint32_t>(static_cast<std::uint64_t>(v) >> 32));
+    };
+    auto out32 = [&](std::uint32_t at, std::uint32_t v) {
+        if (at && CheckRange(at, 4, true)) {
+            std::memcpy(H(at), &v, 4);
+        }
+    };
+    auto ev = [&]() { return static_cast<const AInputEvent*>(PtrOf(a0)); };
+    // --- looper
+    if (n == "ALooper_prepare") {
+        Ret(regs, PtrHandle(::ALooper_prepare(static_cast<int>(a0))));
+        return true;
+    }
+    if (n == "ALooper_forThread") {
+        Ret(regs, PtrHandle(::ALooper_forThread()));
+        return true;
+    }
+    if (n == "ALooper_wake") {
+        if (auto* l = static_cast<ALooper*>(PtrOf(a0))) {
+            ::ALooper_wake(l);
+        }
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "ALooper_pollAll" || n == "ALooper_pollOnce") {
+        // (timeout, int* outFd, int* outEvents, void** outData): the data is
+        // the guest word given at registration, returned as it was.
+        int fd = 0, events = 0;
+        void* data = nullptr;
+        // pollAll is pollOnce repeated while it only ran callbacks (the
+        // NDK no longer declares pollAll itself).
+        int r = 0;
+        do {
+            r = ::ALooper_pollOnce(static_cast<int>(a0), &fd, &events, &data);
+        } while (n == "ALooper_pollAll" && r == ALOOPER_POLL_CALLBACK);
+        out32(a1, static_cast<std::uint32_t>(fd));
+        out32(a2, static_cast<std::uint32_t>(events));
+        out32(a3, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(data)));
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    // --- input queue
+    if (n == "AInputQueue_attachLooper") {
+        // (queue, looper, ident, callback, data@[sp]). A guest callback
+        // cannot be a host ALooper callback: the queue is polled by ident.
+        std::uint32_t data = 0;
+        if (CheckRange(regs[13], 4, false)) {
+            std::memcpy(&data, H(regs[13]), 4);
+        }
+        if (a3 != 0) {
+            std::printf("[ndk] LOUD AInputQueue_attachLooper with a callback (%08x): polled by "
+                        "ident %d instead\n", a3, static_cast<int>(a2));
+        }
+        auto* q = static_cast<AInputQueue*>(PtrOf(a0));
+        auto* l = static_cast<ALooper*>(PtrOf(a1));
+        if (q && l) {
+            ::AInputQueue_attachLooper(q, l, static_cast<int>(a2), nullptr,
+                                       reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)));
+        }
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "AInputQueue_detachLooper") {
+        if (auto* q = static_cast<AInputQueue*>(PtrOf(a0))) {
+            ::AInputQueue_detachLooper(q);
+        }
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "AInputQueue_getEvent") {
+        auto* q = static_cast<AInputQueue*>(PtrOf(a0));
+        AInputEvent* e = nullptr;
+        const int r = q ? ::AInputQueue_getEvent(q, &e) : -1;
+        out32(a1, r >= 0 ? PtrHandle(e) : 0);
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (n == "AInputQueue_preDispatchEvent") {
+        auto* q = static_cast<AInputQueue*>(PtrOf(a0));
+        auto* e = static_cast<AInputEvent*>(PtrOf(a1));
+        const int r = (q && e) ? ::AInputQueue_preDispatchEvent(q, e) : 0;
+        if (r != 0) {
+            DropHandle(a1);  // the IME took it; the system finishes it
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (n == "AInputQueue_finishEvent") {
+        auto* q = static_cast<AInputQueue*>(PtrOf(a0));
+        auto* e = static_cast<AInputEvent*>(PtrOf(a1));
+        if (q && e) {
+            ::AInputQueue_finishEvent(q, e, static_cast<int>(a2));
+        }
+        DropHandle(a1);
+        RetVoid(regs);
+        return true;
+    }
+    // --- input events (int32 in r0, int64 in r0:r1, float bits in r0)
+    if (n == "AInputEvent_getType" || n == "AInputEvent_getDeviceId" || n == "AInputEvent_getSource") {
+        const AInputEvent* e = ev();
+        const std::int32_t v = !e ? 0
+                               : n == "AInputEvent_getType"     ? ::AInputEvent_getType(e)
+                               : n == "AInputEvent_getDeviceId" ? ::AInputEvent_getDeviceId(e)
+                                                                : ::AInputEvent_getSource(e);
+        Ret(regs, static_cast<std::uint32_t>(v));
+        return true;
+    }
+    if (n == "AKeyEvent_getAction" || n == "AKeyEvent_getKeyCode" || n == "AKeyEvent_getMetaState") {
+        const AInputEvent* e = ev();
+        const std::int32_t v = !e ? 0
+                               : n == "AKeyEvent_getAction"  ? ::AKeyEvent_getAction(e)
+                               : n == "AKeyEvent_getKeyCode" ? ::AKeyEvent_getKeyCode(e)
+                                                             : ::AKeyEvent_getMetaState(e);
+        Ret(regs, static_cast<std::uint32_t>(v));
+        return true;
+    }
+    if (n.compare(0, 12, "AMotionEvent") == 0) {
+        const AInputEvent* e = ev();
+        if (!e) {
+            Ret(regs, 0);
+            return true;
+        }
+        const std::size_t i = a1, h = a2;
+        if (n == "AMotionEvent_getAction") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getAction(e))); return true; }
+        if (n == "AMotionEvent_getFlags") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getFlags(e))); return true; }
+        if (n == "AMotionEvent_getMetaState") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getMetaState(e))); return true; }
+        if (n == "AMotionEvent_getEdgeFlags") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getEdgeFlags(e))); return true; }
+        if (n == "AMotionEvent_getPointerCount") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerCount(e))); return true; }
+        if (n == "AMotionEvent_getPointerId") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerId(e, i))); return true; }
+        if (n == "AMotionEvent_getHistorySize") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getHistorySize(e))); return true; }
+        if (n == "AMotionEvent_getDownTime") { ret_64(::AMotionEvent_getDownTime(e)); return true; }
+        if (n == "AMotionEvent_getEventTime") { ret_64(::AMotionEvent_getEventTime(e)); return true; }
+        if (n == "AMotionEvent_getHistoricalEventTime") { ret_64(::AMotionEvent_getHistoricalEventTime(e, i)); return true; }
+        if (n == "AMotionEvent_getXPrecision") { ret_f(::AMotionEvent_getXPrecision(e)); return true; }
+        if (n == "AMotionEvent_getYPrecision") { ret_f(::AMotionEvent_getYPrecision(e)); return true; }
+        if (n == "AMotionEvent_getX") { ret_f(::AMotionEvent_getX(e, i)); return true; }
+        if (n == "AMotionEvent_getY") { ret_f(::AMotionEvent_getY(e, i)); return true; }
+        if (n == "AMotionEvent_getPressure") { ret_f(::AMotionEvent_getPressure(e, i)); return true; }
+        if (n == "AMotionEvent_getSize") { ret_f(::AMotionEvent_getSize(e, i)); return true; }
+        if (n == "AMotionEvent_getToolMajor") { ret_f(::AMotionEvent_getToolMajor(e, i)); return true; }
+        if (n == "AMotionEvent_getToolMinor") { ret_f(::AMotionEvent_getToolMinor(e, i)); return true; }
+        if (n == "AMotionEvent_getTouchMajor") { ret_f(::AMotionEvent_getTouchMajor(e, i)); return true; }
+        if (n == "AMotionEvent_getTouchMinor") { ret_f(::AMotionEvent_getTouchMinor(e, i)); return true; }
+        if (n == "AMotionEvent_getOrientation") { ret_f(::AMotionEvent_getOrientation(e, i)); return true; }
+        if (n == "AMotionEvent_getHistoricalX") { ret_f(::AMotionEvent_getHistoricalX(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalY") { ret_f(::AMotionEvent_getHistoricalY(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalPressure") { ret_f(::AMotionEvent_getHistoricalPressure(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalSize") { ret_f(::AMotionEvent_getHistoricalSize(e, i, h)); return true; }
+    }
+    // --- configuration
+    if (n == "AConfiguration_new") {
+        Ret(regs, PtrHandle(::AConfiguration_new()));
+        return true;
+    }
+    if (n == "AConfiguration_delete") {
+        if (auto* c = static_cast<AConfiguration*>(PtrOf(a0))) {
+            ::AConfiguration_delete(c);
+        }
+        DropHandle(a0);
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "AConfiguration_fromAssetManager") {
+        auto* c = static_cast<AConfiguration*>(PtrOf(a0));
+        void* mgr = nullptr;
+        {
+            std::lock_guard<std::mutex> l(ptr_mu_);
+            const auto it = real_asset_mgrs_.find(a1);
+            mgr = it == real_asset_mgrs_.end() ? nullptr : it->second;
+        }
+        if (c && mgr) {
+            ::AConfiguration_fromAssetManager(c, static_cast<AAssetManager*>(mgr));
+        }
+        RetVoid(regs);
+        return true;
+    }
+    // --- native window
+    if (n == "ANativeWindow_fromSurface") {
+        // (JNIEnv*, jobject surface): the real env of this thread, the real
+        // Surface behind the guest's handle.
+        JNIEnv* re = GuestCallbacks::g_real_env_hook
+                         ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
+                         : nullptr;
+        void* surface = UnwrapObject(a1);
+        ANativeWindow* w = (re && surface) ? ::ANativeWindow_fromSurface(re, static_cast<jobject>(surface)) : nullptr;
+        Ret(regs, PtrHandle(w));
+        return true;
+    }
+    if (n == "ANativeWindow_acquire" || n == "ANativeWindow_release") {
+        if (auto* w = static_cast<ANativeWindow*>(PtrOf(a0))) {
+            if (n == "ANativeWindow_acquire") {
+                ::ANativeWindow_acquire(w);
+            } else {
+                ::ANativeWindow_release(w);  // the handle stays: the window may live on
+            }
+        }
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "ANativeWindow_setBuffersGeometry") {
+        auto* w = static_cast<ANativeWindow*>(PtrOf(a0));
+        Ret(regs, static_cast<std::uint32_t>(
+                      w ? ::ANativeWindow_setBuffersGeometry(w, static_cast<int32_t>(a1),
+                                                             static_cast<int32_t>(a2), static_cast<int32_t>(a3))
+                        : -22));
+        return true;
+    }
+    // --- sensors: none is offered (the device reads as having no sensor
+    //     of any type); the event queue itself is real and stays empty.
+    {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) {
+            std::printf("[ndk] sensors: none offered to the guest\n");
+        }
+    }
+    if (n == "ASensorManager_getInstance") {
+        Ret(regs, PtrHandle(::ASensorManager_getInstance()));
+        return true;
+    }
+    if (n == "ASensorManager_getSensorList") {
+        out32(a1, 0);
+        Ret(regs, 0);
+        return true;
+    }
+    if (n == "ASensorManager_createEventQueue") {
+        // (manager, looper, ident, callback, data@[sp])
+        std::uint32_t data = 0;
+        if (CheckRange(regs[13], 4, false)) {
+            std::memcpy(&data, H(regs[13]), 4);
+        }
+        auto* m = static_cast<ASensorManager*>(PtrOf(a0));
+        auto* l = static_cast<ALooper*>(PtrOf(a1));
+        ASensorEventQueue* q = (m && l) ? ::ASensorManager_createEventQueue(
+                                              m, l, static_cast<int>(a2), nullptr,
+                                              reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)))
+                                        : nullptr;
+        Ret(regs, PtrHandle(q));
+        return true;
+    }
+    if (n == "ASensorManager_destroyEventQueue") {
+        auto* m = static_cast<ASensorManager*>(PtrOf(a0));
+        auto* q = static_cast<ASensorEventQueue*>(PtrOf(a1));
+        const int r = (m && q) ? ::ASensorManager_destroyEventQueue(m, q) : -22;
+        DropHandle(a1);
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (n == "ASensorEventQueue_hasEvents" || n == "ASensorEventQueue_getEvents" ||
+        n == "ASensorManager_getDefaultSensor") {
+        Ret(regs, 0);  // no sensor: no events
+        return true;
+    }
+    // enable/disable/setEventRate on a sensor the guest cannot have, and
+    // the ASensor_get* accessors of one.
+    Ret(regs, n.compare(0, 8, "ASensor_") == 0 ? 0u : static_cast<std::uint32_t>(-22));
+    return true;
+#endif
 }
 
 // bionic's __cxa_guard (ARM): 0 = not constructed, bit 0 = constructed; we

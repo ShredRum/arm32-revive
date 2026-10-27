@@ -7,6 +7,7 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <android/native_activity.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <fcntl.h>
@@ -656,6 +657,49 @@ std::shared_ptr<HostThread> Enter() {
     return st;
 }
 
+// Runs guest `va` on this thread's Jit with AAPCS32 argument words: four in
+// r0-r3, the rest on its guest stack; returns when the guest returns.
+Dynarmic::HaltReason RunWordsOn(HostThread& st, const char* name, std::uint32_t va,
+                                const std::vector<std::uint32_t>& words) {
+    auto& regs = st.jit->Regs();
+    regs.fill(0);
+    const std::uint32_t spbase = st.stack + kThreadStackSize - 0x100u;
+    regs[13] = spbase;
+    for (std::size_t i = 0; i < words.size() && i < 4; i++) {
+        regs[i] = words[i];
+    }
+    for (std::size_t i = 4; i < words.size(); i++) {
+        std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &words[i], 4);
+    }
+    regs[14] = g_mod->halt_va;
+    CallGuest(*st.jit, va);
+    GuestRunGuard gg(&st, name);
+    return RunJit(*st.jit);
+}
+
+// A guest function called by the host itself (a NativeActivity callback):
+// r0 | r1 << 32, or 0 when it could not run.
+std::uint64_t CallGuestFromHost(const char* name, std::uint32_t va,
+                                const std::vector<std::uint32_t>& words) {
+    auto st = Enter();
+    if (!st || va == 0) {
+        return 0;
+    }
+    if (st->in_guest.load()) {
+        Log("REENTER %s while %s active -- dropping call", name, st->in_name);
+        return 0;
+    }
+    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words);
+    auto& regs = st->jit->Regs();
+    if (hr != Dynarmic::HaltReason::UserDefined1) {
+        Log("%s ended hr=%d r0=%08x pc=%08x lr=%08x sp=%08x", name, (int)hr, regs[0], regs[15],
+            regs[14], regs[13]);
+        DumpHaltTailOnce(name, (int)hr);
+        return 0;
+    }
+    return (std::uint64_t)regs[0] | ((std::uint64_t)regs[1] << 32);
+}
+
 // Runs the guest native at `va` for a Java call: (env, thiz, args per sig)
 // marshalled to AAPCS32 on this thread's guest stack; returns r0 | r1 << 32.
 std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig, void* thiz,
@@ -730,22 +774,7 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     words.push_back(g_rt->WrapObject(thiz));
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
     auto& regs = st->jit->Regs();
-    regs.fill(0);
-    const std::uint32_t spbase = st->stack + kThreadStackSize - 0x100u;
-    regs[13] = spbase;
-    for (std::size_t i = 0; i < words.size() && i < 4; i++) {
-        regs[i] = words[i];
-    }
-    for (std::size_t i = 4; i < words.size(); i++) {
-        std::memcpy(g_mem->host(spbase + (std::uint32_t)(i - 4) * 4), &words[i], 4);
-    }
-    regs[14] = g_mod->halt_va;
-    CallGuest(*st->jit, va);
-    Dynarmic::HaltReason hr;
-    {
-        GuestRunGuard gg(st.get(), name);
-        hr = RunJit(*st->jit);
-    }
+    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words);
     if (is_update) {
         g_upd_done_ms = WallMs();
     }
@@ -936,6 +965,30 @@ void* NativeStubFor(const char* cls, const char* name, const char* sig, std::uin
     return stubs[family][n];
 }
 
+// Lowercase hex SHA-256 of a file ("" if unreadable).
+std::string FileSha256(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) {
+        return "";
+    }
+    abr::Sha256 sh;
+    std::vector<std::uint8_t> buf(1 << 20);
+    std::size_t n;
+    while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
+        sh.Update(buf.data(), n);
+    }
+    std::fclose(f);
+    std::uint8_t out[32];
+    sh.Final(out);
+    static const char* hex = "0123456789abcdef";
+    std::string got;
+    for (int i = 0; i < 32; i++) {
+        got.push_back(hex[out[i] >> 4]);
+        got.push_back(hex[out[i] & 0x0f]);
+    }
+    return got;
+}
+
 std::string FindApk() {
     // Our own base.apk: derived from our own .so path via dladdr (no
     // permission issues: own maps always readable). .../lib/arm64/xxx.so
@@ -1069,7 +1122,22 @@ static bool DiagBootWanted(const std::string& files_dir) {
     return on;
 }
 
-extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+namespace {
+int g_primary = 0;  // the guest library Java loads (index in the module)
+}  // namespace
+
+// Loads and starts the guest once, from whichever entry Android uses first:
+// JNI_OnLoad (System.loadLibrary) or, for a NativeActivity title,
+// ANativeActivity_onCreate, which the framework calls before Java loads the
+// library. False when the guest cannot run.
+static bool Boot(JavaVM* vm) {
+    static std::mutex boot_mu;
+    static int booted = 0;  // 0 not yet, 1 ok, -1 failed
+    std::lock_guard<std::mutex> boot_lock(boot_mu);
+    if (booted != 0) {
+        return booted > 0;
+    }
+    booted = -1;
     g_vm = vm;
     GuestCallbacks::g_real_env_hook = RealEnvForThread;
     GuestCallbacks::g_native_stub_hook = NativeStubFor;
@@ -1156,32 +1224,81 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");
-        return 0;
+        return false;
     }
     Log("apk=%s", g_apk.c_str());
     // The guest .so is whatever sits under assets/guestlib/ (the packaging step
     // puts exactly one there). Naming it in C would be a per-title constant.
     const std::string glib_dir = "assets/guestlib/";
-    std::string guest_entry;
+    // Several guest libraries (a Unity title): <abi>/guest.libs lists them in
+    // load order, one "<sha256> <name> [primary]" per line; the primary one is
+    // the library Java loads. Each is extracted under its own name (a guest
+    // dlopen finds it by name) and checked against its digest.
+    struct GuestLib {
+        std::string name, sha, path;
+        bool primary = false;
+    };
+    std::vector<GuestLib> multi;
+    std::string multi_dir;
     for (const std::string& e : ZipListPrefix(g_apk, glib_dir)) {
+        if (e.size() > 11 && e.compare(e.size() - 11, 11, "/guest.libs") == 0) {
+            multi_dir = e.substr(0, e.size() - 10);
+            const std::string lp = g_files + "/guest.libs";
+            FILE* lf = ZipExtractStored(g_apk, e, lp) ? std::fopen(lp.c_str(), "rb") : nullptr;
+            char line[512];
+            while (lf && std::fgets(line, sizeof(line), lf)) {
+                char sha[80] = {0}, name[256] = {0}, flag[32] = {0};
+                if (std::sscanf(line, "%79s %255s %31s", sha, name, flag) >= 2) {
+                    multi.push_back({name, sha, g_files + "/guestlib/" + name,
+                                     std::strcmp(flag, "primary") == 0});
+                }
+            }
+            if (lf) {
+                std::fclose(lf);
+            }
+        }
+    }
+    std::string guest_entry;
+    if (!multi.empty()) {
+        std::filesystem::create_directories(g_files + "/guestlib", ec);
+        for (std::size_t i = 0; i < multi.size(); i++) {
+            const GuestLib& gl = multi[i];
+            if (!ZipExtractStored(g_apk, multi_dir + gl.name, gl.path)) {
+                Log("FATAL: guest %s extract failed", gl.name.c_str());
+                return false;
+            }
+            const std::string got = FileSha256(gl.path);
+            if (got != gl.sha) {
+                Log("[guest] LOUD %s sha256 mismatch: apk says %s, image is %s -- refusing to run",
+                    gl.name.c_str(), gl.sha.c_str(), got.c_str());
+                return false;
+            }
+            Log("[guest] %s sha256 OK %s%s", gl.name.c_str(), got.c_str(), gl.primary ? " (primary)" : "");
+            if (gl.primary) {
+                g_primary = static_cast<int>(i);
+                guest_entry = multi_dir + gl.name;
+            }
+        }
+    }
+    for (const std::string& e : multi.empty() ? ZipListPrefix(g_apk, glib_dir) : std::vector<std::string>()) {
         if (e.size() > 3 && e.compare(e.size() - 3, 3, ".so") == 0) {
             if (!guest_entry.empty()) {
                 Log("FATAL: several guest .so under %s: %s, %s", glib_dir.c_str(),
                     guest_entry.c_str(), e.c_str());
-                return 0;
+                return false;
             }
             guest_entry = e;
         }
     }
     if (guest_entry.empty()) {
         Log("FATAL: no guest .so under %s", glib_dir.c_str());
-        return 0;
+        return false;
     }
     Log("guest entry %s", guest_entry.c_str());
     const std::string guest_path = g_files + "/guest.so";
-    if (!ZipExtractStored(g_apk, guest_entry, guest_path)) {
+    if (multi.empty() && !ZipExtractStored(g_apk, guest_entry, guest_path)) {
         Log("FATAL: guest extract failed");
-        return 0;
+        return false;
     }
     // Guest identity: the packaging step wrote the guest .so's SHA-256 next
     // to it inside the APK. Comparing it with the extracted image makes the
@@ -1189,8 +1306,8 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // missing from some titles' images (Seasons, Space), so for them this is
     // the only identity check there is; the build-id note stays as a second,
     // independent signal where the image has one.
-    bool guest_identity_ok = false;
-    {
+    bool guest_identity_ok = !multi.empty();  // every library checked above
+    if (multi.empty()) {
         const std::size_t slash = guest_entry.find_last_of('/');
         const std::string digest_entry =
             (slash == std::string::npos ? std::string() : guest_entry.substr(0, slash + 1)) +
@@ -1241,7 +1358,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             } else {
                 Log("[guest] LOUD guest sha256 mismatch: apk says %s, image is %s -- refusing to run",
                     wlow.c_str(), got.c_str());
-                return 0;
+                return false;
             }
         } else {
             Log("[guest] no guest fingerprint in the apk (older packaging) -- identity unverified");
@@ -1274,14 +1391,29 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_mem = new GuestMemory();
     if (!g_mem->ok()) {
         Log("FATAL: guest reservation failed");
-        return 0;
+        return false;
     }
     ElfLoader loader(*g_mem);
     g_mod = new LoadedModule();
     std::string err;
-    if (!loader.Load(guest_path.c_str(), *g_mod, err)) {
-        Log("FATAL: load failed: %s", err.c_str());
-        return 0;
+    if (multi.empty()) {
+        if (!loader.Load(guest_path.c_str(), *g_mod, err)) {
+            Log("FATAL: load failed: %s", err.c_str());
+            return false;
+        }
+    } else {
+        // Each library at its own 16 MiB-aligned bias above the NULL guard,
+        // dependencies first (the listed order).
+        std::uint32_t at = 0x1000000u;
+        for (const GuestLib& gl : multi) {
+            if (!loader.Load(gl.path.c_str(), *g_mod, err, at)) {
+                Log("FATAL: load %s failed: %s", gl.name.c_str(), err.c_str());
+                return false;
+            }
+            const std::uint32_t hi = g_mod->more.empty() ? g_mod->span_hi : g_mod->more.back().span_hi;
+            Log("guest %s at %08x", gl.name.c_str(), at);
+            at = (hi + 0xFFFFFFu) & ~0xFFFFFFu;
+        }
     }
     Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
@@ -1336,7 +1468,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     auto st = Enter();  // OnLoad thread state (+ real attach)
     if (!st) {
         Log("FATAL: no thread state for the OnLoad thread");
-        return 0;
+        return false;
     }
     g_rt->set_jit(st->jit);
     // Static init: every DT_INIT_ARRAY entry runs, in order. (Rio's #22 used
@@ -1344,7 +1476,14 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     // that is the ARM kuser __kuser_memory_barrier, which the host now maps,
     // and the initializer runs clean: harness halts 53 -> 54.)
     std::size_t ok = 0;
-    for (std::size_t k = 0; k < g_mod->init_array.size(); k++) {
+    if (!multi.empty()) {
+        // As the linker: the primary library (and the guest libraries it
+        // needs) now; the others when the guest dlopens them.
+        if (!g_rt->InitGuestLibrary(g_primary)) {
+            Log("LOUD primary guest library initialisers failed");
+        }
+    }
+    for (std::size_t k = 0; multi.empty() && k < g_mod->init_array.size(); k++) {
         if (g_mod->init_array[k] == 0) {
             // A NULL slot of the guest's DT_INIT_ARRAY: kept in the vector so
             // the indices match the guest's, but there is nothing to run.
@@ -1363,12 +1502,27 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             Log("[init] #%zu @%08x hr=%d", k, g_mod->init_array[k], (int)hr);
         }
     }
-    Log("init done: %zu/%zu", ok, g_mod->init_array.size());
-    g_rt->MarkGuestLibraryInitialised(0);
+    if (multi.empty()) {
+        Log("init done: %zu/%zu", ok, g_mod->init_array.size());
+        g_rt->MarkGuestLibraryInitialised(0);
+    }
     // Run the guest JNI_OnLoad (registers dynamic natives incl. Lua pump).
+    booted = 1;
+    return true;
+}
+
+extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    if (!Boot(vm)) {
+        return 0;
+    }
+    auto st = Enter();
+    if (!st) {
+        return 0;
+    }
     {
-        const auto it = g_mod->defined.find("JNI_OnLoad");
-        if (it != g_mod->defined.end() && !(it->second & 1u)) {
+        const auto& defs = g_mod->lib_defined[static_cast<std::size_t>(g_primary)];
+        const auto it = defs.find("JNI_OnLoad");
+        if (it != defs.end()) {
             auto& regs = st->jit->Regs();
             regs.fill(0);
             regs[13] = st->stack + kThreadStackSize - 8;
@@ -1394,6 +1548,188 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         Log("watchdog armed (30s stuck-update dumps)");
     }
     return JNI_VERSION_1_6;
+}
+
+// --- NativeActivity (a Unity 4 title): the framework loads our library as
+// the activity's native code and calls ANativeActivity_onCreate. The guest's
+// own ANativeActivity_onCreate gets a guest ANativeActivity (LP32, 40 bytes:
+// callbacks, vm, env, clazz, internalDataPath, externalDataPath, sdkVersion,
+// instance, assetManager, obbPath) with a 16-entry callbacks table it fills
+// in; the real activity's callbacks are ours and call the guest's entry of
+// the same slot, if it set one (read at call time: a guest may change them).
+namespace {
+std::uint32_t g_gact = 0;  // the guest ANativeActivity
+
+enum GuestCb {
+    kOnStart, kOnResume, kOnSaveInstanceState, kOnPause, kOnStop, kOnDestroy,
+    kOnWindowFocusChanged, kOnNativeWindowCreated, kOnNativeWindowResized,
+    kOnNativeWindowRedrawNeeded, kOnNativeWindowDestroyed, kOnInputQueueCreated,
+    kOnInputQueueDestroyed, kOnContentRectChanged, kOnConfigurationChanged, kOnLowMemory,
+};
+
+std::uint64_t CallGuestCb(int slot, const char* name, std::vector<std::uint32_t> args) {
+    std::uint32_t table = 0, fn = 0;
+    if (!g_gact || !g_rt->CheckRange(g_gact, 4, false)) {
+        return 0;
+    }
+    std::memcpy(&table, g_mem->host(g_gact), 4);
+    if (!table || !g_rt->CheckRange(table + slot * 4u, 4, false)) {
+        return 0;
+    }
+    std::memcpy(&fn, g_mem->host(table + slot * 4u), 4);
+    if (!fn) {
+        return 0;
+    }
+    args.insert(args.begin(), g_gact);
+    return CallGuestFromHost(name, fn, args);
+}
+
+void CbStart(ANativeActivity*) { CallGuestCb(kOnStart, "onStart", {}); }
+void CbResume(ANativeActivity*) { CallGuestCb(kOnResume, "onResume", {}); }
+void CbPause(ANativeActivity*) { CallGuestCb(kOnPause, "onPause", {}); }
+void CbStop(ANativeActivity*) { CallGuestCb(kOnStop, "onStop", {}); }
+void CbDestroy(ANativeActivity*) { CallGuestCb(kOnDestroy, "onDestroy", {}); }
+void CbConfigurationChanged(ANativeActivity*) {
+    CallGuestCb(kOnConfigurationChanged, "onConfigurationChanged", {});
+}
+void CbLowMemory(ANativeActivity*) { CallGuestCb(kOnLowMemory, "onLowMemory", {}); }
+void CbWindowFocusChanged(ANativeActivity*, int focus) {
+    CallGuestCb(kOnWindowFocusChanged, "onWindowFocusChanged", {static_cast<std::uint32_t>(focus)});
+}
+void CbWindowCreated(ANativeActivity*, ANativeWindow* w) {
+    CallGuestCb(kOnNativeWindowCreated, "onNativeWindowCreated", {g_rt->PtrHandle(w)});
+}
+void CbWindowResized(ANativeActivity*, ANativeWindow* w) {
+    CallGuestCb(kOnNativeWindowResized, "onNativeWindowResized", {g_rt->PtrHandle(w)});
+}
+void CbWindowRedrawNeeded(ANativeActivity*, ANativeWindow* w) {
+    CallGuestCb(kOnNativeWindowRedrawNeeded, "onNativeWindowRedrawNeeded", {g_rt->PtrHandle(w)});
+}
+void CbWindowDestroyed(ANativeActivity*, ANativeWindow* w) {
+    CallGuestCb(kOnNativeWindowDestroyed, "onNativeWindowDestroyed", {g_rt->PtrHandle(w)});
+}
+void CbInputQueueCreated(ANativeActivity*, AInputQueue* q) {
+    CallGuestCb(kOnInputQueueCreated, "onInputQueueCreated", {g_rt->PtrHandle(q)});
+}
+void CbInputQueueDestroyed(ANativeActivity*, AInputQueue* q) {
+    const std::uint32_t h = g_rt->PtrHandle(q);
+    CallGuestCb(kOnInputQueueDestroyed, "onInputQueueDestroyed", {h});
+    g_rt->DropHandle(h);
+}
+void CbContentRectChanged(ANativeActivity*, const ARect* r) {
+    // A guest copy of the rect (4 int32), valid for the call.
+    const std::uint32_t g = g_rt->GuestMalloc(16);
+    if (!g || !r) {
+        return;
+    }
+    std::memcpy(g_mem->host(g), r, 16);
+    CallGuestCb(kOnContentRectChanged, "onContentRectChanged", {g});
+    g_rt->GuestFree(g);
+}
+void* CbSaveInstanceState(ANativeActivity*, size_t* out_size) {
+    // The guest returns a malloc'd buffer and its size; the framework frees
+    // what we return with free(), so it gets a host copy.
+    *out_size = 0;
+    const std::uint32_t gsize = g_rt->GuestMalloc(4);
+    if (!gsize) {
+        return nullptr;
+    }
+    std::memset(g_mem->host(gsize), 0, 4);
+    const std::uint32_t buf =
+        static_cast<std::uint32_t>(CallGuestCb(kOnSaveInstanceState, "onSaveInstanceState", {gsize}));
+    std::uint32_t size = 0;
+    std::memcpy(&size, g_mem->host(gsize), 4);
+    g_rt->GuestFree(gsize);
+    void* out = nullptr;
+    if (buf && size && g_rt->CheckRange(buf, size, false)) {
+        out = std::malloc(size);
+        if (out) {
+            std::memcpy(out, g_mem->host(buf), size);
+            *out_size = size;
+        }
+    }
+    if (buf) {
+        g_rt->GuestFree(buf);
+    }
+    return out;
+}
+
+std::uint32_t GuestCString(const char* t) {
+    if (!t) {
+        return 0;
+    }
+    const std::uint32_t n = static_cast<std::uint32_t>(std::strlen(t) + 1);
+    const std::uint32_t g = g_rt->GuestMalloc(n);
+    if (g) {
+        std::memcpy(g_mem->host(g), t, n);
+    }
+    return g;
+}
+}  // namespace
+
+extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
+    ANativeActivity* activity, void* saved_state, size_t saved_size) {
+    if (!Boot(activity->vm)) {
+        Log("FATAL: ANativeActivity_onCreate: the guest cannot run");
+        return;
+    }
+    const auto& defs = g_mod->lib_defined[static_cast<std::size_t>(g_primary)];
+    const auto it = defs.find("ANativeActivity_onCreate");
+    if (it == defs.end()) {
+        Log("LOUD ANativeActivity_onCreate: the guest library has none");
+        return;
+    }
+    const std::uint32_t gact = g_rt->GuestMalloc(40);
+    const std::uint32_t table = g_rt->GuestMalloc(64);
+    if (!gact || !table) {
+        Log("LOUD ANativeActivity_onCreate: no guest heap");
+        return;
+    }
+    std::memset(g_mem->host(table), 0, 64);
+    const std::uint32_t mgr = g_rt->NewGuestAssetManager();
+    g_rt->SetRealAssetManager(mgr, activity->assetManager);
+    const std::uint32_t f[10] = {
+        table,
+        g_rt->Jvm(),
+        g_rt->JniEnv(),
+        g_rt->WrapObject(activity->clazz),
+        GuestCString(activity->internalDataPath),
+        GuestCString(activity->externalDataPath),
+        static_cast<std::uint32_t>(activity->sdkVersion),
+        0,  // instance: the guest's own
+        mgr,
+        GuestCString(activity->obbPath),
+    };
+    std::memcpy(g_mem->host(gact), f, 40);
+    g_gact = gact;
+    std::uint32_t gsaved = 0;
+    if (saved_state && saved_size) {
+        gsaved = g_rt->GuestMalloc(static_cast<std::uint32_t>(saved_size));
+        if (gsaved) {
+            std::memcpy(g_mem->host(gsaved), saved_state, saved_size);
+        }
+    }
+    Log("ANativeActivity_onCreate: guest activity %08x (sdk %d, saved %zu bytes)", gact,
+        activity->sdkVersion, saved_size);
+    CallGuestFromHost("ANativeActivity_onCreate", it->second,
+                      {gact, gsaved, static_cast<std::uint32_t>(gsaved ? saved_size : 0)});
+    ANativeActivityCallbacks* cb = activity->callbacks;
+    cb->onStart = CbStart;
+    cb->onResume = CbResume;
+    cb->onSaveInstanceState = CbSaveInstanceState;
+    cb->onPause = CbPause;
+    cb->onStop = CbStop;
+    cb->onDestroy = CbDestroy;
+    cb->onWindowFocusChanged = CbWindowFocusChanged;
+    cb->onNativeWindowCreated = CbWindowCreated;
+    cb->onNativeWindowResized = CbWindowResized;
+    cb->onNativeWindowRedrawNeeded = CbWindowRedrawNeeded;
+    cb->onNativeWindowDestroyed = CbWindowDestroyed;
+    cb->onInputQueueCreated = CbInputQueueCreated;
+    cb->onInputQueueDestroyed = CbInputQueueDestroyed;
+    cb->onContentRectChanged = CbContentRectChanged;
+    cb->onConfigurationChanged = CbConfigurationChanged;
+    cb->onLowMemory = CbLowMemory;
 }
 
 #include "apphost_gen.inc"

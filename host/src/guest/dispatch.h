@@ -284,6 +284,33 @@ public:
     // Returns acquire's result (1 = the caller constructs), 0 for release and
     // abort, or kSemBadPtr for a wild guard pointer.
     std::uint32_t CxaGuard(const std::string& n, std::uint32_t guard);
+    bool EnsureApkIndex();
+    // NDK objects the guest only holds opaquely (ALooper*, AInputQueue*,
+    // AInputEvent*, AConfiguration*, ANativeWindow*, sensor objects): a
+    // 32-bit handle in an unmapped guest range (a dereference halts cleanly)
+    // for each live host pointer.
+    std::uint32_t PtrHandle(void* p);
+    void* PtrOf(std::uint32_t h);
+    void DropHandle(std::uint32_t h);
+    std::mutex ptr_mu_;
+    std::unordered_map<void*, std::uint32_t> ptr_fwd_;
+    std::unordered_map<std::uint32_t, void*> ptr_rev_;
+    std::vector<std::uint32_t> ptr_free_;
+    std::uint32_t ptr_next_ = 0xF2000000u;
+    // The real AAssetManager behind a guest asset manager handle.
+    std::unordered_map<std::uint32_t, void*> real_asset_mgrs_;
+    void SetRealAssetManager(std::uint32_t guest, void* real) {
+        std::lock_guard<std::mutex> l(ptr_mu_);
+        real_asset_mgrs_[guest] = real;
+    }
+    // The NDK imports of a NativeActivity title (ALooper_*, AInputQueue_*,
+    // AInputEvent_*, AMotionEvent_*, AKeyEvent_*, AConfiguration_*,
+    // ANativeWindow_*, ASensor*); false if `n` is not one of them.
+    bool NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    // A guest AAssetManager over our APK (what AAssetManager_fromJava gives),
+    // for a host that hands one to the guest itself (ANativeActivity); 0 when
+    // the APK cannot be indexed.
+    std::uint32_t NewGuestAssetManager();
     // zlib (inflate*/deflate*/crc32) over guest z_streams and bionic's
     // SHA1Init/Update/Final over a guest SHA1_CTX. False: a wild guest
     // pointer (the caller halts).
