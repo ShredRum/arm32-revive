@@ -226,6 +226,13 @@ public:
     static void SetThreadStack(std::uint32_t lo, std::uint32_t size);
     std::uint32_t PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
                               std::uint32_t a2);
+    // C++ static-local guards (__cxa_guard_acquire/release/abort, ARM C++
+    // ABI: a 32-bit guard, bit 0 set once the object is constructed).
+    // Returns acquire's result (1 = the caller constructs), 0 for release and
+    // abort, or kSemBadPtr for a wild guard pointer.
+    std::uint32_t CxaGuard(const std::string& n, std::uint32_t guard);
+    std::mutex guard_mu_;
+    std::condition_variable guard_cv_;
     // Guest semaphores; kSemBadPtr asks the caller to halt on a wild pointer.
     static constexpr std::uint32_t kSemBadPtr = 0xFFFFFFFEu;
     std::uint32_t GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,

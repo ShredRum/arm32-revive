@@ -337,6 +337,9 @@ int main() {
     mod.imports.push_back(abr::Import{"fnmatch", true, 0, 0, 0});         // 69
     mod.imports.push_back(abr::Import{"basename", true, 0, 0, 0});        // 70
     mod.imports.push_back(abr::Import{"wcslen", true, 0, 0, 0});          // 71
+    mod.imports.push_back(abr::Import{"__cxa_guard_acquire", true, 0, 0, 0});  // 72
+    mod.imports.push_back(abr::Import{"__cxa_guard_release", true, 0, 0, 0});  // 73
+    mod.imports.push_back(abr::Import{"__cxa_guard_abort", true, 0, 0, 0});    // 74
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1090,6 +1093,24 @@ int main() {
                       w.size(), w[0], w[1], w[2], w[3]);
         Expect("JNI (J)V word stream", got,
                "4:10002000 20003000 55667788 11223344");
+    }
+
+    // --- C++ static-local guard: the first acquire constructs (1), a later
+    //     one after release sees the object done (0); abort lets the next
+    //     acquire construct again.
+    {
+        const std::uint32_t g = kScratch + 0x800;
+        std::memset(mem.host(g), 0, 4);
+        const std::uint32_t ga[4] = {g, 0, 0, 0};
+        std::string got = std::to_string(abr::RuntimeTestAccess::Call(rt, 72, ga));
+        abr::RuntimeTestAccess::Call(rt, 74, ga);  // abort
+        got += std::to_string(abr::RuntimeTestAccess::Call(rt, 72, ga));
+        abr::RuntimeTestAccess::Call(rt, 73, ga);  // release
+        got += std::to_string(abr::RuntimeTestAccess::Call(rt, 72, ga));
+        std::uint32_t w = 0;
+        std::memcpy(&w, mem.host(g), 4);
+        Expect("__cxa_guard acquire/abort/acquire/release/acquire", got + " bit0=" +
+               std::to_string(w & 1u), "110 bit0=1");
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read

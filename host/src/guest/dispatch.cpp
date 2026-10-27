@@ -4280,7 +4280,28 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- loud exits ---
-    if (n == "abort" || n == "__stack_chk_fail" || n == "__assert2" || n == "exit" || n == "_exit") {
+    if (n == "__cxa_guard_acquire" || n == "__cxa_guard_release" || n == "__cxa_guard_abort") {
+        const std::uint32_t r = CxaGuard(n, a0);
+        if (r == kSemBadPtr) {
+            goto bad_ptr;
+        }
+        Ret(regs, r);
+        return;
+    }
+    // Destructors registered for exit never run: an Android app process is
+    // killed, it does not exit. Registering succeeds, as in bionic.
+    if (n == "__cxa_atexit" || n == "__aeabi_atexit") {
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "__cxa_finalize") {
+        RetVoid(regs);
+        return;
+    }
+    // __cxa_pure_virtual: a call through a pure virtual slot; libstdc++
+    // aborts.
+    if (n == "abort" || n == "__stack_chk_fail" || n == "__assert2" || n == "exit" ||
+        n == "_exit" || n == "__cxa_pure_virtual") {
         std::printf("[svc] FATAL %s() called (r0=%08x) pc=%08x lr=%08x -- halting\n", n.c_str(), a0,
                     regs[15] - 4, regs[14]);
         DumpEventRing();
@@ -7691,7 +7712,14 @@ void Runtime::InitDataImports() {
     // bionic std streams: __sF[3], sizeof(FILE)=84 on this arm32 ABI (stderr is
     // &__sF[2] == base+168; verified at call sites 0x5d4270 and 0x586dc8).
     const std::uint32_t sF = GuestMalloc(3 * 84);
-    if (!var_ctype || !var_guard || !var_lower || !var_upper || !var_page || !sF) {
+    // environ (char**): the variable points at an empty environment, a lone
+    // NULL, which matches getenv answering NULL for every name. std::nothrow
+    // is an empty object only used by address (operator new(size, nothrow)).
+    const std::uint32_t var_environ = GuestMalloc(4);
+    const std::uint32_t env_array = GuestMalloc(4);
+    const std::uint32_t var_nothrow = GuestMalloc(4);
+    if (!var_ctype || !var_guard || !var_lower || !var_upper || !var_page || !sF ||
+        !var_environ || !env_array || !var_nothrow) {
         std::printf("[data] LOUD var alloc failed -- halting\n");
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
@@ -7713,6 +7741,9 @@ void Runtime::InitDataImports() {
     // page size (4096 on arm32 Android).
     const std::uint32_t page_size = 4096;
     std::memcpy(H(var_page), &page_size, 4);
+    std::memset(H(env_array), 0, 4);
+    std::memcpy(H(var_environ), &env_array, 4);
+    std::memset(H(var_nothrow), 0, 4);
     // __sF: bind the three bionic std streams to the host's. The GOT slot must
     // hold the ARRAY BASE (the guest does a single deref: ldr rX,[got]; add
     // rX,rX,#168), unlike the pointer-cell variables above.
@@ -7735,6 +7766,8 @@ void Runtime::InitDataImports() {
         {"_toupper_tab_", var_upper},
         {"__page_size", var_page},
         {"__sF", sF},
+        {"environ", var_environ},
+        {"_ZSt7nothrow", var_nothrow},
     };
     // Bind a data import to a guest address: patch every GOT slot that
     // refers to it and point the import itself at the address (a data
@@ -7779,10 +7812,10 @@ void Runtime::InitDataImports() {
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);
         covered.push_back(idx);
     }
-    // Coverage guard: a data import that is NOT one of the six above would
+    // Coverage guard: a data import that is NOT one of the slots above would
     // keep the address of its TRAMPOLINE (a code address in the trampoline
     // page) and the guest would read a pointer into code as data. The
-    // guests have exactly the six data imports today (measured), so this
+    // guests' data imports are all covered today (measured), so this
     // never fires -- but a new .so or a new bionic symbol would otherwise
     // fail silently. Bind such an import to a zero page instead, and say
     // so loudly.
@@ -8410,6 +8443,47 @@ void Runtime::ForgetSigThreadJit(std::uint32_t tid) {
     const auto it = sig_threads_.find(tid);
     if (it != sig_threads_.end()) {
         it->second->jit.store(nullptr, std::memory_order_release);
+    }
+}
+
+// bionic's __cxa_guard (ARM): 0 = not constructed, bit 0 = constructed; we
+// mark "under construction" with 0x100 (the guard's other bits are the
+// implementation's own, and every guest library calls this one). A thread
+// that finds the object under construction waits for release or abort;
+// while guest signals are in use it waits in slices and runs its handlers
+// in between, with guard_mu_ released (a GC may stop the constructing
+// thread and needs this one's ack).
+std::uint32_t Runtime::CxaGuard(const std::string& n, std::uint32_t guard) {
+    constexpr std::uint32_t kDone = 1, kUnderway = 0x100;
+    if (!CheckRange(guard, 4, true) || (guard & 3u)) {
+        return kSemBadPtr;
+    }
+    std::uint32_t* const g = H<std::uint32_t>(guard);
+    std::unique_lock<std::mutex> l(guard_mu_);
+    if (n == "__cxa_guard_release" || n == "__cxa_guard_abort") {
+        __atomic_store_n(g, n == "__cxa_guard_release" ? kDone : 0u, __ATOMIC_RELEASE);
+        guard_cv_.notify_all();
+        return 0;
+    }
+    for (;;) {
+        const std::uint32_t v = __atomic_load_n(g, __ATOMIC_ACQUIRE);
+        if (v & kDone) {
+            return 0;
+        }
+        if (v == 0) {
+            __atomic_store_n(g, kUnderway, __ATOMIC_RELAXED);
+            return 1;
+        }
+        if (!SignalsInUse()) {
+            guard_cv_.wait(l);
+            continue;
+        }
+        guard_cv_.wait_for(l, std::chrono::nanoseconds(kSigSliceNs));
+        if (SignalDeliverable()) {
+            l.unlock();
+            DeliverPendingSignals();
+            l.lock();
+        }
     }
 }
 
