@@ -1271,8 +1271,11 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             n == "glUniform1fv" || n == "glUniform1iv" || n == "glUniform2fv" ||
             n == "glUniform2iv" || n == "glUniform3fv" || n == "glUniform3iv" ||
             n == "glUniform4fv" || n == "glUniform4iv") {
-            // (location, count, transpose, value*): all in regs.
-            std::uint32_t cnt = a1, vp = a3;
+            // glUniformMatrix*: (location, count, transpose, value*);
+            // glUniform{1-4}{f,i}v: (location, count, value*) -- no transpose,
+            // the pointer is the THIRD argument (r2).
+            const bool matrix = n.find("Matrix") != std::string::npos;
+            std::uint32_t cnt = a1, vp = matrix ? a3 : a2;
             std::uint32_t per = 1;
             if (n.find("Matrix4") != std::string::npos) {
                 per = 16;

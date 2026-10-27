@@ -248,3 +248,24 @@ Found on arm64 only: Boehm's GC_unmap (PROT_NONE MAP_FIXED over part of its heap
 refused by the one-entry-per-mmap table and Mono aborted; fixed by the per-page arena
 (6b807a7); Mono thread+GC stress 5/5 on arm64.
 Still to gate by playing: Rio's dynamic natives (RegisterNatives) and worker exits.
+
+## First device runs (2026-10-27)
+
+APK: scripts/prepare-tree.sh 99-bricks && scripts/build-apk.sh 99-bricks; devgate works
+(the original APK had to be uninstalled from the sandbox: different signature). Unity
+starts: three libraries, Mono loads mscorlib, the EGL context goes current, nativeRender
+runs. Fixed on the way: PushLocalFrame/PopLocalFrame, UnregisterNatives, IsInstanceOf,
+FatalError, direct buffers (FMOD audio), all primitive-array element/region calls, a
+jclass handed in by Java, and an old realgl bug: glUniform{1-4}{f,i}v read the value
+pointer from r3 (only the Matrix variants have a transpose argument; Rovio uses only
+those).
+Seen: landscape instead of portrait and a black screen (Unity probably did not read its
+player settings / data yet); a permissions dialog (targetSdk 24: Unity 4.7 asks).
+
+JNI table audit (Call<T>Method/CallStatic<T>Method go to Java generically): still
+missing ExceptionDescribe, AllocObject, CallNonvirtual* (64-93), Get/Set<T>Field for
+primitives (96-112) and statics (152-162), NewString, GetStringChars/ReleaseStringChars,
+NewObjectArray/Get/SetObjectArrayElement, New<T>Array (175-182), MonitorEnter/Exit,
+ReleasePrimitiveArrayCritical, Get/ReleaseStringCritical, NewDirectByteBuffer,
+GetObjectRefType. Next: implement them all at once (real-Java delegation), then look
+at GL_EXTENSIONS vs eglGetProcAddress (Unity sees extensions we return NULL for).
