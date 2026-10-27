@@ -8307,6 +8307,8 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             if (old != mutex_map_.end()) {
                 // Re-init of an existing guest mutex: a fresh host mutex (the
                 // old one is leaked, another thread might still block on it).
+                std::printf("[mutex] re-init obj=%08x (t%u) lr=%08x\n", obj, GuestTid(),
+                            ActiveJit() ? ActiveJit()->Regs()[14] : 0u);
                 old->second = NewHostMutex(static_cast<int>(type));
             } else {
                 mutex_map_[obj] = NewHostMutex(static_cast<int>(type));
@@ -8506,6 +8508,9 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy") {
         if (n == "pthread_cond_init") {
+            if (cond_map_.count(cond) != 0) {
+                std::printf("[cond] re-init obj=%08x (t%u)\n", cond, GuestTid());
+            }
             cond_map_[cond] = NewHostCond();
         } else {
             cond_map_.erase(cond);  // freed when the last waiter lets go
@@ -11185,6 +11190,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     if (n == "eglSwapBuffers") {
+        egl_swaps_.fetch_add(1, std::memory_order_relaxed);
         Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
         return true;
     }
@@ -11478,9 +11484,10 @@ std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
 // On a proxy (t_is_proxy) the thread's state stays as the proxy found
 // it: the handler's own host calls and Run levels are the proxy's, not the
 // thread's.
-void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr) {
-    if (!t_sig || t_is_proxy) {
-        return;
+void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
+                               bool blocking) {
+    if (!t_sig || t_is_proxy || !blocking) {
+        return;  // a short call: the thread stops when it is back in guest code
     }
     const bool on = SignalsInUse();
     if (on) {
@@ -11492,8 +11499,8 @@ void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::u
     t_sig->outside.store(true, std::memory_order_release);
 }
 
-void Runtime::SigLeaveHostCall() {
-    if (!t_sig || t_is_proxy) {
+void Runtime::SigLeaveHostCall(bool blocking) {
+    if (!t_sig || t_is_proxy || !blocking) {
         return;
     }
     if (SignalsInUse()) {
@@ -11562,6 +11569,7 @@ struct SnapSave {
     std::array<std::uint32_t, 16> regs;
     std::uint32_t cpsr;
     bool valid;
+    bool outside;  // the outer host call blocks (proxy may stand in) or not
 };
 thread_local std::vector<SnapSave> t_snap_stack;
 }  // namespace
@@ -11569,7 +11577,8 @@ thread_local std::vector<SnapSave> t_snap_stack;
 void GuestSigEnterJit() {
     t_jit_depth++;
     if (t_jit_depth > 1 && t_sig && !t_is_proxy) {
-        t_snap_stack.push_back({t_sig->snap, t_sig->snap_cpsr, t_sig->snap_valid.load()});
+        t_snap_stack.push_back({t_sig->snap, t_sig->snap_cpsr, t_sig->snap_valid.load(),
+                                t_sig->outside.load()});
     }
     GuestSigResumeJit();
 }
@@ -11599,7 +11608,13 @@ void GuestSigLeaveJit() {
         t_sig->snap = sv.regs;
         t_sig->snap_cpsr = sv.cpsr;
         t_sig->snap_valid.store(sv.valid, std::memory_order_relaxed);
+        const bool outside = sv.outside;
         t_snap_stack.pop_back();
+        // Back inside the outer host call, which a proxy may serve only if
+        // it blocks.
+        t_sig->parked.store(false, std::memory_order_relaxed);
+        t_sig->outside.store(outside, std::memory_order_release);
+        return;
     }
     t_sig->parked.store(t_jit_depth <= 0, std::memory_order_relaxed);
     t_sig->outside.store(true, std::memory_order_release);
@@ -12585,6 +12600,37 @@ void* Runtime::RealClass(void* real_env, const std::string& cls) {
 #endif
 
 #ifdef __ANDROID__
+// Clears a pending Java exception, naming it first (capped): a bridged call
+// that failed on the Java side used to vanish into a NULL/0 result.
+static void ClearJavaException(JNIEnv* re, const std::string& what) {
+    jthrowable t = re->ExceptionOccurred();
+    if (!t) {
+        return;
+    }
+    re->ExceptionClear();
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) < 50) {
+        jclass c = re->GetObjectClass(t);
+        jmethodID ts = c ? re->GetMethodID(c, "toString", "()Ljava/lang/String;") : nullptr;
+        jstring js = ts ? static_cast<jstring>(re->CallObjectMethod(t, ts)) : nullptr;
+        re->ExceptionClear();
+        const char* u = js ? re->GetStringUTFChars(js, nullptr) : nullptr;
+        std::printf("[jni] Java exception in %.160s: %s\n", what.c_str(), u ? u : "?");
+        if (u) {
+            re->ReleaseStringUTFChars(js, u);
+        }
+        if (js) {
+            re->DeleteLocalRef(js);
+        }
+        if (c) {
+            re->DeleteLocalRef(c);
+        }
+    }
+    re->DeleteLocalRef(t);
+}
+#endif
+
+#ifdef __ANDROID__
 // Real-call delegation for Call*Method (product host): resolve mock
 // class/method cookies to real ART refs (cached), marshal guest args to
 // jvalues (unwrapping objects, materializing strings), invoke the real
@@ -12652,7 +12698,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
     if (!rclazz) {
         jclass lc = re->FindClass(cls.c_str());
         if (!lc || re->ExceptionCheck()) {
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
             return false;
         }
         rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
@@ -12675,7 +12721,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         rmid = is_static ? re->GetStaticMethodID(rclazz, name.c_str(), sig.c_str())
                          : re->GetMethodID(rclazz, name.c_str(), sig.c_str());
         if (!rmid || re->ExceptionCheck()) {
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
             return false;
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -12869,7 +12915,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             re->CallVoidMethodA(robj, rmid, jv);
         }
         if (re->ExceptionCheck()) {
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
         }
         Ret(regs, 0);
         return true;
@@ -12916,7 +12962,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                 std::memcpy(&u, &d, 8);
                 Ret(regs, (std::uint32_t)u, (std::uint32_t)(u >> 32));
                 if (re->ExceptionCheck()) {
-                    re->ExceptionClear();
+                    ClearJavaException(re, mdesc);
                 }
                 return true;
             }
@@ -12927,7 +12973,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             Ret(regs, (std::uint32_t)(std::uint64_t)lv);
         }
         if (re->ExceptionCheck()) {
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
         }
         return true;
     }
@@ -12936,7 +12982,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         jobject ro = is_static ? re->CallStaticObjectMethodA(rclazz, rmid, jv)
                                : re->CallObjectMethodA(robj, rmid, jv);
         if (re->ExceptionCheck() || !ro) {
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
             Ret(regs, 0);
             return true;
         }
@@ -13031,7 +13077,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         jclass lc = re->FindClass(cls.c_str());
         if (!lc || re->ExceptionCheck()) {
             std::printf("[realnew] FindClass %s FAILED\n", cls.c_str());
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
             return false;
         }
         rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
@@ -13055,7 +13101,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         rmid = re->GetMethodID(rclazz, "<init>", sig.c_str());
         if (!rmid || re->ExceptionCheck()) {
             std::printf("[realnew] GetMethodID <init>%s FAILED\n", sig.c_str());
-            re->ExceptionClear();
+            ClearJavaException(re, mdesc);
             return false;
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -13235,7 +13281,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         } else {
             std::printf("[realnew] NewObjectA returned null\n");
         }
-        re->ExceptionClear();
+        ClearJavaException(re, mdesc);
         return false;
     }
     const std::uint32_t h = WrapObject(ro);
@@ -15780,9 +15826,10 @@ void GuestCallbacks::CallSVC(std::uint32_t swi) {
     // thread that went to sleep in a host call earlier must not look like it
     // has no guest frames when the first signal comes (a proxy would run the
     // handler over its live stack).
-    rt_->SigEnterHostCall(regs, jit->Cpsr());
+    const bool blocking = rt_->SvcBlocks(swi);
+    rt_->SigEnterHostCall(regs, jit->Cpsr(), blocking);
     rt_->OnSvc(swi, regs);
-    rt_->SigLeaveHostCall();
+    rt_->SigLeaveHostCall(blocking);
 }
 
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:

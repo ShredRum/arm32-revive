@@ -470,6 +470,15 @@ void Watchdog() {
                 g_rt->MutexOwnersDump();
             }
         }
+        {
+            // A guest that presents its own frames (EGL): how many per 10 s.
+            static std::uint64_t last_swaps = 0;
+            const std::uint64_t sw = g_rt->egl_swaps_.load(std::memory_order_relaxed);
+            if (sw != last_swaps) {
+                Log("[frames] %llu presented in the last 10 s", (unsigned long long)(sw - last_swaps));
+                last_swaps = sw;
+            }
+        }
         const unsigned cn = g_rt->HeapCorruptionCount();
         if (cn != last_corrupt) {
             last_corrupt = cn;

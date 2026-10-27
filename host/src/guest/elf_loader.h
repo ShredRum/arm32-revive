@@ -42,6 +42,27 @@ inline FastMath FastMathForName(const std::string& name) {
     return FastMath::None;
 }
 
+// Imports that wait (for another thread, time or I/O) without moving guest
+// pointers around: while a thread sits in one, a guest signal can be taken
+// for it by a proxy (a GC may then treat it as stopped). Every other import
+// is short and may write the guest heap (memcpy, realloc...), so its thread
+// is stopped when it returns to guest code instead.
+inline bool BlockingImportName(const std::string& n) {
+    static const char* const kNames[] = {
+        "sem_wait", "sem_timedwait", "pthread_cond_wait", "pthread_cond_timedwait",
+        "pthread_cond_timedwait_monotonic", "pthread_cond_timedwait_monotonic_np",
+        "pthread_mutex_lock", "pthread_rwlock_rdlock", "pthread_rwlock_wrlock", "pthread_join",
+        "nanosleep", "usleep", "sleep", "poll", "select", "epoll_wait", "accept", "connect",
+        "recv", "recvfrom", "recvmsg", "read", "ALooper_pollAll", "ALooper_pollOnce",
+        "sigsuspend", "eglSwapBuffers"};
+    for (const char* k : kNames) {
+        if (n == k) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct Import {
     std::string name;
     bool is_function;  // false => data object (needs a guest address, not a call trampoline)
@@ -49,6 +70,7 @@ struct Import {
     std::uint32_t call_va = 0;   // guest VA the guest actually branches to (== tramp_va
                                   // unless the import runs guest-side VFP code)
     std::uint8_t fast_math = 0;  // FastMath id (0 = not a fast-math import)
+    bool blocking = false;       // BlockingImportName
 };
 
 struct PendingData {

@@ -256,8 +256,19 @@ public:
         std::uint32_t stack_top = 0;
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
-    void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr);
-    void SigLeaveHostCall();
+    void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
+                          bool blocking);
+    void SigLeaveHostCall(bool blocking);
+    // A blocking host call: an import marked blocking, or a JNI call (Java).
+    bool SvcBlocks(std::uint32_t swi) const {
+        if (swi >= kSwiKuserBase) {
+            return false;
+        }
+        if (swi >= kSwiJniBase) {
+            return true;
+        }
+        return swi >= 1 && swi - 1 < mod_.imports.size() && mod_.imports[swi - 1].blocking;
+    }
     // Runs the deliverable signals of an outside thread on its behalf.
     void ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid);
     // The kernel tid running guest thread `tid`, or 0 when it is unknown.
@@ -314,6 +325,7 @@ public:
     // real EGL with handles for displays, configs, contexts and surfaces.
     // False when `n` is not an EGL import; a wild pointer halts inside.
     bool EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    std::atomic<std::uint64_t> egl_swaps_{0};  // frames a guest presented
     // A guest AAssetManager over our APK (what AAssetManager_fromJava gives),
     // for a host that hands one to the guest itself (ANativeActivity); 0 when
     // the APK cannot be indexed.
