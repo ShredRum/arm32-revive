@@ -1151,11 +1151,39 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
 namespace {
 // Real-Java delegation for JNI thunks (product host): the calling host
 // thread's real JNIEnv*, or null (harness has none -> mocks stay).
+// A guest-created thread (pthread_create) that calls into Java is attached to
+// the JVM the first time, as the guest's own AttachCurrentThread would on a
+// device, and detached when it exits (ART aborts on an attached thread that
+// exits without detaching).
+struct GuestThreadAttach {
+    JNIEnv* env = nullptr;
+    ~GuestThreadAttach() {
+        if (env && g_vm) {
+            g_vm->DetachCurrentThread();
+        }
+    }
+};
+
 void* RealEnvForThread() {
     const pid_t me = gettid();
-    std::lock_guard<std::mutex> l(g_tmu);
-    const auto it = g_threads.find(me);
-    return it != g_threads.end() ? static_cast<void*>(it->second->env) : nullptr;
+    {
+        std::lock_guard<std::mutex> l(g_tmu);
+        const auto it = g_threads.find(me);
+        if (it != g_threads.end()) {
+            return static_cast<void*>(it->second->env);
+        }
+    }
+    thread_local GuestThreadAttach attach;
+    if (!attach.env && g_vm) {
+        JNIEnv* env = nullptr;
+        if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+            return env;  // attached by someone else (not ours to detach)
+        }
+        if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+            attach.env = env;
+        }
+    }
+    return attach.env;
 }
 }  // namespace
 
@@ -1592,6 +1620,23 @@ static bool Boot(JavaVM* vm) {
 extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     if (!Boot(vm)) {
         return 0;
+    }
+    {
+        // The app's class loader (this Java thread's context loader), for
+        // threads attached from native code, whose FindClass sees only the
+        // system classes.
+        JNIEnv* env = nullptr;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+            jclass tc = env->FindClass("java/lang/Thread");
+            jmethodID cur = tc ? env->GetStaticMethodID(tc, "currentThread", "()Ljava/lang/Thread;") : nullptr;
+            jmethodID gcl = tc ? env->GetMethodID(tc, "getContextClassLoader", "()Ljava/lang/ClassLoader;") : nullptr;
+            jobject th = cur ? env->CallStaticObjectMethod(tc, cur) : nullptr;
+            jobject cl = (th && gcl) ? env->CallObjectMethod(th, gcl) : nullptr;
+            if (cl) {
+                g_rt->SetAppClassLoader(env->NewGlobalRef(cl));
+            }
+            env->ExceptionClear();
+        }
     }
     auto st = Enter();
     if (!st) {

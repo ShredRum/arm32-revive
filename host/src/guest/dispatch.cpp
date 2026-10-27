@@ -12591,7 +12591,28 @@ void* Runtime::RealClass(void* real_env, const std::string& cls) {
     jclass lc = re->FindClass(cls.c_str());
     if (!lc || re->ExceptionCheck()) {
         re->ExceptionClear();
-        return nullptr;
+        lc = nullptr;
+        if (app_class_loader_) {
+            // A thread attached from native code: ask the app's loader.
+            jobject loader = static_cast<jobject>(app_class_loader_);
+            jclass lcls = re->GetObjectClass(loader);
+            jmethodID load = lcls ? re->GetMethodID(lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : nullptr;
+            std::string dotted = cls;
+            std::replace(dotted.begin(), dotted.end(), '/', '.');
+            jstring jn = re->NewStringUTF(dotted.c_str());
+            lc = load ? static_cast<jclass>(re->CallObjectMethod(loader, load, jn)) : nullptr;
+            if (re->ExceptionCheck()) {
+                re->ExceptionClear();
+                lc = nullptr;
+            }
+            re->DeleteLocalRef(jn);
+            if (lcls) {
+                re->DeleteLocalRef(lcls);
+            }
+        }
+        if (!lc) {
+            return nullptr;
+        }
     }
     jclass g = static_cast<jclass>(re->NewGlobalRef(lc));
     re->DeleteLocalRef(lc);
@@ -12702,6 +12723,9 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
         if (it != real_classes_.end()) {
             rclazz = static_cast<jclass>(it->second);
         }
+    }
+    if (!rclazz) {
+        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
     }
     if (!rclazz) {
         jclass lc = re->FindClass(cls.c_str());
@@ -13084,6 +13108,9 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         if (it != real_classes_.end()) {
             rclazz = static_cast<jclass>(it->second);
         }
+    }
+    if (!rclazz) {
+        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
     }
     if (!rclazz) {
         jclass lc = re->FindClass(cls.c_str());
@@ -14537,6 +14564,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         }
                     }
                     if (!rclazz) {
+                        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
+                    }
+                    if (!rclazz) {
                         jclass lc = re->FindClass(cls.c_str());
                         if (lc && !re->ExceptionCheck()) {
                             rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
@@ -15474,6 +15504,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         if (it != real_classes_.end()) {
                             rclazz = static_cast<jclass>(it->second);
                         }
+                    }
+                    if (!rclazz) {
+                        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
                     }
                     if (!rclazz) {
                         jclass lc = re->FindClass(cls.c_str());

@@ -934,6 +934,12 @@ private:
     // The real class named `cls` (a cached global ref), or null with no
     // exception pending.
     void* RealClass(void* real_env, const std::string& cls);
+public:
+    // The app's ClassLoader (global ref): RealClass falls back to it when
+    // FindClass fails on a thread attached from native code.
+    void SetAppClassLoader(void* loader) { app_class_loader_ = loader; }
+private:
+    void* app_class_loader_ = nullptr;
     std::unordered_map<std::uint32_t, void*> real_methods_;
     // Real field IDs per mock GetFieldID cookie (audio buffer fields).
     std::unordered_map<std::uint32_t, void*> real_fields_;
