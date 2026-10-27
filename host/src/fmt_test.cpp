@@ -349,6 +349,9 @@ int main() {
     mod.imports.push_back(abr::Import{"getpwuid", true, 0, 0, 0});  // 81
     mod.imports.push_back(abr::Import{"getgrgid", true, 0, 0, 0});  // 82
     mod.imports.push_back(abr::Import{"sched_get_priority_max", true, 0, 0, 0});  // 83
+    mod.imports.push_back(abr::Import{"readdir", true, 0, 0, 0});  // 84
+    mod.imports.push_back(abr::Import{"chdir", true, 0, 0, 0});  // 85
+    mod.imports.push_back(abr::Import{"getcwd", true, 0, 0, 0});  // 86
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1450,6 +1453,48 @@ int main() {
             const std::uint32_t cargs[4] = {d, 0, 0, 0};
             abr::RuntimeTestAccess::Call(rt, 28, cargs);
         }
+    }
+
+    // --- chdir moves the guest's current directory (getcwd, relative
+    //     names follow it); readdir returns the DIR's own entry; ".." back
+    //     to the files dir restores the default; a missing dir fails.
+    {
+        const std::string host_dir = TestTmp() + "/opencode/abr-dirtest";
+        std::filesystem::create_directories(host_dir + "/sub");
+        if (std::FILE* f = std::fopen((host_dir + "/sub/xyz").c_str(), "w")) {
+            std::fclose(f);
+        }
+        rt.SetFilesDir("/data/data/abr.dir/files", host_dir);
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0) {
+            const std::uint32_t a[4] = {x, y, 0, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        const std::uint32_t kP = 0x10007400, kBuf = 0x10007500;
+        std::string got;
+        put(kP, "sub");
+        got += std::to_string(call(85, kP)) + " ";
+        got += call(86, kBuf, 256) ? rt.H<const char>(kBuf) : "NULL";
+        put(kP, ".");
+        const std::uint32_t d = call(26, kP);
+        bool found = false;
+        for (int i = 0; i < 8 && d; i++) {
+            const std::uint32_t e = call(84, d);
+            if (!e) {
+                break;
+            }
+            found = found || std::strcmp(rt.H<const char>(e + 19), "xyz") == 0;
+        }
+        if (d) {
+            call(28, d);
+        }
+        got += found ? " xyz" : " -";
+        put(kP, "..");
+        got += " " + std::to_string(call(85, kP)) + " ";
+        got += call(86, kBuf, 256) ? rt.H<const char>(kBuf) : "NULL";
+        put(kP, "nope");
+        got += " " + std::to_string(static_cast<std::int32_t>(call(85, kP)));
+        Expect("chdir/getcwd/readdir", got,
+               "0 /data/data/abr.dir/files/sub xyz 0 /data/data/abr.dir/files -1");
     }
 
     // --- stat: bionic arm32 struct stat is 104 bytes, st_size at +48.

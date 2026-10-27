@@ -383,6 +383,12 @@ public:
     void SetFilesDir(const std::string& guest_prefix, const std::string& host_base);
     // Map a guest path to the host path (the file bridge's rule).
     std::string MapGuestPath(std::uint32_t guest_path);
+    std::string MapGuestPathString(const std::string& g);
+    // The guest's current directory (chdir/getcwd), guest spelling. Empty =
+    // the default, the files dir, where bare relative names go (R-006).
+    std::string cwd_;
+    std::mutex cwd_mu_;
+    std::string GuestCwd();
 
     // How many pthread_mutex_destroy calls were REFUSED because the mutex
     // was held (or a lock was in flight). Diagnostic + test hook.
@@ -581,6 +587,7 @@ private:
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
     std::unordered_map<std::uint32_t, std::shared_ptr<sem_t>> sem_map_;  // GuestSem
     std::vector<std::uint32_t> lib_handles_;  // GuestLibraryHandle, per library
+    std::uint32_t global_dl_handle_ = 0;      // dlopen(NULL)
     struct GuestSigAct {
         std::uint32_t handler = 0, mask = 0, flags = 0;
     };
@@ -888,6 +895,7 @@ private:
     struct HostDir {
         DIR* d = nullptr;
         std::string path;
+        std::uint32_t ent = 0;  // readdir's guest struct dirent (280 bytes), lazily
     };
     std::unordered_map<std::uint32_t, HostDir> dir_map_;  // guest DIR* -> host
 

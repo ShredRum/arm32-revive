@@ -38,6 +38,8 @@
 #endif
 #include <utime.h>
 #include <sys/stat.h>
+#include <sys/file.h>
+#include <sys/sendfile.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -2187,6 +2189,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         RetVoid(regs);
         return;
     }
+    if (n == "madvise") {
+        // madvise(addr, len, advice) on guest memory. MADV_DONTNEED (4) must
+        // keep its meaning for private anonymous memory -- the range reads
+        // back as zeros -- so it is honoured exactly: by the host kernel when
+        // its pages are the guest's 4 KiB, else by zeroing the range (a
+        // 16 KiB-page host would drop more than asked). Every other advice is
+        // a hint and is accepted.
+        if ((a0 & 0xFFFu) != 0) {
+            SetGuestErrno(EINVAL);
+            Ret(regs, static_cast<std::uint32_t>(-1));
+            return;
+        }
+        const std::uint32_t len = (a1 + 0xFFFu) & ~0xFFFu;
+        if (a2 == MADV_DONTNEED && len != 0) {
+            if (!CheckRange(a0, len, true)) {
+                SetGuestErrno(ENOMEM);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (::sysconf(_SC_PAGESIZE) != 4096 || ::madvise(H(a0), len, MADV_DONTNEED) != 0) {
+                std::memset(H(a0), 0, len);
+            }
+        }
+        Ret(regs, 0);
+        return;
+    }
     if (n == "mmap" || n == "mmap64") {
         // mmap(addr, len, prot, flags, int fd, off_t off): fd at [sp], the
         // 32-bit off_t at [sp+4]. mmap64's off64_t is 8-aligned at [sp+8].
@@ -3902,15 +3930,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
         return;
     }
-    if (n == "dlopen" || n == "dlsym" || n == "dlclose") {
+    if (n == "dlopen" || n == "dlsym" || n == "dlclose" || n == "dlerror") {
         // Guest libraries this module already holds (several guest .so, e.g.
         // Unity's libmain dlopens libmono/libunity): a handle per library,
         // dlsym from the module's definitions. Any other name -- host
         // libraries such as libc.so -- gets NULL as it always did here.
+        // dlerror's message of this thread's last failure (bionic wording).
+        thread_local std::string dl_error;
         if (n == "dlopen") {
-            const std::uint32_t h = a0 ? GuestLibraryHandle(GuestStr(a0)) : 0;
+            // dlopen(NULL): the program's own handle (app_process). Its dlsym
+            // searches the executable's global group, which libraries loaded
+            // from Java are not part of: no guest symbol is found through it.
+            std::uint32_t h = 0;
+            if (a0 == 0) {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                if (!global_dl_handle_) {
+                    global_dl_handle_ = GuestMalloc(16);
+                }
+                h = global_dl_handle_;
+            } else {
+                h = GuestLibraryHandle(GuestStr(a0));
+            }
             if (DiagOn() || h) {
                 std::printf("[dl] dlopen(\"%s\") -> %08x\n", a0 ? GuestStr(a0) : "NULL", h);
+            }
+            if (!h) {
+                dl_error = std::string("dlopen failed: library \"") + GuestStr(a0) + "\" not found";
             }
             Ret(regs, h);
             return;
@@ -3918,9 +3963,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (n == "dlsym") {
             // That library's own definition first (dlsym(handle) searches the
             // library, then its dependencies: the merged table stands in).
+            // RTLD_DEFAULT (0, or 0xffffffff in the LP32 headers of the
+            // guests' era) also searches the caller's own group: the merged
+            // definitions stand in for it.
             std::uint32_t v = 0;
             const int lib = GuestLibraryIndex(a0);
-            if (lib >= 0 && a1) {
+            if ((a0 == 0 || a0 == 0xFFFFFFFFu) && a1) {
+                if (const auto jt = mod_.defined.find(GuestStr(a1)); jt != mod_.defined.end()) {
+                    v = jt->second;
+                }
+            } else if (lib >= 0 && a1) {
                 const std::string sym = GuestStr(a1);
                 const auto& own = mod_.lib_defined[static_cast<std::size_t>(lib)];
                 const auto it = own.find(sym);
@@ -3930,7 +3982,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     v = jt->second;
                 }
             }
+            if (!v) {
+                dl_error = std::string("undefined symbol: ") + (a1 ? GuestStr(a1) : "(null)");
+            }
             Ret(regs, v);
+            return;
+        }
+        if (n == "dlerror") {
+            // The message once, then NULL until the next failure; the text
+            // lives in a per-thread guest buffer.
+            if (dl_error.empty()) {
+                Ret(regs, 0);
+                return;
+            }
+            thread_local std::uint32_t buf = 0;
+            if (!buf) {
+                buf = GuestMalloc(512);
+            }
+            if (!buf) {
+                Ret(regs, 0);
+                return;
+            }
+            const std::size_t len = dl_error.size() < 511 ? dl_error.size() : 511;
+            std::memcpy(H(buf), dl_error.data(), len);
+            *H<char>(buf + static_cast<std::uint32_t>(len)) = '\0';
+            dl_error.clear();
+            Ret(regs, buf);
             return;
         }
         Ret(regs, 0);  // dlclose: loaded libraries stay
@@ -5381,6 +5458,92 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
+        if (n == "isatty" || n == "flock") {
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, n == "isatty" ? 0u : 0xFFFFFFFFu);
+                return;
+            }
+            int r = 0;
+            if (n == "isatty") {
+                r = ::isatty(hfd);
+            } else {
+                r = ::flock(hfd, static_cast<int>(a1));
+            }
+            if ((n == "isatty" && r == 0) || (n == "flock" && r != 0)) {
+                set_guest_errno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "sendfile") {
+            // sendfile(out_fd, in_fd, off_t* offset, size_t count); the guest
+            // off_t is 32 bits.
+            const int ho = host_fd_of(a0), hi = host_fd_of(a1);
+            if (ho < 0 || hi < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (a2 && !CheckRange(a2, 4, true)) {
+                goto bad_ptr;
+            }
+            off_t off = 0;
+            if (a2) {
+                std::int32_t o32 = 0;
+                std::memcpy(&o32, H(a2), 4);
+                off = o32;
+            }
+            const ssize_t r = ::sendfile(ho, hi, a2 ? &off : nullptr, a3);
+            if (r < 0) {
+                set_guest_errno(errno);
+            } else if (a2) {
+                const std::int32_t o32 = static_cast<std::int32_t>(off);
+                std::memcpy(H(a2), &o32, 4);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "dup2") {
+            // dup2(old, new) onto a guest fd that is open: that fd now names
+            // old's file. Guest fds 0-2 are the host's own streams (stdout is
+            // apphost.log) and a free number is not ours to hand out: both
+            // are refused (EBADF, the "newfd out of range" answer).
+            const int src = host_fd_of(a0);
+            if (src < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (a0 == a1) {
+                Ret(regs, a1);
+                return;
+            }
+            if (a1 <= 2 || host_fd_of(a1) < 0) {
+                std::printf("[files] dup2(%u, %u) refused: target is %s\n", a0, a1,
+                            a1 <= 2 ? "a host std stream" : "not an open guest fd");
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            const int nfd = ::dup(src);
+            if (nfd < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            int old_host = -1;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                int& slot = fd_map_[a1];
+                old_host = slot;
+                slot = nfd;
+            }
+            ::close(old_host);
+            Ret(regs, a1);
+            return;
+        }
         if (n == "dup") {
             // dup(fd): a new guest fd for the same open file. It fell into the
             // generic stub and returned 0, so the guest wrote "its" copy to
@@ -6057,14 +6220,52 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
             n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd" ||
-            n == "pathconf" || n == "statfs") {
+            n == "pathconf" || n == "statfs" || n == "lstat" || n == "truncate" ||
+            n == "chdir") {
+            if (n == "chdir") {
+                // The new directory in guest spelling (relative to the
+                // current one, normalized); it must be a directory the
+                // bridge can reach.
+                if (!CheckRange(a0, 1, false)) {
+                    goto bad_ptr;
+                }
+                std::string g = GuestStr(a0);
+                if (g.empty()) {
+                    SetGuestErrno(ENOENT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (g[0] != '/') {
+                    g = GuestCwd() + "/" + g;
+                }
+                std::string norm = std::filesystem::path(g).lexically_normal().string();
+                while (norm.size() > 1 && norm.back() == '/') {
+                    norm.pop_back();
+                }
+                const std::string hp = MapGuestPathString(norm);
+                struct stat st {};
+                if (hp.empty() || ::stat(hp.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+                    SetGuestErrno(hp.empty() ? ENOENT : (errno ? errno : ENOTDIR));
+                    if (!hp.empty() && S_ISREG(st.st_mode)) {
+                        SetGuestErrno(ENOTDIR);
+                    }
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                {
+                    std::lock_guard<std::mutex> l(cwd_mu_);
+                    cwd_ = (norm == files_prefix_) ? std::string() : norm;
+                }
+                Ret(regs, 0);
+                return;
+            }
             if (n == "getcwd") {
                 // The guest's view of the CWD: its files dir, which is what
                 // bare relative names resolve to (MapGuestPath), in GUEST
                 // spelling. The host path leaked into guest paths and was
                 // mapped again on the next call (on the PC the two differ;
                 // on a device they are the same string).
-                const std::string cwd = files_prefix_.empty() ? "/" : files_prefix_;
+                const std::string cwd = GuestCwd();
                 const std::uint32_t need = static_cast<std::uint32_t>(cwd.size() + 1);
                 // getcwd(buf, size): ERANGE when it does not fit (callers grow
                 // the buffer and retry; writing past it smashed the heap).
@@ -6115,9 +6316,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, n.c_str())) {
                 return;
             }
-            if (n == "stat") {
+            if (n == "truncate") {
+                const int r = ::truncate(hp.c_str(),
+                                         static_cast<off_t>(static_cast<std::int32_t>(a1)));
+                if (r != 0) {
+                    SetGuestErrno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
+                return;
+            }
+            if (n == "stat" || n == "lstat") {
                 struct stat st {};
-                if (::stat(hp.c_str(), &st) != 0 || !fill_stat(a1, st)) {
+                const int sr = n == "stat" ? ::stat(hp.c_str(), &st) : ::lstat(hp.c_str(), &st);
+                if (sr != 0 || !fill_stat(a1, st)) {
                     SetGuestErrno(errno);
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
@@ -6297,8 +6508,63 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "closedir") {
+        if (n == "readdir") {
+            // readdir(DIR*) -> struct dirent*: the entry lives in a buffer
+            // that belongs to the DIR (as in bionic), overwritten by the
+            // next call; same layout as readdir_r above. NULL at the end
+            // (errno untouched) or on error (errno set).
             DIR* dd = nullptr;
+            std::uint32_t ent = 0;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto it = dir_map_.find(a0);
+                if (it == dir_map_.end()) {
+                    set_guest_errno(EBADF);
+                    Ret(regs, 0);
+                    return;
+                }
+                dd = it->second.d;
+                ent = it->second.ent;
+            }
+            if (!ent) {
+                ent = GuestMalloc(280);
+                if (!ent) {
+                    set_guest_errno(ENOMEM);
+                    Ret(regs, 0);
+                    return;
+                }
+                std::lock_guard<std::mutex> io(io_mutex_);
+                dir_map_[a0].ent = ent;
+            }
+            errno = 0;
+            const struct dirent* de = ::readdir(dd);
+            if (!de) {
+                if (errno != 0) {
+                    set_guest_errno(errno);
+                }
+                Ret(regs, 0);
+                return;
+            }
+            const std::size_t nm_len = ::strnlen(de->d_name, 255);
+            const std::uint32_t reclen = static_cast<std::uint32_t>(
+                (kGuestDirentNameOff + nm_len + 1 + 7) & ~std::size_t(7));
+            std::uint8_t* p = H<std::uint8_t>(ent);
+            std::memset(p, 0, 280);
+            const std::uint64_t ino = de->d_ino;
+            const std::int64_t off = de->d_off;
+            const std::uint16_t rl = static_cast<std::uint16_t>(reclen);
+            std::memcpy(p + 0, &ino, 8);
+            std::memcpy(p + 8, &off, 8);
+            std::memcpy(p + 16, &rl, 2);
+            p[18] = de->d_type;
+            std::memcpy(p + kGuestDirentNameOff, de->d_name, nm_len);
+            Ret(regs, ent);
+            return;
+        }
+        if (n == "closedir") {
+            // Frees the guest DIR handle and readdir's entry with it.
+            DIR* dd = nullptr;
+            std::uint32_t ent = 0;
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 const auto it = dir_map_.find(a0);
@@ -6307,9 +6573,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
                 dd = it->second.d;
+                ent = it->second.ent;
                 dir_map_.erase(it);
             }
             int r = ::closedir(dd);
+            GuestFree(a0);
+            if (ent) {
+                GuestFree(ent);
+            }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -12444,9 +12715,25 @@ Runtime::StackScan Runtime::ScanStackForReturnAddresses(std::uint32_t sp,
     return res;
 }
 
-std::string Runtime::MapGuestPath(std::uint32_t gp) {
+std::string Runtime::GuestCwd() {
+    std::lock_guard<std::mutex> l(cwd_mu_);
+    return cwd_.empty() ? (files_prefix_.empty() ? std::string("/") : files_prefix_) : cwd_;
+}
 
-        const std::string g(GuestStr(gp));
+std::string Runtime::MapGuestPath(std::uint32_t gp) {
+    return MapGuestPathString(GuestStr(gp));
+}
+
+std::string Runtime::MapGuestPathString(const std::string& g) {
+        // After a chdir, a relative name is the new directory's entry.
+        if (!g.empty() && g[0] != '/') {
+            std::unique_lock<std::mutex> l(cwd_mu_);
+            if (!cwd_.empty()) {
+                const std::string abs = cwd_ + "/" + g;
+                l.unlock();
+                return MapGuestPathString(abs);
+            }
+        }
         if (g == "/dev/null" || g == "/dev/zero" || g == "/dev/urandom") {
             return g;
         }
