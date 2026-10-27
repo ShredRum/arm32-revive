@@ -68,6 +68,13 @@ struct HostThread {
     // audio-priming buffer is inaudible, a tombstone is not.
     std::atomic<int> in_guest{0};
     const char* in_name = "?";
+    // A Java -> native call that arrives while this thread is already in the
+    // guest (Java called back into native from inside a JNI call: Unity's
+    // nativeResize during nativeRender) runs on the next of these Jits, on
+    // the same guest stack below the interrupted frame, as the nested call
+    // would on an ARM device. depth = how many are running.
+    std::vector<Dynarmic::A32::Jit*> nested;
+    int depth = 0;
 };
 std::mutex g_tmu;
 std::unordered_map<pid_t, std::shared_ptr<HostThread>> g_threads;
@@ -185,6 +192,10 @@ void HostThreadRelease(void* p) {
         g_rt->ForgetSigThreadJit(st->tid);
     }
     delete st->jit;
+    for (Dynarmic::A32::Jit* j : st->nested) {
+        delete j;
+    }
+    st->nested.clear();
     st->jit = nullptr;
     if (g_rt && st->cpu_id != SIZE_MAX) {
         g_rt->ReleaseCpuId(st->cpu_id);
@@ -448,6 +459,17 @@ void Watchdog() {
         // dlmalloc corruption tripwire (replaces abort): report transitions
         // with the guest pc captured at the trip. The game limps on past
         // dropped chunks, so this names WHEN headers break, not just death.
+        {
+            // A stall report on request: files/abdump (removed once read).
+            const std::string req = g_files + "/abdump";
+            if (::access(req.c_str(), F_OK) == 0) {
+                ::unlink(req.c_str());
+                Log("DUMP on request");
+                g_rt->DumpGuestThreads();
+                g_rt->ThreadCensus();
+                g_rt->MutexOwnersDump();
+            }
+        }
         const unsigned cn = g_rt->HeapCorruptionCount();
         if (cn != last_corrupt) {
             last_corrupt = cn;
@@ -592,6 +614,22 @@ void CallGuest(Dynarmic::A32::Jit& jit, std::uint32_t target) {
     }
 }
 
+// A Jit for a host thread's guest code (its own, or a nested one: the same
+// processor id, since only one of them runs at a time).
+Dynarmic::A32::Jit* NewThreadJit(std::size_t cpu_id) {
+    Dynarmic::A32::UserConfig cfg;
+    cfg.callbacks = g_cb;
+    cfg.optimizations =
+        JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+    cfg.enable_cycle_counting = kJitCycleCounting;
+    if (JitFastmemOn()) {
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
+    }
+    cfg.global_monitor = &g_rt->Monitor();  // one monitor for every Jit
+    cfg.processor_id = cpu_id;
+    return g_rt->NewJit(cfg).release();
+}
+
 std::shared_ptr<HostThread> Enter() {
     const pid_t me = gettid();
     {
@@ -614,17 +652,7 @@ std::shared_ptr<HostThread> Enter() {
         g_rt->GuestFree(st->stack);
         return nullptr;
     }
-    Dynarmic::A32::UserConfig cfg;
-    cfg.callbacks = g_cb;
-    cfg.optimizations =
-        JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
-    cfg.enable_cycle_counting = kJitCycleCounting;
-    if (JitFastmemOn()) {
-        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
-    }
-    cfg.global_monitor = &g_rt->Monitor();  // one monitor for every Jit
-    cfg.processor_id = st->cpu_id;
-    st->jit = g_rt->NewJit(cfg).release();
+    st->jit = NewThreadJit(st->cpu_id);
     // Real attach: Java-created threads are attached already; our workers not.
     JNIEnv* env = nullptr;
     if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
@@ -659,8 +687,47 @@ std::shared_ptr<HostThread> Enter() {
 
 // Runs guest `va` on this thread's Jit with AAPCS32 argument words: four in
 // r0-r3, the rest on its guest stack; returns when the guest returns.
+Dynarmic::A32::Jit* NewThreadJit(std::size_t cpu_id);
+
+// Runs guest `va` on this thread with AAPCS32 argument words (four in r0-r3,
+// the rest on the guest stack) and returns when the guest returns; *used is
+// the Jit it ran on (its registers hold the result). The outermost call runs
+// on the thread's Jit from its stack top; a nested one (see HostThread) on
+// the next nested Jit, below the sp of the frame it interrupts.
 Dynarmic::HaltReason RunWordsOn(HostThread& st, const char* name, std::uint32_t va,
-                                const std::vector<std::uint32_t>& words) {
+                                const std::vector<std::uint32_t>& words,
+                                Dynarmic::A32::Jit** used) {
+    if (st.in_guest.load()) {
+        Dynarmic::A32::Jit* outer = st.depth == 0 ? st.jit : st.nested[static_cast<std::size_t>(st.depth - 1)];
+        if (st.nested.size() <= static_cast<std::size_t>(st.depth)) {
+            Dynarmic::A32::Jit* j = NewThreadJit(st.cpu_id);  // the outer one is stopped
+            st.nested.push_back(j);
+        }
+        Dynarmic::A32::Jit* j = st.nested[static_cast<std::size_t>(st.depth)];
+        *used = j;
+        const std::uint32_t outer_sp = outer->Regs()[13];
+        const std::uint32_t nstack = words.size() > 4 ? static_cast<std::uint32_t>(words.size() - 4) * 4u : 0;
+        const std::uint32_t sp = ((outer_sp - 0x100u) - nstack) & ~7u;
+        auto& r = j->Regs();
+        r.fill(0);
+        r[13] = sp;
+        for (std::size_t i = 0; i < words.size() && i < 4; i++) {
+            r[i] = words[i];
+        }
+        for (std::size_t i = 4; i < words.size(); i++) {
+            std::memcpy(g_mem->host(sp + (std::uint32_t)(i - 4) * 4), &words[i], 4);
+        }
+        r[14] = g_mod->halt_va;
+        CallGuest(*j, va);
+        st.depth++;
+        g_rt->ThreadEnter(j, st.tid);
+        const Dynarmic::HaltReason hr = RunJit(*j);
+        j->ClearHalt(Dynarmic::HaltReason::UserDefined1);
+        st.depth--;
+        g_rt->ThreadEnter(outer, st.tid);
+        return hr;
+    }
+    *used = st.jit;
     auto& regs = st.jit->Regs();
     regs.fill(0);
     const std::uint32_t spbase = st.stack + kThreadStackSize - 0x100u;
@@ -685,12 +752,9 @@ std::uint64_t CallGuestFromHost(const char* name, std::uint32_t va,
     if (!st || va == 0) {
         return 0;
     }
-    if (st->in_guest.load()) {
-        Log("REENTER %s while %s active -- dropping call", name, st->in_name);
-        return 0;
-    }
-    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words);
-    auto& regs = st->jit->Regs();
+    Dynarmic::A32::Jit* used = nullptr;
+    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words, &used);
+    auto& regs = used->Regs();
     if (hr != Dynarmic::HaltReason::UserDefined1) {
         Log("%s ended hr=%d r0=%08x pc=%08x lr=%08x sp=%08x", name, (int)hr, regs[0], regs[15],
             regs[14], regs[13]);
@@ -707,10 +771,6 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     auto st = Enter();
     if (!st) {
         return 1;  // same as a dropped re-entrant frame: logged LOUD in Enter
-    }
-    if (st->in_guest.load()) {
-        Log("REENTER %s while %s active -- dropping frame", name, st->in_name);
-        return 1;
     }
     // Surface-size witnesses (2026-10-20, Play worldScale=0 triage). The guest
     // Lua camera code consumes screenWidth/screenHeight from these two calls;
@@ -773,8 +833,9 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     words.push_back(g_rt->JniEnv());
     words.push_back(g_rt->WrapObject(thiz));
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
-    auto& regs = st->jit->Regs();
-    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words);
+    Dynarmic::A32::Jit* used = nullptr;
+    const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words, &used);
+    auto& regs = used->Regs();
     g_rt->FlushDirectBuffers();  // what the guest wrote into direct buffers
     if (is_update) {
         g_upd_done_ms = WallMs();

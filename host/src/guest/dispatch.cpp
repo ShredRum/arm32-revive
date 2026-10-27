@@ -11819,6 +11819,46 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
 
 // End-of-run census (see dispatch.h): detached workers can't be joined, so
 // report tid/done/retval here instead of losing them to _exit.
+void Runtime::DumpGuestThreads() {
+    std::vector<std::pair<std::uint32_t, std::shared_ptr<SigThread>>> all;
+    {
+        std::lock_guard<std::mutex> l(sig_mu_);
+        for (const auto& kv : sig_threads_) {
+            all.emplace_back(kv.first, kv.second);
+        }
+    }
+    auto import_at = [&](std::uint32_t pc) -> std::string {
+        // Import trampoline i sits at kTrampBase + 4 * (i + 2) (slots 0/1 are
+        // halt/once); the stopped pc may be on the svc or just past it.
+        for (std::uint32_t p : {pc, pc - 4}) {
+            if (p >= kTrampBase + 8 && p < kTrampBase + kTrampSize) {
+                const std::uint32_t i = (p - kTrampBase) / 4 - 2;
+                if (i < mod_.imports.size()) {
+                    return mod_.imports[i].name;
+                }
+            }
+        }
+        return "";
+    };
+    for (const auto& [tid, st] : all) {
+        const bool outside = st->outside.load(), parked = st->parked.load();
+        std::uint32_t pc = 0, lr = 0, sp = 0;
+        if (outside && !parked) {
+            pc = st->snap[15];
+            lr = st->snap[14];
+            sp = st->snap[13];
+        } else if (Dynarmic::A32::Jit* j = st->jit.load()) {
+            pc = j->Regs()[15];
+            lr = j->Regs()[14];
+            sp = j->Regs()[13];
+        }
+        const std::string imp = import_at(pc);
+        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s pending=%08x\n", tid,
+                    st->host_tid.load(), parked ? "in-host" : outside ? "host-call" : "guest", pc, lr,
+                    sp, imp.empty() ? "" : " import=", imp.c_str(), st->pending.load());
+    }
+}
+
 void Runtime::ThreadCensus() {
     // Watchdog robustness: never block here (see MutexOwnersDump).
     std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
@@ -12286,6 +12326,137 @@ std::uint32_t Runtime::JniArrayElemSize(std::uint32_t array_handle) {
     (void)array_handle;
 #endif
     return 0;
+}
+
+std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
+#ifdef __ANDROID__
+    JNIEnv* re = RealEnv();
+    jobject m = static_cast<jobject>(UnwrapObject(member));
+    if (!re || !m) {
+        return 0;
+    }
+    // Calls an instance method with no arguments by name and signature.
+    auto call_obj = [&](jobject o, const char* name, const char* sig) -> jobject {
+        jclass c = re->GetObjectClass(o);
+        jmethodID id = c ? re->GetMethodID(c, name, sig) : nullptr;
+        jobject r = id ? re->CallObjectMethod(o, id) : nullptr;
+        if (c) {
+            re->DeleteLocalRef(c);
+        }
+        if (re->ExceptionCheck()) {
+            re->ExceptionClear();
+            return nullptr;
+        }
+        return r;
+    };
+    auto str = [&](jobject js) -> std::string {
+        if (!js) {
+            return "";
+        }
+        const char* u = re->GetStringUTFChars(static_cast<jstring>(js), nullptr);
+        std::string out = u ? u : "";
+        if (u) {
+            re->ReleaseStringUTFChars(static_cast<jstring>(js), u);
+        }
+        re->DeleteLocalRef(js);
+        return out;
+    };
+    // The JNI descriptor of a Class object.
+    auto desc = [&](jobject cls) -> std::string {
+        jclass cc = re->FindClass("java/lang/Class");
+        jmethodID prim = re->GetMethodID(cc, "isPrimitive", "()Z");
+        const bool p = re->CallBooleanMethod(cls, prim);
+        re->DeleteLocalRef(cc);
+        std::string n = str(call_obj(cls, "getName", "()Ljava/lang/String;"));
+        if (p) {
+            static const std::pair<const char*, const char*> kPrim[] = {
+                {"int", "I"}, {"boolean", "Z"}, {"byte", "B"}, {"char", "C"}, {"short", "S"},
+                {"long", "J"}, {"float", "F"}, {"double", "D"}, {"void", "V"}};
+            for (const auto& kv : kPrim) {
+                if (n == kv.first) {
+                    return kv.second;
+                }
+            }
+            return "";
+        }
+        std::replace(n.begin(), n.end(), '.', '/');
+        return n.empty() || n[0] == '[' ? n : "L" + n + ";";
+    };
+    jobject decl = call_obj(m, "getDeclaringClass", "()Ljava/lang/Class;");
+    if (!decl) {
+        return 0;
+    }
+    std::string cname = str(call_obj(decl, "getName", "()Ljava/lang/String;"));
+    std::replace(cname.begin(), cname.end(), '.', '/');
+    re->DeleteLocalRef(decl);
+    jclass mc = re->GetObjectClass(m);
+    jmethodID mods = mc ? re->GetMethodID(mc, "getModifiers", "()I") : nullptr;
+    const bool is_static = mods && (re->CallIntMethod(m, mods) & 0x0008) != 0;
+    jclass ctor_class = re->FindClass("java/lang/reflect/Constructor");
+    const bool is_ctor = !field && ctor_class && re->IsInstanceOf(m, ctor_class);
+    if (ctor_class) {
+        re->DeleteLocalRef(ctor_class);
+    }
+    if (mc) {
+        re->DeleteLocalRef(mc);
+    }
+    std::string text;
+    if (field) {
+        const std::string name = str(call_obj(m, "getName", "()Ljava/lang/String;"));
+        jobject type = call_obj(m, "getType", "()Ljava/lang/Class;");
+        const std::string d = type ? desc(type) : "";
+        if (type) {
+            re->DeleteLocalRef(type);
+        }
+        if (name.empty() || d.empty()) {
+            return 0;
+        }
+        text = "field " + cname + "." + name + ":" + d;
+    } else {
+        const std::string name = is_ctor ? "<init>" : str(call_obj(m, "getName", "()Ljava/lang/String;"));
+        std::string sig = "(";
+        jobjectArray params = static_cast<jobjectArray>(call_obj(m, "getParameterTypes", "()[Ljava/lang/Class;"));
+        const jsize np = params ? re->GetArrayLength(params) : 0;
+        for (jsize i = 0; i < np; i++) {
+            jobject pc = re->GetObjectArrayElement(params, i);
+            sig += desc(pc);
+            re->DeleteLocalRef(pc);
+        }
+        if (params) {
+            re->DeleteLocalRef(params);
+        }
+        sig += ")";
+        if (is_ctor) {
+            sig += "V";
+        } else {
+            jobject rt = call_obj(m, "getReturnType", "()Ljava/lang/Class;");
+            sig += rt ? desc(rt) : "";
+            if (rt) {
+                re->DeleteLocalRef(rt);
+            }
+        }
+        if (name.empty() || sig.back() == ')') {
+            return 0;
+        }
+        text = std::string(is_static ? "static " : "") + cname + "." + name + sig;
+    }
+    re->ExceptionClear();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::uint32_t c = 0;
+    if (!JniAllocObjectHandle(&c)) {
+        return 0;
+    }
+    std::memcpy(H(c), &c, 4);
+    jni_methods_[c] = text;
+    if (DiagOn()) {
+        std::printf("[jni] FromReflected %s -> %08x\n", text.c_str(), c);
+    }
+    return c;
+#else
+    (void)member;
+    (void)field;
+    return 0;
+#endif
 }
 
 void* Runtime::JavaObjectFor(std::uint32_t handle) {
@@ -13897,14 +14068,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, h);
         return;
     }
-    case 175: case 177: case 178: case 179: case 180: case 181: case 182: {
-        // New<T>Array(env, len) for the non-byte types: a real Java array.
+    case 175: case 176: case 177: case 178: case 179: case 180: case 181: case 182: {
+        // New<T>Array(env, len): a real Java array.
         JNIEnv* re = RealEnv();
         jarray arr = nullptr;
         const jsize n = static_cast<jsize>(a1);
         if (re) {
             switch (fn) {
                 case 175: arr = re->NewBooleanArray(n); break;
+                case 176: arr = re->NewByteArray(n); break;
                 case 177: arr = re->NewCharArray(n); break;
                 case 178: arr = re->NewShortArray(n); break;
                 case 179: arr = re->NewIntArray(n); break;
@@ -13964,6 +14136,101 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             re->ExceptionClear();
         }
         Ret(regs, h);
+        return;
+    }
+#endif
+    case 4:  // GetVersion(env) -> JNI 1.6
+        Ret(regs, 0x00010006u);
+        return;
+    case 5:  // DefineClass(env, name, loader, buf, len): not offered (NULL)
+        std::printf("[jni] DefineClass is not offered -> NULL\n");
+        Ret(regs, 0);
+        return;
+    case 7:  // FromReflectedMethod(env, method) -> jmethodID
+    case 8:  // FromReflectedField(env, field) -> jfieldID
+        Ret(regs, CookieForReflected(a1, fn == 8));
+        return;
+#ifdef __ANDROID__
+    case 9:     // ToReflectedMethod(env, cls, methodID, isStatic) -> jobject
+    case 12: {  // ToReflectedField(env, cls, fieldID, isStatic) -> jobject
+        JNIEnv* re = RealEnv();
+        const std::string cname = JniClassName(a1);
+        jclass rc = (re && !cname.empty()) ? static_cast<jclass>(RealClass(re, cname)) : nullptr;
+        jobject o = nullptr;
+        if (rc && fn == 12) {
+            if (jfieldID f = static_cast<jfieldID>(RealFieldId(a2, a3 != 0))) {
+                o = re->ToReflectedField(rc, f, static_cast<jboolean>(a3 != 0));
+            }
+        } else if (rc) {
+            std::string d;
+            {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                const auto it = jni_methods_.find(a2);
+                d = it == jni_methods_.end() ? "" : it->second;
+            }
+            if (d.compare(0, 7, "static ") == 0) {
+                d = d.substr(7);
+            }
+            const std::size_t dot = d.rfind('.', d.find('('));
+            const std::size_t par = d.find('(');
+            if (dot != std::string::npos && par != std::string::npos) {
+                const std::string name = d.substr(dot + 1, par - dot - 1), sig = d.substr(par);
+                jmethodID id = a3 ? re->GetStaticMethodID(rc, name.c_str(), sig.c_str())
+                                  : re->GetMethodID(rc, name.c_str(), sig.c_str());
+                if (id) {
+                    o = re->ToReflectedMethod(rc, id, static_cast<jboolean>(a3 != 0));
+                }
+            }
+        }
+        if (re) {
+            re->ExceptionClear();
+        }
+        const std::uint32_t h = o ? WrapObject(o) : 0;
+        if (o) {
+            re->DeleteLocalRef(o);
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 10: {  // GetSuperclass(env, cls) -> jclass
+        JNIEnv* re = RealEnv();
+        const std::string cname = JniClassName(a1);
+        jclass rc = (re && !cname.empty()) ? static_cast<jclass>(RealClass(re, cname)) : nullptr;
+        jclass sc = rc ? re->GetSuperclass(rc) : nullptr;
+        const std::uint32_t h = sc ? WrapObject(sc) : 0;
+        if (sc) {
+            re->DeleteLocalRef(sc);
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 11: {  // IsAssignableFrom(env, c1, c2) -> jboolean
+        JNIEnv* re = RealEnv();
+        const std::string n1 = JniClassName(a1), n2 = JniClassName(a2);
+        jclass c1 = (re && !n1.empty()) ? static_cast<jclass>(RealClass(re, n1)) : nullptr;
+        jclass c2 = (re && !n2.empty()) ? static_cast<jclass>(RealClass(re, n2)) : nullptr;
+        Ret(regs, (c1 && c2 && re->IsAssignableFrom(c1, c2)) ? 1u : 0u);
+        return;
+    }
+    case 13:    // Throw(env, throwable) -> jint
+    case 14: {  // ThrowNew(env, cls, msg) -> jint
+        // The exception is raised in the real JVM and stays pending: when the
+        // guest native returns, Java sees it, as it would on a device.
+        JNIEnv* re = RealEnv();
+        jint r = -1;
+        if (re && fn == 13) {
+            if (jthrowable t = static_cast<jthrowable>(JavaObjectFor(a1))) {
+                r = re->Throw(t);
+            }
+        } else if (re) {
+            const std::string cname = JniClassName(a1);
+            jclass rc = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
+            if (rc) {
+                r = re->ThrowNew(rc, a2 && CheckRange(a2, 1, false) ? GuestStr(a2) : nullptr);
+            }
+        }
+        std::printf("[jni] %s -> %d\n", fn == 13 ? "Throw" : "ThrowNew", r);
+        Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
 #endif
@@ -14346,8 +14613,35 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 fdesc = it->second;
             }
         }
-        // Offline default: 0/NULL for every static field (logged, tunable per
-        // name, e.g. android/location/Criteria.ACCURACY_COARSE).
+#ifdef __ANDROID__
+        // The real value first (constants such as ActivityInfo.
+        // SCREEN_ORIENTATION_PORTRAIT = 1: answering 0 turned a request for
+        // portrait into landscape).
+        if (JNIEnv* re = RealEnv()) {
+            const std::string cname = JniClassName(a1);
+            jclass rc = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
+            jfieldID fid = rc ? static_cast<jfieldID>(RealFieldId(a2, true)) : nullptr;
+            if (fid) {
+                std::uint64_t v = 0;
+                switch (fn) {
+                    case 146: v = re->GetStaticBooleanField(rc, fid); break;
+                    case 147: v = static_cast<std::uint32_t>(static_cast<std::int32_t>(re->GetStaticByteField(rc, fid))); break;
+                    case 148: v = re->GetStaticCharField(rc, fid); break;
+                    case 149: v = static_cast<std::uint32_t>(static_cast<std::int32_t>(re->GetStaticShortField(rc, fid))); break;
+                    case 150: v = static_cast<std::uint32_t>(re->GetStaticIntField(rc, fid)); break;
+                    default: v = static_cast<std::uint64_t>(re->GetStaticLongField(rc, fid)); break;
+                }
+                re->ExceptionClear();
+                if (DiagOn()) {
+                    std::printf("[jni] GetStaticField#%u %s -> %llu (real)\n", fn, fdesc.c_str(),
+                                static_cast<unsigned long long>(v));
+                }
+                Ret(regs, static_cast<std::uint32_t>(v), static_cast<std::uint32_t>(v >> 32));
+                return;
+            }
+        }
+#endif
+        // No real field: 0 (logged).
         if (DiagOn()) {
             std::printf("[jni] GetStaticField#%u %s -> 0\n", fn, fdesc.c_str());
         }

@@ -468,6 +468,10 @@ public:
     // The real jfieldID behind a GetFieldID / GetStaticFieldID cookie
     // ("field Cls.name:sig"), cached; null if the field does not resolve.
     void* RealFieldId(std::uint32_t cookie, bool is_static);
+    // A method/field cookie (as GetMethodID/GetFieldID make) for a real
+    // java.lang.reflect.Method/Constructor/Field object; 0 if it cannot be
+    // described.
+    std::uint32_t CookieForReflected(std::uint32_t member, bool field);
     // Element size of a real primitive array from its class ("[I" -> 4), 0
     // for anything else.
     std::uint32_t JniArrayElemSize(std::uint32_t array_handle);
@@ -600,6 +604,10 @@ public:
     // End-of-run census: tid/done/retval for every worker (detached threads
     // can't be joined; _exit would silence them).
     void ThreadCensus();
+    // Every guest thread the signal registry knows: where it is (running
+    // guest code, inside a host call -- which import --, or back in the
+    // host) and its pc/lr/sp. Racy reads, for a stall report only.
+    void DumpGuestThreads();
 #ifdef ABR_DIAG_COUNTERS
     // Stage D: one compact leak-counter line. Called by the product watchdog
     // every 30 s. No-op and no symbol in the shipping build.
