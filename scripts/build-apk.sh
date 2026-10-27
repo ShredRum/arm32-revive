@@ -171,6 +171,17 @@ if [ -f "$GUEST" ]; then
     sed -i "\|^[^-]*- *$GDIRREL/target_sdk$|d" "$TREE/apktool.yml"
     sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/target_sdk|" "$TREE/apktool.yml"
     echo "guest target sdk: $ORIG_TSDK -> $GDIRREL/target_sdk"
+    # Shared JIT code cache (host.jitshare): "on" (default) or "off" for a
+    # guest with a JIT of its own (Mono); the host reads it at boot.
+    JITSHARE="$("${PROF[@]}" host.jitshare 2>/dev/null || echo on)"
+    case "$JITSHARE" in
+        on|off) ;;
+        *) echo "build-apk: host.jitshare must be on or off, not '$JITSHARE'" >&2; exit 1 ;;
+    esac
+    printf '%s\n' "$JITSHARE" > "$GDIR/jitshare"
+    sed -i "\|^[^-]*- *$GDIRREL/jitshare$|d" "$TREE/apktool.yml"
+    sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/jitshare|" "$TREE/apktool.yml"
+    echo "jitshare: $JITSHARE -> $GDIRREL/jitshare"
     # Several guest libraries (guest.deps): every one is checked, and
     # guest.libs lists them in guest.load_order as "<sha256> <name>", the
     # primary (guest.lib) marked; the host loads them in that order.

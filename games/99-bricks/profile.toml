@@ -37,6 +37,10 @@ abi          = "arm64-v8a"
 # load "main", so no smali edit is needed.
 lib          = "libmain.so"
 network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+# Mono JITs code of its own: with one shared code cache its cacheflushes left
+# stale translations (Mono metadata asserts at boot, 4 in 10); private caches:
+# 0 in 10. on (default) | off
+jitshare     = "off"
 
 [strip]
 libs = []

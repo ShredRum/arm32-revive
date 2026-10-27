@@ -1339,16 +1339,6 @@ static bool Boot(JavaVM* vm) {
             std::fclose(ff);
         }
     }
-    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
-        "jitopt=%s jitshare=%s",
-        JitFastmemOn() ? "on" : "off",
-        std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
-        std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
-        std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
-        std::getenv("HARNESS_NORELEASE") ? "on" : "off",
-        ClampWriteOn() ? "on" : "off(+jni bound)",
-        diag ? "on" : "off",
-        JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off");
     g_apk = FindApk();
     if (g_apk.empty()) {
         Log("FATAL: own base.apk not found");
@@ -1603,7 +1593,35 @@ static bool Boot(JavaVM* vm) {
         }
         g_rt->SetGuestTargetSdk(sdk);
         Log("guest target sdk: %d", sdk);
+        // Shared code cache (host.jitshare): "off" for a title whose guest
+        // has a JIT of its own (Mono): its cacheflushes left stale code in
+        // the shared cache (99 Bricks: Mono metadata asserts, 4 boots in 10;
+        // none in 10 with private caches). abflags.txt still wins.
+        const std::string js_path = g_files + "/jitshare";
+        char js[16] = {0};
+        if (ZipExtractStored(g_apk, dir + "jitshare", js_path)) {
+            if (FILE* f = std::fopen(js_path.c_str(), "rb")) {
+                if (std::fscanf(f, "%15s", js) != 1) {
+                    js[0] = 0;
+                }
+                std::fclose(f);
+            }
+        }
+        if (std::strcmp(js, "off") == 0) {
+            setenv("HARNESS_NOJITSHARE", "1", 0);
+        }
     }
+    // Every switch is final here (no Jit exists yet): the line states what runs.
+    Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
+        "jitopt=%s jitshare=%s",
+        JitFastmemOn() ? "on" : "off",
+        std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
+        std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
+        std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
+        std::getenv("HARNESS_NORELEASE") ? "on" : "off",
+        ClampWriteOn() ? "on" : "off(+jni bound)",
+        diag ? "on" : "off",
+        JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off");
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
     g_rt->set_callbacks(&callbacks);
