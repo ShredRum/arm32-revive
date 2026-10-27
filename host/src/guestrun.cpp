@@ -2,8 +2,12 @@
 // exported functions in order. A bring-up probe for new titles (no title
 // knowledge, unlike harness.cpp which carries Rovio forensics).
 //
-//   guestrun <lib.so> [--files <hostdir>] [--pkg <package>]
-//            [--call <symbol> [arg...]]...
+//   guestrun <lib.so> [--lib <more.so>]... [--base <addr>] [--files <hostdir>]
+//            [--pkg <package>] [--call <symbol> [arg...]]...
+//
+// Libraries load in the order given (dependencies first) into one module,
+// the first at --base (default 0), each next one at the next 16 MiB boundary;
+// their inits run in the same order.
 //
 // Arguments of a call (r0..r3, then the stack):
 //   123 / 0x7b   an integer
@@ -76,9 +80,15 @@ int main(int argc, char** argv) {
     }
     std::string files_dir, pkg = "abr.guestrun";
     std::vector<Call> calls;
+    std::vector<std::string> libs = {argv[1]};
+    std::uint32_t base = 0;
     for (int i = 2; i < argc; i++) {
         const std::string a = argv[i];
-        if (a == "--files" && i + 1 < argc) {
+        if (a == "--lib" && i + 1 < argc && calls.empty()) {
+            libs.push_back(argv[++i]);
+        } else if (a == "--base" && i + 1 < argc && calls.empty()) {
+            base = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (a == "--files" && i + 1 < argc) {
             files_dir = argv[++i];
         } else if (a == "--pkg" && i + 1 < argc) {
             pkg = argv[++i];
@@ -100,12 +110,17 @@ int main(int argc, char** argv) {
     abr::ElfLoader loader(mem);
     abr::LoadedModule mod;
     std::string err;
-    if (!loader.Load(argv[1], mod, err)) {
-        std::printf("load failed: %s\n", err.c_str());
-        return 1;
+    std::uint32_t at = base;
+    for (const std::string& lib : libs) {
+        if (!loader.Load(lib.c_str(), mod, err, at)) {
+            std::printf("load %s failed: %s\n", lib.c_str(), err.c_str());
+            return 1;
+        }
+        const std::uint32_t hi = mod.more.empty() ? mod.span_hi : mod.more.back().span_hi;
+        std::printf("loaded %s at %08x: %zu host imports, %zu init, %zu exports so far\n",
+                    lib.c_str(), at, mod.imports.size(), mod.init_array.size(), mod.defined.size());
+        at = (hi + 0xFFFFFFu) & ~0xFFFFFFu;
     }
-    std::printf("loaded %s: %zu imports, %zu init, %zu exports\n", mod.path.c_str(),
-                mod.imports.size(), mod.init_array.size(), mod.defined.size());
 
     abr::Runtime rt(mem, mod);
     rt.AddModuleSegments(mod);

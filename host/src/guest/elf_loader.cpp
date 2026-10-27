@@ -46,7 +46,11 @@ std::uint32_t AlignUp(std::uint32_t v, std::uint32_t a) {
 
 }  // namespace
 
-bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
+bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std::uint32_t bias) {
+    const bool first = out.halt_va == 0;  // else: add to the libraries in `out`
+    LoadedModule::Extra extra;
+    extra.path = path;
+    extra.bias = bias;
     if (!mem_.ok()) {
         err = "guest memory not reserved";
         return false;
@@ -86,7 +90,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         return fail("not a 32-bit ARM shared object");
     }
 
-    // Map PT_LOAD segments at linked addresses (bias 0).
+    // Map PT_LOAD segments at linked address + bias.
     for (int i = 0; i < ehdr.e_phnum; i++) {
         Elf32_Phdr ph;
         std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
@@ -94,15 +98,23 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
             continue;
         }
         const std::uint32_t page = 0x1000;
-        const std::uint32_t start = AlignDown(ph.p_vaddr, page);
-        const std::uint32_t end = AlignUp(ph.p_vaddr + ph.p_memsz, page);
+        const std::uint32_t start = AlignDown(ph.p_vaddr, page) + bias;
+        const std::uint32_t end = AlignUp(ph.p_vaddr + ph.p_memsz, page) + bias;
         std::printf("[phdr] LOAD vaddr=%08x filesz=%08x memsz=%08x flags=%x -> map [%08x,%08x)\n",
                     ph.p_vaddr, ph.p_filesz, ph.p_memsz, ph.p_flags, start, end);
         if (!mem_.Map(start, end - start, PROT_READ | PROT_WRITE)) {
             return fail("segment map failed");
         }
         out.segments.push_back({start, end - start, static_cast<int>(ProtFromFlags(ph.p_flags))});
-        std::uint8_t* dst = mem_.host(ph.p_vaddr);
+        std::uint32_t& lo = first ? out.span_lo : extra.span_lo;
+        std::uint32_t& hi = first ? out.span_hi : extra.span_hi;
+        if (hi == 0 || start < lo) {
+            lo = start;
+        }
+        if (end > hi) {
+            hi = end;
+        }
+        std::uint8_t* dst = mem_.host(ph.p_vaddr + bias);
         if (ph.p_filesz > 0) {
             if (ph.p_offset + ph.p_filesz > len) {
                 return fail("segment beyond EOF");
@@ -132,19 +144,25 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
             continue;
         }
         const std::uint32_t page = 0x1000;
-        const std::uint32_t rstart = AlignDown(ph.p_vaddr, page);
+        const std::uint32_t rstart = AlignDown(ph.p_vaddr, page) + bias;
         // The END rounds UP, like glibc's _dl_protect_relro: the page that
         // holds the last byte of the RELRO is protected too. Rounding it
         // down (as this did) left that page unguarded -- a guest write
         // there would not have been refused.
-        const std::uint32_t rend = AlignUp(ph.p_vaddr + ph.p_memsz, page);
+        const std::uint32_t rend = AlignUp(ph.p_vaddr + ph.p_memsz, page) + bias;
         if (rend > rstart) {
-            out.relro_start = rstart;
-            out.relro_size = rend - rstart;
+            if (first) {
+                out.relro_start = rstart;
+                out.relro_size = rend - rstart;
+            } else {
+                extra.relro_start = rstart;
+                extra.relro_size = rend - rstart;
+            }
             std::printf("[phdr] GNU_RELRO [%08x,%08x) -- guest writes refused\n", rstart, rend);
         }
     }
 
+    bool found_build_id = false;
     // G3.4 (2026-10-18): capture the GNU build-id from PT_NOTE. The whole host
     // assumes ONE exact guest image (hardcoded guest VAs, patch sites,
     // behavioural hooks in apphost/dispatch), so the pin should be checkable at
@@ -169,12 +187,15 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                 break;
             }
             if (ntype == 3 && namesz == 4 && std::memcmp(name, "GNU", 4) == 0 && descsz > 0) {
-                out.build_id.assign(desc, desc + descsz);
+                if (first) {
+                    out.build_id.assign(desc, desc + descsz);
+                }
+                found_build_id = true;
                 break;
             }
             p = next;
         }
-        if (!out.build_id.empty()) {
+        if (found_build_id) {
             break;
         }
     }
@@ -187,9 +208,14 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
             Elf32_Shdr sh;
             std::memcpy(&sh, file + ehdr.e_shoff + si * ehdr.e_shentsize, sizeof(sh));
             if (sh.sh_type == SHT_ARM_EXIDX && sh.sh_entsize >= 8 && sh.sh_size >= 8) {
-                out.exidx_va = sh.sh_addr;
-                out.exidx_count = sh.sh_size / 8;
-                std::printf("[exidx] VA=%08x count=%u\n", out.exidx_va, out.exidx_count);
+                if (first) {
+                    out.exidx_va = sh.sh_addr + bias;
+                    out.exidx_count = sh.sh_size / 8;
+                } else {
+                    extra.exidx_va = sh.sh_addr + bias;
+                    extra.exidx_count = sh.sh_size / 8;
+                }
+                std::printf("[exidx] VA=%08x count=%u\n", sh.sh_addr + bias, sh.sh_size / 8);
                 break;
             }
         }
@@ -201,7 +227,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
             Elf32_Phdr ph;
             std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
             if (ph.p_type == PT_LOAD && va >= ph.p_vaddr && va < ph.p_vaddr + ph.p_memsz) {
-                return mem_.host(va);
+                return mem_.host(va + bias);
             }
         }
         return nullptr;
@@ -225,7 +251,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     std::uint32_t init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
     for (std::uint32_t off = 0;; off += 8) {
         Elf32_Dyn dyn;
-        std::memcpy(&dyn, mem_.host(dynph->p_vaddr + off), sizeof(dyn));
+        std::memcpy(&dyn, mem_.host(dynph->p_vaddr + bias + off), sizeof(dyn));
         if (dyn.d_tag == DT_NULL) {
             break;
         }
@@ -335,8 +361,9 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         return false;
     };
 
-    // Index defined symbols by name for fast lookup.
-    std::unordered_map<std::string, std::uint32_t> defined;
+    // Index defined symbols by name (guest addresses). A name an earlier
+    // library already defines keeps that definition (linker search order).
+    std::unordered_map<std::string, std::uint32_t>& defined = out.defined;
     for (std::uint32_t i = 0; i < nchain; i++) {
         Elf32_Sym sym;
         if (!get_sym(i, sym)) {
@@ -345,26 +372,28 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         if (sym.st_shndx != SHN_UNDEF && sym.st_name != 0) {
             std::string name;
             if (get_name(sym.st_name, name)) {
-                defined.emplace(std::move(name), sym.st_value);
+                defined.emplace(std::move(name), sym.st_value + bias);
             }
         }
     }
-    out.defined = std::move(defined);
-    // The bias is read by the relocation handling below; it must be set
-    // BEFORE that (it used to be assigned at the very end of Load(), so the
-    // relocations read a field that had not been written yet -- the default
-    // happened to be 0, which is the only value the loader ever uses).
-    out.bias = 0;
+    // A library's own exports, by name, so an undefined symbol can be told
+    // apart from one this very library defines (the merged table above
+    // may hold an earlier library's definition of the same name).
+    if (first) {
+        out.bias = bias;
+    }
 
-    // Trampoline page: map writable, emit, then protect RX.
-    if (!mem_.Map(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE)) {
+    // Trampoline page: map writable, emit, then protect RX. A later library
+    // reopens it and continues after the slots already emitted.
+    if (first ? !mem_.Map(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE)
+              : !mem_.Protect(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE)) {
         return fail("tramp map failed");
     }
-    std::uint32_t next_tramp = kTrampBase;
+    std::uint32_t next_tramp = first ? kTrampBase : out.next_tramp;
     // Guest-side VFP thunks live in the upper part of the trampoline page so
     // the 4-byte svc slots keep their layout (the STUCK diagnostics map a pc
     // in the slot area back to an import name by slot arithmetic).
-    std::uint32_t next_vfp_thunk = kTrampBase + kTrampSize - 0x1000;
+    std::uint32_t next_vfp_thunk = first ? kTrampBase + kTrampSize - 0x1000 : out.next_vfp_thunk;
     // vmov d0,r0,r1 ; vsqrt.f64 d0,d0 ; vmov r0,r1,d0 ; bx lr
     static const std::uint8_t kFastSqrtThunk[16] = {
         0x10, 0x0b, 0x41, 0xec, 0xc0, 0x0b, 0xb1, 0xee,
@@ -377,14 +406,19 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         std::memcpy(mem_.host(va), &insn, 4);
         return va;
     };
-    // Slot 0: HALT trampoline (svc #0), LR target for init calls.
-    out.halt_va = emit_tramp(kSwiHalt);
-    // Slot 1: pthread_once init-return trampoline. Distinct from HALT so a
-    // halt from any other source (thread exit, qsort comparator) can never be
-    // mistaken for "the once init routine returned" (see Runtime::OnSvc).
-    out.once_va = emit_tramp(kSwiOnce);
+    if (first) {
+        // Slot 0: HALT trampoline (svc #0), LR target for init calls.
+        out.halt_va = emit_tramp(kSwiHalt);
+        // Slot 1: pthread_once init-return trampoline. Distinct from HALT so a
+        // halt from any other source (thread exit, qsort comparator) can never
+        // be mistaken for "the once init routine returned" (see Runtime::OnSvc).
+        out.once_va = emit_tramp(kSwiOnce);
+    }
 
     std::unordered_map<std::string, std::uint32_t> import_index;
+    for (std::uint32_t i = 0; i < out.imports.size(); i++) {
+        import_index.emplace(out.imports[i].name, i);  // host imports are shared
+    }
     auto get_import = [&](const std::string& name, bool is_func) -> std::uint32_t {
         auto it = import_index.find(name);
         if (it != import_index.end()) {
@@ -434,12 +468,12 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
         switch (type) {
             case kRelative:
-                return write32(r_off, cur + out.bias);
+                return write32(r_off, cur + bias);
             case kGlobDat:
             case kJumpSlot: {
                 Elf32_Sym sym;
                 if (symidx != 0 && get_sym(symidx, sym) && sym.st_shndx != SHN_UNDEF) {
-                    return write32(r_off, sym.st_value + out.bias);
+                    return write32(r_off, sym.st_value + bias);
                 }
                 std::string name;
                 if (symidx == 0 || !get_name(({
@@ -449,12 +483,19 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                                             name)) {
                     return false;
                 }
+                // Defined by a library loaded before this one: bind to it.
+                if (!first) {
+                    const auto it = out.defined.find(name);
+                    if (it != out.defined.end()) {
+                        return write32(r_off, it->second);
+                    }
+                }
                 // Data objects referenced via GLOB_DAT need addresses, not calls.
                 if (symidx != 0 && get_sym(symidx, sym) &&
                     ELF32_ST_TYPE(sym.st_info) == STT_OBJECT) {
                     const std::uint32_t idx = get_import(name, false);
                     PendingData pd;
-                    pd.loc_va = r_off;
+                    pd.loc_va = r_off + bias;  // guest address of the slot
                     pd.import_idx = idx;
                     std::uint32_t cur2 = 0;
                     read32(r_off, cur2);
@@ -474,11 +515,17 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                     return false;
                 }
                 if (sym.st_shndx != SHN_UNDEF) {
-                    return write32(r_off, cur + sym.st_value + out.bias);
+                    return write32(r_off, cur + sym.st_value + bias);
                 }
                 std::string name;
                 if (!get_name(sym.st_name, name)) {
                     return false;
+                }
+                if (!first) {
+                    const auto it = out.defined.find(name);
+                    if (it != out.defined.end()) {
+                        return write32(r_off, cur + it->second);
+                    }
                 }
                 if (ELF32_ST_TYPE(sym.st_info) == STT_FUNC) {
                     const std::uint32_t idx = get_import(name, true);
@@ -488,7 +535,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                 // Data object address unknown yet (dispatcher assigns guest
                 // slots later). Defer: record and patch via ResolveData().
                 PendingData pd;
-                pd.loc_va = r_off;
+                pd.loc_va = r_off + bias;  // guest address of the slot
                 pd.import_idx = idx;
                 pd.addend = cur;
                 out.pending_data.push_back(pd);
@@ -502,7 +549,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
                 if (!get_sym(symidx, sym) || sym.st_shndx == SHN_UNDEF) {
                     return false;
                 }
-                return write32(r_off, cur + sym.st_value + out.bias);
+                return write32(r_off, cur + sym.st_value + bias);
             }
             case kThmCall: {
                 if (symidx == 0) {
@@ -535,7 +582,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
     auto apply_table = [&](std::uint32_t base, std::uint32_t size) -> bool {
         for (std::uint32_t i = 0; i < size; i += 8) {
             Elf32_Rel r;
-            std::memcpy(&r, mem_.host(base + i), sizeof(r));
+            const std::uint8_t* rp = va2host(base + i);
+            if (!rp) {
+                return false;
+            }
+            std::memcpy(&r, rp, sizeof(r));
             if (!apply_one(r.r_offset, ELF32_R_TYPE(r.r_info), ELF32_R_SYM(r.r_info))) {
                 return false;
             }
@@ -556,8 +607,8 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         }
         const std::uint32_t prot = ProtFromFlags(ph.p_flags);
         if ((prot & PROT_WRITE) == 0) {
-            const std::uint32_t start = AlignDown(ph.p_vaddr, 0x1000);
-            const std::uint32_t end = AlignUp(ph.p_vaddr + ph.p_memsz, 0x1000);
+            const std::uint32_t start = AlignDown(ph.p_vaddr, 0x1000) + bias;
+            const std::uint32_t end = AlignUp(ph.p_vaddr + ph.p_memsz, 0x1000) + bias;
             rx_ranges.push_back({start, end - start, prot});
             if (!mem_.Protect(start, end - start, prot | PROT_WRITE)) {
                 return fail("rw window failed");
@@ -575,17 +626,21 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         return fail(pltrelsz ? "relocation failed" : "REL relocation failed");
     }
 
-    // JNI function trampolines: 256 slots, swi = kSwiJniBase+i. Runtime builds
-    // the JNIEnv function table from these (see dispatch.cpp CallJni).
-    out.jni_tramp_base = next_tramp;
-    for (std::uint32_t i = 0; i < 256; i++) {
-        emit_tramp(kSwiJniBase + i);
+    if (first) {
+        // JNI function trampolines: 256 slots, swi = kSwiJniBase+i. Runtime
+        // builds the JNIEnv function table from these (see dispatch.cpp CallJni).
+        out.jni_tramp_base = next_tramp;
+        for (std::uint32_t i = 0; i < 256; i++) {
+            emit_tramp(kSwiJniBase + i);
+        }
+        // JavaVM function trampolines (GetEnv etc. for JNI_OnLoad/GetJNIEnv path).
+        out.jvm_tramp_base = next_tramp;
+        for (std::uint32_t i = 0; i < 8; i++) {
+            emit_tramp(kSwiJniBase + 0x100 + i);
+        }
     }
-    // JavaVM function trampolines (GetEnv etc. for JNI_OnLoad/GetJNIEnv path).
-    out.jvm_tramp_base = next_tramp;
-    for (std::uint32_t i = 0; i < 8; i++) {
-        emit_tramp(kSwiJniBase + 0x100 + i);
-    }
+    out.next_tramp = next_tramp;
+    out.next_vfp_thunk = next_vfp_thunk;
     if (next_tramp > kTrampBase + kTrampSize) {
         return fail("tramp page overflow");
     }
@@ -618,8 +673,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err) {
         out.fini_array.push_back(fn == 0xFFFFFFFFu ? 0 : fn);
     }
 
-    out.path = path;
-    out.bias = 0;
+    if (first) {
+        out.path = path;
+    } else {
+        out.more.push_back(extra);
+    }
     munmap(const_cast<std::uint8_t*>(file), len);
     return true;
 }

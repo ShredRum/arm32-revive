@@ -174,6 +174,7 @@ public:
 
     // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
+    std::uint32_t GuestMemalign(std::uint32_t align, std::uint32_t size);
     std::uint32_t HeapTop() { return heap_base_ + kHeapSize; }
     std::uint32_t GuestCalloc(std::uint32_t n, std::uint32_t size);
     std::uint32_t GuestRealloc(std::uint32_t addr, std::uint32_t size);
@@ -401,6 +402,9 @@ public:
     // entry VA or 0. Lets the in-module unwinder do its real job instead of
     // degrading on a stubbed NULL.
     std::uint32_t FindExidx(std::uint32_t pc);
+    // .ARM.exidx table {base, count} of the loaded library that holds pc.
+    void ExidxFor(std::uint32_t pc, std::uint32_t* base, std::uint32_t* count) const;
+    void ProtectOneRelro(std::uint32_t relro_start, std::uint32_t relro_size);
 
     // Fill 2014-era Bionic ctype tables (_ctype_/_tolower_tab_/_toupper_tab_)
     // and resolve their data imports. Bionic 7.1.2 layout (libc/include/ctype.h):

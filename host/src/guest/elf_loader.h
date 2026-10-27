@@ -82,7 +82,23 @@ struct LoadedModule {
     std::uint32_t relro_start = 0;
     std::uint32_t relro_size = 0;
     std::vector<std::uint8_t> build_id;  // GNU build-id (NOTE desc; empty if absent)
-    std::unordered_map<std::string, std::uint32_t> defined;  // DEFINED sym name -> st_value (for apphost Java_* lookup)
+    // DEFINED sym name -> guest address (st_value + bias), over every loaded
+    // module; the first definition wins, as in the linker's search order.
+    std::unordered_map<std::string, std::uint32_t> defined;
+    // Further guest libraries loaded into this module (Load with append):
+    // the fields above describe the first one.
+    std::uint32_t span_lo = 0, span_hi = 0;  // first library's mapped address range
+    struct Extra {
+        std::string path;
+        std::uint32_t bias = 0;
+        std::uint32_t span_lo = 0, span_hi = 0;
+        std::uint32_t exidx_va = 0, exidx_count = 0;
+        std::uint32_t relro_start = 0, relro_size = 0;
+    };
+    std::vector<Extra> more;
+    // Trampoline page cursors, kept for later loads.
+    std::uint32_t next_tramp = 0;
+    std::uint32_t next_vfp_thunk = 0;
 };
 // Bind a data import to a guest address (see the definition in
 // elf_loader.cpp). Free function so the runtime can use it too.
@@ -94,8 +110,12 @@ class ElfLoader {
 public:
     explicit ElfLoader(GuestMemory& mem) : mem_(mem) {}
 
-    // Loads file into guest memory. Returns false + error string on failure.
-    bool Load(const char* path, LoadedModule& out, std::string& err);
+    // Loads file into guest memory at link address + bias. Returns false +
+    // error string on failure. When `out` already holds a library, this one
+    // is added to it: its undefined symbols bind first to the libraries
+    // loaded before (load dependencies first, like the linker's search order),
+    // then to host imports, which share one trampoline table.
+    bool Load(const char* path, LoadedModule& out, std::string& err, std::uint32_t bias = 0);
 
     // Patches all pending ABS32 refs of a data import to addend+guest_addr.
 

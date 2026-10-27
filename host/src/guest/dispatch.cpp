@@ -62,6 +62,7 @@ dl_mspace create_mspace_with_base(void*, size_t, int);
 void* mspace_malloc(dl_mspace, size_t);
 void mspace_free(dl_mspace, void*);
 void* mspace_realloc(dl_mspace, void*, size_t);
+void* mspace_memalign(dl_mspace, size_t, size_t);
 void* mspace_calloc(dl_mspace, size_t, size_t);
 size_t mspace_usable_size(const void*);
 }  // extern "C"
@@ -236,32 +237,57 @@ void Runtime::AddMapping(std::uint32_t start, std::uint32_t size, int prot) {
 
 // RELRO page range as bionic protects it: start rounded down, end rounded up
 // (all six guests end RELRO on a page boundary).
-static void RelroPages(const LoadedModule& mod, std::uint32_t* ps, std::uint32_t* pe) {
-    *ps = mod.relro_start & ~0xFFFu;
-    *pe = static_cast<std::uint32_t>((std::uint64_t(mod.relro_start) + mod.relro_size + 0xFFFu) &
+static void RelroPages(std::uint32_t start, std::uint32_t size, std::uint32_t* ps,
+                       std::uint32_t* pe) {
+    *ps = start & ~0xFFFu;
+    *pe = static_cast<std::uint32_t>((std::uint64_t(start) + size + 0xFFFu) &
                                      ~std::uint64_t(0xFFFu));
 }
 
+// Every loaded library's RELRO as {start, size} (size 0 entries skipped).
+static std::vector<std::pair<std::uint32_t, std::uint32_t>> RelroRanges(const LoadedModule& mod) {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> r;
+    if (mod.relro_size != 0) {
+        r.emplace_back(mod.relro_start, mod.relro_size);
+    }
+    for (const auto& x : mod.more) {
+        if (x.relro_size != 0) {
+            r.emplace_back(x.relro_start, x.relro_size);
+        }
+    }
+    return r;
+}
+
 void Runtime::AddModuleSegments(const LoadedModule& mod) {
-    std::uint32_t ps = 0, pe = 0;
-    RelroPages(mod, &ps, &pe);
+    const auto relros = RelroRanges(mod);
     for (const auto& seg : mod.segments) {
         const std::uint64_t end = std::uint64_t(seg.start) + seg.size;
-        if (mod.relro_size != 0 && seg.start <= ps && pe < end) {
-            AddMapping(seg.start, pe - seg.start, seg.prot);
-            AddMapping(pe, static_cast<std::uint32_t>(end - pe), seg.prot);
-        } else {
+        bool split = false;
+        for (const auto& rr : relros) {
+            std::uint32_t ps = 0, pe = 0;
+            RelroPages(rr.first, rr.second, &ps, &pe);
+            if (seg.start <= ps && pe < end) {
+                AddMapping(seg.start, pe - seg.start, seg.prot);
+                AddMapping(pe, static_cast<std::uint32_t>(end - pe), seg.prot);
+                split = true;
+                break;
+            }
+        }
+        if (!split) {
             AddMapping(seg.start, seg.size, seg.prot);
         }
     }
 }
 
 void Runtime::ProtectRelro(const LoadedModule& mod) {
-    if (mod.relro_size == 0) {
-        return;
+    for (const auto& rr : RelroRanges(mod)) {
+        ProtectOneRelro(rr.first, rr.second);
     }
+}
+
+void Runtime::ProtectOneRelro(std::uint32_t relro_start, std::uint32_t relro_size) {
     std::uint32_t ps = 0, pe = 0;
-    RelroPages(mod, &ps, &pe);
+    RelroPages(relro_start, relro_size, &ps, &pe);
     const MappingTable::Hit h = mappings_.Find(ps, pe - ps);
     if (h.end == 0) {
         std::printf("[guest] LOUD RELRO [%08x,%08x) has no mapping entry -- left writable\n", ps, pe);
@@ -278,7 +304,7 @@ void Runtime::ProtectRelro(const LoadedModule& mod) {
     if (!mem_.Protect(ps, pe - ps, PROT_READ)) {
         std::printf("[guest] LOUD mprotect(RELRO [%08x,%08x), PROT_READ) failed\n", ps, pe);
     }
-    AddWriteGuard(mod.relro_start, mod.relro_size, "RELRO");  // names slow-path hits
+    AddWriteGuard(relro_start, relro_size, "RELRO");  // names slow-path hits
 }
 
 void Runtime::AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what) {
@@ -582,7 +608,11 @@ static std::uint32_t ZeroFillLimit() {
     return (std::uint32_t)v;
 }
 
-std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
+std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0, size); }
+
+// align == 0: plain malloc. Otherwise a power of two (memalign semantics);
+// the block is a normal heap block for free/realloc/usable_size.
+std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
     // disease test for wall4: game memsets 255B into 144B objects; dense bump
@@ -610,7 +640,9 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) {
     size = static_cast<std::uint32_t>(rounded);
     const std::uint32_t total =
         size + pad;  // pad kept: MALLOCPAD layout probe stays available
-    void* hp = heap_ms_ ? mspace_malloc(heap_ms_, total) : nullptr;
+    void* hp = !heap_ms_ ? nullptr
+               : align > 8 ? mspace_memalign(heap_ms_, align, total)
+                           : mspace_malloc(heap_ms_, total);
     std::uint32_t out = 0;
     if (hp) {
         const std::uint64_t off =
@@ -3852,6 +3884,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
         return;
     }
+    if (n == "memalign" || n == "posix_memalign") {
+        // memalign(align, size) -> ptr; posix_memalign(void** out, align,
+        // size) -> errno (EINVAL unless align is a power of two that is a
+        // multiple of sizeof(void*)). bionic's memalign rounds a bad
+        // alignment up to a power of two.
+        const bool posix = (n == "posix_memalign");
+        std::uint32_t align = posix ? a1 : a0;
+        const std::uint32_t size = posix ? a2 : a1;
+        const bool pow2 = align != 0 && (align & (align - 1)) == 0;
+        if (posix && (!pow2 || align < 4)) {
+            Ret(regs, EINVAL);
+            return;
+        }
+        if (!pow2) {
+            std::uint32_t p = 8;
+            while (p < align && p < 0x80000000u) {
+                p <<= 1;
+            }
+            align = p;
+        }
+        const std::uint32_t blk = GuestMemalign(align, size);
+        if (posix) {
+            if (!CheckRange(a0, 4, true)) {
+                goto bad_ptr;
+            }
+            if (blk) {
+                std::memcpy(H(a0), &blk, 4);
+            }
+            Ret(regs, blk ? 0u : static_cast<std::uint32_t>(ENOMEM));
+            return;
+        }
+        if (!blk) {
+            SetGuestErrno(ENOMEM);
+        }
+        Ret(regs, blk);
+        return;
+    }
     if (n == "strlcpy") {
         // strlcpy(dst, src, size): copies at most size-1 bytes, always
         // NUL-terminates when size > 0, returns strlen(src).
@@ -4491,9 +4560,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // continues into __cxa_throw and the game's own handler.
         const std::uint32_t pc = a0 & ~std::uint32_t(1);
         std::uint32_t base = 0, count = 0;
-        if (IsCodeAddress(pc) && mod_.exidx_va != 0) {
-            base = mod_.exidx_va;
-            count = mod_.exidx_count;
+        if (IsCodeAddress(pc)) {
+            ExidxFor(pc, &base, &count);
         }
         if (a1 != 0 && CheckRange(a1, 4, true)) {
             std::memcpy(H(a1), &count, 4);
@@ -7460,9 +7528,22 @@ void Runtime::ReleaseOnceControlsOnExit(std::uint32_t tid) {
     once_depth_ = 0;
 }
 
+void Runtime::ExidxFor(std::uint32_t pc, std::uint32_t* base, std::uint32_t* count) const {
+    // The library whose mapped range holds pc (one library: its own table).
+    *base = mod_.exidx_va;
+    *count = mod_.exidx_count;
+    for (const auto& x : mod_.more) {
+        if (pc >= x.span_lo && pc < x.span_hi) {
+            *base = x.exidx_va;
+            *count = x.exidx_count;
+            return;
+        }
+    }
+}
+
 std::uint32_t Runtime::FindExidx(std::uint32_t pc) {
-    const std::uint32_t base = mod_.exidx_va;
-    const std::uint32_t count = mod_.exidx_count;
+    std::uint32_t base = 0, count = 0;
+    ExidxFor(pc & ~std::uint32_t(1), &base, &count);
     if (base == 0 || count == 0) {
         return 0;
     }

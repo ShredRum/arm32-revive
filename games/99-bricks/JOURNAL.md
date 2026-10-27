@@ -89,3 +89,17 @@ never send signals: their paths are unchanged (harness baselines identical).
 
 Test (guestrun): two mono_gc_collect with the finalizer thread alive pass; a string
 held by a GC handle survives both and still runs ToUpper -> "SURVIVES THE GC".
+
+## Several guest libraries (2026-10-27)
+
+ElfLoader::Load(path, mod, err, bias) adds a library to an existing module: its own
+bias (span recorded), undefined symbols bind first to libraries loaded before
+(dependencies first, the linker's search order), then to host imports sharing one
+trampoline table; per-library exidx/RELRO (LoadedModule::more). Rovio = one library at
+bias 0, unchanged. Also memalign/posix_memalign on the guest heap.
+
+    cd games/99-bricks/work/lib
+    guestrun libmono.so --lib libmain.so --lib libunity.so --base 0x1000000
+
+-> libmono @01000000, libmain @02000000, libunity @03000000; all 236 inits run
+clean. NULL stays unmapped (first library above 16 MiB).
