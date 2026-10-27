@@ -47,3 +47,32 @@ run the guest handler on a guest signal frame, sigreturn, sigsuspend).
 
 Still to come after that: several guest libraries linked to each other,
 NativeActivity entry + input, guest-owned EGL, ~150 more libc/zlib imports.
+
+## Plan: guest signals (for Boehm stop-the-world), decided 2026-10-27
+
+What Mono/Boehm uses: sigaction, sigprocmask/pthread_sigmask, sigsuspend,
+tkill/pthread_kill (suspend = SIGPWR 30, seen live; restart = SIGXCPU 24 expected),
+sem_post/sem_wait for acks. NullReferenceException: avoid SIGSEGV delivery by
+running Mono with MONO_DEBUG=explicit-null-checks (served by our getenv for this
+title only), so no fault -> guest-handler path is needed at first.
+
+Design (Rovio unaffected: everything stays off until a guest installs a handler):
+1. Process table of guest dispositions (sigaction: handler, flags, mask); per guest
+   thread: blocked mask, pending set, tid -> {Jit, host thread} registry.
+2. tkill/pthread_kill/kill(self): mark pending on the target; if it runs guest code,
+   HaltExecution(signal reason) on its Jit; if it waits in a host call, it notices
+   on its next wait slice (see 4).
+3. Delivery points: (a) RunJit sees the signal halt -> save regs/cpsr/ext regs,
+   run the handler on the same Jit (pc = handler, lr = sigreturn trampoline =
+   halt, r0 = sig, r1 = siginfo*, r2 = ucontext* on the guest stack), restore,
+   continue; (b) inside a blocking import: run the handler on a per-thread
+   "signal Jit" (shared code cache, cheap) seeded with the thread's r4-r11/sp so
+   the handler's register spill puts live values on the stack for the GC scan;
+   then restart the wait (SA_RESTART) or return EINTR.
+4. Interruptible waits only while signals are in use: sem_wait, mutex lock, cond
+   wait, nanosleep/usleep, poll/select/epoll_wait, pthread_join, blocking read ->
+   wait in short slices (timed variants) and deliver pending signals between
+   slices. sigsuspend(mask): set mask, wait for an unblocked pending signal,
+   deliver it, restore mask, return -1/EINTR.
+5. Test with guestrun: mono_gc_collect with the finalizer thread alive; then a C#
+   allocation loop that triggers GC by itself.
