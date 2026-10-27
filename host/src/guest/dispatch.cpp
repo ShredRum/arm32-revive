@@ -2975,15 +2975,44 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             cur++;
         }
     }
-    if (n == "sscanf" || n == "vsscanf") {
+    if (n == "sscanf" || n == "vsscanf" || n == "fscanf") {
         // Manual sscanf (host va_list can't be synthesized; semantics follow
         // C99: ws-skip (not %c/%[/%n), literals, widths, suppression,
         // lengths hh/h/l/ll, conversions d i u o x X f e g a s c [ p n %).
         // Guest long = 32-bit (narrow host longs); long double = double.
-        if (!CheckRange(a0, 1, false) || !CheckRange(a1, 1, false)) {
+        // fscanf(stream, fmt, ...): the same engine over what is left of the
+        // stream (up to 64 KiB), then the stream is put back right after the
+        // characters the conversion consumed -- exact for seekable files
+        // (the /proc and data files guests read); other streams are refused.
+        const bool from_stream = (n == "fscanf");
+        FILE* sf = nullptr;
+        long sf_start = 0;
+        if (from_stream) {
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const auto it = file_map_.find(a0);
+                sf = it == file_map_.end() ? nullptr : it->second.f;
+            }
+            sf_start = sf ? std::ftell(sf) : -1;
+            if (!sf || sf_start < 0 || !CheckRange(a1, 1, false)) {
+                std::printf("[svc] fscanf(%08x): not a seekable guest stream -> EOF\n", a0);
+                SetGuestErrno(sf ? ESPIPE : EBADF);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+        } else if (!CheckRange(a0, 1, false) || !CheckRange(a1, 1, false)) {
             goto bad_ptr;
         }
-        const std::string inp(GuestStr(a0));
+        std::string stream_text;
+        if (from_stream) {
+            stream_text.resize(65536);
+            stream_text.resize(std::fread(&stream_text[0], 1, stream_text.size(), sf));
+            const std::size_t nul = stream_text.find('\0');
+            if (nul != std::string::npos) {
+                stream_text.resize(nul);  // the engine reads a C string
+            }
+        }
+        const std::string inp(from_stream ? stream_text : std::string(GuestStr(a0)));
         const std::string fmt(GuestStr(a1));
         // TEMP-DIAG (worker jobs): log parsed inputs (URL flows).
         if (DiagOn()) {  // PLAN.md A: diagnostic layer
@@ -3451,6 +3480,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
+        }
+        if (from_stream) {
+            std::clearerr(sf);
+            std::fseek(sf, sf_start + static_cast<long>(ii), SEEK_SET);
         }
         // assigned = number of successful conversions (EOF => -1).
         Ret(regs, eof ? static_cast<std::uint32_t>(-1)
@@ -7418,6 +7451,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    if (n == "mbrtowc" || n == "wcrtomb" || n == "wcscoll" || n == "wcsxfrm" ||
+        n == "wcsftime" || n == "getwc" || n == "putwc" || n == "ungetwc") {
+        if (!WideCall(n, regs)) {
+            goto bad_ptr;
+        }
+        return;
+    }
     if (n == "SHA1Init" || n == "SHA1Update" || n == "SHA1Final") {
         if (!Sha1Call(n, regs)) {
             goto bad_ptr;
@@ -9585,6 +9625,331 @@ bool Runtime::Sha1Call(const std::string& n, Regs& regs) {
     }
     std::memcpy(H(ctx), &c, sizeof(c));
     RetVoid(regs);
+    return true;
+}
+
+namespace {
+// bionic 7 mbrtoc32 over a 4-byte mbstate (the bytes of a sequence so far).
+// Returns the byte count, 0 for NUL, (size_t)-2 incomplete, (size_t)-1 with
+// *err = EILSEQ.
+std::uint32_t Utf8Decode(std::uint8_t st[4], const std::uint8_t* s, std::uint32_t n,
+                         std::uint32_t* out, int* err) {
+    auto init = [&]() { return st[0] == 0 && st[1] == 0 && st[2] == 0 && st[3] == 0; };
+    auto illegal = [&]() {
+        std::memset(st, 0, 4);
+        *err = EILSEQ;
+        return 0xFFFFFFFFu;
+    };
+    if (n == 0) {
+        return 0;
+    }
+    if (init() && (s[0] & ~0x7Fu) == 0) {
+        *out = s[0];
+        return s[0] != 0 ? 1u : 0u;
+    }
+    const std::uint32_t so_far = st[2] ? 3u : st[1] ? 2u : st[0] ? 1u : 0u;
+    const std::uint8_t ch = so_far ? st[0] : s[0];
+    std::uint32_t mask = 0, length = 0, lower = 0;
+    if ((ch & 0x80) == 0) {
+        mask = 0x7F, length = 1, lower = 0;
+    } else if ((ch & 0xE0) == 0xC0) {
+        mask = 0x1F, length = 2, lower = 0x80;
+    } else if ((ch & 0xF0) == 0xE0) {
+        mask = 0x0F, length = 3, lower = 0x800;
+    } else if ((ch & 0xF8) == 0xF0) {
+        mask = 0x07, length = 4, lower = 0x10000;
+    } else {
+        return illegal();
+    }
+    const std::uint32_t wanted = length - so_far;
+    std::uint32_t i = 0;
+    for (; i < wanted && i < n; i++) {
+        if (!init() && (s[i] & 0xC0) != 0x80) {
+            return illegal();
+        }
+        st[so_far + i] = s[i];
+    }
+    if (i < wanted) {
+        return 0xFFFFFFFEu;
+    }
+    std::uint32_t c = st[0] & mask;
+    for (std::uint32_t k = 1; k < length; k++) {
+        c = (c << 6) | (st[k] & 0x3Fu);
+    }
+    if (c < lower || (c >= 0xD800 && c <= 0xDFFF) || c == 0xFFFE || c == 0xFFFF) {
+        return illegal();
+    }
+    *out = c;
+    std::memset(st, 0, 4);
+    return c == 0 ? 0u : wanted;
+}
+
+// bionic 7 c32rtomb: 1-4 bytes into out, or (size_t)-1 (EILSEQ).
+std::uint32_t Utf8Encode(std::uint32_t c, std::uint8_t out[4]) {
+    std::uint32_t length = 0;
+    std::uint8_t lead = 0;
+    if ((c & ~0x7Fu) == 0) {
+        out[0] = static_cast<std::uint8_t>(c);
+        return 1;
+    }
+    if (c <= 0x7FF) {
+        lead = 0xC0, length = 2;
+    } else if (c <= 0xFFFF) {
+        lead = 0xE0, length = 3;
+    } else if (c <= 0x1FFFFF) {
+        lead = 0xF0, length = 4;
+    } else {
+        return 0xFFFFFFFFu;
+    }
+    for (std::uint32_t i = length - 1; i > 0; i--) {
+        out[i] = static_cast<std::uint8_t>((c & 0x3F) | 0x80);
+        c >>= 6;
+    }
+    out[0] = static_cast<std::uint8_t>((c & 0xFF) | lead);
+    return length;
+}
+}  // namespace
+
+bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    // A NUL-terminated guest wide string: its length, or -1 if unreadable.
+    auto wlen = [&](std::uint32_t w) -> std::uint32_t {
+        for (std::uint32_t i = 0; i < 0x100000u; i++) {
+            if (!CheckRange(w + i * 4, 4, false)) {
+                return 0xFFFFFFFFu;
+            }
+            std::uint32_t c = 0;
+            std::memcpy(&c, H(w + i * 4), 4);
+            if (c == 0) {
+                return i;
+            }
+        }
+        return 0xFFFFFFFFu;
+    };
+    auto file = [&](std::uint32_t h) -> FILE* {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        const auto it = file_map_.find(h);
+        return it == file_map_.end() ? nullptr : it->second.f;
+    };
+    if (n == "mbrtowc") {
+        // (wchar_t* pwc, const char* s, size_t n, mbstate_t* ps); s NULL is
+        // mbrtowc(NULL, "", 1, ps).
+        std::uint8_t* st = mbrtowc_state_;
+        if (a3) {
+            if (!CheckRange(a3, 4, true)) {
+                return false;
+            }
+            st = H<std::uint8_t>(a3);
+        }
+        std::uint32_t pwc = a0, src = a1, len = a2;
+        static const std::uint8_t kEmpty = 0;
+        const std::uint8_t* bytes = &kEmpty;
+        if (src == 0) {
+            pwc = 0;
+            len = 1;
+        } else {
+            len = len > 4 ? 4 : len;  // a sequence is at most 4 bytes
+            if (len && !CheckRange(src, len, false)) {
+                // Fewer readable bytes than n: take what is mapped.
+                while (len && !CheckRange(src, len, false)) {
+                    len--;
+                }
+                if (!len) {
+                    return false;
+                }
+            }
+            bytes = H<const std::uint8_t>(src);
+        }
+        std::uint32_t c = 0;
+        int err = 0;
+        const std::uint32_t r = Utf8Decode(st, bytes, len, &c, &err);
+        if (err) {
+            SetGuestErrno(err);
+        } else if (pwc && r != 0xFFFFFFFEu) {
+            if (!CheckRange(pwc, 4, true)) {
+                return false;
+            }
+            std::memcpy(H(pwc), &c, 4);
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "wcrtomb") {
+        // (char* s, wchar_t wc, mbstate_t* ps); s NULL resets: returns 1.
+        if (a2 && !CheckRange(a2, 4, true)) {
+            return false;
+        }
+        std::uint8_t* st = a2 ? H<std::uint8_t>(a2) : nullptr;
+        if (a0 == 0) {
+            if (st) {
+                std::memset(st, 0, 4);
+            }
+            Ret(regs, 1);
+            return true;
+        }
+        if (st && (st[0] | st[1] | st[2] | st[3])) {
+            std::memset(st, 0, 4);
+            SetGuestErrno(EILSEQ);
+            Ret(regs, 0xFFFFFFFFu);
+            return true;
+        }
+        std::uint8_t b[4];
+        const std::uint32_t k = Utf8Encode(a1, b);
+        if (k == 0xFFFFFFFFu) {
+            SetGuestErrno(EILSEQ);
+            Ret(regs, k);
+            return true;
+        }
+        if (!CheckRange(a0, k, true)) {
+            return false;
+        }
+        std::memcpy(H(a0), b, k);
+        Ret(regs, k);
+        return true;
+    }
+    if (n == "wcscoll") {
+        // The C locale: wcscmp (wchar_t compares as a signed 32-bit int).
+        const std::uint32_t la = wlen(a0), lb = wlen(a1);
+        if (la == 0xFFFFFFFFu || lb == 0xFFFFFFFFu) {
+            return false;
+        }
+        for (std::uint32_t i = 0;; i++) {
+            std::int32_t x = 0, y = 0;
+            std::memcpy(&x, H(a0 + i * 4), 4);
+            std::memcpy(&y, H(a1 + i * 4), 4);
+            if (x != y || x == 0) {
+                Ret(regs, x < y ? 0xFFFFFFFFu : x > y ? 1u : 0u);
+                return true;
+            }
+        }
+    }
+    if (n == "wcsxfrm") {
+        // The C locale: wcslcpy(dst, src, n), the length of src.
+        const std::uint32_t l = wlen(a1);
+        if (l == 0xFFFFFFFFu) {
+            return false;
+        }
+        if (a2) {
+            const std::uint32_t cp = l < a2 ? l : a2 - 1;
+            if (!CheckRange(a0, (cp + 1) * 4, true)) {
+                return false;
+            }
+            std::memmove(H(a0), H(a1), cp * 4);
+            std::memset(H(a0 + cp * 4), 0, 4);
+        }
+        Ret(regs, l);
+        return true;
+    }
+    if (n == "wcsftime") {
+        // (wchar_t* s, size_t max, const wchar_t* fmt, const struct tm* t):
+        // as FreeBSD does it -- the format narrowed to UTF-8, strftime, the
+        // result widened back; 0 when it does not fit.
+        const std::uint32_t fl = wlen(a2);
+        if (fl == 0xFFFFFFFFu || !CheckRange(a3, 36, false)) {
+            return false;
+        }
+        std::string fmt;
+        for (std::uint32_t i = 0; i < fl; i++) {
+            std::uint32_t c = 0;
+            std::memcpy(&c, H(a2 + i * 4), 4);
+            std::uint8_t b[4];
+            const std::uint32_t k = Utf8Encode(c, b);
+            if (k == 0xFFFFFFFFu) {
+                SetGuestErrno(EILSEQ);
+                Ret(regs, 0);
+                return true;
+            }
+            fmt.append(reinterpret_cast<const char*>(b), k);
+        }
+        std::int32_t f[9] = {};
+        std::memcpy(f, H(a3), 36);
+        struct tm ht = {};
+        ht.tm_sec = f[0];
+        ht.tm_min = f[1];
+        ht.tm_hour = f[2];
+        ht.tm_mday = f[3];
+        ht.tm_mon = f[4];
+        ht.tm_year = f[5];
+        ht.tm_wday = f[6];
+        ht.tm_yday = f[7];
+        ht.tm_isdst = f[8];
+        char out[1024];
+        const std::size_t o = std::strftime(out, sizeof out, fmt.c_str(), &ht);
+        std::vector<std::uint32_t> wide;
+        std::uint8_t st[4] = {0, 0, 0, 0};
+        for (std::size_t i = 0; i < o;) {
+            std::uint32_t c = 0;
+            int err = 0;
+            const std::uint32_t k = Utf8Decode(st, reinterpret_cast<const std::uint8_t*>(out + i),
+                                               static_cast<std::uint32_t>(o - i), &c, &err);
+            if (err || k == 0 || k == 0xFFFFFFFEu) {
+                break;
+            }
+            wide.push_back(c);
+            i += k;
+        }
+        if (o == 0 || wide.size() + 1 > a1 || !CheckRange(a0, (wide.size() + 1) * 4, true)) {
+            Ret(regs, 0);
+            return true;
+        }
+        wide.push_back(0);
+        std::memcpy(H(a0), wide.data(), wide.size() * 4);
+        Ret(regs, static_cast<std::uint32_t>(wide.size() - 1));
+        return true;
+    }
+    // Wide stdio: the stream holds UTF-8; WEOF = 0xFFFFFFFF.
+    if (n == "putwc") {
+        FILE* f = file(a1);
+        std::uint8_t b[4];
+        const std::uint32_t k = f ? Utf8Encode(a0, b) : 0xFFFFFFFFu;
+        if (k == 0xFFFFFFFFu || std::fwrite(b, 1, k, f) != k) {
+            SetGuestErrno(f ? EILSEQ : EBADF);
+            Ret(regs, 0xFFFFFFFFu);
+            return true;
+        }
+        Ret(regs, a0);
+        return true;
+    }
+    if (n == "getwc") {
+        FILE* f = file(a0);
+        if (!f) {
+            SetGuestErrno(EBADF);
+            Ret(regs, 0xFFFFFFFFu);
+            return true;
+        }
+        std::uint8_t st[4] = {0, 0, 0, 0};
+        for (;;) {
+            const int ch = std::fgetc(f);
+            if (ch == EOF) {
+                Ret(regs, 0xFFFFFFFFu);
+                return true;
+            }
+            const std::uint8_t b = static_cast<std::uint8_t>(ch);
+            std::uint32_t c = 0;
+            int err = 0;
+            const std::uint32_t k = Utf8Decode(st, &b, 1, &c, &err);
+            if (err) {
+                SetGuestErrno(EILSEQ);
+                Ret(regs, 0xFFFFFFFFu);
+                return true;
+            }
+            if (k != 0xFFFFFFFEu) {
+                Ret(regs, c);
+                return true;
+            }
+        }
+    }
+    if (n == "ungetwc") {
+        // The host stream can push back one byte for sure: an ASCII
+        // character is pushed back; a wider one is refused (WEOF).
+        FILE* f = file(a1);
+        if (!f || a0 == 0xFFFFFFFFu || a0 > 0x7F || std::ungetc(static_cast<int>(a0), f) == EOF) {
+            Ret(regs, 0xFFFFFFFFu);
+            return true;
+        }
+        Ret(regs, a0);
+        return true;
+    }
     return true;
 }
 

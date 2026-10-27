@@ -275,6 +275,11 @@ public:
     // pointer (the caller halts).
     bool ZlibCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
     bool Sha1Call(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    // Wide characters (bionic 7: UTF-8 in every locale, wchar_t 32 bits,
+    // mbstate_t 4 bytes): mbrtowc wcrtomb wcscoll wcsxfrm wcsftime getwc
+    // putwc ungetwc. False: a wild guest pointer.
+    bool WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    std::uint8_t mbrtowc_state_[4] = {0, 0, 0, 0};  // for ps == NULL, as bionic's static
     std::mutex zlib_mu_;
     std::unordered_map<std::uint32_t, std::unique_ptr<z_stream>> zstreams_;
     std::unordered_map<std::string, std::uint32_t> zlib_msgs_;  // host msg -> guest copy

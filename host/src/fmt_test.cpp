@@ -363,6 +363,9 @@ int main() {
     mod.imports.push_back(abr::Import{"inflateInit_", true, 0, 0, 0});  // 94
     mod.imports.push_back(abr::Import{"inflate", true, 0, 0, 0});  // 95
     mod.imports.push_back(abr::Import{"inflateEnd", true, 0, 0, 0});  // 96
+    mod.imports.push_back(abr::Import{"mbrtowc", true, 0, 0, 0});  // 97
+    mod.imports.push_back(abr::Import{"wcrtomb", true, 0, 0, 0});  // 98
+    mod.imports.push_back(abr::Import{"fscanf", true, 0, 0, 0});  // 99
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1594,6 +1597,62 @@ int main() {
         got += " " + std::to_string(static_cast<std::int32_t>(call(85, kP)));
         Expect("chdir/getcwd/readdir", got,
                "0 /data/data/abr.dir/files/sub xyz 0 /data/data/abr.dir/files -1");
+    }
+
+    // --- UTF-8 as bionic 7: mbrtowc whole and split across calls (the
+    //     mbstate keeps the first byte: -2, then 1), wcrtomb of U+20AC; and
+    //     fscanf leaves the stream right after what it consumed.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0,
+                        std::uint32_t w = 0) {
+            const std::uint32_t a[4] = {x, y, z, w};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        const std::uint32_t kS = 0x10007600, kW = 0x10007610, kSt = 0x10007620, kB = 0x10007630;
+        std::memcpy(mem.host(kS), "\xc3\xa9", 3);
+        std::memset(mem.host(kSt), 0, 4);
+        std::string got = std::to_string(call(97, kW, kS, 2, kSt)) + ":";
+        std::uint32_t wc = 0;
+        std::memcpy(&wc, mem.host(kW), 4);
+        got += std::to_string(wc) + " ";
+        got += std::to_string(static_cast<std::int32_t>(call(97, kW, kS, 1, kSt))) + " ";
+        got += std::to_string(call(97, kW, kS + 1, 1, kSt)) + ":";
+        std::memcpy(&wc, mem.host(kW), 4);
+        got += std::to_string(wc) + " ";
+        const std::uint32_t k = call(98, kB, 0x20AC, 0);
+        char hx[16];
+        std::snprintf(hx, sizeof hx, "%u:%02x%02x%02x", k, *mem.host(kB), *mem.host(kB + 1),
+                      *mem.host(kB + 2));
+        got += hx;
+        Expect("mbrtowc/wcrtomb UTF-8", got, "2:233 -2 1:233 3:e282ac");
+
+        const std::string host_dir = TestTmp() + "/opencode/abr-dirtest";
+        if (std::FILE* f = std::fopen((host_dir + "/scan").c_str(), "w")) {
+            std::fputs("12 abc\n34", f);
+            std::fclose(f);
+        }
+        rt.SetFilesDir("/data/data/abr.dir/files", host_dir);
+        const std::uint32_t kPath = 0x10007700, kMode = 0x10007740, kFmt1 = 0x10007750,
+                            kFmt2 = 0x10007760, kI = 0x10007770, kStr = 0x10007780;
+        put(kPath, "/data/data/abr.dir/files/scan");
+        put(kMode, "r");
+        put(kFmt1, "%d %s");
+        put(kFmt2, "%d");
+        const std::uint32_t fp = call(21, kPath, kMode);
+        const std::uint32_t r1 = call(99, fp, kFmt1, kI, kStr);
+        std::int32_t i1 = 0;
+        std::memcpy(&i1, mem.host(kI), 4);
+        const std::string s1 = rt.H<const char>(kStr);
+        const std::uint32_t pos = call(31, fp);
+        const std::uint32_t r2 = call(99, fp, kFmt2, kI);
+        std::int32_t i2 = 0;
+        std::memcpy(&i2, mem.host(kI), 4);
+        const std::int32_t r3 = static_cast<std::int32_t>(call(99, fp, kFmt2, kI));
+        call(22, fp);
+        Expect("fscanf twice, then EOF",
+               std::to_string(r1) + " " + std::to_string(i1) + " " + s1 + " @" + std::to_string(pos) +
+                   " " + std::to_string(r2) + " " + std::to_string(i2) + " " + std::to_string(r3),
+               "2 12 abc @6 1 34 -1");
     }
 
     // --- stat: bionic arm32 struct stat is 104 bytes, st_size at +48.
