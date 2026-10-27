@@ -13007,8 +13007,16 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
     // lookups downstream (GetObjectClass/jni_arrays/jni_strings miss on
     // wrapped handles -> game diverges -> black after LOADING). Only
     // AudioOutput goes real until lookups delegate too.
-    if (cls.find("AudioOutput") == std::string::npos) {
-        return false;
+    {
+        // Every class gets a real object (it used to be Rovio's AudioOutput
+        // only; any other class got a mock without fields, and a Unity guest
+        // reads DisplayMetrics.widthPixels off its own new DisplayMetrics()).
+        // Each class is named once, so a gate shows what a title constructs.
+        static std::set<std::string> seen;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (seen.insert(cls).second) {
+            std::printf("[jni] NewObject %s: a real object\n", cls.c_str());
+        }
     }
     const std::string argstr = sig.substr(1, rp - 1);
     jclass rclazz = nullptr;
