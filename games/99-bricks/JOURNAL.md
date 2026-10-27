@@ -103,3 +103,33 @@ bias 0, unchanged. Also memalign/posix_memalign on the guest heap.
 
 -> libmono @01000000, libmain @02000000, libunity @03000000; all 236 inits run
 clean. NULL stays unmapped (first library above 16 MiB).
+
+## How Unity 4 starts, and what the host must provide (plan, 2026-10-27)
+
+Java: UnityPlayerNativeActivity (extends NativeActivity, lib_name "main") loads
+libmain. libmain's JNI_OnLoad RegisterNatives com/unity3d/player/NativeLoader
+(load/unload). NativeLoader.load -> dlopen("libmono.so"), dlopen("libunity.so"),
+libunity's JNI_OnLoad -> RegisterNatives for UnityPlayer. ANativeActivity_onCreate
+(libmain) receives the window/input queue; Unity renders with its own EGL context.
+FMOD audio: Java_org_fmod_* exports in libunity (plain exports, like Rovio's Java_*).
+
+Host work, in order:
+1. dlopen/dlsym/dlclose for guest libraries already loaded (handle per library,
+   dlsym from mod.defined); dlsym of a host function needs a run-time import
+   (new trampoline slot).
+2. RegisterNatives (D-13): a pool of host stubs taking (env, obj, x2..x7, d0..d7);
+   each registered method gets one, marshals its args per the JNI signature into
+   the 32-bit guest call (AAPCS32), returns per the return type.
+3. Host side of NativeActivity: our host is libmain for Java (APK lib name);
+   ANativeActivity_onCreate builds a guest ANativeActivity + callbacks table, the
+   host's real callbacks forward to the guest's (onStart/Resume/Pause/Stop/
+   Destroy, onNativeWindowCreated/Destroyed, onInputQueueCreated/Destroyed,
+   onWindowFocusChanged, onConfigurationChanged, onLowMemory).
+4. Handles for ANativeWindow / AInputQueue / AInputEvent / ALooper /
+   AConfiguration / ASensor*; forward A* calls to the real NDK functions.
+5. EGL forwarding (eglGetDisplay..eglSwapBuffers) with guest handles for
+   display/config/context/surface; RealGL then sees a current context on the
+   guest's render thread.
+6. Packaging: prepare-tree for a Unity title (our lib named libmain.so, the three
+   guest libs under assets/guestlib, manifest unchanged); MONO_DEBUG served by
+   getenv.
