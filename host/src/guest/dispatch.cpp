@@ -9505,6 +9505,19 @@ std::uint32_t Runtime::GuestSigaction(std::uint32_t sig, std::uint32_t act, std:
         std::uint32_t a[4];
         std::memcpy(a, H(act), 16);
         sig_acts_[sig] = GuestSigAct{a[0], a[1] & ~kUnblockable, a[2]};
+        // A handler for a signal other threads send (Boehm's suspend and
+        // restart signals, not a crash handler for a fault signal) turns
+        // interruptible waits on now, before any thread can block in a plain
+        // wait that a later signal would never reach. Fault-signal handlers
+        // (breakpad in the Rovio titles) leave the waits as they are.
+        constexpr std::uint32_t kFaultSignals = (1u << (4 - 1)) | (1u << (5 - 1)) |
+                                                (1u << (6 - 1)) | (1u << (7 - 1)) |
+                                                (1u << (8 - 1)) | (1u << (11 - 1)) |
+                                                (1u << (31 - 1));
+        if (a[0] > 1 && !(kFaultSignals & (1u << (sig - 1))) &&
+            !signals_in_use_.exchange(true, std::memory_order_acq_rel)) {
+            std::printf("[signal] guest handler for signal %u: interruptible waits on\n", sig);
+        }
     }
     return 0;
 }

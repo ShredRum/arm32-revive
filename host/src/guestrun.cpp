@@ -15,15 +15,18 @@
 //   $N           the r0 result of call N (0-based)
 //   @vm / @env   the runtime's mock JavaVM* / JNIEnv*
 //   j:text       a jstring
+// Pseudo-calls: @read32 addr, @str addr (print a word / a string), @sleep ms.
 // <symbol> may also be a guest address (0x...), e.g. a RegisterNatives target.
 // Each call prints "call N sym(...) -> r0 (hr)". The run stops at the first
 // call that does not return cleanly.
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <dynarmic/interface/A32/a32.h>
@@ -175,7 +178,16 @@ int main(int argc, char** argv) {
     std::vector<std::uint32_t> results;
     for (std::size_t c = 0; c < calls.size(); c++) {
         // Pseudo-calls that read results: @read32 <addr> (prints the word at
-        // addr, result = the word), @str <addr> (prints a guest C string).
+        // addr, result = the word), @str <addr> (prints a guest C string);
+        // @sleep <ms> waits.
+        if (calls[c].sym == "@sleep") {
+            // @sleep <ms>: lets guest threads run (result 0).
+            const long ms = calls[c].args.empty() ? 0 : std::strtol(calls[c].args[0].c_str(), nullptr, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            std::printf("call %zu @sleep(%ld)\n", c, ms);
+            results.push_back(0);
+            continue;
+        }
         if (calls[c].sym == "@read32" || calls[c].sym == "@str") {
             const std::string& a = calls[c].args.empty() ? std::string("0") : calls[c].args[0];
             std::uint32_t addr = 0;
