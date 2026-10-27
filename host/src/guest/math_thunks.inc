@@ -265,14 +265,14 @@
         Ret(regs, static_cast<std::uint32_t>(c));
         return;
     }
-    if (n == "__isfinite" || n == "__isfinitef" || n == "__isnan" || n == "__isnanf" ||
+    if (n == "__isfinite" || n == "__isfinitef" || n == "__isnan" || n == "isnan" || n == "__isnanf" ||
         n == "__isnormal" || n == "__isnormalf") {
         int c = 0;
         if (n == "__isfinite") {
             c = std::isfinite(xd);
         } else if (n == "__isfinitef") {
             c = std::isfinite(x);
-        } else if (n == "__isnan") {
+        } else if (n == "__isnan" || n == "isnan") {  // bionic exports both (double)
             c = std::isnan(xd);
         } else if (n == "__isnanf") {
             c = std::isnan(x);

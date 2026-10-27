@@ -3695,6 +3695,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
+    if (n == "__android_log_vprint") {
+        // (prio, tag, fmt, va_list): the arguments start at the va pointer.
+        const std::string fmt(GuestStr(a2));
+        GuestFmtArgs st{};
+        st.via_va = true;
+        st.ai = 3;
+        st.stack = a3;
+        std::size_t total = 0;
+        const std::string out = ExpandPrintf(fmt, st, &total);
+        std::printf("[glog] %s\n", out.c_str());
+        Ret(regs, static_cast<std::uint32_t>(total));
+        return;
+    }
     if (n == "__android_log_write") {
         // No printf spec: (prio, tag, text). Same sink as log_print.
         const std::string tag(GuestStr(a1));
@@ -5159,6 +5172,42 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
+            return;
+        }
+        if (n == "vfprintf") {
+            // vfprintf(stream, fmt, va_list): the arguments start at the va
+            // pointer, as in vprintf.
+            FILE* f = file_of(a0);
+            if (!f || !CheckRange(a1, 1, false)) {
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            const std::string fmt(GuestStr(a1));
+            GuestFmtArgs st{};
+            st.via_va = true;
+            st.ai = 2;
+            st.stack = a2;
+            const std::string out = ExpandPrintf(fmt, st);
+            Ret(regs, static_cast<std::uint32_t>(std::fwrite(out.data(), 1, out.size(), f)));
+            return;
+        }
+        if (n == "setvbuf") {
+            // setvbuf(stream, buf, mode, size): the mode reaches the host
+            // stream (bionic and the host share _IOFBF 0, _IOLBF 1, _IONBF
+            // 2); a guest buffer cannot back a host FILE, so the host picks.
+            // stdin/stdout/stderr are the host's own (stdout is apphost.log,
+            // unbuffered so a crash loses no line): accepted, left alone.
+            FILE* f = file_of(a0);
+            if (!f || a2 > 2) {
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            if (f == stdin || f == stdout || f == stderr) {
+                Ret(regs, 0);
+                return;
+            }
+            Ret(regs, static_cast<std::uint32_t>(
+                          std::setvbuf(f, nullptr, static_cast<int>(a2), a3)));
             return;
         }
         if (n == "fprintf") {
@@ -6995,6 +7044,151 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         Ret(regs, found);
         return;
+    }
+    // --- ctype functions (for guests that call them rather than reading
+    //     _ctype_). Bionic 7.1.2 takes them from OpenBSD's isctype.c: EOF
+    //     -> 0, otherwise the byte table entry of (unsigned char)c & mask.
+    if (n == "isalnum" || n == "isalpha" || n == "isspace" || n == "isxdigit") {
+        const std::int32_t c = static_cast<std::int32_t>(a0);
+        const std::uint8_t mask = n == "isalnum"   ? 0x07   // _U|_L|_N
+                                  : n == "isalpha" ? 0x03   // _U|_L
+                                  : n == "isspace" ? 0x08   // _S
+                                                   : 0x44;  // _N|_X
+        Ret(regs, c == -1 ? 0u : BionicCtypeClass(static_cast<std::uint8_t>(c)) & mask);
+        return;
+    }
+    if (n == "tolower") {
+        // OpenBSD tolower: values above 255 (and EOF) unchanged, else the
+        // _tolower_tab_ entry (C locale: only A-Z change).
+        Ret(regs, a0 >= 'A' && a0 <= 'Z' ? a0 + 32 : a0);
+        return;
+    }
+    {
+        // Bounded guest strlen; 0xFFFFFFFF = unreadable or unterminated.
+        auto guest_strlen = [&](std::uint32_t s) -> std::uint32_t {
+            for (std::uint32_t i = 0; i < 0x100000u; i++) {
+                if (!CheckRange(s + i, 1, false)) {
+                    return 0xFFFFFFFFu;
+                }
+                if (*H<const char>(s + i) == '\0') {
+                    return i;
+                }
+            }
+            return 0xFFFFFFFFu;
+        };
+        if (n == "strcasestr") {
+            const std::uint32_t hl = guest_strlen(a0), nl = guest_strlen(a1);
+            if (hl == 0xFFFFFFFFu || nl == 0xFFFFFFFFu) {
+                goto bad_ptr;
+            }
+            const char* h = H<const char>(a0);
+            const char* nd = H<const char>(a1);
+            auto low = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+            for (std::uint32_t i = 0; i + nl <= hl; i++) {
+                std::uint32_t k = 0;
+                while (k < nl && low(h[i + k]) == low(nd[k])) {
+                    k++;
+                }
+                if (k == nl) {
+                    Ret(regs, a0 + i);
+                    return;
+                }
+            }
+            Ret(regs, 0);
+            return;
+        }
+        if (n == "strsep") {
+            // strsep(char** stringp, delim): returns *stringp, ends that token at
+            // the first delimiter and points *stringp past it (NULL at the end).
+            if (!CheckRange(a0, 4, true)) {
+                goto bad_ptr;
+            }
+            std::uint32_t sp = 0;
+            std::memcpy(&sp, H(a0), 4);
+            if (sp == 0) {
+                Ret(regs, 0);
+                return;
+            }
+            const std::uint32_t sl = guest_strlen(sp), dl = guest_strlen(a1);
+            if (sl == 0xFFFFFFFFu || dl == 0xFFFFFFFFu) {
+                goto bad_ptr;
+            }
+            char* str = H<char>(sp);
+            const char* delim = H<const char>(a1);
+            const std::size_t tok = std::strcspn(str, delim);
+            std::uint32_t next = 0;
+            if (tok < sl) {
+                str[tok] = '\0';
+                next = sp + static_cast<std::uint32_t>(tok) + 1;
+            }
+            std::memcpy(H(a0), &next, 4);
+            Ret(regs, sp);
+            return;
+        }
+        if (n == "strxfrm") {
+            // C locale (OpenBSD): strlcpy(dst, src, n), or strlen(src) for n = 0.
+            const std::uint32_t sl = guest_strlen(a1);
+            if (sl == 0xFFFFFFFFu) {
+                goto bad_ptr;
+            }
+            if (a2 != 0) {
+                const std::uint32_t cp = sl < a2 ? sl : a2 - 1;
+                if (!CheckRange(a0, cp + 1, true)) {
+                    goto bad_ptr;
+                }
+                std::memmove(H(a0), H(a1), cp);
+                *H<char>(a0 + cp) = '\0';
+            }
+            Ret(regs, sl);
+            return;
+        }
+        if (n == "puts" || n == "putchar" || n == "perror") {
+            // stdout/stderr of the guest are the host's (as for printf).
+            if (n == "putchar") {
+                std::fputc(static_cast<int>(a0 & 0xFFu), stdout);
+                Ret(regs, a0 & 0xFFu);
+                return;
+            }
+            if (a0 != 0 && guest_strlen(a0) == 0xFFFFFFFFu) {
+                goto bad_ptr;
+            }
+            if (n == "puts") {
+                std::fputs(GuestStr(a0), stdout);
+                std::fputc('\n', stdout);
+                Ret(regs, '\n');  // OpenBSD puts: a non-negative value
+                return;
+            }
+            // perror(s): "s: <message for errno>", or just the message.
+            std::int32_t e = 0;
+            const std::uint32_t es = ErrnoSlot();
+            if (CheckRange(es, 4, false)) {
+                std::memcpy(&e, H(es), 4);
+            }
+            const std::string pre = (a0 != 0 && *GuestStr(a0)) ? std::string(GuestStr(a0)) + ": " : "";
+            std::fprintf(stderr, "%s%s\n", pre.c_str(), std::strerror(e));
+            RetVoid(regs);
+            return;
+        }
+        if (n == "div") {
+            // div_t div(int, int): an 8-byte struct, returned through the hidden
+            // pointer in r0 (AAPCS32); the operands are in r1, r2. The two cases
+            // C leaves undefined would trap the host divider: answer 0.
+            if (!CheckRange(a0, 8, true)) {
+                goto bad_ptr;
+            }
+            const std::int32_t num = static_cast<std::int32_t>(a1);
+            const std::int32_t den = static_cast<std::int32_t>(a2);
+            std::int32_t qr[2] = {0, 0};
+            if (den != 0 && !(num == INT32_MIN && den == -1)) {
+                qr[0] = num / den;
+                qr[1] = num % den;
+            } else {
+                std::printf("[svc] LOUD div(%d, %d) is undefined -- answering 0\n", num, den);
+            }
+            std::memcpy(H(a0), qr, 8);
+            RetVoid(regs);
+            return;
+        }
     }
     {
         // Locked: worker threads share stub_hits_ with main. Diagnostic layer

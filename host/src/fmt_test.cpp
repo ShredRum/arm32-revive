@@ -340,6 +340,11 @@ int main() {
     mod.imports.push_back(abr::Import{"__cxa_guard_acquire", true, 0, 0, 0});  // 72
     mod.imports.push_back(abr::Import{"__cxa_guard_release", true, 0, 0, 0});  // 73
     mod.imports.push_back(abr::Import{"__cxa_guard_abort", true, 0, 0, 0});    // 74
+    mod.imports.push_back(abr::Import{"isxdigit", true, 0, 0, 0});  // 75
+    mod.imports.push_back(abr::Import{"isspace", true, 0, 0, 0});  // 76
+    mod.imports.push_back(abr::Import{"strsep", true, 0, 0, 0});  // 77
+    mod.imports.push_back(abr::Import{"strxfrm", true, 0, 0, 0});  // 78
+    mod.imports.push_back(abr::Import{"div", true, 0, 0, 0});  // 79
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1111,6 +1116,45 @@ int main() {
         std::memcpy(&w, mem.host(g), 4);
         Expect("__cxa_guard acquire/abort/acquire/release/acquire", got + " bit0=" +
                std::to_string(w & 1u), "110 bit0=1");
+    }
+
+    // --- small libc: ctype masks as bionic's (isxdigit = _N|_X), strsep
+    //     cuts at the first delimiter, strxfrm = strlcpy in the C locale,
+    //     div returns through the hidden result pointer in r0.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0,
+                        std::uint32_t z = 0) {
+            const std::uint32_t a[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        std::string got;
+        for (int c : {int('a'), int('G'), int('5'), int(' '), int('\t'), -1}) {
+            got += call(75, static_cast<std::uint32_t>(c)) ? 'x' : '-';
+            got += call(76, static_cast<std::uint32_t>(c)) ? 's' : '-';
+        }
+        Expect("isxdigit/isspace on a G 5 space tab EOF", got, "x---x--s-s--");
+        const std::uint32_t str = kScratch + 0x900, sp = kScratch + 0x940, dl = kScratch + 0x950;
+        put(str, "ab,cd");
+        put(dl, ",;");
+        std::memcpy(mem.host(sp), &str, 4);
+        const std::uint32_t t1 = call(77, sp, dl);
+        std::uint32_t rest = 0;
+        std::memcpy(&rest, mem.host(sp), 4);
+        const std::uint32_t t2 = call(77, sp, dl);
+        std::uint32_t end = 1;
+        std::memcpy(&end, mem.host(sp), 4);
+        Expect("strsep tokens", std::string(rt.H<const char>(t1)) + "|" +
+               rt.H<const char>(t2) + "|" + std::to_string(rest - str) + "|" + std::to_string(end),
+               "ab|cd|3|0");
+        const std::uint32_t dst = kScratch + 0x960;
+        const std::uint32_t xl = call(78, dst, dl, 2);
+        Expect("strxfrm(n=2) copies 1 + NUL, returns strlen",
+               std::to_string(xl) + rt.H<const char>(dst), "2,");
+        const std::uint32_t q = kScratch + 0x980;
+        call(79, q, static_cast<std::uint32_t>(-7), 2);
+        std::int32_t qr[2] = {0, 0};
+        std::memcpy(qr, mem.host(q), 8);
+        Expect("div(-7, 2)", std::to_string(qr[0]) + " " + std::to_string(qr[1]), "-3 -1");
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read
