@@ -12208,6 +12208,86 @@ void Runtime::FlushDirectBuffers() {
     t_direct_used.clear();
 }
 
+void* Runtime::RealFieldId(std::uint32_t cookie, bool is_static) {
+#ifdef __ANDROID__
+    JNIEnv* re = RealEnv();
+    if (!re) {
+        return nullptr;
+    }
+    std::string d;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto& cache = is_static ? real_static_fields_ : real_fields_;
+        const auto c = cache.find(cookie);
+        if (c != cache.end()) {
+            return c->second;
+        }
+        const auto it = jni_methods_.find(cookie);
+        if (it == jni_methods_.end()) {
+            return nullptr;
+        }
+        d = it->second;
+    }
+    const std::string pfx = "field ";
+    if (d.compare(0, pfx.size(), pfx) != 0) {
+        return nullptr;
+    }
+    d = d.substr(pfx.size());
+    const std::size_t colon = d.find(':');
+    const std::size_t dot = colon == std::string::npos ? std::string::npos : d.rfind('.', colon);
+    if (dot == std::string::npos) {
+        return nullptr;
+    }
+    const std::string cls = d.substr(0, dot), name = d.substr(dot + 1, colon - dot - 1),
+                      sig = d.substr(colon + 1);
+    jclass rc = static_cast<jclass>(RealClass(re, cls));
+    if (!rc) {
+        return nullptr;
+    }
+    jfieldID f = is_static ? re->GetStaticFieldID(rc, name.c_str(), sig.c_str())
+                           : re->GetFieldID(rc, name.c_str(), sig.c_str());
+    if (!f || re->ExceptionCheck()) {
+        re->ExceptionClear();
+        return nullptr;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    (is_static ? real_static_fields_ : real_fields_)[cookie] = f;
+    return f;
+#else
+    (void)cookie;
+    (void)is_static;
+    return nullptr;
+#endif
+}
+
+std::uint32_t Runtime::JniArrayElemSize(std::uint32_t array_handle) {
+#ifdef __ANDROID__
+    JNIEnv* re = RealEnv();
+    jobject a = static_cast<jobject>(UnwrapObject(array_handle));
+    if (!re || !a) {
+        return 0;
+    }
+    jclass c = re->GetObjectClass(a);
+    const std::uint32_t h = c ? WrapObject(c) : 0;
+    if (c) {
+        re->DeleteLocalRef(c);
+    }
+    const std::string n = h ? JniClassName(h) : "";
+    if (n.size() == 2 && n[0] == '[') {
+        switch (n[1]) {
+            case 'Z': case 'B': return 1;
+            case 'C': case 'S': return 2;
+            case 'I': case 'F': return 4;
+            case 'J': case 'D': return 8;
+            default: break;
+        }
+    }
+#else
+    (void)array_handle;
+#endif
+    return 0;
+}
+
 void* Runtime::JavaObjectFor(std::uint32_t handle) {
     if (!handle) {
         return nullptr;
@@ -13362,6 +13442,35 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 222: {  // GetPrimitiveArrayCritical(env, array, isCopy) -> void*
+#ifdef __ANDROID__
+        // A real Java array: a guest copy (the element size from the array's
+        // class, "[I" and so on), copied back by ReleasePrimitiveArrayCritical.
+        if (JNIEnv* re = RealEnv()) {
+            if (jarray ra = static_cast<jarray>(UnwrapObject(a1))) {
+                const std::uint32_t es = JniArrayElemSize(a1);
+                const jsize n = re->GetArrayLength(ra);
+                const std::uint64_t bytes = std::uint64_t(n > 0 ? n : 0) * es;
+                const std::uint32_t gb = (es && bytes < 0x10000000u)
+                                             ? GuestMalloc(static_cast<std::uint32_t>(bytes ? bytes : 1))
+                                             : 0;
+                void* hp = gb ? re->GetPrimitiveArrayCritical(ra, nullptr) : nullptr;
+                if (hp) {
+                    std::memcpy(H(gb), hp, static_cast<std::size_t>(bytes));
+                    re->ReleasePrimitiveArrayCritical(ra, hp, JNI_ABORT);
+                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    array_pins_[gb] = ArrayPin{ra, nullptr, gb, static_cast<std::uint32_t>(bytes), -1};
+                } else if (gb) {
+                    GuestFree(gb);
+                }
+                re->ExceptionClear();
+                if (a2 != 0 && CheckRange(a2, 1, true)) {
+                    *H(a2) = 1;
+                }
+                Ret(regs, hp ? gb : 0);
+                return;
+            }
+        }
+#endif
         // Our arrays ARE guest buffers (NewByteArray/JniNewArray hand out the
         // buffer VA), so the critical pointer is the handle itself and isCopy
         // is JNI_FALSE (0). (Was mis-mapped as GetStringUTFRegion, which read a
@@ -13560,6 +13669,310 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         return;
     }
+    case 223: {  // ReleasePrimitiveArrayCritical(env, array, carray, mode)
+#ifdef __ANDROID__
+        ArrayPin pin;
+        bool have = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            const auto it = array_pins_.find(a2);
+            if (it != array_pins_.end() && it->second.type == -1) {
+                pin = it->second;
+                if (a3 != 1) {
+                    array_pins_.erase(it);
+                }
+                have = true;
+            }
+        }
+        JNIEnv* re = RealEnv();
+        if (have && re) {
+            if ((a3 == 0 || a3 == 1) && CheckRange(pin.guest_buf, pin.len, false)) {
+                void* hp = re->GetPrimitiveArrayCritical(static_cast<jarray>(pin.real_arr), nullptr);
+                if (hp) {
+                    std::memcpy(hp, H(pin.guest_buf), pin.len);
+                    re->ReleasePrimitiveArrayCritical(static_cast<jarray>(pin.real_arr), hp, 0);
+                }
+            }
+            if (a3 != 1) {
+                GuestFree(pin.guest_buf);
+            }
+            re->ExceptionClear();
+        }
+#endif
+        Ret(regs, 0);
+        return;
+    }
+    case 96: case 97: case 98: case 99: case 100: case 101: case 102: case 103:
+    case 104: case 105: case 106: case 107: case 108: case 109: case 110: case 111: case 112:
+    case 152: case 153: case 154: case 155: case 156: case 157: case 158: case 159:
+    case 160: case 161: case 162: {
+        // Get<T>Field 96-103 / Set<T>Field 104-112 (obj, field[, value]) and
+        // GetStatic{Float,Double}Field 152-153 / SetStatic<T>Field 154-162
+        // (class, field[, value]) on the real object or class. Values per
+        // AAPCS32 softfp: 32-bit in r2 (a float as its bits), 64-bit in r2:r3,
+        // an object as a guest handle; results the same way in r0(:r1).
+        const bool stat = fn >= 152;
+        const bool set = (fn >= 104 && fn <= 112) || fn >= 154;
+        // Type letter, JNI order: object, boolean, byte, char, short, int,
+        // long, float, double.
+        static const char kT[] = "LZBCSIJFD";
+        const char t = set ? kT[stat ? fn - 154 : fn - 104] : (stat ? kT[fn - 152 + 7] : kT[fn - 96 + 1]);
+#ifdef __ANDROID__
+        JNIEnv* re = RealEnv();
+        jfieldID fid = re ? static_cast<jfieldID>(RealFieldId(a2, stat)) : nullptr;
+        jobject obj = nullptr;
+        jclass cls = nullptr;
+        if (stat) {
+            const std::string cname = JniClassName(a1);
+            cls = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
+        } else {
+            obj = static_cast<jobject>(JavaObjectFor(a1));
+        }
+        if (fid && (stat ? cls != nullptr : obj != nullptr)) {
+            std::uint64_t out = 0;
+            if (!set) {
+                switch (t) {
+                    case 'Z': out = stat ? re->GetStaticBooleanField(cls, fid) : re->GetBooleanField(obj, fid); break;
+                    case 'B': out = static_cast<std::uint32_t>(static_cast<std::int32_t>(stat ? re->GetStaticByteField(cls, fid) : re->GetByteField(obj, fid))); break;
+                    case 'C': out = stat ? re->GetStaticCharField(cls, fid) : re->GetCharField(obj, fid); break;
+                    case 'S': out = static_cast<std::uint32_t>(static_cast<std::int32_t>(stat ? re->GetStaticShortField(cls, fid) : re->GetShortField(obj, fid))); break;
+                    case 'I': out = static_cast<std::uint32_t>(stat ? re->GetStaticIntField(cls, fid) : re->GetIntField(obj, fid)); break;
+                    case 'J': out = static_cast<std::uint64_t>(stat ? re->GetStaticLongField(cls, fid) : re->GetLongField(obj, fid)); break;
+                    case 'F': {
+                        const float f = stat ? re->GetStaticFloatField(cls, fid) : re->GetFloatField(obj, fid);
+                        std::uint32_t w = 0;
+                        std::memcpy(&w, &f, 4);
+                        out = w;
+                        break;
+                    }
+                    case 'D': {
+                        const double d = stat ? re->GetStaticDoubleField(cls, fid) : re->GetDoubleField(obj, fid);
+                        std::memcpy(&out, &d, 8);
+                        break;
+                    }
+                    default: break;
+                }
+                re->ExceptionClear();
+                Ret(regs, static_cast<std::uint32_t>(out), static_cast<std::uint32_t>(out >> 32));
+                return;
+            }
+            // Set (env, target, field, value): a 32-bit value is r3; a 64-bit
+            // one takes the next even pair, which is past r3: [sp], 8-aligned.
+            std::uint64_t v = a3;
+            if (t == 'J' || t == 'D') {
+                if (!CheckRange(regs[13], 8, false)) {
+                    Ret(regs, 0);
+                    return;
+                }
+                std::memcpy(&v, H(regs[13]), 8);
+            }
+            const std::uint32_t lo = static_cast<std::uint32_t>(v);
+            switch (t) {
+                case 'L': {
+                    jobject o = static_cast<jobject>(JavaObjectFor(lo));
+                    stat ? re->SetStaticObjectField(cls, fid, o) : re->SetObjectField(obj, fid, o);
+                    break;
+                }
+                case 'Z': stat ? re->SetStaticBooleanField(cls, fid, static_cast<jboolean>(lo & 0xFF)) : re->SetBooleanField(obj, fid, static_cast<jboolean>(lo & 0xFF)); break;
+                case 'B': stat ? re->SetStaticByteField(cls, fid, static_cast<jbyte>(lo)) : re->SetByteField(obj, fid, static_cast<jbyte>(lo)); break;
+                case 'C': stat ? re->SetStaticCharField(cls, fid, static_cast<jchar>(lo)) : re->SetCharField(obj, fid, static_cast<jchar>(lo)); break;
+                case 'S': stat ? re->SetStaticShortField(cls, fid, static_cast<jshort>(lo)) : re->SetShortField(obj, fid, static_cast<jshort>(lo)); break;
+                case 'I': stat ? re->SetStaticIntField(cls, fid, static_cast<jint>(lo)) : re->SetIntField(obj, fid, static_cast<jint>(lo)); break;
+                case 'J': stat ? re->SetStaticLongField(cls, fid, static_cast<jlong>(v)) : re->SetLongField(obj, fid, static_cast<jlong>(v)); break;
+                case 'F': {
+                    float f = 0;
+                    std::memcpy(&f, &lo, 4);
+                    stat ? re->SetStaticFloatField(cls, fid, f) : re->SetFloatField(obj, fid, f);
+                    break;
+                }
+                case 'D': {
+                    double d = 0;
+                    std::memcpy(&d, &v, 8);
+                    stat ? re->SetStaticDoubleField(cls, fid, d) : re->SetDoubleField(obj, fid, d);
+                    break;
+                }
+                default: break;
+            }
+            re->ExceptionClear();
+            Ret(regs, 0);
+            return;
+        }
+        std::printf("[jni] LOUD field fn#%u: no real field %08x on %08x -- halting\n", fn, a2, a1);
+        HaltGuest();
+        return;
+#endif
+        (void)t;
+        Ret(regs, 0);
+        return;
+    }
+#ifdef __ANDROID__
+    case 163: {  // NewString(env, const jchar* unicode, jsize len) -> jstring
+        JNIEnv* re = RealEnv();
+        if (!re || (a2 && !CheckRange(a1, a2 * 2u, false))) {
+            Ret(regs, 0);
+            return;
+        }
+        jstring js = re->NewString(a2 ? H<const jchar>(a1) : nullptr, static_cast<jsize>(a2));
+        const std::uint32_t h = js ? WrapObject(js) : 0;
+        if (js) {
+            re->DeleteLocalRef(js);
+        }
+        re->ExceptionClear();
+        Ret(regs, h);
+        return;
+    }
+    case 165:    // GetStringChars(env, str, isCopy) -> const jchar*
+    case 224: {  // GetStringCritical(env, str, isCopy)
+        // A guest copy of the UTF-16 text (NUL-terminated for convenience),
+        // freed by ReleaseStringChars/ReleaseStringCritical.
+        JNIEnv* re = RealEnv();
+        jstring js = static_cast<jstring>(JavaObjectFor(a1));
+        if (!re || !js) {
+            Ret(regs, 0);
+            return;
+        }
+        const jsize n = re->GetStringLength(js);
+        const std::uint32_t g = GuestMalloc(static_cast<std::uint32_t>(n) * 2u + 2u);
+        if (g) {
+            re->GetStringRegion(js, 0, n, H<jchar>(g));
+            std::memset(H(g + static_cast<std::uint32_t>(n) * 2u), 0, 2);
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            jni_char_copies_[g] = 1;
+        }
+        re->ExceptionClear();
+        if (a2 && CheckRange(a2, 1, true)) {
+            *H<std::uint8_t>(a2) = 1;
+        }
+        Ret(regs, g);
+        return;
+    }
+    case 166:    // ReleaseStringChars(env, str, chars)
+    case 225: {  // ReleaseStringCritical(env, str, carray)
+        bool ours = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            ours = jni_char_copies_.erase(a2) != 0;
+        }
+        if (ours) {
+            GuestFree(a2);
+        }
+        Ret(regs, 0);
+        return;
+    }
+    case 172: {  // NewObjectArray(env, len, elementClass, initial) -> jobjectArray
+        JNIEnv* re = RealEnv();
+        const std::string cname = JniClassName(a2);
+        jclass rc = (re && !cname.empty()) ? static_cast<jclass>(RealClass(re, cname)) : nullptr;
+        jobjectArray arr = rc ? re->NewObjectArray(static_cast<jsize>(a1), rc,
+                                                   static_cast<jobject>(JavaObjectFor(a3)))
+                              : nullptr;
+        const std::uint32_t h = arr ? WrapObject(arr) : 0;
+        if (arr) {
+            re->DeleteLocalRef(arr);
+        }
+        if (re) {
+            re->ExceptionClear();
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 173:    // GetObjectArrayElement(env, array, index) -> jobject
+    case 174: {  // SetObjectArrayElement(env, array, index, value)
+        JNIEnv* re = RealEnv();
+        jobjectArray arr = static_cast<jobjectArray>(UnwrapObject(a1));
+        std::uint32_t h = 0;
+        if (re && arr) {
+            if (fn == 173) {
+                jobject o = re->GetObjectArrayElement(arr, static_cast<jsize>(a2));
+                h = o ? WrapObject(o) : 0;
+                if (o) {
+                    re->DeleteLocalRef(o);
+                }
+            } else {
+                re->SetObjectArrayElement(arr, static_cast<jsize>(a2),
+                                          static_cast<jobject>(JavaObjectFor(a3)));
+            }
+            re->ExceptionClear();
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 175: case 177: case 178: case 179: case 180: case 181: case 182: {
+        // New<T>Array(env, len) for the non-byte types: a real Java array.
+        JNIEnv* re = RealEnv();
+        jarray arr = nullptr;
+        const jsize n = static_cast<jsize>(a1);
+        if (re) {
+            switch (fn) {
+                case 175: arr = re->NewBooleanArray(n); break;
+                case 177: arr = re->NewCharArray(n); break;
+                case 178: arr = re->NewShortArray(n); break;
+                case 179: arr = re->NewIntArray(n); break;
+                case 180: arr = re->NewLongArray(n); break;
+                case 181: arr = re->NewFloatArray(n); break;
+                default: arr = re->NewDoubleArray(n); break;
+            }
+            re->ExceptionClear();
+        }
+        const std::uint32_t h = arr ? WrapObject(arr) : 0;
+        if (arr) {
+            re->DeleteLocalRef(arr);
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 217:    // MonitorEnter(env, obj) -> jint
+    case 218: {  // MonitorExit(env, obj) -> jint
+        JNIEnv* re = RealEnv();
+        jobject o = static_cast<jobject>(JavaObjectFor(a1));
+        jint r = -1;
+        if (re && o) {
+            r = fn == 217 ? re->MonitorEnter(o) : re->MonitorExit(o);
+            re->ExceptionClear();
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return;
+    }
+    case 27: {  // AllocObject(env, clazz) -> jobject
+        JNIEnv* re = RealEnv();
+        const std::string cname = JniClassName(a1);
+        jclass rc = (re && !cname.empty()) ? static_cast<jclass>(RealClass(re, cname)) : nullptr;
+        jobject o = rc ? re->AllocObject(rc) : nullptr;
+        const std::uint32_t h = o ? WrapObject(o) : 0;
+        if (o) {
+            re->DeleteLocalRef(o);
+        }
+        if (re) {
+            re->ExceptionClear();
+        }
+        Ret(regs, h);
+        return;
+    }
+    case 229: {  // NewDirectByteBuffer(env, void* address, jlong capacity in r2:r3)
+        // Guest memory is host memory that stays put, so the buffer can view
+        // it directly.
+        JNIEnv* re = RealEnv();
+        const std::int64_t cap = static_cast<std::int64_t>(std::uint64_t(a2) | (std::uint64_t(a3) << 32));
+        jobject b = (re && cap > 0 && cap < 0x40000000 && CheckRange(a1, static_cast<std::uint32_t>(cap), true))
+                        ? re->NewDirectByteBuffer(H(a1), cap)
+                        : nullptr;
+        const std::uint32_t h = b ? WrapObject(b) : 0;
+        if (b) {
+            re->DeleteLocalRef(b);
+        }
+        if (re) {
+            re->ExceptionClear();
+        }
+        Ret(regs, h);
+        return;
+    }
+#endif
+    case 232:  // GetObjectRefType(env, obj): every guest-held object is a global ref
+        Ret(regs, a1 ? 2u : 0u);  // JNIGlobalRefType
+        return;
+    case 16:  // ExceptionDescribe(env): the bridge clears exceptions as they come
+        Ret(regs, 0);
+        return;
     case 18: {  // FatalError(env, msg): the JVM aborts the process
         std::printf("[jni] FATAL FatalError(\"%s\") -- halting\n",
                     CheckRange(a1, 1, false) ? GuestStr(a1) : "?");

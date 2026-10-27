@@ -465,6 +465,14 @@ public:
     // real class. Null for 0 or an unknown handle. Product host only.
     void* JavaObjectFor(std::uint32_t handle);
     std::string JniClassName(std::uint32_t handle);
+    // The real jfieldID behind a GetFieldID / GetStaticFieldID cookie
+    // ("field Cls.name:sig"), cached; null if the field does not resolve.
+    void* RealFieldId(std::uint32_t cookie, bool is_static);
+    // Element size of a real primitive array from its class ("[I" -> 4), 0
+    // for anything else.
+    std::uint32_t JniArrayElemSize(std::uint32_t array_handle);
+    std::unordered_map<std::uint32_t, void*> real_static_fields_;
+    std::unordered_map<std::uint32_t, std::uint32_t> jni_char_copies_;  // guest copy -> 1
     // Direct ByteBuffers (GetDirectBufferAddress): their memory is the
     // host's, outside the guest. Each gets a guest shadow of its capacity,
     // filled from the buffer when the guest asks for the address; whatever
