@@ -239,3 +239,12 @@ can see at run time, to check on the sandbox (all five, apphost.log + screenshot
   installs fault handlers only); CallSVC then stays on its old path.
 - `[svc] ... is not offered` / `prctl(...) is not offered` lines, if any, name a call
   a Rovio title makes that now fails honestly instead of returning 0.
+
+Sandbox gate 2026-10-27 (lib md5 c415b994..., after 6b807a7): all five titles boot to
+their menus (SW2 amz shows its usual offline dialog), markers 0, death.log empty,
+no `[signal]` / `not offered` / LOUD lines in any apphost.log. arm64 fmt_test: only
+the known statfs f_namelen 256 failure; the AAPCS64 fixed-argument read passes.
+Found on arm64 only: Boehm's GC_unmap (PROT_NONE MAP_FIXED over part of its heap) was
+refused by the one-entry-per-mmap table and Mono aborted; fixed by the per-page arena
+(6b807a7); Mono thread+GC stress 5/5 on arm64.
+Still to gate by playing: Rio's dynamic natives (RegisterNatives) and worker exits.
