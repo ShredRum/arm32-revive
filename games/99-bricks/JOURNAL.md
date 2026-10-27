@@ -191,3 +191,21 @@ truncate, prctl, select, epoll_*, sendfile, dlerror, wide-char), zlib
 (inflate*/deflate*/crc32), GL (stencil, blend separate, framebuffer status,
 mipmaps...), process/network refusals (fork/exec/popen/system, getaddrinfo...),
 then NDK input/looper/configuration/sensors/window and EGL (device).
+
+## GC and threads outside the guest (found 2026-10-27, open)
+
+Test: `mono_thread_create(domain, mono_gc_collect, 0)` while the guestrun main
+thread sleeps in the host (`@sleep`). The new thread's stop-the-world signals the
+main thread (Boehm knows it: it initialised Mono), but a thread that is not running
+guest code and not inside a guest wait cannot take a signal: the collection waited
+until the main thread re-entered the guest 1.5 s later. On the device that is every
+Java thread attached to Mono (UI thread, GL thread) between two native calls: a GC
+from another thread would stall until each of them calls native again, or forever
+if one waits in Java for that thread. Needed: deliver to a parked thread on its
+behalf (a helper runs the handler as that tid, on its guest stack; the thread's next
+entry into the guest waits until the handler is done, which keeps the world
+stopped). Also: key destructors do not run when a Java-attached thread exits
+(HostThreadRelease).
+
+Fixed the same day: waits became interruptible only with the first signal sent, so
+Mono's finalizer, already blocked in sem_wait, never acked (906d206).
