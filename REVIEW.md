@@ -41,6 +41,9 @@ USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 1. Diag-only leftovers (no effect on shipping builds): Rio diag VAs armed for every title under HARNESS_DIAG (G-05/G-11, F-34), build-id pin (F-pin, R-001), HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE), remaining DiagOn-gated TEMP-DIAG logs.
 2. Reliability (owner 2026-10-27: only fixes with no runtime cost; guards against cases that do not occur are not worth a cost): F-24/F-25, C-09, C-22 (risky: may stop a title that reads NULL today), D-08/D-12/D-13, static fields 145-151, G-08/G-09/G-14, H-04, F-35/F-36; E-04 and C-11 need a measured cost first; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
 3. S3/S4 leftovers per area; docs: games/*/JOURNAL.md stale AGENTS section references.
+4. Branch `bricks` (99 Bricks / Unity bring-up) changes the shared core. Before it
+   merges, gate all five titles on the sandbox; the Rovio-visible changes are listed
+   in games/99-bricks/JOURNAL.md ("Rovio-visible changes to gate").
 
 ## Areas and waves
 

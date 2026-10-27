@@ -219,3 +219,23 @@ takes it before executing guest code again, so it stays stopped while the handle
 waits in sigsuspend for the restart signal. Only while signals are in use. Test:
 the worker's collection now ends while the main thread still sleeps; 5/5 runs of six
 thread+GC rounds pass.
+
+## Rovio-visible changes to gate (branch bricks, 2026-10-27)
+
+Harness baselines are identical after every commit (init only). What a Rovio title
+can see at run time, to check on the sandbox (all five, apphost.log + screenshots):
+
+- RegisterNatives really binds (D-13): `[jni] RegisterNatives` lines; Rio's dynamic
+  natives now run guest code when Java calls them.
+- setvbuf on the host std streams is accepted and ignored; strxfrm copies (4 titles).
+- getpwuid returns a real passwd; pthread_getschedparam writes SCHED_OTHER/0;
+  pthread_setschedparam refuses a real-time policy with EPERM (all five).
+- closedir frees the guest DIR (leak fix); dlerror returns bionic's text; dlopen(NULL)
+  returns a handle (all five import opendir/closedir/dl*).
+- getenv: still NULL for every name; the `[env]` line now appears once per name.
+- Thread-key destructors run when a worker ends (POSIX), pthread_exit works.
+- Wide characters (mbrtowc/wcrtomb/...) answer as bionic instead of 0 (4 titles).
+- `[signal] ... interruptible waits on` must NOT appear for a Rovio title (breakpad
+  installs fault handlers only); CallSVC then stays on its old path.
+- `[svc] ... is not offered` / `prctl(...) is not offered` lines, if any, name a call
+  a Rovio title makes that now fails honestly instead of returning 0.
