@@ -55,14 +55,27 @@ bool DiagOn();
 // now the default). Keep all four UserConfig sites + the `flags:` print on this
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
-// Jit::Run, resumed after a code-cache invalidation. A guest that writes
-// code (a JIT such as Mono's) calls cacheflush; the Jit then stops at the
-// next block boundary with CacheInvalidation, drops the stale blocks, and
-// expects to be run again. That stop is not the guest's halt.
+// A guest signal is pending for the thread whose Jit stops with this reason.
+inline constexpr Dynarmic::HaltReason kSignalHalt = Dynarmic::HaltReason::UserDefined4;
+// Runs the guest handlers of this thread's pending, unblocked signals (no-op
+// when there are none or no Runtime is bound to the thread).
+void DeliverGuestSignalsHere();
+
+// Jit::Run, resumed after a code-cache invalidation or a guest signal. A
+// guest that writes code (a JIT such as Mono's) calls cacheflush; the Jit
+// then stops at the next block boundary with CacheInvalidation, drops the
+// stale blocks, and expects to be run again. A signal sent to this thread
+// stops it with kSignalHalt; the handler runs, then the thread continues.
+// Neither stop is the guest's halt.
 inline Dynarmic::HaltReason RunJit(Dynarmic::A32::Jit& jit) {
+    constexpr auto kResume = static_cast<std::uint32_t>(Dynarmic::HaltReason::CacheInvalidation) |
+                             static_cast<std::uint32_t>(kSignalHalt);
     for (;;) {
-        const auto hr = static_cast<std::uint32_t>(jit.Run()) &
-                        ~static_cast<std::uint32_t>(Dynarmic::HaltReason::CacheInvalidation);
+        const auto raw = static_cast<std::uint32_t>(jit.Run());
+        if (raw & static_cast<std::uint32_t>(kSignalHalt)) {
+            DeliverGuestSignalsHere();
+        }
+        const std::uint32_t hr = raw & ~kResume;
         if (hr != 0) {
             return static_cast<Dynarmic::HaltReason>(hr);
         }
@@ -173,6 +186,37 @@ public:
                             int host_fd, std::uint64_t offset);
     int GuestMunmap(std::uint32_t addr, std::uint32_t size);
     int GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot);
+
+    // --- Guest signals (arm32 numbering; sigset_t = 32 bits, signals 1-32).
+    // Off until a guest thread sends a signal (tkill/pthread_kill/kill): the
+    // Rovio titles never do, so their waits and run loops are unchanged.
+    // sigaction/sigprocmask keep the guest's dispositions and masks; a sent
+    // signal is pending on the target thread and runs its handler at the
+    // next delivery point: the target's Run stops (kSignalHalt), or a wait in
+    // a host call wakes between short slices (SignalsInUse). The handler runs
+    // on a callback Jit, on the target thread's own guest stack, seeded with
+    // its callee-saved registers (a GC that scans the stack sees them).
+    struct SigThread {
+        std::atomic<std::uint32_t> pending{0};
+        std::atomic<std::uint32_t> blocked{0};
+        std::atomic<Dynarmic::A32::Jit*> jit{nullptr};
+    };
+    void RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit);
+    // The thread's Jit is being deleted: signals must no longer touch it.
+    void ForgetSigThreadJit(std::uint32_t tid);
+    bool SignalsInUse() const { return signals_in_use_.load(std::memory_order_acquire); }
+    // True when this thread has a pending signal it may take now.
+    bool SignalDeliverable() const;
+    // Delivers this thread's deliverable signals; false if a handler halted
+    // the guest (the thread must stop).
+    bool DeliverPendingSignals();
+    std::uint32_t GuestSigaction(std::uint32_t sig, std::uint32_t act, std::uint32_t old);
+    std::uint32_t GuestSigmask(std::uint32_t how, std::uint32_t set, std::uint32_t old);
+    // Returns 0 or an errno value.
+    std::uint32_t GuestSendSignal(std::uint32_t tid, std::uint32_t sig);
+    std::uint32_t GuestSigsuspend(std::uint32_t mask_ptr);
+    // Slice length of an interruptible wait while signals are in use.
+    static constexpr long kSigSliceNs = 2000000;
     // This thread's guest stack (pthread_getattr_np); default: the main stack.
     static void SetThreadStack(std::uint32_t lo, std::uint32_t size);
     std::uint32_t PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
@@ -514,6 +558,19 @@ private:
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
     std::unordered_map<std::uint32_t, std::shared_ptr<sem_t>> sem_map_;  // GuestSem
+    struct GuestSigAct {
+        std::uint32_t handler = 0, mask = 0, flags = 0;
+    };
+    std::array<GuestSigAct, 33> sig_acts_{};
+    std::mutex sig_mu_;  // sig_acts_, sig_threads_
+    std::unordered_map<std::uint32_t, std::shared_ptr<SigThread>> sig_threads_;
+    std::atomic<bool> signals_in_use_{false};
+    // Runs entry(r0..r2) on a callback Jit with the given guest sp and
+    // callee-saved registers r4-r11; false if it did not return cleanly.
+    bool RunNestedOnStack(std::uint32_t entry, std::uint32_t r0, std::uint32_t r1,
+                          std::uint32_t r2, std::uint32_t sp, const std::uint32_t* r4_r11);
+    bool RunNested(std::uint32_t entry, std::uint32_t r0, std::uint32_t r1, std::uint32_t r2,
+                   std::uint32_t sp, const std::uint32_t* r4_r11, std::int32_t& out);
     bool network_allowed_ = false;  // SetNetworkAllowed
     // One shared code cache per Jit configuration (NewJit).
     struct CodeCacheEntry {

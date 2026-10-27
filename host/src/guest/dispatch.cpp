@@ -52,6 +52,9 @@ namespace abr {
 thread_local std::uint32_t t_cleanup_head = 0;
 thread_local std::uint32_t t_stack_lo = 0;
 thread_local std::uint32_t t_stack_size = 0;
+// Guest-signal state of this thread (RegisterSigThread) and its Runtime.
+thread_local std::shared_ptr<Runtime::SigThread> t_sig;
+thread_local Runtime* t_rt = nullptr;
 
 extern "C" {
 typedef void* dl_mspace;
@@ -87,7 +90,8 @@ static std::int64_t TimeWarp() {
 // normal frame path: Rio's nanosleep is a dead PLT entry (no call site), and
 // Space's sleep_ms is reached only on fatal paths right before abort(). So this
 // is fidelity, not a prod behaviour change.
-static void GuestSleepUs(std::uint64_t us) {
+static void GuestSleepUs(std::uint64_t us);
+static void GuestSleepUsPlain(std::uint64_t us) {
     if (!us) {
         return;
     }
@@ -1173,6 +1177,23 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
     return EINVAL;
 }
 
+namespace {
+// The CLOCK_REALTIME instant `ns` nanoseconds from now.
+struct timespec RealtimeIn(long ns) {
+    struct timespec t {};
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_nsec += ns;
+    while (t.tv_nsec >= 1000000000L) {
+        t.tv_nsec -= 1000000000L;
+        t.tv_sec++;
+    }
+    return t;
+}
+bool Before(const struct timespec& a, const struct timespec& b) {
+    return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
+}
+}  // namespace
+
 std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,
                                 std::uint32_t a2) {
     // A guest sem_t (4 bytes on arm32) is backed by a host sem_t, keyed by
@@ -1220,6 +1241,22 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
             }
             std::memcpy(H(a1), &v, 4);
         }
+    } else if (n == "sem_wait" && SignalsInUse()) {
+        // Interruptible: a handler runs between slices, then EINTR (sem_wait
+        // is never restarted after a handler, whatever SA_RESTART says).
+        for (;;) {
+            const struct timespec slice = RealtimeIn(kSigSliceNs);
+            r = ::sem_timedwait(s.get(), &slice);
+            if (r == 0 || (errno != ETIMEDOUT && errno != EINTR)) {
+                break;
+            }
+            if (SignalDeliverable()) {
+                DeliverPendingSignals();
+                errno = EINTR;
+                r = -1;
+                break;
+            }
+        }
     } else if (n == "sem_wait") {
         do {
             r = ::sem_wait(s.get());
@@ -1237,9 +1274,28 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
         struct timespec ts {};
         ts.tv_sec = g[0];
         ts.tv_nsec = g[1];
-        do {
-            r = ::sem_timedwait(s.get(), &ts);
-        } while (r != 0 && errno == EINTR);
+        for (;;) {
+            struct timespec slice = ts;
+            if (SignalsInUse()) {
+                const struct timespec soon = RealtimeIn(kSigSliceNs);
+                if (Before(soon, ts)) {
+                    slice = soon;
+                }
+            }
+            r = ::sem_timedwait(s.get(), &slice);
+            if (r == 0 || (errno != ETIMEDOUT && errno != EINTR)) {
+                break;
+            }
+            if (SignalDeliverable()) {
+                DeliverPendingSignals();
+                errno = EINTR;
+                r = -1;
+                break;
+            }
+            if (errno == ETIMEDOUT && !Before(slice, ts)) {
+                break;  // the caller's deadline
+            }
+        }
     }
     if (r != 0) {
         SetGuestErrno(errno);
@@ -3911,19 +3967,38 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, r);
         return;
     }
-    if (n == "sigaction" || n == "sigprocmask") {
-        // Guest signal handlers are never delivered (signals belong to the
-        // host process); report "no previous handler / empty mask" instead
-        // of leaving the out-parameter unwritten.
-        const std::uint32_t old = a2;
-        const std::size_t sz = (n == "sigaction") ? 16 : 4;
-        if (old != 0) {
-            if (!CheckRange(old, sz, true)) {
-                goto bad_ptr;
-            }
-            std::memset(H(old), 0, sz);
+    // Guest signals: dispositions, masks and thread-directed signals (see
+    // Runtime::GuestSendSignal). sigaction/sigprocmask/tkill/kill/sigsuspend
+    // return -1 + errno; pthread_sigmask/pthread_kill return the errno.
+    if (n == "sigaction" || n == "sigprocmask" || n == "pthread_sigmask" || n == "tkill" ||
+        n == "pthread_kill" || n == "kill" || n == "sigsuspend") {
+        std::uint32_t e = 0;
+        if (n == "sigaction") {
+            e = GuestSigaction(a0, a1, a2);
+        } else if (n == "sigprocmask" || n == "pthread_sigmask") {
+            e = GuestSigmask(a0, a1, a2);
+        } else if (n == "tkill" || n == "pthread_kill") {
+            e = GuestSendSignal(a0, a1);
+        } else if (n == "kill") {
+            // Only this process exists for the guest: a signal to it goes to
+            // the calling thread, as the kernel picks one that can take it.
+            e = (a0 == static_cast<std::uint32_t>(::getpid()) || a0 == 0)
+                    ? GuestSendSignal(GuestTid(), a1)
+                    : static_cast<std::uint32_t>(ESRCH);
+        } else {
+            e = GuestSigsuspend(a0);
         }
-        Ret(regs, 0);
+        if (e == EFAULT) {
+            goto bad_ptr;
+        }
+        if (n == "pthread_sigmask" || n == "pthread_kill") {
+            Ret(regs, e);
+        } else if (e != 0) {
+            SetGuestErrno(static_cast<int>(e));
+            Ret(regs, 0xFFFFFFFFu);
+        } else {
+            Ret(regs, 0);
+        }
         return;
     }
     if (n == "raise") {
@@ -6984,7 +7059,23 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     if (n == "pthread_mutex_lock") {
         pend_lock_obj_ = obj;
         pend_lock_tid_ = GuestTid();
-        const int r = pthread_mutex_lock(m.get());
+        int r = 0;
+        if (SignalsInUse()) {
+            // Interruptible (see PthreadCond): handlers run between slices,
+            // then the lock attempt goes on (a mutex lock is never EINTR).
+            for (;;) {
+                const struct timespec slice = RealtimeIn(kSigSliceNs);
+                r = pthread_mutex_timedlock(m.get(), &slice);
+                if (r != ETIMEDOUT) {
+                    break;
+                }
+                if (SignalDeliverable()) {
+                    DeliverPendingSignals();
+                }
+            }
+        } else {
+            r = pthread_mutex_lock(m.get());
+        }
         if (r == 0) {
             // The owner is recorded WHILE the pending witness is still set,
             // and the witness is cleared only afterwards: a destroy in the
@@ -7121,10 +7212,37 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         return EINVAL;
     }
     const std::shared_ptr<pthread_mutex_t> mx = mit->second;
+    // While guest signals are in use, a wait sleeps in short slices; a
+    // pending signal then runs its handler with the mutex released (as the
+    // kernel runs it while the thread sleeps in the futex) and the wait
+    // returns 0, a spurious wakeup the caller's predicate loop absorbs.
+    auto sliced = [&](const struct timespec* deadline_mono) -> int {
+        for (;;) {
+            struct timespec now {};
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            struct timespec slice = now;
+            slice.tv_nsec += kSigSliceNs;
+            if (slice.tv_nsec >= 1000000000L) {
+                slice.tv_nsec -= 1000000000L;
+                slice.tv_sec++;
+            }
+            const bool last = deadline_mono && !Before(slice, *deadline_mono);
+            const int r = pthread_cond_timedwait(cv.get(), mx.get(), last ? deadline_mono : &slice);
+            if (r != ETIMEDOUT || last) {
+                return r;
+            }
+            if (SignalDeliverable()) {
+                pthread_mutex_unlock(mx.get());
+                DeliverPendingSignals();
+                pthread_mutex_lock(mx.get());
+                return 0;
+            }
+        }
+    };
     if (n == "pthread_cond_wait") {
         // Untimed wait: block until signalled, as bionic does.
         mutex_.unlock();
-        const int r = pthread_cond_wait(cv.get(), mx.get());
+        const int r = SignalsInUse() ? sliced(nullptr) : pthread_cond_wait(cv.get(), mx.get());
         mutex_.lock();
         return static_cast<std::uint32_t>(r);
     }
@@ -7160,7 +7278,8 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             ts.tv_nsec = static_cast<long>(mono_ns % 1000000000LL);
         }
         mutex_.unlock();
-        const int r = pthread_cond_timedwait(cv.get(), mx.get(), &ts);
+        const int r =
+            SignalsInUse() ? sliced(&ts) : pthread_cond_timedwait(cv.get(), mx.get(), &ts);
         mutex_.lock();
         return static_cast<std::uint32_t>(r);
     }
@@ -7971,10 +8090,31 @@ std::uint32_t Runtime::HeapCorruptionPc() {
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
     t_active_jit = jit;
     t_tid = tid;
+    if (jit) {
+        RegisterSigThread(tid, jit);
+    } else if (t_sig) {
+        std::lock_guard<std::mutex> l(sig_mu_);  // see GuestSendSignal
+        t_sig->jit.store(nullptr, std::memory_order_release);  // its Jit is going away
+    }
 }
 
 bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb,
                             std::int32_t& out) {
+    return RunNested(compar, pa, pb, 0, 0, nullptr, out);
+}
+
+bool Runtime::RunNestedOnStack(std::uint32_t entry, std::uint32_t r0, std::uint32_t r1,
+                               std::uint32_t r2, std::uint32_t sp, const std::uint32_t* r4_r11) {
+    std::int32_t ignored = 0;
+    return RunNested(entry, r0, r1, r2, sp, r4_r11, ignored);
+}
+
+// Runs guest entry(r0, r1, r2) on a callback Jit and returns r0 in out.
+// sp == 0: the slot's own stack; otherwise that guest sp, with r4-r11 seeded
+// from r4_r11 (a signal handler on the interrupted thread's stack).
+bool Runtime::RunNested(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb,
+                        std::uint32_t pc_arg, std::uint32_t sp, const std::uint32_t* r4_r11,
+                        std::int32_t& out) {
     // Cheap validation first (wild compar = guest bug, not a callback).
     if (!compar || !IsCodeAddress(compar & ~std::uint32_t(1))) {
         cb_last_hr_ = -2;  // rejected before first Run
@@ -8040,10 +8180,16 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
     jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
     auto& regs = jit->Regs();
     regs.fill(0);
-    regs[13] = slot->stack + 0x200000u - 8;
+    regs[13] = sp ? sp : slot->stack + 0x200000u - 8;
     regs[14] = mod_.halt_va;
     regs[0] = pa;
     regs[1] = pb;
+    regs[2] = pc_arg;
+    if (r4_r11) {
+        for (int i = 0; i < 8; i++) {
+            regs[4 + i] = r4_r11[i];
+        }
+    }
     if (compar & 1u) {
         std::uint32_t cpsr = jit->Cpsr();
         jit->SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
@@ -8070,6 +8216,262 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
     }
     out = static_cast<std::int32_t>(regs[0]);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Guest signals (see dispatch.h). arm32 Linux numbers: SIGKILL 9, SIGSTOP 19;
+// sigaction flags SA_SIGINFO 4, SA_ONSTACK 0x08000000, SA_RESTART 0x10000000,
+// SA_NODEFER 0x40000000, SA_RESETHAND 0x80000000; how SIG_BLOCK 0, SIG_UNBLOCK
+// 1, SIG_SETMASK 2. Bit (sig - 1) of a 32-bit mask stands for signal sig.
+
+void DeliverGuestSignalsHere() {
+    if (t_rt) {
+        t_rt->DeliverPendingSignals();
+    }
+}
+
+namespace {
+constexpr std::uint32_t kSigBit(std::uint32_t sig) { return 1u << (sig - 1); }
+constexpr std::uint32_t kUnblockable = (1u << (9 - 1)) | (1u << (19 - 1));
+bool SigDefaultIgnores(std::uint32_t sig) {
+    return sig == 17 || sig == 18 || sig == 23 || sig == 28;  // CHLD CONT URG WINCH
+}
+}  // namespace
+
+void Runtime::RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit) {
+    std::lock_guard<std::mutex> l(sig_mu_);
+    std::shared_ptr<SigThread>& e = sig_threads_[tid];
+    if (!e) {
+        e = std::make_shared<SigThread>();
+    }
+    e->jit.store(jit, std::memory_order_release);
+    t_sig = e;
+    t_rt = this;
+}
+
+void Runtime::ForgetSigThreadJit(std::uint32_t tid) {
+    std::lock_guard<std::mutex> l(sig_mu_);
+    const auto it = sig_threads_.find(tid);
+    if (it != sig_threads_.end()) {
+        it->second->jit.store(nullptr, std::memory_order_release);
+    }
+}
+
+// Guest sleeps: while guest signals are in use, in slices with handlers run
+// in between (the sleep then goes on, as SA_RESTART would have it).
+static void GuestSleepUs(std::uint64_t us) {
+    if (!t_rt || !t_rt->SignalsInUse()) {
+        GuestSleepUsPlain(us);
+        return;
+    }
+    const std::uint64_t slice_us = static_cast<std::uint64_t>(Runtime::kSigSliceNs / 1000);
+    while (us > 0) {
+        const std::uint64_t now = us < slice_us ? us : slice_us;
+        GuestSleepUsPlain(now);
+        us -= now;
+        if (t_rt->SignalDeliverable()) {
+            t_rt->DeliverPendingSignals();
+        }
+    }
+}
+
+bool Runtime::SignalDeliverable() const {
+    return t_sig && (t_sig->pending.load(std::memory_order_acquire) &
+                     ~t_sig->blocked.load(std::memory_order_relaxed)) != 0;
+}
+
+bool Runtime::DeliverPendingSignals() {
+    if (!t_sig) {
+        return true;
+    }
+    for (;;) {
+        const std::uint32_t avail = t_sig->pending.load(std::memory_order_acquire) &
+                                    ~t_sig->blocked.load(std::memory_order_relaxed);
+        if (avail == 0) {
+            return true;
+        }
+        const std::uint32_t sig = static_cast<std::uint32_t>(__builtin_ctz(avail)) + 1;
+        t_sig->pending.fetch_and(~kSigBit(sig), std::memory_order_acq_rel);
+        GuestSigAct act;
+        {
+            std::lock_guard<std::mutex> l(sig_mu_);
+            act = sig_acts_[sig];
+            if (act.handler > 1 && (act.flags & 0x80000000u)) {
+                sig_acts_[sig] = GuestSigAct{};  // SA_RESETHAND
+            }
+        }
+        if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
+            continue;  // SIG_IGN, or ignored by default
+        }
+        if (act.handler == 0) {
+            std::printf("[signal] FATAL signal %u with the default action -- halting\n", sig);
+            HaltGuest();
+            return false;
+        }
+        Dynarmic::A32::Jit* cur = t_active_jit;
+        if (!cur) {
+            return true;
+        }
+        const auto& regs = cur->Regs();
+        std::uint32_t saved[8];
+        for (int i = 0; i < 8; i++) {
+            saved[i] = regs[4 + i];
+        }
+        // Frame below the interrupted sp (128-byte red zone): siginfo (128 B)
+        // and a ucontext whose mcontext holds the interrupted registers.
+        constexpr std::uint32_t kInfo = 128, kUc = 0x300;
+        const std::uint32_t info = (regs[13] - 128 - kInfo) & ~7u;
+        const std::uint32_t uc = (info - kUc) & ~7u;
+        if (!CheckRange(uc, kUc + kInfo, true)) {
+            std::printf("[signal] LOUD no room for a signal frame below sp=%08x -- halting\n",
+                        regs[13]);
+            HaltGuest();
+            return false;
+        }
+        std::memset(H(uc), 0, kUc + kInfo);
+        const std::int32_t si[3] = {static_cast<std::int32_t>(sig), 0, -6 /*SI_TKILL*/};
+        std::memcpy(H(info), si, sizeof(si));
+        // ucontext: uc_flags, uc_link, uc_stack (12 B), then mcontext:
+        // trap_no, error_code, oldmask, r0-r15, cpsr, fault_address.
+        const std::uint32_t old_blocked = t_sig->blocked.load(std::memory_order_relaxed);
+        std::memcpy(H(uc + 28), &old_blocked, 4);
+        for (int i = 0; i < 16; i++) {
+            std::memcpy(H(uc + 32 + 4 * i), &regs[i], 4);
+        }
+        const std::uint32_t cpsr = cur->Cpsr();
+        std::memcpy(H(uc + 96), &cpsr, 4);
+        std::memcpy(H(uc + 104), &old_blocked, 4);  // uc_sigmask
+        std::uint32_t during = old_blocked | act.mask;
+        if (!(act.flags & 0x40000000u)) {
+            during |= kSigBit(sig);  // SA_NODEFER clear: block it while it runs
+        }
+        t_sig->blocked.store(during & ~kUnblockable, std::memory_order_relaxed);
+        const bool ok = RunNestedOnStack(act.handler, sig, info, uc, uc & ~7u, saved);
+        t_sig->blocked.store(old_blocked, std::memory_order_relaxed);
+        if (!ok) {
+            std::printf("[signal] LOUD handler %08x for signal %u did not return -- halting\n",
+                        act.handler, sig);
+            HaltGuest();
+            return false;
+        }
+    }
+}
+
+std::uint32_t Runtime::GuestSigaction(std::uint32_t sig, std::uint32_t act, std::uint32_t old) {
+    // arm32 struct sigaction: { handler; sa_mask (32 bits); sa_flags; sa_restorer; }.
+    if (sig < 1 || sig > 64 || (act && (sig == 9 || sig == 19))) {
+        return EINVAL;
+    }
+    if ((old && !CheckRange(old, 16, true)) || (act && !CheckRange(act, 16, false))) {
+        return EFAULT;
+    }
+    if (sig > 32) {
+        // Real-time signals: valid, but no guest sends them (the 32-bit
+        // sigset_t cannot name them); accepted as before, nothing kept.
+        if (old) {
+            std::memset(H(old), 0, 16);
+        }
+        return 0;
+    }
+    std::lock_guard<std::mutex> l(sig_mu_);
+    if (old) {
+        const std::uint32_t o[4] = {sig_acts_[sig].handler, sig_acts_[sig].mask,
+                                    sig_acts_[sig].flags, 0};
+        std::memcpy(H(old), o, 16);
+    }
+    if (act) {
+        std::uint32_t a[4];
+        std::memcpy(a, H(act), 16);
+        sig_acts_[sig] = GuestSigAct{a[0], a[1] & ~kUnblockable, a[2]};
+    }
+    return 0;
+}
+
+std::uint32_t Runtime::GuestSigmask(std::uint32_t how, std::uint32_t set, std::uint32_t old) {
+    if ((old && !CheckRange(old, 4, true)) || (set && !CheckRange(set, 4, false))) {
+        return EFAULT;
+    }
+    if (!t_sig) {
+        // A thread the runtime does not track: nothing can be pending for it.
+        if (old) {
+            std::memset(H(old), 0, 4);
+        }
+        return 0;
+    }
+    const std::uint32_t cur = t_sig->blocked.load(std::memory_order_relaxed);
+    if (old) {
+        std::memcpy(H(old), &cur, 4);
+    }
+    if (!set) {
+        return 0;
+    }
+    std::uint32_t m = 0;
+    std::memcpy(&m, H(set), 4);
+    std::uint32_t next = cur;
+    if (how == 0) {
+        next = cur | m;
+    } else if (how == 1) {
+        next = cur & ~m;
+    } else if (how == 2) {
+        next = m;
+    } else {
+        return EINVAL;
+    }
+    t_sig->blocked.store(next & ~kUnblockable, std::memory_order_relaxed);
+    if (SignalDeliverable()) {
+        if (Dynarmic::A32::Jit* j = t_active_jit) {
+            j->HaltExecution(kSignalHalt);  // deliver once back in guest code
+        }
+    }
+    return 0;
+}
+
+std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
+    if (sig > 32) {
+        return EINVAL;
+    }
+    // Under sig_mu_ throughout: ForgetSigThreadJit takes it too, so the
+    // target's Jit cannot be deleted while it is being stopped here.
+    std::lock_guard<std::mutex> l(sig_mu_);
+    const auto it = sig_threads_.find(tid);
+    if (it == sig_threads_.end()) {
+        return ESRCH;
+    }
+    if (sig == 0) {
+        return 0;  // existence check
+    }
+    const GuestSigAct act = sig_acts_[sig];
+    if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
+        return 0;  // discarded at generation, as the kernel does
+    }
+    signals_in_use_.store(true, std::memory_order_release);
+    it->second->pending.fetch_or(kSigBit(sig), std::memory_order_acq_rel);
+    if (Dynarmic::A32::Jit* j = it->second->jit.load(std::memory_order_acquire)) {
+        j->HaltExecution(kSignalHalt);
+    }
+    return 0;
+}
+
+std::uint32_t Runtime::GuestSigsuspend(std::uint32_t mask_ptr) {
+    // Wait with the given mask until a signal it does not block is delivered;
+    // always ends with -1/EINTR.
+    if (!CheckRange(mask_ptr, 4, false)) {
+        return EFAULT;
+    }
+    if (!t_sig) {
+        return EINTR;
+    }
+    std::uint32_t m = 0;
+    std::memcpy(&m, H(mask_ptr), 4);
+    const std::uint32_t old = t_sig->blocked.load(std::memory_order_relaxed);
+    t_sig->blocked.store(m & ~kUnblockable, std::memory_order_relaxed);
+    while (!SignalDeliverable()) {
+        struct timespec ts {0, kSigSliceNs};
+        ::nanosleep(&ts, nullptr);
+    }
+    DeliverPendingSignals();
+    t_sig->blocked.store(old, std::memory_order_relaxed);
+    return EINTR;
 }
 
 std::uint32_t Runtime::ErrnoSlot() {
@@ -8220,6 +8622,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         const std::unique_ptr<Dynarmic::A32::Jit> jit_owner = NewJit(cfg);
         Dynarmic::A32::Jit& jit = *jit_owner;
         t_active_jit = &jit;
+        RegisterSigThread(tid, &jit);
         // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
         // workers; racy values, liveness only — same caveat as main beat).
         if (std::getenv("HARNESS_WBEAT")) {
@@ -8270,6 +8673,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         // joiner only needs st->retval). Idempotent with join/detach.
         ReapThreadStack(tid);
         t_active_jit = nullptr;
+        ForgetSigThreadJit(tid);
         ReleaseCpuId(cpu_id);  // the Jit no longer runs
         {
             // A detached thread is gone once it ends (a joinable one waits

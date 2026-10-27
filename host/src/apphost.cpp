@@ -179,6 +179,9 @@ void HostThreadRelease(void* p) {
     }
     Dynarmic::A32::Jit* dying = st->jit;
     g_upd_jit.compare_exchange_strong(dying, nullptr);
+    if (g_rt) {
+        g_rt->ForgetSigThreadJit(st->tid);
+    }
     delete st->jit;
     st->jit = nullptr;
     if (g_rt && st->cpu_id != SIZE_MAX) {

@@ -76,3 +76,16 @@ Design (Rovio unaffected: everything stays off until a guest installs a handler)
    deliver it, restore mask, return -1/EINTR.
 5. Test with guestrun: mono_gc_collect with the finalizer thread alive; then a C#
    allocation loop that triggers GC by itself.
+
+## Guest signals implemented (2026-10-27)
+
+Runtime: sigaction/sigprocmask/pthread_sigmask keep real dispositions and per-thread
+masks; tkill/pthread_kill/kill mark a signal pending on the target and stop its Jit
+(kSignalHalt); RunJit runs the handler; waits (sem, cond, mutex, sleeps) go in 2 ms
+slices once any signal was sent, with handlers between slices; sigsuspend. The
+handler runs on a callback Jit (RunNested) on the target's own guest stack with its
+r4-r11, so the GC's register spill and stack scan see live values. Rovio titles
+never send signals: their paths are unchanged (harness baselines identical).
+
+Test (guestrun): two mono_gc_collect with the finalizer thread alive pass; a string
+held by a GC handle survives both and still runs ToUpper -> "SURVIVES THE GC".
