@@ -14574,8 +14574,27 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 fdesc = it->second;
             }
         }
-        // The game does NOT null-check (Build.MANUFACTURER NULL -> instant
-        // GetStringLength(NULL) death), so never return NULL here.
+#ifdef __ANDROID__
+        // The real object first (Unity reads fields of what it gets here).
+        if (JNIEnv* re = RealEnv()) {
+            const std::string cname = JniClassName(a1);
+            jclass rc = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
+            jfieldID fid = rc ? static_cast<jfieldID>(RealFieldId(a2, true)) : nullptr;
+            jobject o = fid ? re->GetStaticObjectField(rc, fid) : nullptr;
+            re->ExceptionClear();
+            if (o) {
+                const std::uint32_t h = WrapObject(o);
+                re->DeleteLocalRef(o);
+                if (DiagOn()) {
+                    std::printf("[jni] GetStaticObjectField %s -> %08x (real)\n", fdesc.c_str(), h);
+                }
+                Ret(regs, h);
+                return;
+            }
+        }
+#endif
+        // No real value: the game does NOT null-check (Build.MANUFACTURER
+        // NULL -> instant GetStringLength(NULL) death), so never return NULL.
         // String-typed -> registered empty jstring; else fresh mock object.
         if (fdesc.size() >= 18 &&
             fdesc.compare(fdesc.size() - 18, 18, "Ljava/lang/String;") == 0) {
