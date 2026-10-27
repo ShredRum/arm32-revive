@@ -318,6 +318,110 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
+    // --- blend, stencil, masks, depth/polygon state (scalar args; floats
+    //     arrive as their bits in core registers, softfp) ---
+    if (n == "glBlendEquationSeparate") {
+        glBlendEquationSeparate((GLenum)a0, (GLenum)a1);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glBlendFuncSeparate") {
+        glBlendFuncSeparate((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLenum)a3);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glColorMask") {
+        glColorMask((GLboolean)a0, (GLboolean)a1, (GLboolean)a2, (GLboolean)a3);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glClearDepthf" || n == "glPolygonOffset") {
+        float f0 = 0, f1 = 0;
+        std::memcpy(&f0, &a0, 4);
+        std::memcpy(&f1, &a1, 4);
+        if (n == "glClearDepthf") {
+            glClearDepthf(f0);
+        } else {
+            glPolygonOffset(f0, f1);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glClearStencil" || n == "glStencilMask") {
+        if (n == "glClearStencil") {
+            glClearStencil((GLint)a0);
+        } else {
+            glStencilMask((GLuint)a0);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glStencilFunc" || n == "glStencilOp") {
+        if (n == "glStencilFunc") {
+            glStencilFunc((GLenum)a0, (GLint)a1, (GLuint)a2);
+        } else {
+            glStencilOp((GLenum)a0, (GLenum)a1, (GLenum)a2);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glStencilFuncSeparate" || n == "glStencilOpSeparate") {
+        if (n == "glStencilFuncSeparate") {
+            glStencilFuncSeparate((GLenum)a0, (GLenum)a1, (GLint)a2, (GLuint)a3);
+        } else {
+            glStencilOpSeparate((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLenum)a3);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glGenerateMipmap") {
+        glGenerateMipmap((GLenum)a0);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glCheckFramebufferStatus") {
+        r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
+        return true;
+    }
+    if (n == "glGetFramebufferAttachmentParameteriv" || n == "glGetVertexAttribiv") {
+        // (target, attachment, pname, params*) / (index, pname, params*).
+        // GL_CURRENT_VERTEX_ATTRIB answers four values, every other pname one.
+        const bool fb = (n == "glGetFramebufferAttachmentParameteriv");
+        const std::uint32_t out = fb ? a3 : a2;
+        const std::uint32_t count = (!fb && a1 == GL_CURRENT_VERTEX_ATTRIB) ? 4u : 1u;
+        if (!r->CheckRange(out, count * 4u, true)) {
+            r->Ret(regs, 0);
+            return true;
+        }
+        GLint v[4] = {0, 0, 0, 0};
+        if (fb) {
+            glGetFramebufferAttachmentParameteriv((GLenum)a0, (GLenum)a1, (GLenum)a2, v);
+        } else {
+            glGetVertexAttribiv((GLuint)a0, (GLenum)a1, v);
+        }
+        std::memcpy(r->H(out), v, count * 4u);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glGetVertexAttribPointerv") {
+        // (index, pname, void** pointer): a client array was passed to the
+        // driver as a host address inside guest memory -- hand back the guest
+        // address; a buffer offset is returned as it was given.
+        if (!r->CheckRange(a2, 4, true)) {
+            r->Ret(regs, 0);
+            return true;
+        }
+        void* p = nullptr;
+        glGetVertexAttribPointerv((GLuint)a0, (GLenum)a1, &p);
+        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(r->mem().base());
+        const std::uintptr_t hp = reinterpret_cast<std::uintptr_t>(p);
+        const std::uint32_t g = (hp >= base && hp - base <= 0xFFFFFFFFu)
+                                    ? static_cast<std::uint32_t>(hp - base)
+                                    : static_cast<std::uint32_t>(hp);
+        std::memcpy(r->H(a2), &g, 4);
+        r->Ret(regs, 0);
+        return true;
+    }
     if (n == "glDepthMask") {
         glDepthMask((GLboolean)a0);
         r->Ret(regs, 0);
