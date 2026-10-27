@@ -99,6 +99,15 @@ struct LoadedModule {
         std::uint32_t relro_start = 0, relro_size = 0;
     };
     std::vector<Extra> more;
+    // Per library (index 0: the first, i: more[i-1]): its own entries of
+    // init_array [init_begin, init_end) and its DT_NEEDED names, so a host
+    // can run a library's initialisers when the guest dlopens it, after the
+    // ones of the guest libraries it needs (as the linker does).
+    struct LibInfo {
+        std::uint32_t init_begin = 0, init_end = 0;
+        std::vector<std::string> needed;
+    };
+    std::vector<LibInfo> libs;
     // Trampoline page cursors, kept for later loads.
     std::uint32_t next_tramp = 0;
     std::uint32_t next_vfp_thunk = 0;

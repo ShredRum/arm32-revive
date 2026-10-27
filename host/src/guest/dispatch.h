@@ -190,6 +190,18 @@ public:
     // directory): a stable non-NULL handle, else 0.
     std::uint32_t GuestLibraryHandle(const std::string& name);
     int GuestLibraryIndex(std::uint32_t h) const;  // -1: not a library handle
+    // Runs guest library `lib`'s initialisers once (first the guest libraries
+    // it needs), on this thread, like the linker at dlopen time. A host calls
+    // it for the library Java loads; the guest's dlopen for the others.
+    // False when an initialiser did not return cleanly.
+    bool InitGuestLibrary(int lib);
+    // The host ran these initialisers itself (its own init loop).
+    void MarkGuestLibraryInitialised(int lib);
+    // The guest library with this file name (any directory), or -1.
+    int GuestLibraryByName(const std::string& name) const;
+    std::mutex lib_init_mu_;
+    std::condition_variable lib_init_cv_;
+    std::vector<std::uint32_t> lib_init_state_;  // 0 none, 1 running (by tid+1 << 2), 2 done
     std::uint32_t HeapTop() { return heap_base_ + kHeapSize; }
     std::uint32_t GuestCalloc(std::uint32_t n, std::uint32_t size);
     std::uint32_t GuestRealloc(std::uint32_t addr, std::uint32_t size);

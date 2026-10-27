@@ -249,6 +249,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
     std::uint32_t strtab = 0, strsz = 0, symtab = 0, hash = 0;
     std::uint32_t rel = 0, relsz = 0, jmprel = 0, pltrelsz = 0;
     std::uint32_t init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
+    std::vector<std::uint32_t> needed_off;  // DT_NEEDED name offsets (strtab)
     for (std::uint32_t off = 0;; off += 8) {
         Elf32_Dyn dyn;
         std::memcpy(&dyn, mem_.host(dynph->p_vaddr + bias + off), sizeof(dyn));
@@ -279,6 +280,9 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
                 break;
             case DT_PLTRELSZ:
                 pltrelsz = dyn.d_un.d_val;
+                break;
+            case DT_NEEDED:
+                needed_off.push_back(dyn.d_un.d_val);
                 break;
             case DT_INIT_ARRAY:
                 init_array = dyn.d_un.d_ptr;
@@ -687,6 +691,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
     // is the index it has in the guest's DT_INIT_ARRAY. Dropping them shifted
     // every later index -- the "PARKED #22" check and the HARNESS_SKIP
     // index then addressed the wrong function. The init loops skip the 0.
+    const std::uint32_t init_begin = static_cast<std::uint32_t>(out.init_array.size());
     for (std::uint32_t i = 0; i < init_arraysz; i += 4) {
         std::uint32_t fn = 0;
         if (!read32(init_array + i, fn)) {
@@ -694,6 +699,16 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         }
         out.init_array.push_back(fn == 0xFFFFFFFFu ? 0 : fn);
     }
+    LoadedModule::LibInfo info;
+    info.init_begin = init_begin;
+    info.init_end = static_cast<std::uint32_t>(out.init_array.size());
+    for (const std::uint32_t no : needed_off) {
+        std::string nm;
+        if (get_name(no, nm)) {
+            info.needed.push_back(nm);
+        }
+    }
+    out.libs.push_back(std::move(info));
     for (std::uint32_t i = 0; i < fini_arraysz; i += 4) {
         std::uint32_t fn = 0;
         if (!read32(fini_array + i, fn)) {

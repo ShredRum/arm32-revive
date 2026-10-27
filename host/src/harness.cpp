@@ -910,6 +910,7 @@ int main(int argc, char** argv) {
         }
         jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
     }
+    rt.MarkGuestLibraryInitialised(0);
     std::printf("init done: %zu/%zu clean, svc=%llu halts=%llu\n", ok_count, mod.init_array.size(),
                 (unsigned long long)rt.svc_count, (unsigned long long)rt.halt_count);
     if (ok_count != mod.init_array.size()) {

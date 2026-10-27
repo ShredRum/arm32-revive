@@ -3,11 +3,13 @@
 // knowledge, unlike harness.cpp which carries Rovio forensics).
 //
 //   guestrun <lib.so> [--lib <more.so>]... [--base <addr>] [--files <hostdir>]
-//            [--pkg <package>] [--call <symbol> [arg...]]...
+//            [--pkg <package>] [--init <lib>] [--call <symbol> [arg...]]...
 //
 // Libraries load in the order given (dependencies first) into one module,
 // the first at --base (default 0), each next one at the next 16 MiB boundary;
-// their inits run in the same order.
+// their inits run in the same order; with --init <lib>, only that library's
+// (and the guest libraries it needs) at start, the others at the guest's
+// dlopen, as on a device.
 //
 // Arguments of a call (r0..r3, then the stack):
 //   123 / 0x7b   an integer
@@ -88,12 +90,15 @@ int main(int argc, char** argv) {
     std::vector<Call> calls;
     std::vector<std::string> libs = {argv[1]};
     std::uint32_t base = 0;
+    std::string init_only;  // --init: only this library's initialisers now
     for (int i = 2; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--lib" && i + 1 < argc && calls.empty()) {
             libs.push_back(argv[++i]);
         } else if (a == "--base" && i + 1 < argc && calls.empty()) {
             base = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (a == "--init" && i + 1 < argc && calls.empty()) {
+            init_only = argv[++i];
         } else if (a == "--files" && i + 1 < argc) {
             files_dir = argv[++i];
         } else if (a == "--pkg" && i + 1 < argc) {
@@ -161,7 +166,17 @@ int main(int argc, char** argv) {
     rt.set_jit(&jit);
     rt.ThreadEnter(&jit, rt.AllocTid());
 
-    for (std::size_t k = 0; k < mod.init_array.size(); k++) {
+    if (!init_only.empty()) {
+        // As on a device: the library Java loads (and the guest libraries it
+        // needs) now, the others when the guest dlopens them.
+        const int lib = rt.GuestLibraryByName(init_only);
+        const bool ok = lib >= 0 && rt.InitGuestLibrary(lib);
+        std::printf("[init] %s -> %s\n", init_only.c_str(), ok ? "ok" : "FAILED");
+        if (!ok) {
+            return 1;
+        }
+    }
+    for (std::size_t k = 0; init_only.empty() && k < mod.init_array.size(); k++) {
         const std::uint32_t fn = mod.init_array[k];
         if (fn == 0 || fn == 0xFFFFFFFFu) {
             continue;
@@ -175,6 +190,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    for (std::size_t l = 0; init_only.empty() && l < mod.libs.size(); l++) {
+        rt.MarkGuestLibraryInitialised(static_cast<int>(l));  // all ran above
+    }
     std::vector<std::uint32_t> results;
     for (std::size_t c = 0; c < calls.size(); c++) {
         // Pseudo-calls that read results: @read32 <addr> (prints the word at

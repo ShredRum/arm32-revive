@@ -9736,26 +9736,100 @@ std::string BaseName(const std::string& p) {
 }
 }  // namespace
 
-std::uint32_t Runtime::GuestLibraryHandle(const std::string& name) {
+int Runtime::GuestLibraryByName(const std::string& name) const {
     const std::string want = BaseName(name);
-    std::vector<std::string> paths = {mod_.path};
-    for (const auto& x : mod_.more) {
-        paths.push_back(x.path);
+    if (BaseName(mod_.path) == want) {
+        return 0;
     }
+    for (std::size_t i = 0; i < mod_.more.size(); i++) {
+        if (BaseName(mod_.more[i].path) == want) {
+            return static_cast<int>(i + 1);
+        }
+    }
+    return -1;
+}
+
+std::uint32_t Runtime::GuestLibraryHandle(const std::string& name) {
+    const int lib = GuestLibraryByName(name);
+    if (lib < 0) {
+        return 0;
+    }
+    // dlopen initialises the library (and the guest libraries it needs) the
+    // first time, outside the runtime lock: initialisers may start threads.
+    if (!InitGuestLibrary(lib)) {
+        return 0;
+    }
+    const std::size_t n = mod_.more.size() + 1;
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (std::size_t i = 0; i < paths.size(); i++) {
-        if (BaseName(paths[i]) != want) {
+    if (lib_handles_.size() < n) {
+        lib_handles_.resize(n, 0);
+    }
+    if (!lib_handles_[static_cast<std::size_t>(lib)]) {
+        lib_handles_[static_cast<std::size_t>(lib)] = GuestMalloc(16);  // opaque, never read
+    }
+    return lib_handles_[static_cast<std::size_t>(lib)];
+}
+
+void Runtime::MarkGuestLibraryInitialised(int lib) {
+    std::lock_guard<std::mutex> l(lib_init_mu_);
+    if (lib_init_state_.size() < mod_.libs.size()) {
+        lib_init_state_.resize(mod_.libs.size(), 0);
+    }
+    if (lib >= 0 && static_cast<std::size_t>(lib) < lib_init_state_.size()) {
+        lib_init_state_[static_cast<std::size_t>(lib)] = 2;
+    }
+}
+
+bool Runtime::InitGuestLibrary(int lib) {
+    if (lib < 0 || static_cast<std::size_t>(lib) >= mod_.libs.size()) {
+        return true;  // a module without per-library records: nothing deferred
+    }
+    const std::uint32_t me = (GuestTid() + 1) << 2 | 1u;
+    {
+        std::unique_lock<std::mutex> l(lib_init_mu_);
+        if (lib_init_state_.size() < mod_.libs.size()) {
+            lib_init_state_.resize(mod_.libs.size(), 0);
+        }
+        std::uint32_t& st = lib_init_state_[static_cast<std::size_t>(lib)];
+        // Another thread initialising it: wait. This thread (a dlopen from
+        // inside an initialiser): go on, as the linker does.
+        lib_init_cv_.wait(l, [&] { return st == 0 || st == 2 || st == me; });
+        if (st != 0) {
+            return true;
+        }
+        st = me;
+    }
+    bool ok = true;
+    for (const std::string& dep : mod_.libs[static_cast<std::size_t>(lib)].needed) {
+        const int d = GuestLibraryByName(dep);
+        if (d >= 0 && d != lib) {
+            ok = ok && InitGuestLibrary(d);
+        }
+    }
+    const LoadedModule::LibInfo& info = mod_.libs[static_cast<std::size_t>(lib)];
+    for (std::uint32_t k = info.init_begin; ok && k < info.init_end; k++) {
+        const std::uint32_t fn = mod_.init_array[k];
+        if (fn == 0) {
             continue;
         }
-        if (lib_handles_.size() < paths.size()) {
-            lib_handles_.resize(paths.size(), 0);
+        std::int32_t ignored = 0;
+        if (!RunNested(fn, 0, 0, 0, 0, nullptr, ignored)) {
+            std::printf("[dl] LOUD %s init #%u @%08x did not return (hr=%d)\n",
+                        BaseName(lib == 0 ? mod_.path : mod_.more[static_cast<std::size_t>(lib - 1)].path)
+                            .c_str(),
+                        k - info.init_begin, fn, cb_last_hr_);
+            ok = false;
         }
-        if (!lib_handles_[i]) {
-            lib_handles_[i] = GuestMalloc(16);  // opaque, never read by the guest
-        }
-        return lib_handles_[i];
     }
-    return 0;
+    {
+        std::lock_guard<std::mutex> l(lib_init_mu_);
+        lib_init_state_[static_cast<std::size_t>(lib)] = ok ? 2u : 0u;
+    }
+    lib_init_cv_.notify_all();
+    std::printf("[dl] %s initialised (%u init entries)%s\n",
+                BaseName(lib == 0 ? mod_.path : mod_.more[static_cast<std::size_t>(lib - 1)].path).c_str(),
+                info.init_end - info.init_begin, ok ? "" : " -- FAILED");
+    return ok;
 }
 
 int Runtime::GuestLibraryIndex(std::uint32_t h) const {

@@ -1364,6 +1364,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         }
     }
     Log("init done: %zu/%zu", ok, g_mod->init_array.size());
+    g_rt->MarkGuestLibraryInitialised(0);
     // Run the guest JNI_OnLoad (registers dynamic natives incl. Lua pump).
     {
         const auto it = g_mod->defined.find("JNI_OnLoad");
