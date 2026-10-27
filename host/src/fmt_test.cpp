@@ -1345,17 +1345,35 @@ int main() {
         in[13] = kScratch + 0xE00;  // stack: fd -1, offset 0
         const std::uint32_t stk[2] = {0xFFFFFFFFu, 0};
         std::memcpy(mem.host(in[13]), stk, 8);
-        const std::uint32_t margs[4] = {0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS};
-        const std::uint32_t m = abr::RuntimeTestAccess::Call(rt, 104, margs, in, nullptr);
+        auto mmap_at = [&](std::uint32_t at, std::uint32_t len, int prot, int fixed) {
+            const std::uint32_t margs[4] = {at, len, static_cast<std::uint32_t>(prot),
+                                            static_cast<std::uint32_t>(MAP_PRIVATE | MAP_ANONYMOUS | fixed)};
+            return abr::RuntimeTestAccess::Call(rt, 104, margs, in, nullptr);
+        };
+        const std::uint32_t m = mmap_at(0, 4096, PROT_READ | PROT_WRITE, 0);
         std::string mr = "mmap-failed";
         if (m != 0xFFFFFFFFu) {
             std::memcpy(mem.host(m), "kept", 5);
-            const std::uint32_t grown = call(105, m, 4096, 3 * 4096, 1);
-            const std::uint32_t stay = call(105, m, 4096, 3 * 4096, 0);
-            mr = std::string(grown != 0xFFFFFFFFu ? rt.H<const char>(grown) : "fail") + " " +
-                 std::to_string(static_cast<std::int32_t>(stay));
+            mmap_at(m + 4096, 4096, PROT_READ, MAP_FIXED);  // the next page is taken
+            const std::int32_t stay = static_cast<std::int32_t>(call(105, m, 4096, 3 * 4096, 0));
+            const std::uint32_t moved = call(105, m, 4096, 3 * 4096, 1);
+            mr = std::to_string(stay) + " " + (moved != m && moved != 0xFFFFFFFFu ? rt.H<const char>(moved) : "fail") +
+                 " old=" + (abr::RuntimeTestAccess::InMapping(rt, m, 1) ? "mapped" : "gone");
         }
-        Expect("mremap grows by moving (MAYMOVE), refuses in place", mr, "kept -1");
+        Expect("mremap: in place refused when taken, moves with MAYMOVE", mr, "-1 kept old=gone");
+        // Boehm's GC_unmap shape: PROT_NONE MAP_FIXED over the middle page of
+        // a three-page mapping, then a partial munmap of the first page.
+        const std::uint32_t t = mmap_at(0, 3 * 4096, PROT_READ | PROT_WRITE, 0);
+        std::string pm = "mmap-failed";
+        if (t != 0xFFFFFFFFu) {
+            const std::uint32_t r1 = mmap_at(t + 4096, 4096, PROT_NONE, MAP_FIXED);
+            auto rd = [&](std::uint32_t a) { return abr::RuntimeTestAccess::InMapping(rt, a, 1) ? 'r' : '-'; };
+            pm = std::string(r1 == t + 4096 ? "fixed " : "fixed-failed ") + rd(t) + rd(t + 4096) + rd(t + 8192);
+            const std::uint32_t ua[4] = {t, 4096, 0, 0};
+            const std::uint32_t r2 = abr::RuntimeTestAccess::Call(rt, 53, ua);
+            pm += " " + std::to_string(r2) + " " + rd(t) + rd(t + 8192);
+        }
+        Expect("MAP_FIXED over part of a mapping, partial munmap", pm, "fixed r-r 0 -r");
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read

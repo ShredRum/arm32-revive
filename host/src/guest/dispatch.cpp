@@ -1033,10 +1033,45 @@ void Runtime::GuestFree(std::uint32_t addr) {
     }
 }
 
+// Host side of guest arena pages [addr, addr+len): `anon` gives fresh zero
+// pages with `hprot`, otherwise the file at `offset`. With 4 KiB host pages
+// (or a host-page-aligned range) the kernel does it exactly. A larger host
+// page cannot be remapped in 4 KiB parts: anonymous memory is then zeroed in
+// place and the host pages stay read-write (the page map holds the guest's
+// protection and every bounds check enforces it); a file there fails.
+// Returns 0 or an errno value.
+int Runtime::HostMapArena(std::uint32_t addr, std::uint64_t len, int hprot, int share, bool anon,
+                          int host_fd, std::uint64_t offset) {
+    const std::uint64_t hp = GuestMemory::HostPageSize();
+    void* want = H(addr);
+    if (hp == 4096 || ((addr % hp) == 0 && (len % hp) == 0)) {
+        void* r = anon ? ::mmap(want, len, hprot, share | MAP_ANONYMOUS | MAP_FIXED, -1, 0)
+                       : ::mmap(want, len, hprot, share | MAP_FIXED, host_fd,
+                                static_cast<off_t>(offset));
+        if (r == MAP_FAILED) {
+            const int e = errno;
+            ::mmap(want, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            return e;
+        }
+        return 0;
+    }
+    if (!anon) {
+        return EINVAL;
+    }
+    const std::uint64_t lo = std::uint64_t(addr) & ~(hp - 1);
+    const std::uint64_t hi = (std::uint64_t(addr) + len + hp - 1) & ~(hp - 1);
+    ::mprotect(H(static_cast<std::uint32_t>(lo)), static_cast<std::size_t>(hi - lo),
+               PROT_READ | PROT_WRITE);
+    std::memset(want, 0, len);
+    return 0;
+}
+
 std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags,
                                  int host_fd, std::uint64_t offset) {
     // Guest flag/prot values are the Linux ones on both ABIs (asm-generic
     // mman: MAP_SHARED 1, MAP_PRIVATE 2, MAP_FIXED 0x10, MAP_ANONYMOUS 0x20).
+    // Mappings live in the mmap arena, page by page (MappingTable): a
+    // MAP_FIXED replaces whatever pages were there, as the kernel's does.
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const bool anon = (flags & MAP_ANONYMOUS) != 0;
     const int share = flags & (MAP_SHARED | MAP_PRIVATE);
@@ -1049,8 +1084,6 @@ std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int pro
     const int hprot = prot & (PROT_READ | PROT_WRITE | PROT_EXEC);
     std::uint32_t out = 0;
     if (flags & MAP_FIXED) {
-        // Only inside the mmap arena, and only over free space or exactly over
-        // an earlier mmap (the table cannot split entries).
         const std::uint64_t end = std::uint64_t(addr) + len;
         if ((addr & 0xFFFu) != 0 || addr < kMmapArenaBase || end > kTrampBase) {
             std::printf("[mmap] LOUD MAP_FIXED %08x+%llx outside the mmap arena -- refused\n", addr,
@@ -1058,73 +1091,69 @@ std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int pro
             SetGuestErrno(EINVAL);
             return 0xFFFFFFFFu;
         }
-        bool exact = false, overlap = false;
-        mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int) {
-            if (st == addr && en == end) {
-                exact = true;
-            } else if (st < end && addr < en) {
-                overlap = true;
-            }
-        });
-        if (overlap) {
-            std::printf("[mmap] LOUD MAP_FIXED %08x+%llx partially overlaps a mapping -- refused\n",
-                        addr, (unsigned long long)len);
-            SetGuestErrno(EINVAL);
-            return 0xFFFFFFFFu;
-        }
         out = addr;
-        if (!exact && !mappings_.Add(addr, static_cast<std::uint32_t>(end), 0)) {
-            SetGuestErrno(ENOMEM);
-            return 0xFFFFFFFFu;
-        }
     } else {
-        // addr without MAP_FIXED is only a hint: allocate in the arena.
-        const std::uint64_t next = (std::uint64_t(mmap_next_) + 0xFFFFu) & ~std::uint64_t(0xFFFFu);
-        if (next + len > kTrampBase) {
+        // A free, aligned hint is honoured; otherwise the next free run.
+        if (addr != 0 && (addr & 0xFFFu) == 0 && mappings_.ArenaFree(addr, std::uint64_t(addr) + len)) {
+            out = addr;
+        } else {
+            out = mappings_.ArenaFindFree(mmap_next_, len, 0x10000u);
+        }
+        if (out == 0) {
             SetGuestErrno(ENOMEM);
             return 0xFFFFFFFFu;
         }
-        out = static_cast<std::uint32_t>(next);
-        if (!mappings_.Add(out, static_cast<std::uint32_t>(next + len), 0)) {
-            SetGuestErrno(ENOMEM);
-            return 0xFFFFFFFFu;
-        }
-        mmap_next_ = static_cast<std::uint32_t>(next + len);
+        mmap_next_ = static_cast<std::uint32_t>(out + len);
     }
-    // Map the host pages: a file mapping maps the real file (MAP_SHARED writes
-    // reach it, MAP_PRIVATE is copy-on-write), exactly like the kernel would.
-    void* want = H(out);
-    void* r = anon ? ::mmap(want, len, hprot, share | MAP_ANONYMOUS | MAP_FIXED, -1, 0)
-                   : ::mmap(want, len, hprot, share | MAP_FIXED, host_fd, static_cast<off_t>(offset));
-    if (r == MAP_FAILED) {
-        const int e = errno;
-        ::mmap(want, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    const int e = HostMapArena(out, len, hprot, share, anon, host_fd, offset);
+    if (e != 0) {
+        if (flags & MAP_FIXED) {
+            // The kernel would have dropped the old pages already.
+            mappings_.SetArena(out, static_cast<std::uint32_t>(out + len), false, 0);
+        }
         SetGuestErrno(e);
         return 0xFFFFFFFFu;
     }
-    mappings_.SetProt(out, static_cast<std::uint32_t>(out + len), hprot);
+    mappings_.SetArena(out, static_cast<std::uint32_t>(out + len), true, hprot);
     return out;
 }
 
 int Runtime::GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot) {
-    // Protection changes only ever ADD access. The mapping table (what
-    // CheckAccess believes) cannot split an entry, and the host pages must
-    // allow everything the table allows, or a host-side access would fault
-    // the host instead of halting the guest. So the entry and the host pages
-    // get old|new; a request to remove access (a guard page) is accepted and
-    // not enforced. Enough for a guest JIT that flips pages RW <-> RX.
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::uint64_t len = (std::uint64_t(size) + 0xFFFu) & ~std::uint64_t(0xFFFu);
     if ((addr & 0xFFFu) != 0 || len == 0) {
         SetGuestErrno(EINVAL);
         return -1;
     }
+    const int hprot = prot & (PROT_READ | PROT_WRITE | PROT_EXEC);
+    if (MappingTable::InArena(addr, std::uint64_t(addr) + len)) {
+        // mmap arena: any page range, adding or removing access (the kernel's
+        // semantics); every page must be mapped (else ENOMEM).
+        const std::uint32_t end = static_cast<std::uint32_t>(addr + len);
+        if (mappings_.Find(addr, len).end == 0) {
+            SetGuestErrno(ENOMEM);
+            return -1;
+        }
+        const std::uint64_t hp = GuestMemory::HostPageSize();
+        if (hp == 4096 || ((addr % hp) == 0 && (len % hp) == 0)) {
+            ::mprotect(H(addr), static_cast<std::size_t>(len), hprot);
+        }
+        // (Larger host pages: they stay read-write, the page map enforces.)
+        mappings_.SetProt(addr, end, hprot);
+        return 0;
+    }
+    // Boot mappings: protection changes only ever ADD access. Such an entry
+    // cannot be split, and the host pages must allow everything the table
+    // allows, or a host-side access would fault the host instead of halting
+    // the guest. So the entry and the host pages get old|new; a request to
+    // remove access (a guard page) is accepted and not enforced. Enough for
+    // a guest JIT that flips pages RW <-> RX.
     const MappingTable::Hit h = mappings_.Find(addr, len);
     if (h.end == 0) {
         SetGuestErrno(ENOMEM);  // not mapped (kernel answer)
         return -1;
     }
-    const int want = h.prot | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
+    const int want = h.prot | hprot;
     if (want != h.prot) {
         const std::uint64_t hp = GuestMemory::HostPageSize();
         const std::uint64_t lo = std::uint64_t(h.start) & ~(hp - 1);
@@ -1366,10 +1395,11 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
 }
 
 int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
-    // Releases exactly one earlier mmap: the host pages become PROT_NONE
-    // (the address range is not reused) and the table entry loses its
-    // protection, so a later guest access halts cleanly instead of faulting
-    // the host. Partial unmaps are refused (the table cannot split entries).
+    // Any page range of the mmap arena, mapped or not (the kernel's rule):
+    // the pages leave the page map first, so guest accesses halt instead of
+    // reaching pages being replaced, then the host drops them (PROT_NONE; on a
+    // larger host page that cannot be split, the contents are zeroed). The
+    // range can be handed out again by a later mmap.
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::uint64_t len = (std::uint64_t(size) + 0xFFFu) & ~std::uint64_t(0xFFFu);
     const std::uint64_t end = std::uint64_t(addr) + len;
@@ -1377,21 +1407,13 @@ int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
         SetGuestErrno(EINVAL);
         return -1;
     }
-    bool exact = false;
-    mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int) {
-        if (st == addr && en == end) {
-            exact = true;
-        }
-    });
-    if (!exact) {
-        std::printf("[mmap] LOUD munmap(%08x+%x) does not match one mmap -- refused\n", addr, size);
-        SetGuestErrno(EINVAL);
-        return -1;
+    mappings_.SetArena(addr, static_cast<std::uint32_t>(end), false, 0);
+    const std::uint64_t hp = GuestMemory::HostPageSize();
+    if (hp == 4096 || ((addr % hp) == 0 && (len % hp) == 0)) {
+        ::mmap(H(addr), len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    } else {
+        HostMapArena(addr, len, PROT_NONE, MAP_PRIVATE, true, -1, 0);
     }
-    // Revoke in the table first: from here on guest accesses halt instead of
-    // reaching the pages being replaced.
-    mappings_.SetProt(addr, static_cast<std::uint32_t>(end), 0);
-    ::mmap(H(addr), len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     return 0;
 }
 
@@ -2269,32 +2291,35 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     if (n == "mremap") {
-        // mremap(old, old_size, new_size, flags): the mapping table cannot
-        // split or extend an entry, so a mapping that shrinks keeps its
-        // address (its tail stays mapped, which no caller can tell from a
-        // real shrink but by touching it), one that grows moves when
-        // MREMAP_MAYMOVE (1) allows: a new mapping with the same protection,
-        // the contents copied, the old one released. Growing in place and
-        // MREMAP_FIXED are refused (ENOMEM / EINVAL).
+        // mremap(old, old_size, new_size, flags): a shrink drops the tail; a
+        // growth extends in place when the following pages are free, else
+        // moves under MREMAP_MAYMOVE (1): a new mapping with the same
+        // protection, the contents copied, the old pages released.
+        // MREMAP_FIXED is not offered (EINVAL).
         const std::uint32_t old_len = (a1 + 0xFFFu) & ~0xFFFu, new_len = (a2 + 0xFFFu) & ~0xFFFu;
-        if ((a0 & 0xFFFu) != 0 || new_len == 0 || (a3 & ~1u) != 0) {
+        if ((a0 & 0xFFFu) != 0 || new_len == 0 || old_len == 0 || (a3 & ~1u) != 0) {
             SetGuestErrno(EINVAL);
             Ret(regs, 0xFFFFFFFFu);
             return;
         }
-        int prot = -1;
-        mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int pr) {
-            if (st == a0 && en - st >= old_len) {
-                prot = pr;
-            }
-        });
-        if (prot < 0 || a0 < kMmapArenaBase) {
+        const MappingTable::Hit h = mappings_.Find(a0, old_len);
+        if (h.end == 0 || !MappingTable::InArena(a0, std::uint64_t(a0) + old_len)) {
             SetGuestErrno(EFAULT);
             Ret(regs, 0xFFFFFFFFu);
             return;
         }
         if (new_len <= old_len) {
+            if (new_len < old_len) {
+                GuestMunmap(a0 + new_len, old_len - new_len);
+            }
             Ret(regs, a0);
+            return;
+        }
+        const std::uint64_t grow_end = std::uint64_t(a0) + new_len;
+        if (mappings_.ArenaFree(a0 + old_len, grow_end)) {
+            const std::uint32_t r = GuestMmap(a0 + old_len, new_len - old_len, h.prot,
+                                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            Ret(regs, r == 0xFFFFFFFFu ? r : a0);
             return;
         }
         if (!(a3 & 1u)) {
@@ -2302,14 +2327,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0xFFFFFFFFu);
             return;
         }
-        const std::uint32_t moved = GuestMmap(0, new_len, prot | PROT_READ | PROT_WRITE,
+        const std::uint32_t moved = GuestMmap(0, new_len, h.prot | PROT_READ | PROT_WRITE,
                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (moved == 0xFFFFFFFFu) {
             Ret(regs, moved);
             return;
         }
         std::memcpy(H(moved), H(a0), old_len);
-        GuestMprotect(moved, new_len, prot);
+        GuestMprotect(moved, new_len, h.prot);
         GuestMunmap(a0, old_len);
         Ret(regs, moved);
         return;

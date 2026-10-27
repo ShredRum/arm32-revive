@@ -201,6 +201,8 @@ public:
     std::uint32_t GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags,
                             int host_fd, std::uint64_t offset);
     int GuestMunmap(std::uint32_t addr, std::uint32_t size);
+    int HostMapArena(std::uint32_t addr, std::uint64_t len, int hprot, int share, bool anon,
+                     int host_fd, std::uint64_t offset);
     int GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot);
 
     // --- Guest signals (arm32 numbering; sigset_t = 32 bits, signals 1-32).
