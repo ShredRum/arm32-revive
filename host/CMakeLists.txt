@@ -98,6 +98,11 @@ target_link_libraries(harness PRIVATE guest)
 target_compile_options(harness PRIVATE -g)
 target_compile_options(guest PRIVATE -g)
 
+# Bring-up probe for new titles: load any guest .so, run its inits, call exports.
+add_executable(guestrun src/guestrun.cpp)
+target_link_libraries(guestrun PRIVATE guest)
+target_compile_options(guestrun PRIVATE -g)
+
 # Product host (Android only): real Java drives guest Java_* under Dynarmic.
 if(ANDROID)
     add_library(abhost SHARED src/apphost.cpp)
