@@ -461,6 +461,26 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         return idx;
     };
 
+    // A weak reference nobody defines resolves to 0 (ELF), and the code then
+    // tests it for presence. These are the weak names the guests reference
+    // that Android's system libraries do not export (checked against the NDK
+    // r27 stubs of libc, libm, libdl, libstdc++, liblog and libandroid, API
+    // 21-25), so on a device they are 0; as imports they would get a
+    // trampoline address and read as present. Every other weak name stays an
+    // import: getauxval and __gnu_Unwind_Find_exidx are exported by libc.
+    auto unexported_weak = [](const Elf32_Sym& s, const std::string& name) {
+        static const char* const kNames[] = {"__data_start", "data_start", "__cxa_begin_cleanup",
+                                             "__cxa_type_match", "__cxa_call_unexpected"};
+        if (ELF32_ST_BIND(s.st_info) != STB_WEAK) {
+            return false;
+        }
+        for (const char* k : kNames) {
+            if (name == k) {
+                return true;
+            }
+        }
+        return false;
+    };
     auto apply_one = [&](std::uint32_t r_off, std::uint32_t type, std::uint32_t symidx) -> bool {
         if (r_off == 0x672010u) {
             std::printf("[relaudit] write to 00672010: type=%u symidx=%u\n", type, symidx);
@@ -492,6 +512,9 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
                     if (it != out.defined.end()) {
                         return write32(r_off, it->second);
                     }
+                }
+                if (get_sym(symidx, sym) && unexported_weak(sym, name)) {
+                    return write32(r_off, 0);
                 }
                 // Data objects referenced via GLOB_DAT need addresses, not calls.
                 if (symidx != 0 && get_sym(symidx, sym) &&
@@ -529,6 +552,9 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
                     if (it != out.defined.end()) {
                         return write32(r_off, cur + it->second);
                     }
+                }
+                if (unexported_weak(sym, name)) {
+                    return write32(r_off, cur);  // S = 0
                 }
                 if (ELF32_ST_TYPE(sym.st_info) == STT_FUNC) {
                     const std::uint32_t idx = get_import(name, true);
