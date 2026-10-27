@@ -57,6 +57,12 @@ namespace abr {
 
 // This thread's pthread_cleanup list head (guest address) and guest stack.
 thread_local std::uint32_t t_cleanup_head = 0;
+// pthread_exit was called: the worker's Run stopped with kThreadExitHalt.
+thread_local bool t_thread_exiting = false;
+thread_local std::uint32_t t_exit_value = 0;
+// A pthread_create worker's own Jit (null on every other thread). Unlike
+// t_active_jit it does not change while a callback Jit runs.
+thread_local Dynarmic::A32::Jit* t_worker_jit = nullptr;
 thread_local std::uint32_t t_stack_lo = 0;
 thread_local std::uint32_t t_stack_size = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
@@ -4451,14 +4457,52 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     if (n == "pthread_cond_init" || n == "pthread_cond_destroy" || n == "pthread_cond_signal" ||
         n == "pthread_cond_broadcast" || n == "pthread_cond_wait" ||
-        n == "pthread_cond_timedwait" || n == "pthread_cond_timedwait_monotonic") {
-        std::string base = (n == "pthread_cond_timedwait_monotonic") ? "pthread_cond_timedwait" : n;
-        const bool mono = (n == "pthread_cond_timedwait_monotonic");
+        n == "pthread_cond_timedwait" || n == "pthread_cond_timedwait_monotonic" ||
+        n == "pthread_cond_timedwait_monotonic_np") {
+        // The _np name is bionic's other export of the same function
+        // (absolute CLOCK_MONOTONIC deadline).
+        const bool mono = (n == "pthread_cond_timedwait_monotonic" ||
+                           n == "pthread_cond_timedwait_monotonic_np");
+        std::string base = mono ? "pthread_cond_timedwait" : n;
         Ret(regs, PthreadCond(base, a0, a1, a2, mono));
         return;
     }
     if (n == "pthread_key_create") {
         Ret(regs, PthreadKeyCreate(a0, a1));
+        return;
+    }
+    if (n == "pthread_key_delete") {
+        Ret(regs, PthreadKeyDelete(a0));
+        return;
+    }
+    if (n == "pthread_exit") {
+        // Only a worker's own code can end its thread (the thread was made by
+        // pthread_create and this is its Jit, not a callback or a Java thread).
+        if (t_worker_jit == nullptr || ActiveJit() != t_worker_jit) {
+            std::printf("[thread] LOUD pthread_exit outside a worker's own code (tid=%u) -- "
+                        "halting\n", GuestTid());
+            HaltGuest();
+            return;
+        }
+        // Cleanup handlers, innermost first, then the thread ends.
+        while (t_cleanup_head != 0) {
+            std::uint32_t c[3] = {0, 0, 0};
+            if (!CheckRange(t_cleanup_head, 12, false)) {
+                break;
+            }
+            std::memcpy(c, H(t_cleanup_head), 12);
+            t_cleanup_head = c[0];
+            std::int32_t ignored = 0;
+            if (c[1] && !RunComparator(c[1], c[2], 0, ignored)) {
+                std::printf("[thread] LOUD cleanup routine %08x(%08x) failed -- halting\n", c[1],
+                            c[2]);
+                HaltGuest();
+                return;
+            }
+        }
+        t_exit_value = a0;
+        t_thread_exiting = true;
+        ActiveJit()->HaltExecution(kThreadExitHalt);
         return;
     }
     if (n == "pthread_getspecific") {
@@ -8122,15 +8166,64 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     return EINVAL;
 }
 
-std::uint32_t Runtime::PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t /*destr*/) {
+std::uint32_t Runtime::PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t destr) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!CheckRange(key_ptr, 4, true)) {
         return EINVAL;  // a wild key pointer must not become a host write
     }
     const std::uint32_t key = next_key_++;
-    key_map_[key] = 0;
+    key_map_[key] = destr;
     std::memcpy(H(key_ptr), &key, 4);
     return 0;
+}
+
+// pthread_key_delete: the key and every thread's value go; no destructor
+// runs (POSIX).
+std::uint32_t Runtime::PthreadKeyDelete(std::uint32_t key) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (key_map_.erase(key) == 0) {
+        return EINVAL;
+    }
+    for (auto i = tls_map_.begin(); i != tls_map_.end();) {
+        if (static_cast<std::uint32_t>(i->first >> 32) == key) {
+            i = tls_map_.erase(i);
+        } else {
+            ++i;
+        }
+    }
+    return 0;
+}
+
+void Runtime::RunKeyDestructors() {
+    const std::uint32_t tid = GuestTid();
+    for (int round = 0; round < 4; round++) {
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> calls;  // destructor, value
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            for (const auto& kd : key_map_) {
+                if (kd.second == 0) {
+                    continue;
+                }
+                const auto it = tls_map_.find((std::uint64_t(kd.first) << 32) | tid);
+                if (it != tls_map_.end() && it->second != 0) {
+                    calls.emplace_back(kd.second, it->second);
+                    it->second = 0;
+                }
+            }
+        }
+        if (calls.empty()) {
+            return;
+        }
+        for (const auto& c : calls) {
+            std::int32_t ignored = 0;
+            if (!RunComparator(c.first, c.second, 0, ignored)) {
+                std::printf("[thread] LOUD key destructor %08x(%08x) failed (hr=%d) -- the "
+                            "thread's other destructors are skipped\n",
+                            c.first, c.second, cb_last_hr_);
+                return;
+            }
+        }
+    }
 }
 
 std::uint32_t Runtime::PthreadGetSpecific(std::uint32_t key) {
@@ -9651,6 +9744,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         const std::unique_ptr<Dynarmic::A32::Jit> jit_owner = NewJit(cfg);
         Dynarmic::A32::Jit& jit = *jit_owner;
         t_active_jit = &jit;
+        t_worker_jit = &jit;
         RegisterSigThread(tid, &jit);
         // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
         // workers; racy values, liveness only — same caveat as main beat).
@@ -9687,8 +9781,17 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
             jit.SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10));
             regs[15] = start;
         }
-        Dynarmic::HaltReason hr = RunJit(jit);
-        (void)hr;
+        const Dynarmic::HaltReason hr = RunJit(jit);
+        if (t_thread_exiting) {
+            regs[0] = t_exit_value;  // pthread_exit(value)
+        }
+        // A clean end (the start routine returned, or pthread_exit) runs the
+        // key destructors on this thread; a halted guest runs nothing more.
+        if (hr == Dynarmic::HaltReason::UserDefined1 || t_thread_exiting) {
+            const std::uint32_t retval = regs[0];
+            RunKeyDestructors();
+            regs[0] = retval;
+        }
         // Dying here must not strand a caller that is waiting in PthreadOnce.
         ReleaseOnceControlsOnExit(tid);
         {
@@ -9702,6 +9805,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         // joiner only needs st->retval). Idempotent with join/detach.
         ReapThreadStack(tid);
         t_active_jit = nullptr;
+        t_worker_jit = nullptr;
         ForgetSigThreadJit(tid);
         ReleaseCpuId(cpu_id);  // the Jit no longer runs
         {

@@ -327,6 +327,14 @@ public:
     std::uint32_t PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                               std::uint32_t arg2, bool monotonic = false);
     std::uint32_t PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t destr);
+    std::uint32_t PthreadKeyDelete(std::uint32_t key);
+    // At a guest thread's clean exit (POSIX): each key with a destructor and
+    // a non-NULL value is reset to NULL and its destructor called with the
+    // old value, in rounds, up to PTHREAD_DESTRUCTOR_ITERATIONS (4 on bionic).
+    void RunKeyDestructors();
+    // pthread_exit from a worker's own code: cleanup handlers run, then the
+    // thread stops with kThreadExitHalt and exits with this value.
+    static constexpr Dynarmic::HaltReason kThreadExitHalt = Dynarmic::HaltReason::UserDefined5;
     std::uint32_t PthreadGetSpecific(std::uint32_t key);
     std::uint32_t PthreadSetSpecific(std::uint32_t key, std::uint32_t value);
     // pthread_once via control-flow hijack. Returns true if hijacked (caller
@@ -648,7 +656,7 @@ private:
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_mutex_t>> mutex_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_cond_t>> cond_map_;
-    std::unordered_map<std::uint32_t, pthread_key_t> key_map_;
+    std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)
     std::uint32_t next_key_ = 1;
     std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value
     // D2 (2026-10-18): flat index of live heap blocks (base -> usable bytes)
