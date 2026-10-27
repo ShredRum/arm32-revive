@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <optional>
+#include <EGL/egl.h>
 #include <netdb.h>
 #include <poll.h>
 #ifdef __ANDROID__
@@ -7748,6 +7749,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    if (n[0] == 'e' && EglCall(n, regs)) {
+        return;
+    }
     if (n[0] == 'A' && NdkCall(n, regs)) {
         return;
     }
@@ -11037,6 +11041,168 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
     Ret(regs, n.compare(0, 8, "ASensor_") == 0 ? 0u : static_cast<std::uint32_t>(-22));
     return true;
 #endif
+}
+
+bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    if (n.compare(0, 3, "egl") != 0) {
+        return false;
+    }
+    const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    auto bad = [&](const char* what) {
+        std::printf("[egl] LOUD %s: bad guest pointer -- halting\n", what);
+        HaltGuest();
+        return true;
+    };
+    // A guest attribute list, EGL_NONE-terminated (at most 64 pairs).
+    auto attribs = [&](std::uint32_t at, std::vector<EGLint>& out) -> bool {
+        out.clear();
+        if (at == 0) {
+            return true;
+        }
+        for (std::uint32_t i = 0; i < 129; i++) {
+            if (!CheckRange(at + i * 4, 4, false)) {
+                return false;
+            }
+            EGLint v = 0;
+            std::memcpy(&v, H(at + i * 4), 4);
+            out.push_back(v);
+            if (v == EGL_NONE && (i % 2) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto out32 = [&](std::uint32_t at, std::uint32_t v) -> bool {
+        if (at == 0) {
+            return true;
+        }
+        if (!CheckRange(at, 4, true)) {
+            return false;
+        }
+        std::memcpy(H(at), &v, 4);
+        return true;
+    };
+    auto dpy = [&](std::uint32_t h) { return static_cast<EGLDisplay>(PtrOf(h)); };
+    if (n == "eglGetDisplay") {
+        // Only the default display exists for an app.
+        Ret(regs, PtrHandle(::eglGetDisplay(EGL_DEFAULT_DISPLAY)));
+        return true;
+    }
+    if (n == "eglInitialize") {
+        EGLint major = 0, minor = 0;
+        const EGLBoolean r = ::eglInitialize(dpy(a0), &major, &minor);
+        if (!out32(a1, static_cast<std::uint32_t>(major)) || !out32(a2, static_cast<std::uint32_t>(minor))) {
+            return bad("eglInitialize");
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglTerminate") {
+        Ret(regs, ::eglTerminate(dpy(a0)));
+        return true;
+    }
+    if (n == "eglGetError") {
+        Ret(regs, static_cast<std::uint32_t>(::eglGetError()));
+        return true;
+    }
+    if (n == "eglChooseConfig") {
+        // (dpy, attrib_list, EGLConfig* configs, config_size, EGLint* num@[sp])
+        std::vector<EGLint> al;
+        std::uint32_t num_ptr = 0;
+        if (!attribs(a1, al) || !CheckRange(regs[13], 4, false)) {
+            return bad("eglChooseConfig");
+        }
+        std::memcpy(&num_ptr, H(regs[13]), 4);
+        const EGLint size = static_cast<EGLint>(a3);
+        if (a2 && (size < 0 || size > 4096 || !CheckRange(a2, static_cast<std::uint32_t>(size) * 4u, true))) {
+            return bad("eglChooseConfig configs");
+        }
+        std::vector<EGLConfig> cfg(a2 && size > 0 ? static_cast<std::size_t>(size) : 0);
+        EGLint num = 0;
+        const EGLBoolean r = ::eglChooseConfig(dpy(a0), al.empty() ? nullptr : al.data(),
+                                               a2 ? cfg.data() : nullptr, a2 ? size : 0, &num);
+        if (r && a2) {
+            for (EGLint i = 0; i < num && i < size; i++) {
+                const std::uint32_t h = PtrHandle(cfg[static_cast<std::size_t>(i)]);
+                std::memcpy(H(a2 + static_cast<std::uint32_t>(i) * 4u), &h, 4);
+            }
+        }
+        if (!out32(num_ptr, static_cast<std::uint32_t>(num))) {
+            return bad("eglChooseConfig num");
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglGetConfigAttrib") {
+        EGLint v = 0;
+        const EGLBoolean r = ::eglGetConfigAttrib(dpy(a0), static_cast<EGLConfig>(PtrOf(a1)),
+                                                  static_cast<EGLint>(a2), &v);
+        if (!out32(a3, static_cast<std::uint32_t>(v))) {
+            return bad("eglGetConfigAttrib");
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglCreateWindowSurface" || n == "eglCreateContext") {
+        // (dpy, config, window | share_context, attrib_list)
+        std::vector<EGLint> al;
+        if (!attribs(a3, al)) {
+            return bad(n.c_str());
+        }
+        void* third = PtrOf(a2);
+        void* r = nullptr;
+        if (n == "eglCreateWindowSurface") {
+            r = ::eglCreateWindowSurface(dpy(a0), static_cast<EGLConfig>(PtrOf(a1)),
+                                         reinterpret_cast<EGLNativeWindowType>(third),
+                                         al.empty() ? nullptr : al.data());
+        } else {
+            r = ::eglCreateContext(dpy(a0), static_cast<EGLConfig>(PtrOf(a1)),
+                                   static_cast<EGLContext>(third), al.empty() ? nullptr : al.data());
+        }
+        std::printf("[egl] %s -> %s (0x%x)\n", n.c_str(), r ? "ok" : "FAILED", r ? 0 : ::eglGetError());
+        Ret(regs, PtrHandle(r));
+        return true;
+    }
+    if (n == "eglDestroySurface" || n == "eglDestroyContext") {
+        void* obj = PtrOf(a1);
+        const EGLBoolean r = n == "eglDestroySurface"
+                                 ? ::eglDestroySurface(dpy(a0), static_cast<EGLSurface>(obj))
+                                 : ::eglDestroyContext(dpy(a0), static_cast<EGLContext>(obj));
+        if (r) {
+            DropHandle(a1);
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglMakeCurrent") {
+        const EGLBoolean r =
+            ::eglMakeCurrent(dpy(a0), static_cast<EGLSurface>(PtrOf(a1)), static_cast<EGLSurface>(PtrOf(a2)),
+                             static_cast<EGLContext>(PtrOf(a3)));
+        std::printf("[egl] eglMakeCurrent(ctx %08x) on t%u -> %u\n", a3, GuestTid(), r);
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglSwapBuffers") {
+        Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
+        return true;
+    }
+    if (n == "eglGetProcAddress") {
+        // Extension entry points are not offered: NULL, as for an extension
+        // the driver lacks. Named once each, so a port sees what was wanted.
+        static std::set<std::string> asked;
+        const std::string name = CheckRange(a0, 1, false) ? GuestStr(a0) : "?";
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (asked.insert(name).second) {
+                std::printf("[egl] eglGetProcAddress(\"%s\") -> NULL (not offered)\n", name.c_str());
+            }
+        }
+        Ret(regs, 0);
+        return true;
+    }
+    std::printf("[egl] LOUD %s is not offered -> 0\n", n.c_str());
+    Ret(regs, 0);
+    return true;
 }
 
 // bionic's __cxa_guard (ARM): 0 = not constructed, bit 0 = constructed; we

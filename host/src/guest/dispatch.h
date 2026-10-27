@@ -307,6 +307,10 @@ public:
     // AInputEvent_*, AMotionEvent_*, AKeyEvent_*, AConfiguration_*,
     // ANativeWindow_*, ASensor*); false if `n` is not one of them.
     bool NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    // EGL for a guest that drives its own context (Unity): forwarded to the
+    // real EGL with handles for displays, configs, contexts and surfaces.
+    // False when `n` is not an EGL import; a wild pointer halts inside.
+    bool EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
     // A guest AAssetManager over our APK (what AAssetManager_fromJava gives),
     // for a host that hands one to the guest itself (ANativeActivity); 0 when
     // the APK cannot be indexed.
