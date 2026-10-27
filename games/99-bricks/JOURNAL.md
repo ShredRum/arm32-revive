@@ -295,3 +295,27 @@ Open, in order:
 3. Performance (8-30 fps at times): later.
 4. Rovio gate of the core changes (real NewObject / static fields / attached
    worker threads / proxy rules) before anything merges to master.
+
+## 2026-10-28: saves, the hangs, the stale-code asserts
+
+- Saves: Unity puts persistentDataPath in the app's external dir when the
+  storage permission is granted; the bridge did not map it, Unity kept an empty
+  path. Now <storage>/Android/data/<pkg>/... lives in /data/data/<pkg>/ext
+  (2574672). save_premium.wb is written.
+- The hangs (logo, 25-30%, placing a block): a lost cond wake in our sliced
+  waits (REVIEW R-008), fixed a53149d. The [threads] dump shows a cond waiter's
+  cond, mutex and the wakes handed out before/since it slept.
+- What remained looked the same (bar stuck at 25-30%) but was Mono asserting on
+  its own metadata: stale translations of Mono-JITed code in the shared code
+  cache (REVIEW R-007). host.jitshare = off for this title: 0 of 20 boots broken
+  (was 4 of 10).
+- sem_wait: the original targets 21, where bionic's sem_wait does not return
+  EINTR; it no longer does here (a3c3402). Unity's "Failed to wait on a
+  semaphore" is gone.
+- scripts/swap-lib.sh used to leave the old host in this APK (libmain.so).
+
+Open: no music (sound effects work); a short freeze when a tower level is
+reached; R-007 itself (the shared cache with a guest JIT).
+Rovio-visible changes added today: cond waits (a53149d), Jit registry and
+cacheflush to all private Jits (13b053f), packaged target_sdk (Seasons targets
+22: its sem_wait no longer returns EINTR) and jitshare (Rovio: on).
