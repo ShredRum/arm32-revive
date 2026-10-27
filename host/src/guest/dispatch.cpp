@@ -7409,6 +7409,65 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, e == 0 ? 0u : 0xFFFFFFFFu);
         return;
     }
+    // --- processes. The emulator cannot give a guest a child process (a
+    //     fork would duplicate the whole host, exec would replace it), so
+    //     these fail the way a system without the facility answers.
+    if (n == "fork" || n == "execv" || n == "execve" || n == "execl" || n == "popen" ||
+        n == "system" || n == "pclose" || n == "waitpid" || n == "ptrace") {
+        {
+            static std::set<std::string> said;
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (said.insert(n).second) {
+                std::printf("[svc] %s is not offered (no guest processes) -> failure\n", n.c_str());
+            }
+        }
+        if (n == "system" && a0 == 0) {
+            Ret(regs, 0);  // system(NULL): no command processor available
+            return;
+        }
+        SetGuestErrno(n == "pclose" || n == "waitpid" ? ECHILD : n == "ptrace" ? EPERM : ENOSYS);
+        Ret(regs, n == "popen" ? 0u : 0xFFFFFFFFu);
+        return;
+    }
+    if (n == "setresuid") {
+        // An app may "change" to the ids it already has; anything else needs
+        // privileges it does not have (EPERM). -1 keeps an id.
+        uid_t r = 0, e = 0, sv = 0;
+        ::getresuid(&r, &e, &sv);
+        auto same = [](std::uint32_t want, uid_t have) {
+            return want == 0xFFFFFFFFu || want == have;
+        };
+        if (same(a0, r) && same(a1, e) && same(a2, sv)) {
+            Ret(regs, 0);
+            return;
+        }
+        SetGuestErrno(EPERM);
+        Ret(regs, 0xFFFFFFFFu);
+        return;
+    }
+    if (n == "setitimer") {
+        // setitimer(which, const itimerval* new, itimerval* old). Interval
+        // timers would have to raise guest signals; none is offered, so only
+        // disarming succeeds (old reads as disarmed).
+        if ((a1 && !CheckRange(a1, 16, false)) || (a2 && !CheckRange(a2, 16, true))) {
+            goto bad_ptr;
+        }
+        if (a2) {
+            std::memset(H(a2), 0, 16);
+        }
+        std::uint32_t v[4] = {0, 0, 0, 0};
+        if (a1) {
+            std::memcpy(v, H(a1), 16);
+        }
+        if (v[2] == 0 && v[3] == 0) {  // it_value zero: disarm
+            Ret(regs, 0);
+            return;
+        }
+        std::printf("[svc] setitimer(%u) arming is not offered -> ENOSYS\n", a0);
+        SetGuestErrno(ENOSYS);
+        Ret(regs, 0xFFFFFFFFu);
+        return;
+    }
     // --- ctype functions (for guests that call them rather than reading
     //     _ctype_). Bionic 7.1.2 takes them from OpenBSD's isctype.c: EOF
     //     -> 0, otherwise the byte table entry of (unsigned char)c & mask.
