@@ -364,6 +364,8 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
     // Index defined symbols by name (guest addresses). A name an earlier
     // library already defines keeps that definition (linker search order).
     std::unordered_map<std::string, std::uint32_t>& defined = out.defined;
+    out.lib_defined.emplace_back();
+    std::unordered_map<std::string, std::uint32_t>& own = out.lib_defined.back();
     for (std::uint32_t i = 0; i < nchain; i++) {
         Elf32_Sym sym;
         if (!get_sym(i, sym)) {
@@ -372,6 +374,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         if (sym.st_shndx != SHN_UNDEF && sym.st_name != 0) {
             std::string name;
             if (get_name(sym.st_name, name)) {
+                own.emplace(name, sym.st_value + bias);
                 defined.emplace(std::move(name), sym.st_value + bias);
             }
         }

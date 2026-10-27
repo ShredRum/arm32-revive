@@ -175,6 +175,10 @@ public:
     // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
     std::uint32_t GuestMemalign(std::uint32_t align, std::uint32_t size);
+    // dlopen of a guest library already in the module (by file name, any
+    // directory): a stable non-NULL handle, else 0.
+    std::uint32_t GuestLibraryHandle(const std::string& name);
+    int GuestLibraryIndex(std::uint32_t h) const;  // -1: not a library handle
     std::uint32_t HeapTop() { return heap_base_ + kHeapSize; }
     std::uint32_t GuestCalloc(std::uint32_t n, std::uint32_t size);
     std::uint32_t GuestRealloc(std::uint32_t addr, std::uint32_t size);
@@ -562,6 +566,7 @@ private:
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
     std::unordered_map<std::uint32_t, std::shared_ptr<sem_t>> sem_map_;  // GuestSem
+    std::vector<std::uint32_t> lib_handles_;  // GuestLibraryHandle, per library
     struct GuestSigAct {
         std::uint32_t handler = 0, mask = 0, flags = 0;
     };

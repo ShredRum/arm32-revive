@@ -85,6 +85,9 @@ struct LoadedModule {
     // DEFINED sym name -> guest address (st_value + bias), over every loaded
     // module; the first definition wins, as in the linker's search order.
     std::unordered_map<std::string, std::uint32_t> defined;
+    // Each library's own definitions (index 0: the first library, i: more[i-1]),
+    // for dlsym on a library handle.
+    std::vector<std::unordered_map<std::string, std::uint32_t>> lib_defined;
     // Further guest libraries loaded into this module (Load with append):
     // the fields above describe the first one.
     std::uint32_t span_lo = 0, span_hi = 0;  // first library's mapped address range

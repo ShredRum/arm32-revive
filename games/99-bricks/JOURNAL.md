@@ -133,3 +133,17 @@ Host work, in order:
 6. Packaging: prepare-tree for a Unity title (our lib named libmain.so, the three
    guest libs under assets/guestlib, manifest unchanged); MONO_DEBUG served by
    getenv.
+
+## Unity's native start-up chain runs (2026-10-27)
+
+dlopen/dlsym for guest libraries already in the module (handle per library; dlsym
+searches that library first, then the merged table; other names still NULL), JNI
+GetJavaVM (fn 219). guestrun: `--call JNI_OnLoad @vm 0` (libmain) registers
+NativeLoader.load/unload; `--call 0x0200334c @env 0 j:<libdir>` (NativeLoader.load)
+dlopens libmono + libunity and runs libunity's JNI_OnLoad, which registers 26
+UnityPlayer natives (initJni, nativeRender, nativeResize, nativePause/Resume,
+nativeRecreateGfxState(Surface), nativeInjectEvent(InputEvent), UnitySendMessage...),
+6 org/fmod/FMODAudioDevice natives and 2 ReflectionHelper natives -> returns true.
+
+Next: the host side of RegisterNatives (real Java must call these guest functions),
+then the NativeActivity/EGL/input bridge and packaging.

@@ -3884,6 +3884,40 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
         return;
     }
+    if (n == "dlopen" || n == "dlsym" || n == "dlclose") {
+        // Guest libraries this module already holds (several guest .so, e.g.
+        // Unity's libmain dlopens libmono/libunity): a handle per library,
+        // dlsym from the module's definitions. Any other name -- host
+        // libraries such as libc.so -- gets NULL as it always did here.
+        if (n == "dlopen") {
+            const std::uint32_t h = a0 ? GuestLibraryHandle(GuestStr(a0)) : 0;
+            if (DiagOn() || h) {
+                std::printf("[dl] dlopen(\"%s\") -> %08x\n", a0 ? GuestStr(a0) : "NULL", h);
+            }
+            Ret(regs, h);
+            return;
+        }
+        if (n == "dlsym") {
+            // That library's own definition first (dlsym(handle) searches the
+            // library, then its dependencies: the merged table stands in).
+            std::uint32_t v = 0;
+            const int lib = GuestLibraryIndex(a0);
+            if (lib >= 0 && a1) {
+                const std::string sym = GuestStr(a1);
+                const auto& own = mod_.lib_defined[static_cast<std::size_t>(lib)];
+                const auto it = own.find(sym);
+                if (it != own.end()) {
+                    v = it->second;
+                } else if (const auto jt = mod_.defined.find(sym); jt != mod_.defined.end()) {
+                    v = jt->second;
+                }
+            }
+            Ret(regs, v);
+            return;
+        }
+        Ret(regs, 0);  // dlclose: loaded libraries stay
+        return;
+    }
     if (n == "memalign" || n == "posix_memalign") {
         // memalign(align, size) -> ptr; posix_memalign(void** out, align,
         // size) -> errno (EINVAL unless align is a power of two that is a
@@ -8330,6 +8364,47 @@ void Runtime::RegisterSigThread(std::uint32_t tid, Dynarmic::A32::Jit* jit) {
     t_rt = this;
 }
 
+namespace {
+std::string BaseName(const std::string& p) {
+    const std::size_t s = p.find_last_of('/');
+    return s == std::string::npos ? p : p.substr(s + 1);
+}
+}  // namespace
+
+std::uint32_t Runtime::GuestLibraryHandle(const std::string& name) {
+    const std::string want = BaseName(name);
+    std::vector<std::string> paths = {mod_.path};
+    for (const auto& x : mod_.more) {
+        paths.push_back(x.path);
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (std::size_t i = 0; i < paths.size(); i++) {
+        if (BaseName(paths[i]) != want) {
+            continue;
+        }
+        if (lib_handles_.size() < paths.size()) {
+            lib_handles_.resize(paths.size(), 0);
+        }
+        if (!lib_handles_[i]) {
+            lib_handles_[i] = GuestMalloc(16);  // opaque, never read by the guest
+        }
+        return lib_handles_[i];
+    }
+    return 0;
+}
+
+int Runtime::GuestLibraryIndex(std::uint32_t h) const {
+    if (h == 0) {
+        return -1;
+    }
+    for (std::size_t i = 0; i < lib_handles_.size() && i < mod_.lib_defined.size(); i++) {
+        if (lib_handles_[i] == h) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 void Runtime::ForgetSigThreadJit(std::uint32_t tid) {
     std::lock_guard<std::mutex> l(sig_mu_);
     const auto it = sig_threads_.find(tid);
@@ -10334,6 +10409,17 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 228:  // ExceptionCheck(env) -> jboolean FALSE (mock never raises)
         Ret(regs, 0);
         return;
+    case 219: {  // GetJavaVM(env, JavaVM** out) -> 0, the runtime's JavaVM
+        if (!CheckRange(a1, 4, true)) {
+            std::printf("[jni] LOUD GetJavaVM: bad out pointer %08x -- halting\n", a1);
+            HaltGuest();
+            return;
+        }
+        const std::uint32_t vm = Jvm();
+        std::memcpy(H(a1), &vm, 4);
+        Ret(regs, 0);
+        return;
+    }
     case 28:  // NewObject(V/A)(env, class, method, ...) -> fresh mock object
     case 29:   // (verified vs NDK jni.h; ctor args ignored, offline fine)
     case 30: {

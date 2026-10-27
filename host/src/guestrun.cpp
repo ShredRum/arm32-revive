@@ -13,6 +13,9 @@
 //   123 / 0x7b   an integer
 //   s:text       a NUL-terminated copy of text in guest memory
 //   $N           the r0 result of call N (0-based)
+//   @vm / @env   the runtime's mock JavaVM* / JNIEnv*
+//   j:text       a jstring
+// <symbol> may also be a guest address (0x...), e.g. a RegisterNatives target.
 // Each call prints "call N sym(...) -> r0 (hr)". The run stops at the first
 // call that does not return cleanly.
 #include <cstdio>
@@ -195,10 +198,16 @@ int main(int argc, char** argv) {
             results.push_back(w);
             continue;
         }
-        const auto it = mod.defined.find(calls[c].sym);
-        if (it == mod.defined.end()) {
-            std::printf("call %zu: no export %s\n", c, calls[c].sym.c_str());
-            return 1;
+        std::uint32_t target = 0;
+        if (calls[c].sym.rfind("0x", 0) == 0) {
+            target = static_cast<std::uint32_t>(std::strtoul(calls[c].sym.c_str(), nullptr, 16));
+        } else {
+            const auto it = mod.defined.find(calls[c].sym);
+            if (it == mod.defined.end()) {
+                std::printf("call %zu: no export %s\n", c, calls[c].sym.c_str());
+                return 1;
+            }
+            target = it->second;
         }
         std::vector<std::uint32_t> words;
         std::string shown;
@@ -208,6 +217,12 @@ int main(int argc, char** argv) {
                 const std::string s = a.substr(2);
                 w = rt.GuestMalloc(static_cast<std::uint32_t>(s.size() + 1));
                 std::memcpy(rt.H(w), s.c_str(), s.size() + 1);
+            } else if (a == "@vm") {
+                w = rt.Jvm();  // the mock JavaVM* (as JNI_OnLoad gets it)
+            } else if (a == "@env") {
+                w = rt.JniEnv();  // the guest JNIEnv*
+            } else if (a.rfind("j:", 0) == 0) {
+                w = rt.JniNewString(a.substr(2));  // a jstring
             } else if (!a.empty() && a[0] == '$') {
                 const std::size_t idx = std::strtoul(a.c_str() + 1, nullptr, 10);
                 w = idx < results.size() ? results[idx] : 0;
@@ -221,7 +236,7 @@ int main(int argc, char** argv) {
         }
         std::uint32_t r0 = 0;
         int hr = 0;
-        const bool ok = RunGuest(jit, rt, mod, it->second | (it->second & 1u), words, &r0, &hr);
+        const bool ok = RunGuest(jit, rt, mod, target, words, &r0, &hr);
         results.push_back(r0);
         std::printf("call %zu %s(%s) -> %08x (%s, hr=%d)\n", c, calls[c].sym.c_str(),
                     shown.c_str(), r0, ok ? "ok" : "HALTED", hr);
