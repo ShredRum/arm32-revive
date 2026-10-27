@@ -172,3 +172,22 @@ Known gaps for Unity, to handle when they show up on the device:
   native) is dropped as REENTER.
 
 Next: NativeActivity host bridge, window/input handles, EGL, packaging.
+
+## Imports the three libraries miss (2026-10-27)
+
+Unity's libs import ~200 names the host does not implement (they fall into the
+`[stub] -> 0` path). Done so far: weak references the system does not export
+resolve to 0 (`__data_start`, `data_start`, `__cxa_begin_cleanup`,
+`__cxa_type_match`, `__cxa_call_unexpected`; NDK r27 stubs, API 21-25),
+`__cxa_guard_*` (a 0 meant "already constructed"), `__cxa_pure_virtual`, atexit
+family, `environ` (empty) and `_ZSt7nothrow` data objects. Mono GC test still
+passes (mono_gc_collect x2, heap 128 KiB).
+
+Still missing, by group: libc (ctype isalnum/isalpha/isspace/isxdigit/tolower,
+usleep/sleep, readdir, lstat, chdir, dup2, isatty, setenv/unsetenv, strcasestr,
+strsep, strxfrm, puts/putchar/perror/vfprintf/setvbuf/fscanf, div,
+pthread_key_delete/exit/sched*, getuid/getpwuid, getrusage, madvise, mremap, flock,
+truncate, prctl, select, epoll_*, sendfile, dlerror, wide-char), zlib
+(inflate*/deflate*/crc32), GL (stencil, blend separate, framebuffer status,
+mipmaps...), process/network refusals (fork/exec/popen/system, getaddrinfo...),
+then NDK input/looper/configuration/sensors/window and EGL (device).
