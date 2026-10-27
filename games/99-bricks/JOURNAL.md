@@ -269,3 +269,12 @@ NewObjectArray/Get/SetObjectArrayElement, New<T>Array (175-182), MonitorEnter/Ex
 ReleasePrimitiveArrayCritical, Get/ReleaseStringCritical, NewDirectByteBuffer,
 GetObjectRefType. Next: implement them all at once (real-Java delegation), then look
 at GL_EXTENSIONS vs eglGetProcAddress (Unity sees extensions we return NULL for).
+
+## Open: a rare hang at the logo, inside ART (2026-10-27)
+
+Seen a few times before the loading bar: the Java render thread (UnityMain, tid 5)
+sits in JNI GetArrayLength, in ART's ConditionVariable wait (transition to Runnable,
+i.e. a pending thread suspension that is never lifted); FMODAudioDevice waits the same
+way in ReleasePrimitiveArray. No guest-attached thread is among ART's threads. Not yet
+explained; traces in work/review/traces_bricks*.txt. (The other hang, Unity's
+asyncProcessor queue, was dumped once with the queue empty and no waiter.)
