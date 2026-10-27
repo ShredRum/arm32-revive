@@ -11482,8 +11482,12 @@ void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::u
     if (!t_sig || t_is_proxy) {
         return;
     }
-    t_sig->snap = regs;
-    t_sig->snap_cpsr = cpsr;
+    const bool on = SignalsInUse();
+    if (on) {
+        t_sig->snap = regs;
+        t_sig->snap_cpsr = cpsr;
+    }
+    t_sig->snap_valid.store(on, std::memory_order_relaxed);
     t_sig->parked.store(false, std::memory_order_relaxed);
     t_sig->outside.store(true, std::memory_order_release);
 }
@@ -11492,7 +11496,11 @@ void Runtime::SigLeaveHostCall() {
     if (!t_sig || t_is_proxy) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+    if (SignalsInUse()) {
+        std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+        t_sig->outside.store(false, std::memory_order_release);
+        return;
+    }
     t_sig->outside.store(false, std::memory_order_release);
 }
 
@@ -11507,6 +11515,14 @@ void Runtime::ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid) {
                 // registers it left guest code with (none when parked).
                 std::array<std::uint32_t, 16> regs = st->snap;
                 std::uint32_t cpsr = st->snap_cpsr;
+                if (!st->snap_valid.load(std::memory_order_relaxed)) {
+                    // A host call entered before signals were in use: the
+                    // thread's stopped Jit holds its registers.
+                    if (Dynarmic::A32::Jit* j = st->jit.load(std::memory_order_acquire)) {
+                        regs = j->Regs();
+                        cpsr = j->Cpsr();
+                    }
+                }
                 if (st->parked.load(std::memory_order_relaxed)) {
                     regs.fill(0);
                     const std::uint32_t top = st->stack_top ? st->stack_top : kStackTop;
@@ -11542,17 +11558,22 @@ void GuestSigEnterJit() {
 }
 
 void GuestSigResumeJit() {
-    if (!t_rt || !t_sig || t_is_proxy || !t_rt->SignalsInUse()) {
+    if (!t_rt || !t_sig || t_is_proxy) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+    if (t_rt->SignalsInUse()) {
+        std::lock_guard<std::recursive_mutex> tok(t_sig->token);  // wait out a proxy
+        t_sig->parked.store(false, std::memory_order_relaxed);
+        t_sig->outside.store(false, std::memory_order_release);
+        return;
+    }
     t_sig->parked.store(false, std::memory_order_relaxed);
     t_sig->outside.store(false, std::memory_order_release);
 }
 
 void GuestSigLeaveJit() {
     t_jit_depth--;
-    if (!t_rt || !t_sig || t_is_proxy || !t_rt->SignalsInUse()) {
+    if (!t_rt || !t_sig || t_is_proxy) {
         return;
     }
     // Back in a host call (a callback Jit ended) or back in the host.
@@ -15723,10 +15744,10 @@ void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
 void GuestCallbacks::CallSVC(std::uint32_t swi) {
     Dynarmic::A32::Jit* jit = rt_->ActiveJit();
     auto& regs = jit->Regs();
-    if (!rt_->SignalsInUse()) {
-        rt_->OnSvc(swi, regs);
-        return;
-    }
+    // Where the thread is must be known before signals are ever used: a
+    // thread that went to sleep in a host call earlier must not look like it
+    // has no guest frames when the first signal comes (a proxy would run the
+    // handler over its live stack).
     rt_->SigEnterHostCall(regs, jit->Cpsr());
     rt_->OnSvc(swi, regs);
     rt_->SigLeaveHostCall();

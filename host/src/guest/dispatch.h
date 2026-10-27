@@ -250,6 +250,9 @@ public:
         std::atomic<bool> proxy{false};  // a proxy is scheduled or running
         std::array<std::uint32_t, 16> snap{};
         std::uint32_t snap_cpsr = 0x10;
+        // snap holds this host call's registers (taken only while signals
+        // are in use); otherwise the thread's Jit registers are its state.
+        std::atomic<bool> snap_valid{false};
         std::uint32_t stack_top = 0;
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
