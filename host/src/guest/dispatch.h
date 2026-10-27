@@ -384,6 +384,17 @@ public:
     // Map a guest path to the host path (the file bridge's rule).
     std::string MapGuestPath(std::uint32_t guest_path);
     std::string MapGuestPathString(const std::string& g);
+    // The guest's environment: getenv/setenv/unsetenv and the `environ`
+    // array (NULL-terminated "K=V" guest strings; its variable is
+    // environ_var_). SetGuestEnv lets the host seed it before the guest runs.
+    void SetGuestEnv(const std::string& key, const std::string& value);
+    std::uint32_t GuestGetenv(const std::string& key);
+    std::uint32_t GuestSetenv(const std::string& key, const std::string* value, bool overwrite);
+    void RebuildEnvironLocked();
+    std::mutex env_mu_;
+    std::vector<std::pair<std::string, std::uint32_t>> env_;  // key, guest "K=V"
+    std::uint32_t environ_var_ = 0;
+    std::uint32_t environ_array_ = 0;
     // The guest's current directory (chdir/getcwd), guest spelling. Empty =
     // the default, the files dir, where bare relative names go (R-006).
     std::string cwd_;

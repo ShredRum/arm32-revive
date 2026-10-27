@@ -7321,6 +7321,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, found);
         return;
     }
+    if (n == "getenv") {
+        if (!CheckRange(a0, 1, false)) {
+            goto bad_ptr;
+        }
+        const std::string key = GuestStr(a0);
+        const std::uint32_t v = GuestGetenv(key);
+        {
+            // Which names a guest asks for: once per name (a port needs to
+            // see them; the old stub printed the first five calls).
+            static std::set<std::string> seen;
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (seen.size() < 200 && seen.insert(key).second) {
+                std::printf("[env] getenv(\"%s\") -> %s\n", key.c_str(), v ? GuestStr(v) : "NULL");
+            }
+        }
+        Ret(regs, v);
+        return;
+    }
+    if (n == "setenv" || n == "unsetenv") {
+        if (!CheckRange(a0, 1, false) || (n == "setenv" && !CheckRange(a1, 1, false))) {
+            goto bad_ptr;
+        }
+        const std::string key = GuestStr(a0);
+        const std::string val = n == "setenv" ? std::string(GuestStr(a1)) : std::string();
+        const std::uint32_t e = GuestSetenv(key, n == "setenv" ? &val : nullptr, a2 != 0);
+        if (e != 0) {
+            SetGuestErrno(static_cast<int>(e));
+        }
+        Ret(regs, e == 0 ? 0u : 0xFFFFFFFFu);
+        return;
+    }
     // --- ctype functions (for guests that call them rather than reading
     //     _ctype_). Bionic 7.1.2 takes them from OpenBSD's isctype.c: EOF
     //     -> 0, otherwise the byte table entry of (unsigned char)c & mask.
@@ -7689,7 +7720,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
         // Enriched logging for environment queries: names matter.
-        if (n == "__system_property_get" || n == "getenv" || n == "dlopen" || n == "open" ||
+        if (n == "__system_property_get" || n == "dlopen" || n == "open" ||
             n == "fopen" || n == "stat" || n == "access") {
             std::printf("[env]%s %s(\"%s\") lr=%08x\n", GuestTid() == 1 ? "" : "(T2+)", n.c_str(),
                         GuestStr(a0), regs[14]);
@@ -8394,8 +8425,8 @@ void Runtime::InitDataImports() {
     // bionic std streams: __sF[3], sizeof(FILE)=84 on this arm32 ABI (stderr is
     // &__sF[2] == base+168; verified at call sites 0x5d4270 and 0x586dc8).
     const std::uint32_t sF = GuestMalloc(3 * 84);
-    // environ (char**): the variable points at an empty environment, a lone
-    // NULL, which matches getenv answering NULL for every name. std::nothrow
+    // environ (char**): the variable points at the guest's environment
+    // (env_, see GuestSetenv), empty unless the host seeds it. std::nothrow
     // is an empty object only used by address (operator new(size, nothrow)).
     const std::uint32_t var_environ = GuestMalloc(4);
     const std::uint32_t env_array = GuestMalloc(4);
@@ -8425,6 +8456,12 @@ void Runtime::InitDataImports() {
     std::memcpy(H(var_page), &page_size, 4);
     std::memset(H(env_array), 0, 4);
     std::memcpy(H(var_environ), &env_array, 4);
+    {
+        std::lock_guard<std::mutex> l(env_mu_);
+        environ_var_ = var_environ;
+        environ_array_ = env_array;
+        RebuildEnvironLocked();  // entries the host set before this point
+    }
     std::memset(H(var_nothrow), 0, 4);
     // __sF: bind the three bionic std streams to the host's. The GOT slot must
     // hold the ARRAY BASE (the guest does a single deref: ldr rX,[got]; add
@@ -9133,6 +9170,79 @@ void Runtime::ForgetSigThreadJit(std::uint32_t tid) {
     if (it != sig_threads_.end()) {
         it->second->jit.store(nullptr, std::memory_order_release);
     }
+}
+
+// The environ array holds the env_ strings in order, then NULL. A new array
+// replaces the old one (freed: like bionic's setenv, it does not outlive the
+// next change).
+void Runtime::RebuildEnvironLocked() {
+    if (!environ_var_) {
+        return;  // before InitDataImports: built there
+    }
+    const std::uint32_t arr = GuestMalloc(static_cast<std::uint32_t>(env_.size() + 1) * 4u);
+    if (!arr) {
+        std::printf("[env] LOUD no guest heap for environ -- left as it was\n");
+        return;
+    }
+    for (std::size_t i = 0; i < env_.size(); i++) {
+        std::memcpy(H(arr + static_cast<std::uint32_t>(i) * 4u), &env_[i].second, 4);
+    }
+    std::memset(H(arr + static_cast<std::uint32_t>(env_.size()) * 4u), 0, 4);
+    std::memcpy(H(environ_var_), &arr, 4);
+    if (environ_array_) {
+        GuestFree(environ_array_);
+    }
+    environ_array_ = arr;
+}
+
+std::uint32_t Runtime::GuestGetenv(const std::string& key) {
+    std::lock_guard<std::mutex> l(env_mu_);
+    for (const auto& kv : env_) {
+        if (kv.first == key) {
+            return kv.second + static_cast<std::uint32_t>(key.size()) + 1u;  // past "K="
+        }
+    }
+    return 0;
+}
+
+// setenv (value) / unsetenv (null value). Returns 0 or an errno value. An
+// old "K=V" string is not freed: a pointer getenv returned may still be in
+// use (bionic leaks it too).
+std::uint32_t Runtime::GuestSetenv(const std::string& key, const std::string* value,
+                                   bool overwrite) {
+    if (key.empty() || key.find('=') != std::string::npos) {
+        return EINVAL;
+    }
+    std::lock_guard<std::mutex> l(env_mu_);
+    auto it = std::find_if(env_.begin(), env_.end(),
+                           [&](const auto& kv) { return kv.first == key; });
+    if (!value) {
+        if (it != env_.end()) {
+            env_.erase(it);
+            RebuildEnvironLocked();
+        }
+        return 0;
+    }
+    if (it != env_.end() && !overwrite) {
+        return 0;
+    }
+    const std::string kv = key + "=" + *value;
+    const std::uint32_t str = GuestMalloc(static_cast<std::uint32_t>(kv.size() + 1));
+    if (!str) {
+        return ENOMEM;
+    }
+    std::memcpy(H(str), kv.c_str(), kv.size() + 1);
+    if (it != env_.end()) {
+        it->second = str;
+    } else {
+        env_.emplace_back(key, str);
+    }
+    RebuildEnvironLocked();
+    return 0;
+}
+
+void Runtime::SetGuestEnv(const std::string& key, const std::string& value) {
+    GuestSetenv(key, &value, true);
 }
 
 // bionic's __cxa_guard (ARM): 0 = not constructed, bit 0 = constructed; we

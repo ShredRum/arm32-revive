@@ -352,6 +352,9 @@ int main() {
     mod.imports.push_back(abr::Import{"readdir", true, 0, 0, 0});  // 84
     mod.imports.push_back(abr::Import{"chdir", true, 0, 0, 0});  // 85
     mod.imports.push_back(abr::Import{"getcwd", true, 0, 0, 0});  // 86
+    mod.imports.push_back(abr::Import{"getenv", true, 0, 0, 0});  // 87
+    mod.imports.push_back(abr::Import{"setenv", true, 0, 0, 0});  // 88
+    mod.imports.push_back(abr::Import{"unsetenv", true, 0, 0, 0});  // 89
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1193,6 +1196,40 @@ int main() {
         Expect("sched_get_priority_max(SCHED_FIFO)",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 83, fifo)),
                "99");
+    }
+
+    // --- guest environment: setenv/getenv/unsetenv share one table and the
+    //     environ array follows it ("K=V" strings, NULL-terminated).
+    {
+        const std::uint32_t kVar = kScratch + 0xA00, kK = kScratch + 0xA10, kV1 = kScratch + 0xA20,
+                            kV2 = kScratch + 0xA30;
+        std::memset(mem.host(kVar), 0, 4);
+        rt.environ_var_ = kVar;
+        put(kK, "ABR_K");
+        put(kV1, "one");
+        put(kV2, "two");
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t a[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        auto env0 = [&]() -> std::string {
+            std::uint32_t arr = 0, e0 = 0;
+            std::memcpy(&arr, mem.host(kVar), 4);
+            if (!arr) {
+                return "noarr";
+            }
+            std::memcpy(&e0, mem.host(arr), 4);
+            return e0 ? rt.H<const char>(e0) : "NULL";
+        };
+        std::string got = std::to_string(call(87, kK)) + " ";
+        call(88, kK, kV1, 1);
+        call(88, kK, kV2, 0);  // no overwrite
+        const std::uint32_t v = call(87, kK);
+        got += (v ? rt.H<const char>(v) : "NULL") + std::string(" ") + env0() + " ";
+        call(89, kK);
+        got += std::to_string(call(87, kK)) + " " + env0();
+        Expect("getenv/setenv/unsetenv/environ", got, "0 one ABR_K=one 0 NULL");
+        rt.environ_var_ = 0;
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read
