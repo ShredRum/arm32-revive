@@ -279,6 +279,14 @@ public:
     // mbstate_t 4 bytes): mbrtowc wcrtomb wcscoll wcsxfrm wcsftime getwc
     // putwc ungetwc. False: a wild guest pointer.
     bool WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    // Name resolution in the guest's LP32 structs (getaddrinfo, freeaddrinfo,
+    // gai_strerror, gethostbyname, gethostbyaddr, __get_h_errno), with
+    // bionic's EAI_/AI_/h_errno numbers. Offline titles resolve only NULL,
+    // numeric hosts and localhost; any other name gets EAI_NODATA /
+    // HOST_NOT_FOUND, as a phone without network answers. False: a wild
+    // guest pointer.
+    bool NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    std::unordered_map<int, std::uint32_t> gai_msgs_;  // bionic EAI code -> guest text
     std::uint8_t mbrtowc_state_[4] = {0, 0, 0, 0};  // for ps == NULL, as bionic's static
     std::mutex zlib_mu_;
     std::unordered_map<std::uint32_t, std::unique_ptr<z_stream>> zstreams_;

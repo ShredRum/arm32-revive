@@ -366,6 +366,12 @@ int main() {
     mod.imports.push_back(abr::Import{"mbrtowc", true, 0, 0, 0});  // 97
     mod.imports.push_back(abr::Import{"wcrtomb", true, 0, 0, 0});  // 98
     mod.imports.push_back(abr::Import{"fscanf", true, 0, 0, 0});  // 99
+    mod.imports.push_back(abr::Import{"getaddrinfo", true, 0, 0, 0});  // 100
+    mod.imports.push_back(abr::Import{"freeaddrinfo", true, 0, 0, 0});  // 101
+    mod.imports.push_back(abr::Import{"gai_strerror", true, 0, 0, 0});  // 102
+    mod.imports.push_back(abr::Import{"inet_aton", true, 0, 0, 0});  // 103
+    mod.imports.push_back(abr::Import{"mmap", true, 0, 0, 0});  // 104
+    mod.imports.push_back(abr::Import{"mremap", true, 0, 0, 0});  // 105
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -1295,6 +1301,61 @@ int main() {
         std::snprintf(want, sizeof want, "0 1 0 same=1 in+%u avail_in=0 out+3000 avail_out=1096 total=3000",
                       static_cast<unsigned>(plen));
         Expect("guest z_stream inflate", got, want);
+    }
+
+    // --- name resolution offline (bionic EAI numbers; a numeric host
+    //     resolves into the guest's LP32 addrinfo), inet_aton, and mremap
+    //     growing a mapping by moving it with its contents.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0,
+                        std::uint32_t w = 0) {
+            const std::uint32_t a[4] = {x, y, z, w};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        const std::uint32_t kN = kScratch + 0xD00, kSv = kScratch + 0xD40, kRes = kScratch + 0xD50,
+                            kIa = kScratch + 0xD60;
+        put(kN, "example.com");
+        std::string got = std::to_string(call(100, kN, 0, 0, kRes)) + " ";
+        put(kN, "127.0.0.1");
+        put(kSv, "80");
+        const std::uint32_t r = call(100, kN, kSv, 0, kRes);
+        std::uint32_t ai = 0;
+        std::memcpy(&ai, mem.host(kRes), 4);
+        std::uint32_t f[8] = {0};
+        if (r == 0 && ai) {
+            std::memcpy(f, mem.host(ai), 32);
+        }
+        const std::uint8_t* sa = f[6] ? mem.host(f[6]) : nullptr;
+        got += std::to_string(r) + " fam=" + std::to_string(f[1]) + " len=" + std::to_string(f[4]) +
+               " port=" + std::to_string(sa ? (sa[2] << 8 | sa[3]) : 0) + " ip0=" +
+               std::to_string(sa ? sa[4] : 0);
+        if (ai) {
+            call(101, ai);
+        }
+        got += std::string(" '") + rt.H<const char>(call(102, 7)) + "'";
+        put(kN, "10.1.2.3");
+        got += " aton=" + std::to_string(call(103, kN, kIa));
+        char ip[16];
+        std::snprintf(ip, sizeof ip, ":%u.%u.%u.%u", *mem.host(kIa), *mem.host(kIa + 1),
+                      *mem.host(kIa + 2), *mem.host(kIa + 3));
+        got += ip;
+        Expect("getaddrinfo offline / numeric, gai_strerror, inet_aton", got,
+               "7 0 fam=2 len=16 port=80 ip0=127 'No address associated with hostname' aton=1:10.1.2.3");
+        abr::RuntimeTestAccess::RegsView in{};
+        in[13] = kScratch + 0xE00;  // stack: fd -1, offset 0
+        const std::uint32_t stk[2] = {0xFFFFFFFFu, 0};
+        std::memcpy(mem.host(in[13]), stk, 8);
+        const std::uint32_t margs[4] = {0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS};
+        const std::uint32_t m = abr::RuntimeTestAccess::Call(rt, 104, margs, in, nullptr);
+        std::string mr = "mmap-failed";
+        if (m != 0xFFFFFFFFu) {
+            std::memcpy(mem.host(m), "kept", 5);
+            const std::uint32_t grown = call(105, m, 4096, 3 * 4096, 1);
+            const std::uint32_t stay = call(105, m, 4096, 3 * 4096, 0);
+            mr = std::string(grown != 0xFFFFFFFFu ? rt.H<const char>(grown) : "fail") + " " +
+                 std::to_string(static_cast<std::int32_t>(stay));
+        }
+        Expect("mremap grows by moving (MAYMOVE), refuses in place", mr, "kept -1");
     }
 
     // --- JNI argument words from a signature (AppendJniArgs). Both read

@@ -20,7 +20,9 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <optional>
+#include <netdb.h>
 #include <poll.h>
+#include <sys/epoll.h>
 #include <pwd.h>
 #include <grp.h>
 #include <sched.h>
@@ -2264,6 +2266,52 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, off));
+        return;
+    }
+    if (n == "mremap") {
+        // mremap(old, old_size, new_size, flags): the mapping table cannot
+        // split or extend an entry, so a mapping that shrinks keeps its
+        // address (its tail stays mapped, which no caller can tell from a
+        // real shrink but by touching it), one that grows moves when
+        // MREMAP_MAYMOVE (1) allows: a new mapping with the same protection,
+        // the contents copied, the old one released. Growing in place and
+        // MREMAP_FIXED are refused (ENOMEM / EINVAL).
+        const std::uint32_t old_len = (a1 + 0xFFFu) & ~0xFFFu, new_len = (a2 + 0xFFFu) & ~0xFFFu;
+        if ((a0 & 0xFFFu) != 0 || new_len == 0 || (a3 & ~1u) != 0) {
+            SetGuestErrno(EINVAL);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        int prot = -1;
+        mappings_.ForEach([&](std::uint32_t st, std::uint32_t en, int pr) {
+            if (st == a0 && en - st >= old_len) {
+                prot = pr;
+            }
+        });
+        if (prot < 0 || a0 < kMmapArenaBase) {
+            SetGuestErrno(EFAULT);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        if (new_len <= old_len) {
+            Ret(regs, a0);
+            return;
+        }
+        if (!(a3 & 1u)) {
+            SetGuestErrno(ENOMEM);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        const std::uint32_t moved = GuestMmap(0, new_len, prot | PROT_READ | PROT_WRITE,
+                                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (moved == 0xFFFFFFFFu) {
+            Ret(regs, moved);
+            return;
+        }
+        std::memcpy(H(moved), H(a0), old_len);
+        GuestMprotect(moved, new_len, prot);
+        GuestMunmap(a0, old_len);
+        Ret(regs, moved);
         return;
     }
     if (n == "munmap") {
@@ -5872,8 +5920,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // match, so forward directly, with the blocking/timeout semantics the
         // guest set itself (fcntl, setsockopt). Network destinations are
         // refused unless the title is online (offline_refuses above).
-        // sendmsg/recvmsg NOT marshalled (guest msghdr is 32-bit layout) ->
-        // LOUD if ever called.
+        // sendmsg/recvmsg marshal the 32-bit msghdr (data only, see there).
         if (n == "socket") {
             int hfd = ::socket((int)a0, (int)a1, (int)a2);
             if (hfd < 0) {
@@ -5913,6 +5960,309 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (DiagOn()) {
                 std::printf("[netsock]%s connect(gfd %u) -> %d (errno %d)\n",
                             GuestTid() == 1 ? "" : "(T2+)", a0, r, r != 0 ? errno : 0);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "accept") {
+            // accept(fd, sockaddr* addr, socklen_t* len): the new connection
+            // becomes a guest fd; the sockaddr layout is the host's.
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            socklen_t len = 0;
+            if (a1) {
+                if (!CheckRange(a2, 4, true)) {
+                    goto bad_ptr;
+                }
+                std::uint32_t l32 = 0;
+                std::memcpy(&l32, H(a2), 4);
+                if (l32 > 128 || !CheckRange(a1, l32, true)) {
+                    goto bad_ptr;
+                }
+                len = l32;
+            }
+            const int nfd = ::accept(hfd, a1 ? reinterpret_cast<struct sockaddr*>(H(a1)) : nullptr,
+                                     a1 ? &len : nullptr);
+            if (nfd < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (a1) {
+                const std::uint32_t l32 = len;
+                std::memcpy(H(a2), &l32, 4);
+            }
+            const std::uint32_t g = alloc_guest_fd(nfd);
+            if (g == 0xFFFFFFFFu) {
+                ::close(nfd);
+                set_guest_errno(EMFILE);
+            }
+            Ret(regs, g);
+            return;
+        }
+        if (n == "sendmsg" || n == "recvmsg") {
+            // (fd, msghdr*, flags). Guest msghdr (LP32, NDK): name @0,
+            // namelen @4, iov @8, iovlen @12, control @16, controllen @20,
+            // flags @24; iovec {base, len} = 8 bytes. Ancillary data is not
+            // carried: its header differs between arm32 and arm64 (12 vs 16
+            // bytes), so sendmsg with control data is refused and recvmsg
+            // reports any it got as truncated (MSG_CTRUNC).
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (!CheckRange(a1, 28, n == "recvmsg")) {
+                goto bad_ptr;
+            }
+            std::uint32_t m[7];
+            std::memcpy(m, H(a1), 28);
+            const bool rec = (n == "recvmsg");
+            if (m[3] > 1024 || (m[3] && !CheckRange(m[2], m[3] * 8, false)) ||
+                (m[0] && (m[1] > 128 || !CheckRange(m[0], m[1], rec)))) {
+                goto bad_ptr;
+            }
+            if (!rec && m[5] != 0) {
+                std::printf("[netsock] sendmsg with ancillary data is not carried -> EOPNOTSUPP\n");
+                set_guest_errno(EOPNOTSUPP);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (!rec && m[0] && offline_refuses(m[0], m[1])) {
+                set_guest_errno(ENETUNREACH);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            std::vector<struct iovec> iov(m[3]);
+            for (std::uint32_t i = 0; i < m[3]; i++) {
+                std::uint32_t v[2];
+                std::memcpy(v, H(m[2] + i * 8), 8);
+                if (v[1] && !CheckRange(v[0], v[1], rec)) {
+                    goto bad_ptr;
+                }
+                iov[i].iov_base = v[1] ? H(v[0]) : nullptr;
+                iov[i].iov_len = v[1];
+            }
+            struct msghdr hm {};
+            hm.msg_name = m[0] ? H(m[0]) : nullptr;
+            hm.msg_namelen = m[0] ? m[1] : 0;
+            hm.msg_iov = iov.data();
+            hm.msg_iovlen = iov.size();
+            char control[256];
+            if (rec && m[5]) {
+                hm.msg_control = control;
+                hm.msg_controllen = sizeof(control);
+            }
+            const ssize_t r = rec ? ::recvmsg(hfd, &hm, static_cast<int>(a2))
+                                  : ::sendmsg(hfd, &hm, static_cast<int>(a2));
+            if (r < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (rec) {
+                std::uint32_t flags = static_cast<std::uint32_t>(hm.msg_flags);
+                if (hm.msg_controllen != 0) {
+                    flags |= MSG_CTRUNC;  // ancillary data dropped (see above)
+                }
+                m[1] = m[0] ? static_cast<std::uint32_t>(hm.msg_namelen) : m[1];
+                m[5] = 0;
+                m[6] = flags;
+                std::memcpy(H(a1), m, 28);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+        if (n == "select") {
+            // select(nfds, fd_set* r, fd_set* w, fd_set* e, timeval* t) over
+            // guest fd numbers, run as a host poll (host fds may exceed
+            // FD_SETSIZE). Guest fd_set = 1024 bits; timeval {long, long},
+            // updated with the time left, as Linux does.
+            if (a0 > 1024) {
+                set_guest_errno(EINVAL);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            std::uint32_t tv_ptr = 0;
+            if (!CheckRange(regs[13], 4, false)) {
+                goto bad_ptr;
+            }
+            std::memcpy(&tv_ptr, H(regs[13]), 4);
+            const std::uint32_t set_bytes = (a0 + 7) / 8;
+            const std::uint32_t sets[3] = {a1, a2, a3};
+            for (std::uint32_t k = 0; k < 3; k++) {
+                if (sets[k] && set_bytes && !CheckRange(sets[k], set_bytes, true)) {
+                    goto bad_ptr;
+                }
+            }
+            if (tv_ptr && !CheckRange(tv_ptr, 8, true)) {
+                goto bad_ptr;
+            }
+            auto has = [&](std::uint32_t set, std::uint32_t fd) {
+                return set && (*H<std::uint8_t>(set + fd / 8) >> (fd % 8)) & 1u;
+            };
+            std::vector<struct pollfd> pfds;
+            std::vector<std::uint32_t> gfds;
+            for (std::uint32_t fd = 0; fd < a0; fd++) {
+                short ev = 0;
+                if (has(a1, fd)) ev |= POLLIN;
+                if (has(a2, fd)) ev |= POLLOUT;
+                if (has(a3, fd)) ev |= POLLPRI;
+                if (!ev) {
+                    continue;
+                }
+                const int hfd = fd <= 2 ? static_cast<int>(fd) : host_fd_of(fd);
+                if (hfd < 0) {
+                    set_guest_errno(EBADF);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                pfds.push_back({hfd, ev, 0});
+                gfds.push_back(fd);
+            }
+            int timeout = -1;
+            std::int32_t tv[2] = {0, 0};
+            if (tv_ptr) {
+                std::memcpy(tv, H(tv_ptr), 8);
+                if (tv[0] < 0 || tv[1] < 0) {
+                    set_guest_errno(EINVAL);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                const long long ms = static_cast<long long>(tv[0]) * 1000 + (tv[1] + 999) / 1000;
+                timeout = ms > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(ms);
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            const int r = ::poll(pfds.data(), pfds.size(), timeout);
+            if (r < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            for (std::uint32_t k = 0; k < 3; k++) {
+                if (sets[k] && set_bytes) {
+                    std::memset(H(sets[k]), 0, set_bytes);
+                }
+            }
+            std::uint32_t count = 0;
+            for (std::size_t i = 0; i < pfds.size(); i++) {
+                const std::uint32_t fd = gfds[i];
+                const short re = pfds[i].revents;
+                auto mark = [&](std::uint32_t set) {
+                    *H<std::uint8_t>(set + fd / 8) |= static_cast<std::uint8_t>(1u << (fd % 8));
+                    count++;
+                };
+                if (a1 && (pfds[i].events & POLLIN) && (re & (POLLIN | POLLHUP | POLLERR))) {
+                    mark(a1);
+                }
+                if (a2 && (pfds[i].events & POLLOUT) && (re & (POLLOUT | POLLERR))) {
+                    mark(a2);
+                }
+                if (a3 && (pfds[i].events & POLLPRI) && (re & POLLPRI)) {
+                    mark(a3);
+                }
+            }
+            if (tv_ptr) {
+                const long long spent = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count();
+                long long left = static_cast<long long>(tv[0]) * 1000000 + tv[1] - spent;
+                if (left < 0 || r == 0) {
+                    left = 0;
+                }
+                const std::int32_t o[2] = {static_cast<std::int32_t>(left / 1000000),
+                                           static_cast<std::int32_t>(left % 1000000)};
+                std::memcpy(H(tv_ptr), o, 8);
+            }
+            Ret(regs, count);
+            return;
+        }
+        if (n == "epoll_create" || n == "epoll_ctl" || n == "epoll_wait") {
+            // Guest struct epoll_event (arm EABI, not packed): events @0,
+            // 64-bit data @8; 16 bytes. The data word is the guest's, kept
+            // as given.
+            if (n == "epoll_create") {
+                if (static_cast<std::int32_t>(a0) <= 0) {
+                    set_guest_errno(EINVAL);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                const int efd = ::epoll_create1(0);
+                if (efd < 0) {
+                    set_guest_errno(errno);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                const std::uint32_t g = alloc_guest_fd(efd);
+                if (g == 0xFFFFFFFFu) {
+                    ::close(efd);
+                    set_guest_errno(EMFILE);
+                }
+                Ret(regs, g);
+                return;
+            }
+            const int efd = host_fd_of(a0);
+            if (efd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (n == "epoll_ctl") {
+                // (epfd, op, fd, event*)
+                const int hfd = a2 <= 2 ? static_cast<int>(a2) : host_fd_of(a2);
+                if (hfd < 0) {
+                    set_guest_errno(EBADF);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                struct epoll_event ev {};
+                if (a1 != EPOLL_CTL_DEL) {
+                    if (!CheckRange(a3, 16, false)) {
+                        goto bad_ptr;
+                    }
+                    std::uint32_t e = 0;
+                    std::uint64_t d = 0;
+                    std::memcpy(&e, H(a3), 4);
+                    std::memcpy(&d, H(a3 + 8), 8);
+                    ev.events = e;
+                    ev.data.u64 = d;
+                }
+                const int r = ::epoll_ctl(efd, static_cast<int>(a1), hfd, &ev);
+                if (r != 0) {
+                    set_guest_errno(errno);
+                }
+                Ret(regs, static_cast<std::uint32_t>(r));
+                return;
+            }
+            // epoll_wait(epfd, events*, maxevents, timeout)
+            const std::int32_t maxev = static_cast<std::int32_t>(a2);
+            if (maxev <= 0 || maxev > 4096) {
+                set_guest_errno(EINVAL);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (!CheckRange(a1, static_cast<std::uint32_t>(maxev) * 16u, true)) {
+                goto bad_ptr;
+            }
+            std::vector<struct epoll_event> evs(static_cast<std::size_t>(maxev));
+            const int r = ::epoll_wait(efd, evs.data(), maxev, static_cast<int>(a3));
+            if (r < 0) {
+                set_guest_errno(errno);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            for (int i = 0; i < r; i++) {
+                const std::uint32_t at = a1 + static_cast<std::uint32_t>(i) * 16u;
+                const std::uint32_t e = evs[static_cast<std::size_t>(i)].events;
+                const std::uint64_t d = evs[static_cast<std::size_t>(i)].data.u64;
+                std::memset(H(at), 0, 16);
+                std::memcpy(H(at), &e, 4);
+                std::memcpy(H(at + 8), &d, 8);
             }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
@@ -6305,7 +6655,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
         }
-        if (n == "inet_addr" || n == "inet_pton" || n == "inet_ntoa" || n == "inet_ntop") {
+        if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
+            n == "inet_ntop") {
             InetThunk(regs, n, a0, a1, a2, a3);
             return;
         }
@@ -7447,6 +7798,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         n == "inflateEnd" || n == "inflateReset" || n == "deflate" || n == "deflateInit2_" ||
         n == "deflateEnd" || n == "deflateReset") {
         if (!ZlibCall(n, regs)) {
+            goto bad_ptr;
+        }
+        return;
+    }
+    if (n == "getaddrinfo" || n == "freeaddrinfo" || n == "gai_strerror" || n == "gethostbyname" ||
+        n == "gethostbyaddr" || n == "__get_h_errno") {
+        if (!NetDbCall(n, regs)) {
             goto bad_ptr;
         }
         return;
@@ -9948,6 +10306,293 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
             return true;
         }
         Ret(regs, a0);
+        return true;
+    }
+    return true;
+}
+
+namespace {
+// bionic's EAI_ numbers (netdb.h, measured with the NDK); glibc's are
+// negative and different, so a host answer is translated.
+std::uint32_t BionicEai(int host) {
+    switch (host) {
+        case 0: return 0;
+#ifdef EAI_ADDRFAMILY
+        case EAI_ADDRFAMILY: return 1;
+#endif
+        case EAI_AGAIN: return 2;
+        case EAI_BADFLAGS: return 3;
+        case EAI_FAIL: return 4;
+        case EAI_FAMILY: return 5;
+        case EAI_MEMORY: return 6;
+#if defined(EAI_NODATA) && (!defined(EAI_ADDRFAMILY) || EAI_NODATA != EAI_ADDRFAMILY)
+        case EAI_NODATA: return 7;
+#endif
+        case EAI_NONAME: return 8;
+        case EAI_SERVICE: return 9;
+        case EAI_SOCKTYPE: return 10;
+        case EAI_SYSTEM: return 11;
+#ifdef EAI_OVERFLOW
+        case EAI_OVERFLOW: return 14;
+#endif
+        default: return 4;  // EAI_FAIL
+    }
+}
+// bionic AI_ flags -> the host's (glibc numbers several differently).
+int HostAiFlags(std::uint32_t g) {
+    int f = 0;
+    if (g & 1) f |= AI_PASSIVE;
+    if (g & 2) f |= AI_CANONNAME;
+    if (g & 4) f |= AI_NUMERICHOST;
+    if (g & 8) f |= AI_NUMERICSERV;
+    if (g & 2048) f |= AI_V4MAPPED;
+    if (g & 256) f |= AI_ALL;
+    if (g & 1024) f |= AI_ADDRCONFIG;
+    return f;
+}
+// And back, for the flags a result entry carries.
+std::int32_t GuestAiFlags(int h) {
+    std::int32_t g = 0;
+    if (h & AI_PASSIVE) g |= 1;
+    if (h & AI_CANONNAME) g |= 2;
+    if (h & AI_NUMERICHOST) g |= 4;
+    if (h & AI_NUMERICSERV) g |= 8;
+    if (h & AI_V4MAPPED) g |= 2048;
+    if (h & AI_ALL) g |= 256;
+    if (h & AI_ADDRCONFIG) g |= 1024;
+    return g;
+}
+bool NumericHost(const char* h) {
+    std::uint8_t buf[16];
+    return ::inet_pton(AF_INET, h, buf) == 1 || ::inet_pton(AF_INET6, h, buf) == 1;
+}
+}  // namespace
+
+bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
+    // This thread's h_errno (a guest int, per thread as in bionic).
+    auto h_errno_cell = [&]() -> std::uint32_t {
+        thread_local std::uint32_t cell = 0;
+        if (!cell) {
+            cell = GuestMalloc(4);
+            if (cell) {
+                std::memset(H(cell), 0, 4);
+            }
+        }
+        return cell;
+    };
+    auto set_h_errno = [&](std::int32_t v) {
+        if (const std::uint32_t c = h_errno_cell()) {
+            std::memcpy(H(c), &v, 4);
+        }
+    };
+    auto guest_str = [&](const std::string& t) -> std::uint32_t {
+        const std::uint32_t g = GuestMalloc(static_cast<std::uint32_t>(t.size() + 1));
+        if (g) {
+            std::memcpy(H(g), t.c_str(), t.size() + 1);
+        }
+        return g;
+    };
+    if (n == "__get_h_errno") {
+        Ret(regs, h_errno_cell());
+        return true;
+    }
+    if (n == "gai_strerror") {
+        // NetBSD's texts, which bionic uses.
+        static const char* const kText[] = {
+            "Success", "Address family for hostname not supported",
+            "Temporary failure in name resolution", "Invalid value for ai_flags",
+            "Non-recoverable failure in name resolution", "ai_family not supported",
+            "Memory allocation failure", "No address associated with hostname",
+            "hostname nor servname provided, or not known", "servname not supported for ai_socktype",
+            "ai_socktype not supported", "System error returned in errno", "Invalid value for hints",
+            "Resolved protocol is unknown", "Argument buffer overflow"};
+        const int code = static_cast<std::int32_t>(a0);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::uint32_t& g = gai_msgs_[code];
+        if (!g) {
+            g = guest_str(code >= 0 && code <= 14 ? kText[code] : "Unknown error");
+        }
+        Ret(regs, g);
+        return true;
+    }
+    if (n == "freeaddrinfo") {
+        // Our chains: one guest block per entry (struct, address, name).
+        for (std::uint32_t ai = a0; ai != 0;) {
+            if (!CheckRange(ai, 32, false)) {
+                return false;
+            }
+            std::uint32_t next = 0;
+            std::memcpy(&next, H(ai + 28), 4);
+            GuestFree(ai);
+            ai = next;
+        }
+        RetVoid(regs);
+        return true;
+    }
+    if (n == "getaddrinfo") {
+        // (node, service, hints, res**). Guest struct addrinfo (LP32): flags
+        // @0, family @4, socktype @8, protocol @12, addrlen @16, canonname
+        // @20, addr @24, next @28; 32 bytes.
+        if ((a0 && !CheckRange(a0, 1, false)) || (a1 && !CheckRange(a1, 1, false)) ||
+            (a2 && !CheckRange(a2, 32, false)) || !CheckRange(a3, 4, true)) {
+            return false;
+        }
+        const std::string node = a0 ? GuestStr(a0) : "";
+        const std::string serv = a1 ? GuestStr(a1) : "";
+        std::uint32_t z = 0;
+        std::memcpy(H(a3), &z, 4);
+        struct addrinfo hints {};
+        if (a2) {
+            std::int32_t h[4];
+            std::memcpy(h, H(a2), 16);
+            hints.ai_flags = HostAiFlags(static_cast<std::uint32_t>(h[0]));
+            hints.ai_family = h[1];
+            hints.ai_socktype = h[2];
+            hints.ai_protocol = h[3];
+        }
+        if (!network_allowed_ && a0 && !NumericHost(node.c_str()) && node != "localhost") {
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1) < 8) {
+                std::printf("[net] offline: getaddrinfo(\"%s\") -> EAI_NODATA\n", node.c_str());
+            }
+            Ret(regs, 7);  // EAI_NODATA
+            return true;
+        }
+        struct addrinfo* res = nullptr;
+        const int r = ::getaddrinfo(a0 ? node.c_str() : nullptr, a1 ? serv.c_str() : nullptr,
+                                    a2 ? &hints : nullptr, &res);
+        if (r != 0) {
+            if (r == EAI_SYSTEM) {
+                SetGuestErrno(errno);
+            }
+            Ret(regs, BionicEai(r));
+            return true;
+        }
+        std::uint32_t head = 0, prev = 0;
+        for (const struct addrinfo* p = res; p; p = p->ai_next) {
+            const std::uint32_t alen = static_cast<std::uint32_t>(p->ai_addrlen);
+            const std::string cname = p->ai_canonname ? p->ai_canonname : "";
+            const std::uint32_t size = 32 + ((alen + 3) & ~3u) + (p->ai_canonname ? cname.size() + 1 : 0);
+            const std::uint32_t g = GuestMalloc(size);
+            if (!g) {
+                break;
+            }
+            std::memset(H(g), 0, size);
+            const std::int32_t f[5] = {GuestAiFlags(p->ai_flags), p->ai_family, p->ai_socktype, p->ai_protocol,
+                                       static_cast<std::int32_t>(alen)};
+            std::memcpy(H(g), f, 20);
+            const std::uint32_t addr = g + 32;
+            if (p->ai_addr && alen) {
+                std::memcpy(H(addr), p->ai_addr, alen);  // sockaddr layouts match
+                std::memcpy(H(g + 24), &addr, 4);
+            }
+            if (p->ai_canonname) {
+                const std::uint32_t cn = addr + ((alen + 3) & ~3u);
+                std::memcpy(H(cn), cname.c_str(), cname.size() + 1);
+                std::memcpy(H(g + 20), &cn, 4);
+            }
+            if (prev) {
+                std::memcpy(H(prev + 28), &g, 4);
+            } else {
+                head = g;
+            }
+            prev = g;
+        }
+        ::freeaddrinfo(res);
+        if (!head) {
+            Ret(regs, 6);  // EAI_MEMORY
+            return true;
+        }
+        std::memcpy(H(a3), &head, 4);
+        Ret(regs, 0);
+        return true;
+    }
+    if (n == "gethostbyname" || n == "gethostbyaddr") {
+        // struct hostent (LP32): name @0, aliases @4, addrtype @8, length @12,
+        // addr_list @16; 20 bytes. One result per thread, overwritten by the
+        // next call (bionic's per-thread buffer).
+        std::string name;
+        std::vector<std::string> addrs;
+        int type = AF_INET, length = 4;
+        static std::mutex host_resolver_mu;  // the host's gethostby* share a static result
+        std::lock_guard<std::mutex> resolver_lock(host_resolver_mu);
+        if (n == "gethostbyname") {
+            if (!CheckRange(a0, 1, false)) {
+                return false;
+            }
+            name = GuestStr(a0);
+            if (!network_allowed_ && !NumericHost(name.c_str()) && name != "localhost") {
+                set_h_errno(1);  // HOST_NOT_FOUND
+                Ret(regs, 0);
+                return true;
+            }
+            const struct hostent* he = ::gethostbyname(name.c_str());
+            if (!he) {
+                set_h_errno(h_errno);
+                Ret(regs, 0);
+                return true;
+            }
+            name = he->h_name ? he->h_name : name;
+            type = he->h_addrtype;
+            length = he->h_length;
+            for (char** p = he->h_addr_list; p && *p && addrs.size() < 16; p++) {
+                addrs.emplace_back(*p, static_cast<std::size_t>(length));
+            }
+        } else {
+            // (const void* addr, socklen_t len, int type)
+            if (a1 == 0 || a1 > 16 || !CheckRange(a0, a1, false)) {
+                return false;
+            }
+            const std::uint8_t* ad = H<const std::uint8_t>(a0);
+            const bool loop = (a2 == AF_INET && a1 == 4 && ad[0] == 127) ||
+                              (a2 == AF_INET6 && a1 == 16 &&
+                               std::memcmp(ad, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1", 16) == 0);
+            if (!network_allowed_ && !loop) {
+                set_h_errno(1);
+                Ret(regs, 0);
+                return true;
+            }
+            const struct hostent* he = ::gethostbyaddr(ad, a1, static_cast<int>(a2));
+            if (!he) {
+                set_h_errno(h_errno);
+                Ret(regs, 0);
+                return true;
+            }
+            name = he->h_name ? he->h_name : "";
+            type = he->h_addrtype;
+            length = he->h_length;
+            addrs.emplace_back(reinterpret_cast<const char*>(ad), a1);
+        }
+        // Layout: hostent, aliases {NULL}, addr_list {..., NULL}, addresses, name.
+        const std::uint32_t na = static_cast<std::uint32_t>(addrs.size());
+        const std::uint32_t need = 20 + 4 + (na + 1) * 4 + na * 16 + static_cast<std::uint32_t>(name.size() + 1);
+        thread_local std::uint32_t buf = 0, buf_size = 0;
+        if (buf_size < need) {
+            if (buf) {
+                GuestFree(buf);
+            }
+            buf = GuestMalloc(need);
+            buf_size = buf ? need : 0;
+        }
+        if (!buf) {
+            set_h_errno(3);  // NO_RECOVERY
+            Ret(regs, 0);
+            return true;
+        }
+        std::memset(H(buf), 0, need);
+        const std::uint32_t aliases = buf + 20, list = aliases + 4, data = list + (na + 1) * 4,
+                            nm = data + na * 16;
+        for (std::uint32_t i = 0; i < na; i++) {
+            const std::uint32_t at = data + i * 16;
+            std::memcpy(H(at), addrs[i].data(), addrs[i].size() < 16 ? addrs[i].size() : 16);
+            std::memcpy(H(list + i * 4), &at, 4);
+        }
+        std::memcpy(H(nm), name.c_str(), name.size() + 1);
+        const std::uint32_t he32[5] = {nm, aliases, static_cast<std::uint32_t>(type),
+                                       static_cast<std::uint32_t>(length), list};
+        std::memcpy(H(buf), he32, 20);
+        Ret(regs, buf);
         return true;
     }
     return true;
@@ -13530,6 +14175,21 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
     const char* s = GuestStr(sptr);
     if (n == "inet_addr") {
         Ret(regs, static_cast<std::uint32_t>(::inet_addr(s)));
+        return;
+    }
+    if (n == "inet_aton") {
+        // inet_aton(cp, struct in_addr* inp) -> 1 valid, 0 not; inp may be
+        // NULL (validation only).
+        struct in_addr ia {};
+        const int r = ::inet_aton(s, &ia);
+        if (r && a1) {
+            if (!CheckRange(a1, 4, true)) {
+                Ret(regs, 0);
+                return;
+            }
+            std::memcpy(H(a1), &ia.s_addr, 4);
+        }
+        Ret(regs, r ? 1u : 0u);
         return;
     }
     // inet_pton(af, src, dst): AF_INET (4B) and AF_INET6 (16B).
