@@ -191,10 +191,11 @@ void HostThreadRelease(void* p) {
     if (g_rt) {
         g_rt->ForgetSigThreadJit(st->tid);
     }
-    delete st->jit;
+    // Jits come from NewJit (released): ReleaseJit takes them off record.
     for (Dynarmic::A32::Jit* j : st->nested) {
-        delete j;
+        g_rt ? g_rt->ReleaseJit(j) : delete j;
     }
+    g_rt ? g_rt->ReleaseJit(st->jit) : delete st->jit;
     st->nested.clear();
     st->jit = nullptr;
     if (g_rt && st->cpu_id != SIZE_MAX) {

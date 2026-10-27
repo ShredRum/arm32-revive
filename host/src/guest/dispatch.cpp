@@ -9394,12 +9394,21 @@ void Runtime::OnGuestSyscall(Regs& regs) {
         regs[0] = static_cast<std::uint32_t>(::getpid());
         return;
     case 0xF0002: {  // __ARM_NR_cacheflush(start, end, flags): a guest wrote code
-        // Drop the translations of [start, end); Dynarmic does it when this
-        // thread's Run stops at the next block boundary (RunJit resumes it).
-        // A shared cache is invalidated for every thread at once.
+        // Drop the translations of [start, end); Dynarmic does it when a
+        // Jit's Run stops at the next block boundary (RunJit resumes it).
+        // A shared cache is invalidated for every thread at once; private
+        // caches each hold their own copy of the old code, so every live Jit
+        // drops it (InvalidateCacheRange may be called from any thread).
         if (r1 > r0) {
-            if (Dynarmic::A32::Jit* jit = ActiveJit()) {
-                jit->InvalidateCacheRange(r0, r1 - r0);
+            if (JitShareOn()) {
+                if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+                    jit->InvalidateCacheRange(r0, r1 - r0);
+                }
+            } else {
+                std::lock_guard<std::mutex> l(live_jits_mu_);
+                for (Dynarmic::A32::Jit* jit : live_jits_) {
+                    jit->InvalidateCacheRange(r0, r1 - r0);
+                }
             }
         }
         regs[0] = 0;
@@ -11870,24 +11879,50 @@ bool Runtime::AcquireCpuId(std::size_t* id) {
     return false;
 }
 
-std::unique_ptr<Dynarmic::A32::Jit> Runtime::NewJit(const Dynarmic::A32::UserConfig& cfg) {
+Runtime::JitPtr Runtime::NewJit(const Dynarmic::A32::UserConfig& cfg) {
+    JitPtr jit(nullptr, JitDrop{this});
     if (!JitShareOn()) {
-        return std::make_unique<Dynarmic::A32::Jit>(cfg);
-    }
-    std::lock_guard<std::mutex> l(code_cache_mu_);
-    for (const CodeCacheEntry& e : code_caches_) {
-        const Dynarmic::A32::UserConfig& c = e.cfg;
-        if (cfg.callbacks == c.callbacks && cfg.global_monitor == c.global_monitor &&
-            cfg.fastmem_pointer == c.fastmem_pointer && cfg.optimizations == c.optimizations &&
-            cfg.enable_cycle_counting == c.enable_cycle_counting) {
-            return std::make_unique<Dynarmic::A32::Jit>(cfg, e.cache);
+        jit.reset(new Dynarmic::A32::Jit(cfg));
+    } else {
+        std::lock_guard<std::mutex> l(code_cache_mu_);
+        for (const CodeCacheEntry& e : code_caches_) {
+            const Dynarmic::A32::UserConfig& c = e.cfg;
+            if (cfg.callbacks == c.callbacks && cfg.global_monitor == c.global_monitor &&
+                cfg.fastmem_pointer == c.fastmem_pointer && cfg.optimizations == c.optimizations &&
+                cfg.enable_cycle_counting == c.enable_cycle_counting) {
+                jit.reset(new Dynarmic::A32::Jit(cfg, e.cache));
+                break;
+            }
+        }
+        if (!jit) {
+            jit.reset(new Dynarmic::A32::Jit(cfg));
+            if (auto cache = jit->GetSharedCodeCache()) {  // nullptr: backend cannot share
+                code_caches_.push_back({cfg, std::move(cache)});
+            }
         }
     }
-    auto jit = std::make_unique<Dynarmic::A32::Jit>(cfg);
-    if (auto cache = jit->GetSharedCodeCache()) {  // nullptr: backend cannot share
-        code_caches_.push_back({cfg, std::move(cache)});
-    }
+    std::lock_guard<std::mutex> l(live_jits_mu_);
+    live_jits_.insert(jit.get());
     return jit;
+}
+
+void JitDrop::operator()(Dynarmic::A32::Jit* j) const {
+    if (rt) {
+        rt->ReleaseJit(j);
+    } else {
+        delete j;
+    }
+}
+
+void Runtime::ReleaseJit(Dynarmic::A32::Jit* j) {
+    if (!j) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> l(live_jits_mu_);
+        live_jits_.erase(j);
+    }
+    delete j;
 }
 
 void Runtime::ReleaseCpuId(std::size_t id) {
@@ -11962,7 +11997,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         }
         cfg.global_monitor = &monitor_;
         cfg.processor_id = cpu_id;
-        const std::unique_ptr<Dynarmic::A32::Jit> jit_owner = NewJit(cfg);
+        const JitPtr jit_owner = NewJit(cfg);
         Dynarmic::A32::Jit& jit = *jit_owner;
         t_active_jit = &jit;
         t_worker_jit = &jit;

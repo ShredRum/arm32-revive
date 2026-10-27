@@ -160,6 +160,15 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 // overran a 24 B block into the next chunk head), so it stays on regardless.
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
 
+class Runtime;
+// Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
+struct JitDrop {
+    JitDrop() noexcept = default;
+    explicit JitDrop(Runtime* r) noexcept : rt(r) {}
+    void operator()(Dynarmic::A32::Jit* j) const;
+    Runtime* rt = nullptr;
+};
+
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);
@@ -181,7 +190,12 @@ public:
     // process: a new thread runs code other threads already ran at full
     // speed instead of compiling it again (60-160 ms per thread measured,
     // which turned a benign engine race into a self-join abort; R-005).
-    std::unique_ptr<Dynarmic::A32::Jit> NewJit(const Dynarmic::A32::UserConfig& cfg);
+    // Every live Jit is on record (a guest's cacheflush reaches all of them
+    // when they do not share a cache); the deleter takes it off.
+    using JitPtr = std::unique_ptr<Dynarmic::A32::Jit, JitDrop>;
+    JitPtr NewJit(const Dynarmic::A32::UserConfig& cfg);
+    // Deletes a Jit that left its JitPtr (release()).
+    void ReleaseJit(Dynarmic::A32::Jit* j);
 
     // Guest heap (dlmalloc mspace inside the heap arena; quarantine on free).
     std::uint32_t GuestMalloc(std::uint32_t size);
@@ -803,6 +817,8 @@ private:
         std::shared_ptr<Dynarmic::A32::SharedCodeCache> cache;
     };
     std::mutex code_cache_mu_;
+    std::mutex live_jits_mu_;
+    std::unordered_set<Dynarmic::A32::Jit*> live_jits_;
     std::vector<CodeCacheEntry> code_caches_;
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
     std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
@@ -911,7 +927,7 @@ private:
     // (cb_slots_.resize(8) on first use); exhaustion (pathological nesting)
     // fails the sort LOUD, array untouched.
     struct CbSlot {
-        std::unique_ptr<Dynarmic::A32::Jit> jit;
+        JitPtr jit;
         std::uint32_t stack = 0;
         bool busy = false;
     };
