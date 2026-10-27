@@ -463,6 +463,27 @@ void Watchdog() {
             // A stall report on request: files/abdump (removed once read).
             const std::string req = g_files + "/abdump";
             if (::access(req.c_str(), F_OK) == 0) {
+                // Optional lines "mem <guest addr> <bytes>": hex dumps.
+                if (FILE* rf = std::fopen(req.c_str(), "r")) {
+                    char line[128];
+                    while (std::fgets(line, sizeof line, rf)) {
+                        unsigned long a = 0, n = 0;
+                        if (std::sscanf(line, "mem %lx %lu", &a, &n) == 2 && n <= 4096 &&
+                            g_rt->CheckRange(static_cast<std::uint32_t>(a), n, false)) {
+                            for (unsigned long o = 0; o < n; o += 16) {
+                                char hex[80];
+                                int k = 0;
+                                for (unsigned long b = o; b < o + 16 && b < n; b += 4) {
+                                    std::uint32_t w = 0;
+                                    std::memcpy(&w, g_mem->host(static_cast<std::uint32_t>(a + b)), 4);
+                                    k += std::snprintf(hex + k, sizeof hex - k, " %08x", w);
+                                }
+                                Log("[mem] %08lx:%s", a + o, hex);
+                            }
+                        }
+                    }
+                    std::fclose(rf);
+                }
                 ::unlink(req.c_str());
                 Log("DUMP on request");
                 g_rt->DumpGuestThreads();

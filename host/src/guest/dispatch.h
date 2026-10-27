@@ -321,6 +321,13 @@ public:
     // AInputEvent_*, AMotionEvent_*, AKeyEvent_*, AConfiguration_*,
     // ANativeWindow_*, ASensor*); false if `n` is not one of them.
     bool NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    // True for an NDK function NdkCall serves (dlsym of a system library).
+    static bool NdkServes(const std::string& n);
+    // A trampoline for a host import made at run time (dlsym of a function a
+    // system library would export and the host serves); its guest address,
+    // or 0 when the trampoline page or the reserved table is full.
+    std::uint32_t RuntimeImport(const std::string& name);
+    std::uint32_t sys_dl_handle_ = 0;  // dlopen of a system library
     // EGL for a guest that drives its own context (Unity): forwarded to the
     // real EGL with handles for displays, configs, contexts and surfaces.
     // False when `n` is not an EGL import; a wild pointer halts inside.

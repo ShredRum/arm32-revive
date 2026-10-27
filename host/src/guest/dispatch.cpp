@@ -207,6 +207,9 @@ static std::set<FILE*> g_regfiles;
 static int g_regdump_n = 0;
 
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
+    // Room for imports made at run time (RuntimeImport): the table must not
+    // move while other threads index it.
+    mod_.imports.reserve(mod_.imports.size() + 512);
     // HARNESS_HEAPBASE=hex: relocate heap start (address-sensitivity probe).
     if (const char* e = std::getenv("HARNESS_HEAPBASE")) {
         heap_base_ = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
@@ -4085,7 +4088,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 h = global_dl_handle_;
             } else {
-                h = GuestLibraryHandle(GuestStr(a0));
+                const std::string want = GuestStr(a0);
+                h = GuestLibraryHandle(want);
+                // A system library: a handle whose dlsym finds what the host
+                // serves of it (an app may always dlopen these on Android).
+                static const char* const kSystem[] = {
+                    "libandroid.so", "libc.so", "libm.so", "libdl.so", "liblog.so", "libEGL.so",
+                    "libGLESv1_CM.so", "libGLESv2.so", "libz.so", "libstdc++.so", "libOpenSLES.so"};
+                const std::string base = want.substr(want.find_last_of('/') + 1);
+                for (const char* k : kSystem) {
+                    if (!h && base == k) {
+                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        if (!sys_dl_handle_) {
+                            sys_dl_handle_ = GuestMalloc(16);
+                        }
+                        h = sys_dl_handle_;
+                    }
+                }
             }
             if (DiagOn() || h) {
                 std::printf("[dl] dlopen(\"%s\") -> %08x\n", a0 ? GuestStr(a0) : "NULL", h);
@@ -4116,6 +4135,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     v = it->second;
                 } else if (const auto jt = mod_.defined.find(sym); jt != mod_.defined.end()) {
                     v = jt->second;
+                }
+            }
+            if (!v && a1 && (a0 == 0 || a0 == 0xFFFFFFFFu || (sys_dl_handle_ && a0 == sys_dl_handle_))) {
+                // What a system library exports and the host serves: a
+                // trampoline made now.
+                const std::string sym = GuestStr(a1);
+                if (NdkServes(sym)) {
+                    v = RuntimeImport(sym);
                 }
             }
             if (!v) {
@@ -10770,6 +10797,63 @@ void Runtime::DropHandle(std::uint32_t h) {
     ptr_free_.push_back(h);
 }
 
+bool Runtime::NdkServes(const std::string& n) {
+    static const std::set<std::string> kNames = {
+        "ALooper_prepare", "ALooper_forThread", "ALooper_wake", "ALooper_pollAll",
+        "ALooper_pollOnce", "AInputQueue_attachLooper", "AInputQueue_detachLooper",
+        "AInputQueue_getEvent", "AInputQueue_preDispatchEvent", "AInputQueue_finishEvent",
+        "AInputEvent_getType", "AInputEvent_getDeviceId", "AInputEvent_getSource",
+        "AKeyEvent_getAction", "AKeyEvent_getKeyCode", "AKeyEvent_getMetaState",
+        "AMotionEvent_getAction", "AMotionEvent_getFlags", "AMotionEvent_getMetaState",
+        "AMotionEvent_getEdgeFlags", "AMotionEvent_getPointerCount", "AMotionEvent_getPointerId",
+        "AMotionEvent_getHistorySize", "AMotionEvent_getDownTime", "AMotionEvent_getEventTime",
+        "AMotionEvent_getHistoricalEventTime", "AMotionEvent_getXPrecision",
+        "AMotionEvent_getYPrecision", "AMotionEvent_getX", "AMotionEvent_getY",
+        "AMotionEvent_getRawX", "AMotionEvent_getRawY", "AMotionEvent_getPressure",
+        "AMotionEvent_getSize", "AMotionEvent_getToolMajor", "AMotionEvent_getToolMinor",
+        "AMotionEvent_getTouchMajor", "AMotionEvent_getTouchMinor", "AMotionEvent_getOrientation",
+        "AMotionEvent_getHistoricalX", "AMotionEvent_getHistoricalY",
+        "AMotionEvent_getHistoricalRawX", "AMotionEvent_getHistoricalRawY",
+        "AMotionEvent_getHistoricalPressure", "AMotionEvent_getHistoricalSize",
+        "AMotionEvent_getHistoricalTouchMajor", "AMotionEvent_getHistoricalTouchMinor",
+        "AMotionEvent_getHistoricalToolMajor", "AMotionEvent_getHistoricalToolMinor",
+        "AMotionEvent_getHistoricalOrientation", "AConfiguration_new", "AConfiguration_delete",
+        "AConfiguration_fromAssetManager", "ANativeWindow_fromSurface", "ANativeWindow_acquire",
+        "ANativeWindow_release", "ANativeWindow_setBuffersGeometry"};
+    return kNames.count(n) != 0;
+}
+
+std::uint32_t Runtime::RuntimeImport(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const Import& imp : mod_.imports) {
+        if (imp.is_function && imp.name == name) {
+            return imp.call_va;
+        }
+    }
+    const std::uint32_t va = mod_.next_tramp;
+    // The last 4 KiB of the page hold the VFP thunks.
+    if (mod_.imports.size() >= mod_.imports.capacity() ||
+        va + 4 > kTrampBase + kTrampSize - 0x1000) {
+        std::printf("[dl] LOUD no room for a run-time import of %s\n", name.c_str());
+        return 0;
+    }
+    Import imp;
+    imp.name = name;
+    imp.is_function = true;
+    imp.tramp_va = imp.call_va = va;
+    imp.blocking = BlockingImportName(name);
+    imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
+    const std::uint32_t swi = static_cast<std::uint32_t>(mod_.imports.size()) + 1;  // swi = idx + 1
+    const std::uint32_t insn = 0xEF000000u | swi;
+    mod_.imports.push_back(imp);  // before the address is handed out
+    mem_.Protect(kTrampBase, kTrampSize, PROT_READ | PROT_WRITE);
+    std::memcpy(H(va), &insn, 4);
+    mem_.Protect(kTrampBase, kTrampSize, PROT_READ | PROT_EXEC);
+    mod_.next_tramp = va + 4;
+    std::printf("[dl] run-time import %s at %08x\n", name.c_str(), va);
+    return va;
+}
+
 bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
     const bool ours = n.compare(0, 7, "ALooper") == 0 || n.compare(0, 11, "AInputQueue") == 0 ||
                       n.compare(0, 11, "AInputEvent") == 0 || n.compare(0, 12, "AMotionEvent") == 0 ||
@@ -10939,6 +11023,15 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         if (n == "AMotionEvent_getHistoricalY") { ret_f(::AMotionEvent_getHistoricalY(e, i, h)); return true; }
         if (n == "AMotionEvent_getHistoricalPressure") { ret_f(::AMotionEvent_getHistoricalPressure(e, i, h)); return true; }
         if (n == "AMotionEvent_getHistoricalSize") { ret_f(::AMotionEvent_getHistoricalSize(e, i, h)); return true; }
+        if (n == "AMotionEvent_getRawX") { ret_f(::AMotionEvent_getRawX(e, i)); return true; }
+        if (n == "AMotionEvent_getRawY") { ret_f(::AMotionEvent_getRawY(e, i)); return true; }
+        if (n == "AMotionEvent_getHistoricalRawX") { ret_f(::AMotionEvent_getHistoricalRawX(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalRawY") { ret_f(::AMotionEvent_getHistoricalRawY(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalTouchMajor") { ret_f(::AMotionEvent_getHistoricalTouchMajor(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalTouchMinor") { ret_f(::AMotionEvent_getHistoricalTouchMinor(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalToolMajor") { ret_f(::AMotionEvent_getHistoricalToolMajor(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalToolMinor") { ret_f(::AMotionEvent_getHistoricalToolMinor(e, i, h)); return true; }
+        if (n == "AMotionEvent_getHistoricalOrientation") { ret_f(::AMotionEvent_getHistoricalOrientation(e, i, h)); return true; }
     }
     // --- configuration
     if (n == "AConfiguration_new") {
