@@ -140,10 +140,35 @@ dlopen/dlsym for guest libraries already in the module (handle per library; dlsy
 searches that library first, then the merged table; other names still NULL), JNI
 GetJavaVM (fn 219). guestrun: `--call JNI_OnLoad @vm 0` (libmain) registers
 NativeLoader.load/unload; `--call 0x0200334c @env 0 j:<libdir>` (NativeLoader.load)
-dlopens libmono + libunity and runs libunity's JNI_OnLoad, which registers 26
+dlopens libmono + libunity and runs libunity's JNI_OnLoad, which registers 25
 UnityPlayer natives (initJni, nativeRender, nativeResize, nativePause/Resume,
 nativeRecreateGfxState(Surface), nativeInjectEvent(InputEvent), UnitySendMessage...),
 6 org/fmod/FMODAudioDevice natives and 2 ReflectionHelper natives -> returns true.
 
 Next: the host side of RegisterNatives (real Java must call these guest functions),
 then the NativeActivity/EGL/input bridge and packaging.
+
+## RegisterNatives binds guest natives in the real JVM (2026-10-27)
+
+Product host: RegisterNatives gives each guest entry a host stub (pool in apphost.cpp:
+256 integer/reference-returning, 32 float, 32 double; one per class.method+sig+entry,
+re-registering reuses it) and calls the real RegisterNatives on the real class. A stub
+is what ART calls with fixed AAPCS64 arguments; it reads them through its own `...`
+(exact on AArch64 Linux) and lays them out for the guest with the same marshaller as
+the generated Java_* forwarders (AppendJniArgs: Z/C zero-, B/S sign-extended, J/D
+aligned pairs, F bits), runs the guest on the thread's Jit, and returns per the return
+type (softfp float/double bits, references through Runtime::JavaObjectFor). PC tools
+only log. fmt_test: both read modes on one 24-word signature (the raw one only runs on
+arm64: run fmt_test on the sandbox).
+
+Behaviour change for Rovio too (D-13): a Rovio guest that calls RegisterNatives on the
+device now really binds those natives (the real game does the same on ARM32). Gate all
+five titles; apphost.log lists every registration as `[jni] RegisterNatives`.
+
+Known gaps for Unity, to handle when they show up on the device:
+- WrapObject makes a global ref per new incoming object and scans all of them; per-event
+  objects (nativeInjectEvent's InputEvent) would grow it without bound.
+- A native called by Java while the same thread is inside the guest (Java callback ->
+  native) is dropped as REENTER.
+
+Next: NativeActivity host bridge, window/input handles, EGL, packaging.

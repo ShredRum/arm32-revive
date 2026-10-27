@@ -340,6 +340,10 @@ public:
     // Product host: real-ART <-> mock-handle map (pointer-width airtight).
     std::uint32_t WrapObject(void* real);
     void* UnwrapObject(std::uint32_t mock);
+    // A guest reference as a real Java reference (a native's return value):
+    // a wrapped object, a mock jstring as a new String, a mock jclass as its
+    // real class. Null for 0 or an unknown handle. Product host only.
+    void* JavaObjectFor(std::uint32_t handle);
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
@@ -747,6 +751,9 @@ private:
     bool RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2, std::uint32_t a3,
                        Regs& regs, const std::string& mdesc);
     std::unordered_map<std::string, void*> real_classes_;
+    // The real class named `cls` (a cached global ref), or null with no
+    // exception pending.
+    void* RealClass(void* real_env, const std::string& cls);
     std::unordered_map<std::uint32_t, void*> real_methods_;
     // Real field IDs per mock GetFieldID cookie (audio buffer fields).
     std::unordered_map<std::uint32_t, void*> real_fields_;
@@ -923,6 +930,12 @@ public:
     // host thread's real JNIEnv*, or null (harness: always null -> mocks).
     // Set once by apphost at OnLoad; never in harness builds.
     static void* (*g_real_env_hook)();
+    // Product host: the host function the real JVM is to call for a guest
+    // native registered through RegisterNatives (class, method, signature,
+    // guest entry), or null when none is left. Set by apphost; null in PC
+    // tools, where RegisterNatives only logs.
+    static void* (*g_native_stub_hook)(const char* cls, const char* name, const char* sig,
+                                       std::uint32_t fn);
 
     std::uint8_t MemoryRead8(VAddr addr) override;
     std::uint16_t MemoryRead16(VAddr addr) override;

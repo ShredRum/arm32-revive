@@ -195,7 +195,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | D-10 | S2 | 8824, 8197, 8520 | strings silently truncated at 4096 bytes | fixed 393f105 |
 | D-11 | S3 | 117-151 mocks | shipping mocks shadow real Java (API 21, 800x480, Build.* "", hasSystemFeature list, static void dropped, FindClass never fails) | fixed d8adc22 (static fields 145-151 still mock) |
 | D-12 | S3 | 135-137 | CallStaticFloatMethod missing; AccelerometerWrapper getters resolved | open |
-| D-13 | S3 | 215 RegisterNatives | registers nothing; "never ships" comment false; 6 natives without forwarders (Rio smali) | open |
+| D-13 | S3 | 215 RegisterNatives | registers nothing; "never ships" comment false; 6 natives without forwarders (Rio smali) | fixed on `bricks` (real registration via host stubs); device gate of all five pending |
 | D-14 | S3 | JniNewString etc. | unbounded growth: mock strings, registry, method cookies never deduped | open |
 | D-15 | S3 | apphost.cpp:281 DeathHandler | stack walk before write -> line lost on corrupt frames; ActiveJit() may print another thread's regs | open |
 | D-16 | S3 | apphost.cpp:1209 | stdout "w" + stderr "a" on the same apphost.log -> overwrites | open |

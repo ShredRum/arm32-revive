@@ -228,6 +228,39 @@ constexpr std::uint32_t kOut = 0x10003000;      // %n destination
 
 }  // namespace
 
+// Reads the Java arguments of a fake native call into guest words, the way
+// AppHost_Call (promoted varargs) and the RegisterNatives stubs (raw) do.
+struct JniArgsProbe {
+    static inline const char* sig = "()V";
+    static inline std::vector<std::uint32_t> words;
+    static std::uint32_t Wrap(void* o) {
+        return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(o));
+    }
+    static void Promoted(void*, void*, ...);
+    static void Raw(void*, void*, ...);
+    static std::string Shown() {
+        std::string out = std::to_string(words.size()) + ":";
+        for (std::size_t i = 0; i < words.size(); i++) {
+            char b[12];
+            std::snprintf(b, sizeof b, "%s%08x", i ? " " : "", words[i]);
+            out += b;
+        }
+        return out;
+    }
+};
+void JniArgsProbe::Promoted(void*, void* thiz, ...) {
+    va_list ap;
+    va_start(ap, thiz);
+    abr::AppendJniArgs(words, sig, ap, abr::JniFloatArgs::kPromoted, Wrap);
+    va_end(ap);
+}
+void JniArgsProbe::Raw(void*, void* thiz, ...) {
+    va_list ap;
+    va_start(ap, thiz);
+    abr::AppendJniArgs(words, sig, ap, abr::JniFloatArgs::kRaw, Wrap);
+    va_end(ap);
+}
+
 int main() {
     abr::GuestMemory mem;
     abr::LoadedModule mod;
@@ -1057,6 +1090,37 @@ int main() {
                       w.size(), w[0], w[1], w[2], w[3]);
         Expect("JNI (J)V word stream", got,
                "4:10002000 20003000 55667788 11223344");
+    }
+
+    // --- JNI argument words from a signature (AppendJniArgs). Both read
+    //     modes give the same stream: narrow types extended as AAPCS32 wants,
+    //     J/D paired and aligned, F as bits, references through the wrapper.
+    //     Raw mode is how the RegisterNatives stubs read a fixed-argument call
+    //     from ART; it holds on AArch64 only, so it is tested there (run
+    //     fmt_test on the sandbox). Enough arguments to spill past x7 / v7.
+    {
+        // Words 0, 1 = env, thiz (they set the parity of the J/D pairs).
+        const char* want =
+            "24:000000e0 00000070 00000007 3fc00000 55667788 11223344 00000001 000000a1 "
+            "9999999a 3ff19999 c0200000 ffffff80 ffff8000 0000ffff fffffffd 00000000 "
+            "41000000 41100000 41200000 41300000 41400000 41500000 41600000 41700000";
+        JniArgsProbe::sig = "(IFJZLjava/lang/String;DFBSCI[IFFFFFFFF)V";
+        JniArgsProbe::words = {0xE0u, 0x70u};
+        JniArgsProbe::Promoted(nullptr, nullptr, 7, 1.5f, 0x1122334455667788ll,
+                               (unsigned char)1, (void*)0xA1, 1.1, -2.5f, (signed char)-128,
+                               (short)-32768, (unsigned short)0xFFFF, -3, (void*)0, 8.0f, 9.0f,
+                               10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f);
+        Expect("JNI args (promoted varargs)", JniArgsProbe::Shown(), want);
+#if defined(__aarch64__) && !defined(__APPLE__)
+        using Fixed = void (*)(void*, void*, int, float, long long, unsigned char, void*, double,
+                               float, signed char, short, unsigned short, int, void*, float, float,
+                               float, float, float, float, float, float);
+        JniArgsProbe::words = {0xE0u, 0x70u};
+        reinterpret_cast<Fixed>(&JniArgsProbe::Raw)(
+            nullptr, nullptr, 7, 1.5f, 0x1122334455667788ll, 1, (void*)0xA1, 1.1, -2.5f, -128,
+            -32768, 0xFFFF, -3, nullptr, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f);
+        Expect("JNI args (fixed call read raw, AAPCS64)", JniArgsProbe::Shown(), want);
+#endif
     }
 
     // --- file bridge: fopen/fclose must free the 96-byte guest FILE, erase

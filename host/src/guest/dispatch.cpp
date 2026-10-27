@@ -9173,6 +9173,72 @@ void* Runtime::UnwrapObject(std::uint32_t mock) {
     return it != obj_rev_.end() ? it->second : nullptr;
 }
 
+void* Runtime::JavaObjectFor(std::uint32_t handle) {
+    if (!handle) {
+        return nullptr;
+    }
+    if (void* o = UnwrapObject(handle)) {
+        return o;
+    }
+#ifdef __ANDROID__
+    JNIEnv* re = RealEnv();
+    if (!re) {
+        return nullptr;
+    }
+    std::string text, cls;
+    bool is_string = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto js = jni_strings_.find(handle);
+        if (js != jni_strings_.end()) {
+            text = js->second;
+            is_string = true;
+        } else {
+            const auto jc = jni_classes_.find(handle);
+            if (jc != jni_classes_.end()) {
+                cls = jc->second;
+            }
+        }
+    }
+    if (is_string) {
+        return re->NewStringUTF(text.c_str());
+    }
+    if (!cls.empty()) {
+        return RealClass(re, cls);
+    }
+#endif
+    return nullptr;
+}
+
+#ifdef __ANDROID__
+void* Runtime::RealClass(void* real_env, const std::string& cls) {
+    JNIEnv* re = static_cast<JNIEnv*>(real_env);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = real_classes_.find(cls);
+        if (it != real_classes_.end()) {
+            return it->second;
+        }
+    }
+    jclass lc = re->FindClass(cls.c_str());
+    if (!lc || re->ExceptionCheck()) {
+        re->ExceptionClear();
+        return nullptr;
+    }
+    jclass g = static_cast<jclass>(re->NewGlobalRef(lc));
+    re->DeleteLocalRef(lc);
+    if (!g) {
+        return nullptr;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = real_classes_.emplace(cls, g);
+    if (!it.second) {
+        re->DeleteGlobalRef(g);  // another thread cached it first
+    }
+    return it.first->second;
+}
+#endif
+
 #ifdef __ANDROID__
 // Real-call delegation for Call*Method (product host): resolve mock
 // class/method cookies to real ART refs (cached), marshal guest args to
@@ -11099,9 +11165,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 215: {  // RegisterNatives(env, clazz, methods, nMethods) -> jint
-        // Discovery logger: names the dynamic natives (e.g. the Java-driven
-        // Lua pump). Harness-only; returns JNI_OK. Never ships.
-        std::string cname = "?";
+        // methods = JNINativeMethod[nMethods] {name, signature, fnPtr}, 12
+        // bytes each on the guest. Product host: each guest fnPtr gets a host
+        // stub (g_native_stub_hook) that the real JVM calls and that runs the
+        // guest function; the real RegisterNatives result is returned. PC
+        // tools (no real JVM) only log the table and return JNI_OK.
+        std::string cname;
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             const auto it = jni_classes_.find(a1);
@@ -11109,24 +11178,62 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 cname = it->second;
             }
         }
-        for (std::uint32_t k = 0; k < a3 && k < 256; k++) {
-            if (!CheckRange(a2 + k * 12, 12, false)) {
-                break;
-            }
+        struct Entry {
+            std::string name, sig;
+            std::uint32_t fn;
+        };
+        std::vector<Entry> entries;
+        bool bad = cname.empty() || static_cast<std::int32_t>(a3) < 0 || a3 > 4096u ||
+                   (a3 && !CheckRange(a2, a3 * 12u, false));
+        for (std::uint32_t k = 0; !bad && k < a3; k++) {
             std::uint32_t nm = 0, sg = 0, fp = 0;
             std::memcpy(&nm, H(a2 + k * 12), 4);
             std::memcpy(&sg, H(a2 + k * 12 + 4), 4);
             std::memcpy(&fp, H(a2 + k * 12 + 8), 4);
-            std::string ns = "?", ss = "?";
-            if (nm && CheckRange(nm, 1, false)) {
-                ns = GuestStr(nm);
+            if (!nm || !sg || !fp || !CheckRange(nm, 1, false) || !CheckRange(sg, 1, false)) {
+                bad = true;
+                break;
             }
-            if (sg && CheckRange(sg, 1, false)) {
-                ss = GuestStr(sg);
-            }
+            entries.push_back({GuestStr(nm), GuestStr(sg), fp});
             std::printf("[jni] RegisterNatives %s.%s%s -> %08x\n", cname.c_str(),
-                        ns.c_str(), ss.c_str(), fp);
+                        entries.back().name.c_str(), entries.back().sig.c_str(), fp);
         }
+        if (bad) {
+            std::printf("LOUD [jni] RegisterNatives class %08x (%s) methods %08x n=%u: bad table\n",
+                        a1, cname.empty() ? "?" : cname.c_str(), a2, a3);
+            Ret(regs, static_cast<std::uint32_t>(-1));  // JNI_ERR
+            return;
+        }
+#ifdef __ANDROID__
+        if (JNIEnv* re = RealEnv(); re && GuestCallbacks::g_native_stub_hook) {
+            jclass rc = static_cast<jclass>(RealClass(re, cname));
+            if (!rc) {
+                std::printf("LOUD [jni] RegisterNatives: no real class %s\n", cname.c_str());
+                Ret(regs, static_cast<std::uint32_t>(-1));  // JNI_ERR
+                return;
+            }
+            std::vector<JNINativeMethod> ms;
+            for (const Entry& e : entries) {
+                void* stub = GuestCallbacks::g_native_stub_hook(cname.c_str(), e.name.c_str(),
+                                                                e.sig.c_str(), e.fn);
+                if (!stub) {
+                    std::printf("LOUD [jni] RegisterNatives %s.%s%s: no host stub left\n",
+                                cname.c_str(), e.name.c_str(), e.sig.c_str());
+                    Ret(regs, static_cast<std::uint32_t>(-1));  // JNI_ERR
+                    return;
+                }
+                ms.push_back({e.name.c_str(), e.sig.c_str(), stub});
+            }
+            const jint r = re->RegisterNatives(rc, ms.data(), static_cast<jint>(ms.size()));
+            if (r != JNI_OK || re->ExceptionCheck()) {
+                // NoSuchMethodError: a method the Java class does not declare.
+                std::printf("LOUD [jni] RegisterNatives %s -> %d\n", cname.c_str(), (int)r);
+                re->ExceptionClear();
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
+#endif
         Ret(regs, 0);  // JNI_OK
         return;
     }
@@ -11529,6 +11636,8 @@ std::uint16_t GuestCallbacks::MemoryRead16(VAddr a) { return Read<std::uint16_t>
 std::uint32_t GuestCallbacks::MemoryRead32(VAddr a) { return Read<std::uint32_t>(a, false); }
 std::uint64_t GuestCallbacks::MemoryRead64(VAddr a) { return Read<std::uint64_t>(a, false); }
 void* (*GuestCallbacks::g_real_env_hook)() = nullptr;
+void* (*GuestCallbacks::g_native_stub_hook)(const char*, const char*, const char*,
+                                            std::uint32_t) = nullptr;
 void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                                Dynarmic::A32::IREmitter& ir) {
     (void)ir;

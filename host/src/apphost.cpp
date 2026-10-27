@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "apphost.h"
@@ -143,7 +144,7 @@ void DumpHaltTailOnce(const char* name, int hr) {
 // destructor releases both when the real thread exits, so thread churn cannot
 // accumulate 8 MB per thread -- the F1 shape, on the Java->native path. By then
 // the thread has stopped running guest code, so deleting the Jit and freeing
-// the stack is safe; an in-flight shared_ptr (AppHost_CallImpl) keeps the
+// the stack is safe; an in-flight shared_ptr (RunGuestNative) keeps the
 // HostThread itself alive on its own.
 // Update thread's JIT, for the watchdog's stuck-PC reads. Cleared when that
 // thread's JIT is deleted (GLSurfaceView recreates its thread on pause/resume),
@@ -655,7 +656,10 @@ std::shared_ptr<HostThread> Enter() {
     return st;
 }
 
-std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, void* thiz, va_list ap) {
+// Runs the guest native at `va` for a Java call: (env, thiz, args per sig)
+// marshalled to AAPCS32 on this thread's guest stack; returns r0 | r1 << 32.
+std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig, void* thiz,
+                             va_list ap, JniFloatArgs floats) {
     auto st = Enter();
     if (!st) {
         return 1;  // same as a dropped re-entrant frame: logged LOUD in Enter
@@ -707,25 +711,6 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
         g_upd_jit = st->jit;
         g_upd_tid = (int)gettid();
     }
-    static std::unordered_map<std::string, std::uint32_t> vacache;
-    std::uint32_t va = 0;
-    {
-        static std::mutex cmu;
-        std::lock_guard<std::mutex> l(cmu);
-        const auto it = vacache.find(name);
-        if (it != vacache.end()) {
-            va = it->second;
-        } else {
-            const auto jt = g_mod->defined.find(name);
-            if (jt == g_mod->defined.end() || (jt->second & 1u)) {
-                // Thumb entries not expected (all 63 ARM per inventory); log loudly.
-                Log("no guest VA for %s", name);
-                return 0;
-            }
-            va = jt->second;
-            vacache[name] = va;
-        }
-    }
     // The guest's register words: mock env + wrapped thiz (the guest only
     // ever sees 32-bit mock handles; real 64-bit pointers never enter guest
     // regs/fields), then sig-driven (J split in two with 8-byte alignment,
@@ -743,46 +728,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     std::vector<std::uint32_t> words;
     words.push_back(g_rt->JniEnv());
     words.push_back(g_rt->WrapObject(thiz));
-    for (const char* p = sig; *p && *p != ')'; p++) {
-        if (*p == '(') {
-            continue;
-        }
-        if (*p == 'J') {
-            const jlong v = va_arg(ap, jlong);
-            AppendJniWord64(words, static_cast<std::uint64_t>(v));
-        } else if (*p == 'F') {
-            const double d = va_arg(ap, double);
-            const float f = (float)d;
-            std::uint32_t w = 0;
-            std::memcpy(&w, &f, 4);
-            words.push_back(w);
-        } else if (*p == 'D') {
-            const double d = va_arg(ap, double);
-            std::uint64_t u = 0;
-            std::memcpy(&u, &d, 8);
-            AppendJniWord64(words, u);
-        } else if (*p == 'L' || *p == '[') {
-            void* o = va_arg(ap, void*);
-            words.push_back(g_rt->WrapObject(o));
-            if (*p == 'L') {
-                while (*p && *p != ';') {
-                    p++;
-                }
-            } else {
-                while (*p == '[') {
-                    p++;
-                }
-                if (*p == 'L') {
-                    while (*p && *p != ';') {
-                        p++;
-                    }
-                }
-            }
-        } else {
-            const int v = va_arg(ap, int);
-            words.push_back((std::uint32_t)v);
-        }
-    }
+    AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
     auto& regs = st->jit->Regs();
     regs.fill(0);
     const std::uint32_t spbase = st->stack + kThreadStackSize - 0x100u;
@@ -838,6 +784,156 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     }
 #endif
     return (std::uint64_t)regs[0] | ((std::uint64_t)regs[1] << 32);
+}
+
+// A generated Java_* forwarder: the guest export of the same name.
+std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* thiz, va_list ap) {
+    static std::unordered_map<std::string, std::uint32_t> vacache;
+    std::uint32_t va = 0;
+    {
+        static std::mutex cmu;
+        std::lock_guard<std::mutex> l(cmu);
+        const auto it = vacache.find(name);
+        if (it != vacache.end()) {
+            va = it->second;
+        } else {
+            const auto jt = g_mod->defined.find(name);
+            if (jt == g_mod->defined.end() || (jt->second & 1u)) {
+                // Thumb entries not expected (all 63 ARM per inventory); log loudly.
+                Log("no guest VA for %s", name);
+                return 0;
+            }
+            va = jt->second;
+            vacache[name] = va;
+        }
+    }
+    return RunGuestNative(name, va, sig, thiz, ap, JniFloatArgs::kPromoted);
+}
+
+// --- RegisterNatives: host stubs the real JVM calls for guest natives ---
+//
+// A guest that registers natives at run time (Unity's libmain/libunity) hands
+// RegisterNatives guest entries; ART needs host functions. Each registered
+// method takes one stub from a fixed pool. The JVM calls a stub with fixed
+// AAPCS64 arguments, which the stub reads through its own `...`
+// (JniFloatArgs::kRaw explains why that is exact). Stubs come in three
+// return families, since AAPCS64 returns integers and references in x0, a
+// float in s0 and a double in d0.
+struct NativeSlot {
+    std::uint32_t va = 0;  // guest entry (bit 0 = Thumb)
+    char ret = 'V';        // first char of the return type
+    std::string name;      // "cls.method", for logs
+    std::string sig;
+};
+constexpr std::size_t kWordStubs = 256;
+constexpr std::size_t kFloatStubs = 32;
+constexpr std::size_t kDoubleStubs = 32;
+NativeSlot g_word_slots[kWordStubs];
+NativeSlot g_float_slots[kFloatStubs];
+NativeSlot g_double_slots[kDoubleStubs];
+
+std::uint64_t RunSlot(const NativeSlot& s, void* thiz, va_list ap) {
+    return RunGuestNative(s.name.c_str(), s.va, s.sig.c_str(), thiz, ap, JniFloatArgs::kRaw);
+}
+
+// The guest's r0 (r1:r0 for J) as the JNI return value of type `ret`.
+jlong WordReturn(char ret, std::uint64_t r) {
+    const std::uint32_t r0 = static_cast<std::uint32_t>(r);
+    switch (ret) {
+        case 'Z': return static_cast<std::uint8_t>(r0) ? 1 : 0;
+        case 'B': return static_cast<std::int8_t>(r0);
+        case 'C': return static_cast<std::uint16_t>(r0);
+        case 'S': return static_cast<std::int16_t>(r0);
+        case 'I': return static_cast<std::int32_t>(r0);
+        case 'J': return static_cast<jlong>(r);
+        case 'L':
+        case '[': return reinterpret_cast<jlong>(g_rt->JavaObjectFor(r0));
+        default: return 0;  // V
+    }
+}
+
+template <std::size_t N>
+jlong WordStub(JNIEnv*, jobject thiz, ...) {
+    va_list ap;
+    va_start(ap, thiz);
+    const std::uint64_t r = RunSlot(g_word_slots[N], thiz, ap);
+    va_end(ap);
+    return WordReturn(g_word_slots[N].ret, r);
+}
+
+template <std::size_t N>
+jfloat FloatStub(JNIEnv*, jobject thiz, ...) {
+    va_list ap;
+    va_start(ap, thiz);
+    const std::uint32_t r0 = static_cast<std::uint32_t>(RunSlot(g_float_slots[N], thiz, ap));
+    va_end(ap);
+    float f = 0;
+    std::memcpy(&f, &r0, 4);  // softfp: the float's bits in r0
+    return f;
+}
+
+template <std::size_t N>
+jdouble DoubleStub(JNIEnv*, jobject thiz, ...) {
+    va_list ap;
+    va_start(ap, thiz);
+    const std::uint64_t r = RunSlot(g_double_slots[N], thiz, ap);
+    va_end(ap);
+    double d = 0;
+    std::memcpy(&d, &r, 8);  // softfp: r1:r0
+    return d;
+}
+
+template <std::size_t... I>
+std::vector<void*> WordStubs(std::index_sequence<I...>) {
+    return {reinterpret_cast<void*>(&WordStub<I>)...};
+}
+template <std::size_t... I>
+std::vector<void*> FloatStubs(std::index_sequence<I...>) {
+    return {reinterpret_cast<void*>(&FloatStub<I>)...};
+}
+template <std::size_t... I>
+std::vector<void*> DoubleStubs(std::index_sequence<I...>) {
+    return {reinterpret_cast<void*>(&DoubleStub<I>)...};
+}
+
+// GuestCallbacks::g_native_stub_hook. One stub per (class, method, sig,
+// entry): registering the same native again reuses its stub.
+void* NativeStubFor(const char* cls, const char* name, const char* sig, std::uint32_t fn) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, void*> by_key;
+    static std::size_t used[3] = {0, 0, 0};
+    static const std::vector<void*> stubs[3] = {
+        WordStubs(std::make_index_sequence<kWordStubs>()),
+        FloatStubs(std::make_index_sequence<kFloatStubs>()),
+        DoubleStubs(std::make_index_sequence<kDoubleStubs>())};
+    NativeSlot* const slots[3] = {g_word_slots, g_float_slots, g_double_slots};
+    const char* rp = std::strchr(sig, ')');
+    if (!rp || !rp[1]) {
+        return nullptr;
+    }
+    const char ret = rp[1];
+    const int family = ret == 'F' ? 1 : ret == 'D' ? 2 : 0;
+    char vab[12];
+    std::snprintf(vab, sizeof vab, "@%08x", fn);
+    const std::string key = std::string(cls) + "." + name + sig + vab;
+    std::lock_guard<std::mutex> l(mu);
+    const auto it = by_key.find(key);
+    if (it != by_key.end()) {
+        return it->second;
+    }
+    if (used[family] >= stubs[family].size()) {
+        Log("LOUD RegisterNatives: the %s stub pool is full",
+            family == 0 ? "word" : family == 1 ? "float" : "double");
+        return nullptr;
+    }
+    const std::size_t n = used[family]++;
+    NativeSlot& s = slots[family][n];
+    s.va = fn;
+    s.ret = ret;
+    s.name = std::string(cls) + "." + name;
+    s.sig = sig;
+    by_key[key] = stubs[family][n];
+    return stubs[family][n];
 }
 
 std::string FindApk() {
@@ -916,7 +1012,7 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     }
 #endif
     calln++;
-    const std::uint64_t rv = AppHost_CallImpl(name, sig, env, thiz, ap);
+    const std::uint64_t rv = AppHost_CallImpl(name, sig, thiz, ap);
     va_end(ap);
     return rv;
 }
@@ -976,6 +1072,7 @@ static bool DiagBootWanted(const std::string& files_dir) {
 extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     g_vm = vm;
     GuestCallbacks::g_real_env_hook = RealEnvForThread;
+    GuestCallbacks::g_native_stub_hook = NativeStubFor;
     // Logs to app files dir (pullable); stdout unbuffered.
     g_files = GuestFilesDir();
     std::error_code ec;
