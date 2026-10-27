@@ -11829,8 +11829,9 @@ void Runtime::DumpGuestThreads() {
     }
     auto import_at = [&](std::uint32_t pc) -> std::string {
         // Import trampoline i sits at kTrampBase + 4 * (i + 2) (slots 0/1 are
-        // halt/once); the stopped pc may be on the svc or just past it.
-        for (std::uint32_t p : {pc, pc - 4}) {
+        // halt/once); a thread stopped in a host call reports the pc past
+        // its svc, so the svc is at pc - 4.
+        for (std::uint32_t p : {pc - 4}) {
             if (p >= kTrampBase + 8 && p < kTrampBase + kTrampSize) {
                 const std::uint32_t i = (p - kTrampBase) / 4 - 2;
                 if (i < mod_.imports.size()) {
@@ -11853,9 +11854,22 @@ void Runtime::DumpGuestThreads() {
             sp = j->Regs()[13];
         }
         const std::string imp = import_at(pc);
-        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s pending=%08x\n", tid,
-                    st->host_tid.load(), parked ? "in-host" : outside ? "host-call" : "guest", pc, lr,
-                    sp, imp.empty() ? "" : " import=", imp.c_str(), st->pending.load());
+        std::string samples;
+        if (!outside) {
+            // Running guest code: a few pc samples tell a spin from progress.
+            if (Dynarmic::A32::Jit* j = st->jit.load()) {
+                for (int k = 0; k < 5; k++) {
+                    char b[16];
+                    std::snprintf(b, sizeof b, " %08x", j->Regs()[15]);
+                    samples += b;
+                    ::usleep(20000);
+                }
+            }
+        }
+        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s pending=%08x%s%s\n",
+                    tid, st->host_tid.load(), parked ? "in-host" : outside ? "host-call" : "guest", pc,
+                    lr, sp, imp.empty() ? "" : " import=", imp.c_str(), st->pending.load(),
+                    samples.empty() ? "" : " samples:", samples.c_str());
     }
 }
 
@@ -13968,7 +13982,20 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        std::printf("[jni] LOUD field fn#%u: no real field %08x on %08x -- halting\n", fn, a2, a1);
+        {
+            std::string what = "?", field = "?";
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (const auto it = jni_objects_.find(a1); it != jni_objects_.end()) {
+                what = it->second;
+            } else if (const auto jc = jni_classes_.find(a1); jc != jni_classes_.end()) {
+                what = "class " + jc->second;
+            }
+            if (const auto jf = jni_methods_.find(a2); jf != jni_methods_.end()) {
+                field = jf->second;
+            }
+            std::printf("[jni] LOUD field fn#%u: no real field %08x (%s) on %08x (%s) -- halting\n", fn,
+                        a2, field.c_str(), a1, what.c_str());
+        }
         HaltGuest();
         return;
 #endif

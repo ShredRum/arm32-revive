@@ -698,6 +698,13 @@ Dynarmic::HaltReason RunWordsOn(HostThread& st, const char* name, std::uint32_t 
                                 const std::vector<std::uint32_t>& words,
                                 Dynarmic::A32::Jit** used) {
     if (st.in_guest.load()) {
+        {
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1) < 40) {
+                Log("nested %s inside %s (depth %d) lr=%08x", name, st.in_name, st.depth,
+                    (st.depth == 0 ? st.jit : st.nested[static_cast<std::size_t>(st.depth - 1)])->Regs()[14]);
+            }
+        }
         Dynarmic::A32::Jit* outer = st.depth == 0 ? st.jit : st.nested[static_cast<std::size_t>(st.depth - 1)];
         if (st.nested.size() <= static_cast<std::size_t>(st.depth)) {
             Dynarmic::A32::Jit* j = NewThreadJit(st.cpu_id);  // the outer one is stopped
