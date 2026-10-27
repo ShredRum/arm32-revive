@@ -14788,6 +14788,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
             return;
         }
+        {
+            // A mock answer where the real call was meant to run: the guest
+            // gets "" or an inert object, so name the method.
+            static std::atomic<int> mock_logs{0};
+            if (mock_logs.fetch_add(1) < 40) {
+                std::printf("[jni] Call%sObject %s: no real call, a mock result\n",
+                            is_static ? "Static" : "", mdesc.c_str());
+            }
+        }
 #endif
         if (mdesc.size() >= 20 &&
             mdesc.compare(mdesc.size() - 20, 20, "()Ljava/lang/String;") == 0) {
