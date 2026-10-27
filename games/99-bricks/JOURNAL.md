@@ -278,3 +278,20 @@ i.e. a pending thread suspension that is never lifted); FMODAudioDevice waits th
 way in ReleasePrimitiveArray. No guest-attached thread is among ART's threads. Not yet
 explained; traces in work/review/traces_bricks*.txt. (The other hang, Unity's
 asyncProcessor queue, was dumped once with the queue empty and no waiter.)
+
+## Milestone (2026-10-27): into a level on the sandbox
+
+Unity splash, loading bar, quality dialog (touch works), title screen, a level.
+Key fixes on the way: guest-signal proxy delivery (thread state always known,
+outer snapshot restored after nested runs, proxies only for blocking host calls),
+per-page mmap arena (Boehm's partial MAP_FIXED), real JNI everywhere (static fields,
+NewObject for every class, reflection, FindClass classes as arguments, guest threads
+attached to the JVM with the app class loader), nested Java -> native calls,
+system-library dlopen + run-time import trampolines.
+
+Open, in order:
+1. Saves: Application.persistentDataPath arrives empty ("/save_premium.wb.tmp").
+2. The rare hang at the logo (see above): next time take `debuggerd -b <pid>`.
+3. Performance (8-30 fps at times): later.
+4. Rovio gate of the core changes (real NewObject / static fields / attached
+   worker threads / proxy rules) before anything merges to master.
