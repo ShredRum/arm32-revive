@@ -24,6 +24,7 @@
 #include <set>
 #include <arpa/inet.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/vfs.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -46,6 +47,11 @@ static void LibBaseAnchor() {}
 #include <cstring>
 
 namespace abr {
+
+// This thread's pthread_cleanup list head (guest address) and guest stack.
+thread_local std::uint32_t t_cleanup_head = 0;
+thread_local std::uint32_t t_stack_lo = 0;
+thread_local std::uint32_t t_stack_size = 0;
 
 extern "C" {
 typedef void* dl_mspace;
@@ -1036,6 +1042,210 @@ std::uint32_t Runtime::GuestMmap(std::uint32_t addr, std::uint32_t size, int pro
     }
     mappings_.SetProt(out, static_cast<std::uint32_t>(out + len), hprot);
     return out;
+}
+
+int Runtime::GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot) {
+    // Protection changes only ever ADD access. The mapping table (what
+    // CheckAccess believes) cannot split an entry, and the host pages must
+    // allow everything the table allows, or a host-side access would fault
+    // the host instead of halting the guest. So the entry and the host pages
+    // get old|new; a request to remove access (a guard page) is accepted and
+    // not enforced. Enough for a guest JIT that flips pages RW <-> RX.
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const std::uint64_t len = (std::uint64_t(size) + 0xFFFu) & ~std::uint64_t(0xFFFu);
+    if ((addr & 0xFFFu) != 0 || len == 0) {
+        SetGuestErrno(EINVAL);
+        return -1;
+    }
+    const MappingTable::Hit h = mappings_.Find(addr, len);
+    if (h.end == 0) {
+        SetGuestErrno(ENOMEM);  // not mapped (kernel answer)
+        return -1;
+    }
+    const int want = h.prot | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
+    if (want != h.prot) {
+        const std::uint64_t hp = GuestMemory::HostPageSize();
+        const std::uint64_t lo = std::uint64_t(h.start) & ~(hp - 1);
+        const std::uint64_t hi = (std::uint64_t(h.end) + hp - 1) & ~(hp - 1);
+        ::mprotect(H(static_cast<std::uint32_t>(lo)), static_cast<std::size_t>(hi - lo), want);
+        mappings_.SetProt(h.start, h.end, want);
+    }
+    return 0;
+}
+
+void Runtime::SetThreadStack(std::uint32_t lo, std::uint32_t size) {
+    t_stack_lo = lo;
+    t_stack_size = size;
+}
+
+std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
+                                   std::uint32_t a2) {
+    // bionic arm32 pthread_attr_t (NDK pthread.h), 24 bytes:
+    // { u32 flags; void* stack_base; size_t stack_size; size_t guard_size;
+    //   s32 sched_policy; s32 sched_priority; }. flags bit 0 = detached.
+    constexpr std::uint32_t kSize = 24, kDetached = 1;
+    std::uint32_t at = 0;
+    if (n == "pthread_getattr_np") {
+        at = a1;  // (thread, attr)
+    } else {
+        at = a0;
+    }
+    if (!CheckRange(at, kSize, true)) {
+        std::printf("[thread] LOUD %s: bad attr %08x -- halting\n", n.c_str(), at);
+        HaltGuest();
+        return EINVAL;
+    }
+    std::uint32_t f[6];
+    std::memcpy(f, H(at), kSize);
+    auto store = [&]() { std::memcpy(H(at), f, kSize); };
+    auto out32 = [&](std::uint32_t p, std::uint32_t v) -> bool {
+        if (!CheckRange(p, 4, true)) {
+            return false;
+        }
+        std::memcpy(H(p), &v, 4);
+        return true;
+    };
+    if (n == "pthread_attr_init") {
+        // bionic defaults: joinable, 1 MiB stack (minus its own guard), one
+        // page of guard, SCHED_NORMAL.
+        const std::uint32_t d[6] = {0, 0, 1024u * 1024u, 4096u, 0, 0};
+        std::memcpy(f, d, kSize);
+        store();
+        return 0;
+    }
+    if (n == "pthread_attr_destroy") {
+        std::memset(f, 0, kSize);
+        store();
+        return 0;
+    }
+    if (n == "pthread_getattr_np") {
+        // Only the calling thread's own stack is known here (enough for the
+        // GC/stack-bounds use); other threads get the defaults.
+        std::uint32_t lo = t_stack_lo, sz = t_stack_size;
+        if (sz == 0) {
+            lo = kStackBase;
+            sz = kStackSize;
+        }
+        const bool self = (a0 == GuestTid());
+        const std::uint32_t d[6] = {0, self ? lo : 0u, self ? sz : 1024u * 1024u, 4096u, 0, 0};
+        std::memcpy(f, d, kSize);
+        store();
+        return 0;
+    }
+    if (n == "pthread_attr_getstack") {  // (attr, void** addr, size_t* size)
+        return (out32(a1, f[1]) && out32(a2, f[2])) ? 0u : static_cast<std::uint32_t>(EINVAL);
+    }
+    if (n == "pthread_attr_getstacksize") {
+        return out32(a1, f[2]) ? 0u : static_cast<std::uint32_t>(EINVAL);
+    }
+    if (n == "pthread_attr_setstacksize") {
+        if (a1 < 16384u) {
+            return EINVAL;  // PTHREAD_STACK_MIN
+        }
+        f[2] = a1;
+        store();
+        return 0;
+    }
+    if (n == "pthread_attr_getdetachstate") {
+        return out32(a1, (f[0] & kDetached) ? 1u : 0u) ? 0u : static_cast<std::uint32_t>(EINVAL);
+    }
+    if (n == "pthread_attr_setdetachstate") {
+        if (a1 > 1) {
+            return EINVAL;
+        }
+        f[0] = a1 ? (f[0] | kDetached) : (f[0] & ~kDetached);
+        store();
+        return 0;
+    }
+    if (n == "pthread_attr_setschedpolicy") {
+        f[4] = a1;
+        store();
+        return 0;
+    }
+    if (n == "pthread_attr_setschedparam") {  // (attr, const sched_param*)
+        if (!CheckRange(a1, 4, false)) {
+            return EINVAL;
+        }
+        std::memcpy(&f[5], H(a1), 4);
+        store();
+        return 0;
+    }
+    return EINVAL;
+}
+
+std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,
+                                std::uint32_t a2) {
+    // A guest sem_t (4 bytes on arm32) is backed by a host sem_t, keyed by
+    // its address like the mutex map. Blocking waits run outside mutex_.
+    if (!CheckRange(sem, 4, true)) {
+        return kSemBadPtr;
+    }
+    std::shared_ptr<sem_t> s;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (n == "sem_init") {  // (sem, pshared, value)
+            auto ns = std::shared_ptr<sem_t>(new sem_t, [](sem_t* p) {
+                ::sem_destroy(p);
+                delete p;
+            });
+            if (::sem_init(ns.get(), 0, a2) != 0) {
+                SetGuestErrno(errno);
+                return 0xFFFFFFFFu;
+            }
+            sem_map_[sem] = ns;  // a re-init replaces it (waiters keep theirs)
+            return 0;
+        }
+        const auto it = sem_map_.find(sem);
+        if (it == sem_map_.end()) {
+            SetGuestErrno(EINVAL);
+            return 0xFFFFFFFFu;
+        }
+        s = it->second;
+        if (n == "sem_destroy") {
+            sem_map_.erase(it);
+            return 0;
+        }
+    }
+    int r = 0;
+    if (n == "sem_post") {
+        r = ::sem_post(s.get());
+    } else if (n == "sem_trywait") {
+        r = ::sem_trywait(s.get());
+    } else if (n == "sem_getvalue") {  // (sem, int* value)
+        int v = 0;
+        r = ::sem_getvalue(s.get(), &v);
+        if (r == 0) {
+            if (!CheckRange(a1, 4, true)) {
+                return kSemBadPtr;
+            }
+            std::memcpy(H(a1), &v, 4);
+        }
+    } else if (n == "sem_wait") {
+        do {
+            r = ::sem_wait(s.get());
+        } while (r != 0 && errno == EINTR);
+    } else {  // sem_timedwait(sem, const struct timespec* abs CLOCK_REALTIME)
+        if (!CheckRange(a1, 8, false)) {
+            return kSemBadPtr;
+        }
+        std::int32_t g[2] = {0, 0};
+        std::memcpy(g, H(a1), 8);
+        if (g[1] < 0 || g[1] >= 1000000000) {
+            SetGuestErrno(EINVAL);
+            return 0xFFFFFFFFu;
+        }
+        struct timespec ts {};
+        ts.tv_sec = g[0];
+        ts.tv_nsec = g[1];
+        do {
+            r = ::sem_timedwait(s.get(), &ts);
+        } while (r != 0 && errno == EINTR);
+    }
+    if (r != 0) {
+        SetGuestErrno(errno);
+        return 0xFFFFFFFFu;
+    }
+    return 0;
 }
 
 int Runtime::GuestMunmap(std::uint32_t addr, std::uint32_t size) {
@@ -3566,6 +3776,141 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, c_str);
         return;
     }
+    // --- libc pieces first needed by Mono (99 Bricks). Not imported by the
+    // Rovio titles, so their behaviour is unchanged.
+    if (n == "bsd_signal") {
+        // signal(sig, handler): guest handlers are never delivered (see
+        // sigaction below); report SIG_DFL as the previous disposition.
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "gettid") {
+        Ret(regs, GuestTid());
+        return;
+    }
+    if (n == "getdtablesize") {
+        // The descriptor table size (RLIMIT_NOFILE soft limit); Android's
+        // default is 1024. Mono's io-layer sizes its handle table from it.
+        struct rlimit rl {};
+        const bool ok = ::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY;
+        Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
+        return;
+    }
+    if (n == "strlcpy") {
+        // strlcpy(dst, src, size): copies at most size-1 bytes, always
+        // NUL-terminates when size > 0, returns strlen(src).
+        std::uint32_t len = 0;
+        if (!GuestStrnlen(a1, 0xFFFFFFFFu, &len)) {
+            goto bad_ptr;
+        }
+        if (a2 != 0) {
+            const std::uint32_t c = len < a2 - 1 ? len : a2 - 1;
+            if (!CheckRange(a0, c + 1, true)) {
+                goto bad_ptr;
+            }
+            std::memmove(H(a0), H(a1), c);
+            *H<std::uint8_t>(a0 + c) = 0;
+        }
+        Ret(regs, len);
+        return;
+    }
+    if (n == "clock_getres") {
+        // clock_getres(clk, struct timespec* res): 32-bit {time_t, long}.
+        struct timespec ts {};
+        if (::clock_getres(static_cast<clockid_t>(a0), &ts) != 0) {
+            SetGuestErrno(errno);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        if (a1 != 0) {
+            if (!CheckRange(a1, 8, true)) {
+                goto bad_ptr;
+            }
+            const std::int32_t g[2] = {static_cast<std::int32_t>(ts.tv_sec),
+                                       static_cast<std::int32_t>(ts.tv_nsec)};
+            std::memcpy(H(a1), g, 8);
+        }
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "mprotect") {
+        Ret(regs, static_cast<std::uint32_t>(GuestMprotect(a0, a1, static_cast<int>(a2))));
+        return;
+    }
+    if (n == "readlink") {
+        // readlink(path, buf, size): through the file bridge. A link target
+        // inside the host files dir goes back in guest spelling. No match
+        // (unmapped path) is ENOENT; a plain file or dir is EINVAL as usual.
+        if (!CheckRange(a1, a2 ? a2 : 1, true)) {
+            goto bad_ptr;
+        }
+        const std::string hp = MapGuestPath(a0);
+        if (hp.empty()) {
+            SetGuestErrno(ENOENT);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        char buf[4096];
+        const ssize_t r = ::readlink(hp.c_str(), buf, sizeof(buf) - 1);
+        if (r < 0) {
+            SetGuestErrno(errno);
+            Ret(regs, 0xFFFFFFFFu);
+            return;
+        }
+        std::string target(buf, static_cast<std::size_t>(r));
+        if (!files_hostbase_.empty() && target.compare(0, files_hostbase_.size(), files_hostbase_) == 0) {
+            target = files_prefix_ + target.substr(files_hostbase_.size());
+        }
+        const std::size_t len = target.size() < a2 ? target.size() : a2;  // no NUL, may truncate
+        std::memcpy(H(a1), target.data(), len);
+        Ret(regs, static_cast<std::uint32_t>(len));
+        return;
+    }
+    if (n == "pthread_attr_init" || n == "pthread_attr_destroy" || n == "pthread_getattr_np" ||
+        n == "pthread_attr_getstack" || n == "pthread_attr_getstacksize" ||
+        n == "pthread_attr_setstacksize" || n == "pthread_attr_getdetachstate" ||
+        n == "pthread_attr_setdetachstate" || n == "pthread_attr_setschedpolicy" ||
+        n == "pthread_attr_setschedparam") {
+        Ret(regs, PthreadAttr(n, a0, a1, a2));
+        return;
+    }
+    if (n == "__pthread_cleanup_push" || n == "__pthread_cleanup_pop") {
+        // bionic __pthread_cleanup_t { prev; routine; arg; } (12 B), a
+        // per-thread list. pop(c, execute) runs routine(arg) when asked.
+        if (!CheckRange(a0, 12, n == "__pthread_cleanup_push")) {
+            goto bad_ptr;
+        }
+        if (n == "__pthread_cleanup_push") {
+            const std::uint32_t c[3] = {t_cleanup_head, a1, a2};
+            std::memcpy(H(a0), c, 12);
+            t_cleanup_head = a0;
+            Ret(regs, 0);
+            return;
+        }
+        std::uint32_t c[3] = {0, 0, 0};
+        std::memcpy(c, H(a0), 12);
+        t_cleanup_head = c[0];
+        if (a1 != 0 && c[1] != 0) {
+            std::int32_t ignored = 0;
+            if (!RunComparator(c[1], c[2], 0, ignored)) {
+                std::printf("[thread] LOUD cleanup routine %08x(%08x) failed -- halting\n", c[1],
+                            c[2]);
+                HaltGuest();
+                return;
+            }
+        }
+        Ret(regs, 0);
+        return;
+    }
+    if (n == "sem_init" || n == "sem_destroy" || n == "sem_post" || n == "sem_wait" ||
+        n == "sem_trywait" || n == "sem_timedwait" || n == "sem_getvalue") {
+        const std::uint32_t r = GuestSem(n, a0, a1, a2);
+        if (r == kSemBadPtr) {
+            goto bad_ptr;
+        }
+        Ret(regs, r);
+        return;
+    }
     if (n == "sigaction" || n == "sigprocmask") {
         // Guest signal handlers are never delivered (signals belong to the
         // host process); report "no previous handler / empty mask" instead
@@ -5462,13 +5807,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd" ||
             n == "pathconf" || n == "statfs") {
             if (n == "getcwd") {
-                const std::string cwd = files_hostbase_.empty() ? "/" : files_hostbase_;
-                if (a1 == 0 || !CheckRange(a0, cwd.size() + 1, true)) {
+                // The guest's view of the CWD: its files dir, which is what
+                // bare relative names resolve to (MapGuestPath), in GUEST
+                // spelling. The host path leaked into guest paths and was
+                // mapped again on the next call (on the PC the two differ;
+                // on a device they are the same string).
+                const std::string cwd = files_prefix_.empty() ? "/" : files_prefix_;
+                const std::uint32_t need = static_cast<std::uint32_t>(cwd.size() + 1);
+                // getcwd(buf, size): ERANGE when it does not fit (callers grow
+                // the buffer and retry; writing past it smashed the heap).
+                // bionic: buf == NULL allocates max(size, need) bytes.
+                std::uint32_t dst = a0;
+                if (dst == 0) {
+                    dst = GuestMalloc(a1 > need ? a1 : need);
+                    if (!dst) {
+                        SetGuestErrno(ENOMEM);
+                        Ret(regs, 0);
+                        return;
+                    }
+                } else if (a1 == 0) {
+                    SetGuestErrno(EINVAL);
                     Ret(regs, 0);
                     return;
+                } else if (a1 < need) {
+                    SetGuestErrno(ERANGE);
+                    Ret(regs, 0);
+                    return;
+                } else if (!CheckRange(dst, need, true)) {
+                    goto bad_ptr;
                 }
-                std::memcpy(H(a0), cwd.c_str(), cwd.size() + 1);
-                Ret(regs, a0);
+                std::memcpy(H(dst), cwd.c_str(), need);
+                Ret(regs, dst);
                 return;
             }
             if (n == "pathconf") {
@@ -7391,6 +7760,18 @@ void Runtime::OnGuestSyscall(Regs& regs) {
     case 20:  // getpid
         regs[0] = static_cast<std::uint32_t>(::getpid());
         return;
+    case 0xF0002: {  // __ARM_NR_cacheflush(start, end, flags): a guest wrote code
+        // Drop the translations of [start, end); Dynarmic does it when this
+        // thread's Run stops at the next block boundary (RunJit resumes it).
+        // A shared cache is invalidated for every thread at once.
+        if (r1 > r0) {
+            if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+                jit->InvalidateCacheRange(r0, r1 - r0);
+            }
+        }
+        regs[0] = 0;
+        return;
+    }
     case 224:  // gettid
         regs[0] = GuestTid();
         return;
@@ -7677,7 +8058,7 @@ bool Runtime::RunComparator(std::uint32_t compar, std::uint32_t pa, std::uint32_
     // restore before returning to the outer Run.
     Dynarmic::A32::Jit* outer = t_active_jit;
     t_active_jit = jit;
-    Dynarmic::HaltReason hr = jit->Run();
+    Dynarmic::HaltReason hr = RunJit(*jit);
     t_active_jit = outer;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -7825,6 +8206,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     try {
     st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
         t_tid = tid;
+        SetThreadStack(stack, kThreadStackSize);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
         cfg.optimizations =
@@ -7873,7 +8255,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
             jit.SetCpsr((cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10));
             regs[15] = start;
         }
-        Dynarmic::HaltReason hr = jit.Run();
+        Dynarmic::HaltReason hr = RunJit(jit);
         (void)hr;
         // Dying here must not strand a caller that is waiting in PthreadOnce.
         ReleaseOnceControlsOnExit(tid);

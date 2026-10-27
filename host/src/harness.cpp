@@ -193,7 +193,7 @@ Dynarmic::HaltReason RunOneJni(Dynarmic::A32::Jit& jit, abr::Runtime& rt, abr::G
         hr = StepRun(jit, rt, mem, mod.halt_va, cap,
                      std::getenv("HARNESS_FULLTRACE") != nullptr);
     } else {
-        hr = jit.Run();
+        hr = abr::RunJit(jit);
     }
     alarm(0);
     std::printf("hr=%d r0=%08x (%u) svc=%llu\n", static_cast<int>(hr), regs[0], regs[0],
@@ -877,7 +877,7 @@ int main(int argc, char** argv) {
             }
             std::printf("\n");
         } else {
-            hr = jit.Run();
+            hr = abr::RunJit(jit);
         }
         alarm(0);
         g_current_init = -1;
@@ -1007,7 +1007,7 @@ int main(int argc, char** argv) {
             std::printf("[jni] JNI_OnLoad @%08x jvm=%08x ... ", onload, regs[0]);
             std::fflush(stdout);
             alarm(kWatchdogSeconds);
-            Dynarmic::HaltReason ohr = jit.Run();
+            Dynarmic::HaltReason ohr = abr::RunJit(jit);
             alarm(0);
             std::printf("hr=%d r0=%08x svc=%llu\n", static_cast<int>(ohr), regs[0],
                         (unsigned long long)rt.svc_count);

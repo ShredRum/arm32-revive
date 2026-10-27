@@ -6,6 +6,7 @@
 #include <array>
 #include <bitset>
 #include <atomic>
+#include <semaphore.h>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -54,6 +55,19 @@ bool DiagOn();
 // now the default). Keep all four UserConfig sites + the `flags:` print on this
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
+// Jit::Run, resumed after a code-cache invalidation. A guest that writes
+// code (a JIT such as Mono's) calls cacheflush; the Jit then stops at the
+// next block boundary with CacheInvalidation, drops the stale blocks, and
+// expects to be run again. That stop is not the guest's halt.
+inline Dynarmic::HaltReason RunJit(Dynarmic::A32::Jit& jit) {
+    for (;;) {
+        const auto hr = static_cast<std::uint32_t>(jit.Run()) &
+                        ~static_cast<std::uint32_t>(Dynarmic::HaltReason::CacheInvalidation);
+        if (hr != 0) {
+            return static_cast<Dynarmic::HaltReason>(hr);
+        }
+    }
+}
 // Fastmem (direct host access for guest loads/stores): always on in the
 // product, where a boot without it is ~10x slower; opt-in on the PC harness.
 inline bool JitFastmemOn() {
@@ -158,6 +172,15 @@ public:
     std::uint32_t GuestMmap(std::uint32_t addr, std::uint32_t size, int prot, int flags,
                             int host_fd, std::uint64_t offset);
     int GuestMunmap(std::uint32_t addr, std::uint32_t size);
+    int GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot);
+    // This thread's guest stack (pthread_getattr_np); default: the main stack.
+    static void SetThreadStack(std::uint32_t lo, std::uint32_t size);
+    std::uint32_t PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
+                              std::uint32_t a2);
+    // Guest semaphores; kSemBadPtr asks the caller to halt on a wild pointer.
+    static constexpr std::uint32_t kSemBadPtr = 0xFFFFFFFEu;
+    std::uint32_t GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,
+                           std::uint32_t a2);
 
     // Host pointer from guest address (no checks; callbacks validate first).
     template <typename T = std::uint8_t>
@@ -490,6 +513,7 @@ private:
     Dynarmic::ExclusiveMonitor monitor_{kMaxGuestCpus};
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<sem_t>> sem_map_;  // GuestSem
     bool network_allowed_ = false;  // SetNetworkAllowed
     // One shared code cache per Jit configuration (NewJit).
     struct CodeCacheEntry {

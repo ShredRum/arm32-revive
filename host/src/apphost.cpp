@@ -594,6 +594,7 @@ std::shared_ptr<HostThread> Enter() {
         const auto it = g_threads.find(me);
         if (it != g_threads.end()) {
             g_rt->ThreadEnter(it->second->jit, it->second->tid);
+            abr::Runtime::SetThreadStack(it->second->stack, kThreadStackSize);
             return it->second;
         }
     }
@@ -643,6 +644,7 @@ std::shared_ptr<HostThread> Enter() {
     pthread_setspecific(g_hostthread_key, reinterpret_cast<void*>(static_cast<std::intptr_t>(me)));
     const unsigned created = ++g_ht_created;
     g_rt->ThreadEnter(st->jit, tid);
+    abr::Runtime::SetThreadStack(st->stack, kThreadStackSize);
     // One line per real thread (bounded -- not per call): the only witness that
     // Java->native thread churn would show. Always on.
     Log("thread enter tid=%u stack=%08x attached=%d live=%zu (created=%u)", (unsigned)tid, st->stack,
@@ -793,7 +795,7 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* env, voi
     Dynarmic::HaltReason hr;
     {
         GuestRunGuard gg(st.get(), name);
-        hr = st->jit->Run();
+        hr = RunJit(*st->jit);
     }
     if (is_update) {
         g_upd_done_ms = WallMs();
@@ -1253,7 +1255,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         regs[13] = st->stack + kThreadStackSize - 8;
         regs[14] = g_mod->halt_va;
         CallGuest(*st->jit, g_mod->init_array[k]);
-        const Dynarmic::HaltReason hr = st->jit->Run();
+        const Dynarmic::HaltReason hr = RunJit(*st->jit);
         st->jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
         if (hr == Dynarmic::HaltReason::UserDefined1) {
             ok++;
@@ -1276,7 +1278,7 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             regs[0] = g_rt->Jvm();
             regs[1] = 0;
             CallGuest(*st->jit, it->second);
-            const Dynarmic::HaltReason hr = st->jit->Run();
+            const Dynarmic::HaltReason hr = RunJit(*st->jit);
             st->jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
             Log("guest OnLoad hr=%d r0=%08x", (int)hr, regs[0]);
         } else {
