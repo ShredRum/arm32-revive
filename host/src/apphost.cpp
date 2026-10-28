@@ -870,7 +870,7 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     words.push_back(g_rt->WrapObject(thiz));
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
     // HARNESS_PROF: a render-thread frame that takes too long is broken down.
-    const bool frame_prof = EnvOn("HARNESS_PROF") && !st->in_guest.load() && std::strstr(name, "nativeRender");
+    const bool frame_prof = abr::prof::g_enabled && !st->in_guest.load() && std::strstr(name, "nativeRender");
     const std::uint64_t frame_t0 = frame_prof ? abr::prof::FrameBegin() : 0;
     Dynarmic::A32::Jit* used = nullptr;
     const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words, &used);
@@ -1637,6 +1637,7 @@ static bool Boot(JavaVM* vm) {
             setenv("HARNESS_NOJITSHARE", "1", 0);
         }
     }
+    abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s clampwrite=%s diag=%s "
         "jitopt=%s jitshare=%s",

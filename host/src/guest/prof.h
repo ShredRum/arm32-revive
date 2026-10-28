@@ -20,6 +20,10 @@ namespace abr::prof {
 
 inline constexpr std::uint64_t kSlowNs = 100'000'000;  // 100 ms
 
+// Set once at boot when HARNESS_PROF is on: with it off, the hot paths test
+// this plain global and touch no thread_local (emulated TLS on Android < 29
+// is a call, not an instruction).
+inline bool g_enabled = false;
 inline thread_local bool t_on = false;  // this thread's frames are timed
 inline thread_local int t_depth = 0;    // host calls in progress (nested ones are not added twice)
 inline thread_local std::unordered_map<std::uint32_t, std::uint64_t> t_ns;  // swi -> ns
@@ -29,7 +33,7 @@ inline thread_local std::unordered_map<std::uint32_t, std::uint32_t> t_calls;
 inline std::atomic<std::uint64_t> g_flushes{0}, g_flush_bytes{0};
 // Guest data accesses that took the callback path instead of fastmem (this
 // thread): an access that faulted once stays on the slow path.
-inline thread_local std::uint64_t t_slow_mem = 0;
+inline thread_local std::uint64_t t_slow_mem = 0;  // counted only when g_enabled
 inline thread_local std::uint64_t t_slow_mem0 = 0;
 inline thread_local std::uint64_t t_flushes0 = 0, t_flush_bytes0 = 0;
 
@@ -42,9 +46,10 @@ inline std::uint64_t NowNs() {
 // Times one host call when this thread is profiled (outermost calls only).
 class CallTimer {
 public:
-    explicit CallTimer(std::uint32_t swi) : swi_(swi), t0_(t_on && t_depth++ == 0 ? NowNs() : 0) {}
+    explicit CallTimer(std::uint32_t swi)
+        : swi_(swi), t0_(g_enabled && t_on && t_depth++ == 0 ? NowNs() : 0) {}
     ~CallTimer() {
-        if (!t_on) {
+        if (!g_enabled || !t_on) {
             return;
         }
         if (--t_depth == 0 && t0_) {

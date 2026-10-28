@@ -9437,8 +9437,10 @@ void Runtime::OnGuestSyscall(Regs& regs) {
         // caches each hold their own copy of the old code, so every live Jit
         // drops it (InvalidateCacheRange may be called from any thread).
         if (r1 > r0) {
-            prof::g_flushes.fetch_add(1, std::memory_order_relaxed);
-            prof::g_flush_bytes.fetch_add(r1 - r0, std::memory_order_relaxed);
+            if (prof::g_enabled) {
+                prof::g_flushes.fetch_add(1, std::memory_order_relaxed);
+                prof::g_flush_bytes.fetch_add(r1 - r0, std::memory_order_relaxed);
+            }
             if (JitShareOn()) {
                 if (Dynarmic::A32::Jit* jit = ActiveJit()) {
                     jit->InvalidateCacheRange(r0, r1 - r0);
@@ -16064,7 +16066,9 @@ static std::int64_t WatchAddr() {
 
 template <typename T>
 T GuestCallbacks::Read(VAddr addr, bool exec) {
-    prof::t_slow_mem += !exec;
+    if (prof::g_enabled) {
+        prof::t_slow_mem += !exec;
+    }
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
             std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
@@ -16125,7 +16129,9 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
 
 template <typename T>
 void GuestCallbacks::Write(VAddr addr, T v) {
-    prof::t_slow_mem++;
+    if (prof::g_enabled) {
+        prof::t_slow_mem++;
+    }
     {
         const char* gwhat = nullptr;
         if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
