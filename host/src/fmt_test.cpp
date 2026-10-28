@@ -127,13 +127,18 @@ struct RuntimeTestAccess {
     static void SeedHostThreadTls(Runtime& rt, std::uint32_t tid, std::uint32_t slot,
                                   std::uint32_t key, std::uint32_t value) {
         rt.errno_slots_[tid] = slot;
-        rt.tls_map_[(static_cast<std::uint64_t>(key) << 32) | tid] = value;
+        auto& b = rt.tls_blocks_[tid];
+        if (!b) {
+            b = std::make_shared<GuestTls>();
+        }
+        b->v[key].store(value);
     }
     static bool HostThreadHasErrno(Runtime& rt, std::uint32_t tid) {
         return rt.errno_slots_.find(tid) != rt.errno_slots_.end();
     }
     static bool HostThreadHasTls(Runtime& rt, std::uint32_t tid, std::uint32_t key) {
-        return rt.tls_map_.find((static_cast<std::uint64_t>(key) << 32) | tid) != rt.tls_map_.end();
+        const auto it = rt.tls_blocks_.find(tid);
+        return it != rt.tls_blocks_.end() && it->second->v[key].load() != 0;
     }
     static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
     static bool InMapping(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, false); }
@@ -375,6 +380,10 @@ int main() {
     mod.imports.push_back(abr::Import{"mremap", true, 0, 0, 0});  // 105
     mod.imports.push_back(abr::Import{"pthread_cond_signal", true, 0, 0, 0});  // 106
     mod.imports.push_back(abr::Import{"pthread_cond_wait", true, 0, 0, 0});    // 107
+    mod.imports.push_back(abr::Import{"pthread_key_create", true, 0, 0, 0});   // 108
+    mod.imports.push_back(abr::Import{"pthread_setspecific", true, 0, 0, 0});  // 109
+    mod.imports.push_back(abr::Import{"pthread_getspecific", true, 0, 0, 0});  // 110
+    mod.imports.push_back(abr::Import{"pthread_key_delete", true, 0, 0, 0});   // 111
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -2448,6 +2457,32 @@ int main() {
         waiter.join();
         Expect("waiter survives a concurrent cond destroy (ETIMEDOUT)", std::to_string(wr),
                std::to_string(ETIMEDOUT));
+    }
+
+    // --- pthread_*specific: each guest thread its own value; a key delete
+    //     clears it for every thread.
+    {
+        const std::uint32_t kKeyAt = 0x10008E00;
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0) {
+            const std::uint32_t args[4] = {x, y, 0, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        call(108, kKeyAt, 0);
+        std::uint32_t key = 0;
+        std::memcpy(&key, rt.H(kKeyAt), 4);
+        call(109, key, 5);
+        std::uint32_t other_before = 1, other_after = 0;
+        std::thread([&] {
+            rt.ThreadEnter(nullptr, 77);
+            other_before = call(110, key);
+            call(109, key, 7);
+            other_after = call(110, key);
+        }).join();
+        Expect("tls: another thread starts at NULL", std::to_string(other_before), "0");
+        Expect("tls: another thread keeps its own", std::to_string(other_after), "7");
+        Expect("tls: this thread keeps its own", std::to_string(call(110, key)), "5");
+        call(111, key);
+        Expect("tls: a deleted key reads NULL", std::to_string(call(110, key)), "0");
     }
 
     // --- cond wakes: a signal with nobody waiting is not kept, and a signal

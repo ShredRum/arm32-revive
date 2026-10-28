@@ -437,6 +437,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         imp.is_function = is_func;
         imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
         imp.blocking = BlockingImportName(name);
+        imp.hot = HotImportForName(name);
         imp.tramp_va = emit_tramp(idx + 1);  // swi = idx+1
         imp.call_va = imp.tramp_va;
         if (name == "sqrt") {

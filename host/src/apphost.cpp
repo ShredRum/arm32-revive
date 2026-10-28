@@ -41,6 +41,7 @@
 #include "guest/dispatch.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
+#include "guest/prof.h"
 #include "zipfile.h"
 #include "guest/sha256.h"
 
@@ -868,8 +869,15 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     words.push_back(g_rt->JniEnv());
     words.push_back(g_rt->WrapObject(thiz));
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
+    // HARNESS_PROF: a render-thread frame that takes too long is broken down.
+    const bool frame_prof = EnvOn("HARNESS_PROF") && !st->in_guest.load() && std::strstr(name, "nativeRender");
+    const std::uint64_t frame_t0 = frame_prof ? abr::prof::FrameBegin() : 0;
     Dynarmic::A32::Jit* used = nullptr;
     const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words, &used);
+    if (frame_prof) {
+        abr::prof::FrameEnd(frame_t0, [](std::uint32_t swi) { return g_rt->SvcName(swi); },
+                            [](const char* fmt, auto... a) { Log(fmt, a...); });
+    }
     auto& regs = used->Regs();
     g_rt->FlushDirectBuffers();  // what the guest wrote into direct buffers
     if (is_update) {

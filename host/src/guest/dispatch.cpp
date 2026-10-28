@@ -5,6 +5,7 @@
 #endif
 
 #include "guest/bsd_random.h"
+#include "guest/prof.h"
 #include "guest/sha1.h"
 #include "realgl.h"
 
@@ -2239,6 +2240,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (imp.fast_math != 0) {
         CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
         return;
+    }
+    switch (imp.hot) {
+        case HotImport::TlsGet:
+            Ret(regs, PthreadGetSpecific(a0));
+            return;
+        case HotImport::TlsSet:
+            Ret(regs, PthreadSetSpecific(a0, a1));
+            return;
+        case HotImport::MutexLock:
+        case HotImport::MutexUnlock:
+            Ret(regs, PthreadMutex(n, a0, a1));
+            return;
+        case HotImport::None:
+            break;
     }
 
     // --- memory management ---
@@ -8730,6 +8745,9 @@ std::uint32_t Runtime::PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t des
     if (!CheckRange(key_ptr, 4, true)) {
         return EINVAL;  // a wild key pointer must not become a host write
     }
+    if (next_key_ >= GuestTls::kKeys) {
+        return EAGAIN;  // as bionic answers when its keys run out
+    }
     const std::uint32_t key = next_key_++;
     key_map_[key] = destr;
     std::memcpy(H(key_ptr), &key, 4);
@@ -8743,30 +8761,25 @@ std::uint32_t Runtime::PthreadKeyDelete(std::uint32_t key) {
     if (key_map_.erase(key) == 0) {
         return EINVAL;
     }
-    for (auto i = tls_map_.begin(); i != tls_map_.end();) {
-        if (static_cast<std::uint32_t>(i->first >> 32) == key) {
-            i = tls_map_.erase(i);
-        } else {
-            ++i;
-        }
+    for (auto& kv : tls_blocks_) {
+        kv.second->v[key].store(0, std::memory_order_relaxed);
     }
     return 0;
 }
 
 void Runtime::RunKeyDestructors() {
-    const std::uint32_t tid = GuestTid();
+    GuestTls& tls = TlsFor(GuestTid());
     for (int round = 0; round < 4; round++) {
         std::vector<std::pair<std::uint32_t, std::uint32_t>> calls;  // destructor, value
         {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             for (const auto& kd : key_map_) {
-                if (kd.second == 0) {
+                if (kd.second == 0 || kd.first >= GuestTls::kKeys) {
                     continue;
                 }
-                const auto it = tls_map_.find((std::uint64_t(kd.first) << 32) | tid);
-                if (it != tls_map_.end() && it->second != 0) {
-                    calls.emplace_back(kd.second, it->second);
-                    it->second = 0;
+                const std::uint32_t v = tls.v[kd.first].exchange(0, std::memory_order_relaxed);
+                if (v != 0) {
+                    calls.emplace_back(kd.second, v);
                 }
             }
         }
@@ -8785,17 +8798,36 @@ void Runtime::RunKeyDestructors() {
     }
 }
 
-std::uint32_t Runtime::PthreadGetSpecific(std::uint32_t key) {
+// The calling thread's block is looked up once per guest thread identity
+// (a proxy changes it while it stands in); the values need no lock. Mono
+// reads them ~200k times in a busy frame: a lock and a map per call cost a
+// third of a second there.
+GuestTls& Runtime::TlsFor(std::uint32_t tid) {
+    thread_local std::uint32_t cached_tid = 0;
+    thread_local std::shared_ptr<GuestTls> cached;
+    if (cached && cached_tid == tid) {
+        return *cached;
+    }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const std::uint64_t id = (std::uint64_t(key) << 32) | GuestTid();
-    auto it = tls_map_.find(id);
-    return it == tls_map_.end() ? 0 : it->second;
+    std::shared_ptr<GuestTls>& b = tls_blocks_[tid];
+    if (!b) {
+        b = std::make_shared<GuestTls>();
+    }
+    cached_tid = tid;
+    cached = b;
+    return *b;
+}
+
+std::uint32_t Runtime::PthreadGetSpecific(std::uint32_t key) {
+    // bionic returns NULL for a key it does not know.
+    return key < GuestTls::kKeys ? TlsFor(GuestTid()).v[key].load(std::memory_order_relaxed) : 0;
 }
 
 std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const std::uint64_t id = (std::uint64_t(key) << 32) | GuestTid();
-    tls_map_[id] = value;
+    if (key >= GuestTls::kKeys) {
+        return EINVAL;
+    }
+    TlsFor(GuestTid()).v[key].store(value, std::memory_order_relaxed);
     return 0;
 }
 
@@ -9405,6 +9437,8 @@ void Runtime::OnGuestSyscall(Regs& regs) {
         // caches each hold their own copy of the old code, so every live Jit
         // drops it (InvalidateCacheRange may be called from any thread).
         if (r1 > r0) {
+            prof::g_flushes.fetch_add(1, std::memory_order_relaxed);
+            prof::g_flush_bytes.fetch_add(r1 - r0, std::memory_order_relaxed);
             if (JitShareOn()) {
                 if (Dynarmic::A32::Jit* jit = ActiveJit()) {
                     jit->InvalidateCacheRange(r0, r1 - r0);
@@ -10938,6 +10972,7 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     imp.is_function = true;
     imp.tramp_va = imp.call_va = va;
     imp.blocking = BlockingImportName(name);
+    imp.hot = HotImportForName(name);
     imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
     const std::uint32_t swi = static_cast<std::uint32_t>(mod_.imports.size()) + 1;  // swi = idx + 1
     const std::uint32_t insn = 0xEF000000u | swi;
@@ -12247,7 +12282,7 @@ void Runtime::DumpDiagCounters() {
         utf_allocs = diag_.utf_allocs.load(std::memory_order_relaxed);
         utf_releases = diag_.utf_releases.load(std::memory_order_relaxed);
         n_threads = threads_.size();
-        n_tls = tls_map_.size();
+        n_tls = tls_blocks_.size();
         n_errno = errno_slots_.size();
         n_errno_free = errno_free_.size();
         errno_next = next_errno_slot_;
@@ -12346,13 +12381,7 @@ void Runtime::ReapThreadTls(std::uint32_t tid) {
         errno_free_.push_back(it->second);
         errno_slots_.erase(it);
     }
-    for (auto i = tls_map_.begin(); i != tls_map_.end();) {
-        if (static_cast<std::uint32_t>(i->first & 0xFFFFFFFFu) == tid) {
-            i = tls_map_.erase(i);
-        } else {
-            ++i;
-        }
-    }
+    tls_blocks_.erase(tid);  // a cached reference keeps it alive until its thread lets go
 }
 
 std::uint32_t Runtime::PthreadJoin(std::uint32_t tid, std::uint32_t retval_out) {
@@ -16035,6 +16064,7 @@ static std::int64_t WatchAddr() {
 
 template <typename T>
 T GuestCallbacks::Read(VAddr addr, bool exec) {
+    prof::t_slow_mem += !exec;
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
             std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
@@ -16095,6 +16125,7 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
 
 template <typename T>
 void GuestCallbacks::Write(VAddr addr, T v) {
+    prof::t_slow_mem++;
     {
         const char* gwhat = nullptr;
         if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
@@ -16271,8 +16302,21 @@ void GuestCallbacks::CallSVC(std::uint32_t swi) {
     // handler over its live stack).
     const bool blocking = rt_->SvcBlocks(swi);
     rt_->SigEnterHostCall(regs, jit->Cpsr(), blocking);
-    rt_->OnSvc(swi, regs);
+    {
+        const prof::CallTimer timer(swi);  // HARNESS_PROF only (a thread_local test otherwise)
+        rt_->OnSvc(swi, regs);
+    }
     rt_->SigLeaveHostCall(blocking);
+}
+
+std::string Runtime::SvcName(std::uint32_t swi) const {
+    if (swi >= kSwiJniBase && swi < kSwiJniBase + 0x100) {
+        return "jni#" + std::to_string(swi - kSwiJniBase);
+    }
+    if (swi >= 1 && swi - 1 < mod_.imports.size()) {
+        return mod_.imports[swi - 1].name;
+    }
+    return "svc#" + std::to_string(swi);
 }
 
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:

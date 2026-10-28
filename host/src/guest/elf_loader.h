@@ -63,6 +63,17 @@ inline bool BlockingImportName(const std::string& n) {
     return false;
 }
 
+// Imports the guests call in tight loops, dispatched by a load-time id ahead
+// of the import-name chain (Runtime::CallImport), like FastMath.
+enum class HotImport : std::uint8_t { None, TlsGet, TlsSet, MutexLock, MutexUnlock };
+inline HotImport HotImportForName(const std::string& n) {
+    if (n == "pthread_getspecific") return HotImport::TlsGet;
+    if (n == "pthread_setspecific") return HotImport::TlsSet;
+    if (n == "pthread_mutex_lock") return HotImport::MutexLock;
+    if (n == "pthread_mutex_unlock") return HotImport::MutexUnlock;
+    return HotImport::None;
+}
+
 struct Import {
     std::string name;
     bool is_function;  // false => data object (needs a guest address, not a call trampoline)
@@ -71,6 +82,7 @@ struct Import {
                                   // unless the import runs guest-side VFP code)
     std::uint8_t fast_math = 0;  // FastMath id (0 = not a fast-math import)
     bool blocking = false;       // BlockingImportName
+    HotImport hot = HotImport::None;  // HotImportForName
 };
 
 struct PendingData {

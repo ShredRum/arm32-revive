@@ -160,6 +160,14 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 // overran a 24 B block into the next chunk head), so it stays on regardless.
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
 
+// One guest thread's pthread_setspecific values, by key (keys are small and
+// never reused; bionic allows 128). Fixed size: read and written without a
+// lock, also by a proxy standing in for the thread or by a key delete.
+struct GuestTls {
+    static constexpr std::uint32_t kKeys = 1024;
+    std::atomic<std::uint32_t> v[kKeys] = {};
+};
+
 class Runtime;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
 struct JitDrop {
@@ -276,6 +284,8 @@ public:
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
                           bool blocking);
     void SigLeaveHostCall(bool blocking);
+    // An import's or JNI function's name for a svc number (diagnostics).
+    std::string SvcName(std::uint32_t swi) const;
     // A blocking host call: an import marked blocking, or a JNI call (Java).
     bool SvcBlocks(std::uint32_t swi) const {
         if (swi >= kSwiKuserBase) {
@@ -862,7 +872,9 @@ private:
     std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
     std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)
     std::uint32_t next_key_ = 1;
-    std::unordered_map<std::uint64_t, std::uint32_t> tls_map_;  // (key<<32)|tid -> value
+    // Guest thread -> its pthread_*specific values (TlsFor).
+    std::unordered_map<std::uint32_t, std::shared_ptr<GuestTls>> tls_blocks_;
+    GuestTls& TlsFor(std::uint32_t tid);
     // D2 (2026-10-18): flat index of live heap blocks (base -> usable bytes)
     // replaces the std::map that used to sit here. The map allocated a host
     // node per live guest block and freed it on every guest free -- a hidden
