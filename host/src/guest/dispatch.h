@@ -270,7 +270,7 @@ public:
         std::uint32_t stack_top = 0;
         // The HostCond this thread sleeps on in a guest cond wait (dump).
         std::atomic<const void*> wait_cv{nullptr};
-        std::atomic<std::uint64_t> wait_wakes{0};  // the cond's wakeup count when it slept
+        std::atomic<std::uint64_t> wait_wakes{0};  // the cond's wakes handed out when it slept
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
@@ -634,9 +634,8 @@ public:
     // jit_). GuestTid() is 1 on main, worker ids otherwise.
     Dynarmic::A32::Jit* ActiveJit();
     std::uint32_t GuestTid();
-    // A guest cond's host cond, with its signals + broadcasts so far: a
-    // sliced wait that timed out sees whether a wake came meanwhile (the
-    // timeout may have taken it), and the dump shows the last sender.
+    // The host side of a guest cond (PthreadCond); the dump shows its wakes
+    // and the last sender.
     struct HostCond {
         // The sleepers, oldest first, under m. A signal hands its wake to the
         // oldest one (a broadcast to all) and wakes exactly that one through

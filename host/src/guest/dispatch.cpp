@@ -10753,90 +10753,90 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
 // Builds the APK's asset index once (the central directory: name -> stored
 // or deflated entry); false when there is no APK or no entry.
 bool Runtime::EnsureApkIndex() {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (apk_indexed_) {
-            return !apk_index_.empty();
-        }
-        apk_indexed_ = true;
-        if (apk_path_.empty()) {
-            return false;
-        }
-        FILE* f = std::fopen(apk_path_.c_str(), "rb");
-        if (!f) {
-            return false;
-        }
-        std::fseek(f, 0, SEEK_END);
-        long size = std::ftell(f);
-        const long scan = size > 65558 ? 65558 : size;
-        std::vector<std::uint8_t> tail((std::size_t)scan);
-        std::fseek(f, size - scan, SEEK_SET);
-        if (std::fread(tail.data(), 1, tail.size(), f) != tail.size()) {
-            std::fclose(f);
-            return false;
-        }
-        long eocd = -1;
-        for (long i = (long)tail.size() - 22; i >= 0; i--) {
-            if (tail[(std::size_t)i] == 0x50 && tail[(std::size_t)i + 1] == 0x4B &&
-                tail[(std::size_t)i + 2] == 0x05 && tail[(std::size_t)i + 3] == 0x06) {
-                eocd = i;
-                break;
-            }
-        }
-        if (eocd < 0) {
-            std::fclose(f);
-            return false;
-        }
-        auto rd16 = [&](long o) -> std::uint32_t {
-            return (std::uint32_t)tail[(std::size_t)o] |
-                   ((std::uint32_t)tail[(std::size_t)o + 1] << 8);
-        };
-        auto rd32 = [&](long o) -> std::uint32_t {
-            return rd16(o) | (rd16(o + 2) << 16);
-        };
-        const std::uint32_t count = rd16(eocd + 10);
-        const std::uint32_t cdoff = rd32(eocd + 16);
-        std::fclose(f);
-        FILE* g = std::fopen(apk_path_.c_str(), "rb");
-        if (!g) {
-            return false;
-        }
-        for (std::uint32_t i = 0, off = cdoff; i < count; i++) {
-            std::uint8_t hdr[46];
-            std::fseek(g, (long)off, SEEK_SET);
-            if (std::fread(hdr, 1, 46, g) != 46 || hdr[0] != 0x50 || hdr[1] != 0x4B ||
-                hdr[2] != 0x01 || hdr[3] != 0x02) {
-                break;
-            }
-            auto h16 = [&](int o) -> std::uint32_t { return hdr[o] | (hdr[o + 1] << 8); };
-            auto h32 = [&](int o) -> std::uint32_t { return h16(o) | (h16(o + 2) << 16); };
-            const std::uint32_t nlen = h16(28), elen = h16(30), clen = h16(32);
-            std::string name(nlen, '\0');
-            std::fseek(g, (long)(off + 46), SEEK_SET);
-            if (nlen && std::fread(name.data(), 1, nlen, g) != nlen) {
-                break;
-            }
-            off += 46 + nlen + elen + clen;
-            ApkEntry e;
-            e.name = name;
-            e.method = h16(10);
-            e.csize = h32(20);
-            e.usize = h32(24);
-            const std::uint32_t lho = h32(42);
-            std::uint8_t lh[30];
-            std::fseek(g, (long)lho, SEEK_SET);
-            if (std::fread(lh, 1, 30, g) != 30 || lh[0] != 0x50 || lh[1] != 0x4B ||
-                lh[2] != 0x03 || lh[3] != 0x04) {
-                continue;
-            }
-            auto l16 = [&](int o) -> std::uint32_t { return lh[o] | (lh[o + 1] << 8); };
-            e.data_off = (std::uint64_t)lho + 30 + l16(26) + l16(28);
-            (void)elen;
-            (void)clen;
-            apk_index_[e.name] = e;
-        }
-        std::fclose(g);
-        std::printf("[asset] indexed %zu entries from apk\n", apk_index_.size());
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (apk_indexed_) {
         return !apk_index_.empty();
+    }
+    apk_indexed_ = true;
+    if (apk_path_.empty()) {
+        return false;
+    }
+    FILE* f = std::fopen(apk_path_.c_str(), "rb");
+    if (!f) {
+        return false;
+    }
+    std::fseek(f, 0, SEEK_END);
+    long size = std::ftell(f);
+    const long scan = size > 65558 ? 65558 : size;
+    std::vector<std::uint8_t> tail((std::size_t)scan);
+    std::fseek(f, size - scan, SEEK_SET);
+    if (std::fread(tail.data(), 1, tail.size(), f) != tail.size()) {
+        std::fclose(f);
+        return false;
+    }
+    long eocd = -1;
+    for (long i = (long)tail.size() - 22; i >= 0; i--) {
+        if (tail[(std::size_t)i] == 0x50 && tail[(std::size_t)i + 1] == 0x4B &&
+            tail[(std::size_t)i + 2] == 0x05 && tail[(std::size_t)i + 3] == 0x06) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd < 0) {
+        std::fclose(f);
+        return false;
+    }
+    auto rd16 = [&](long o) -> std::uint32_t {
+        return (std::uint32_t)tail[(std::size_t)o] |
+               ((std::uint32_t)tail[(std::size_t)o + 1] << 8);
+    };
+    auto rd32 = [&](long o) -> std::uint32_t {
+        return rd16(o) | (rd16(o + 2) << 16);
+    };
+    const std::uint32_t count = rd16(eocd + 10);
+    const std::uint32_t cdoff = rd32(eocd + 16);
+    std::fclose(f);
+    FILE* g = std::fopen(apk_path_.c_str(), "rb");
+    if (!g) {
+        return false;
+    }
+    for (std::uint32_t i = 0, off = cdoff; i < count; i++) {
+        std::uint8_t hdr[46];
+        std::fseek(g, (long)off, SEEK_SET);
+        if (std::fread(hdr, 1, 46, g) != 46 || hdr[0] != 0x50 || hdr[1] != 0x4B ||
+            hdr[2] != 0x01 || hdr[3] != 0x02) {
+            break;
+        }
+        auto h16 = [&](int o) -> std::uint32_t { return hdr[o] | (hdr[o + 1] << 8); };
+        auto h32 = [&](int o) -> std::uint32_t { return h16(o) | (h16(o + 2) << 16); };
+        const std::uint32_t nlen = h16(28), elen = h16(30), clen = h16(32);
+        std::string name(nlen, '\0');
+        std::fseek(g, (long)(off + 46), SEEK_SET);
+        if (nlen && std::fread(name.data(), 1, nlen, g) != nlen) {
+            break;
+        }
+        off += 46 + nlen + elen + clen;
+        ApkEntry e;
+        e.name = name;
+        e.method = h16(10);
+        e.csize = h32(20);
+        e.usize = h32(24);
+        const std::uint32_t lho = h32(42);
+        std::uint8_t lh[30];
+        std::fseek(g, (long)lho, SEEK_SET);
+        if (std::fread(lh, 1, 30, g) != 30 || lh[0] != 0x50 || lh[1] != 0x4B ||
+            lh[2] != 0x03 || lh[3] != 0x04) {
+            continue;
+        }
+        auto l16 = [&](int o) -> std::uint32_t { return lh[o] | (lh[o + 1] << 8); };
+        e.data_off = (std::uint64_t)lho + 30 + l16(26) + l16(28);
+        (void)elen;
+        (void)clen;
+        apk_index_[e.name] = e;
+    }
+    std::fclose(g);
+    std::printf("[asset] indexed %zu entries from apk\n", apk_index_.size());
+    return !apk_index_.empty();
 }
 
 std::uint32_t Runtime::NewGuestAssetManager() {
@@ -12507,6 +12507,9 @@ std::string Runtime::JniClassName(std::uint32_t handle) {
     jclass cls_class = re->FindClass("java/lang/Class");
     if (!cls_class || !re->IsInstanceOf(static_cast<jobject>(obj), cls_class)) {
         re->ExceptionClear();
+        if (cls_class) {
+            re->DeleteLocalRef(cls_class);  // a native-attached thread keeps locals until detach
+        }
         return "";
     }
     jmethodID get_name = re->GetMethodID(cls_class, "getName", "()Ljava/lang/String;");

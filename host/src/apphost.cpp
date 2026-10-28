@@ -716,10 +716,6 @@ std::shared_ptr<HostThread> Enter() {
     return st;
 }
 
-// Runs guest `va` on this thread's Jit with AAPCS32 argument words: four in
-// r0-r3, the rest on its guest stack; returns when the guest returns.
-Dynarmic::A32::Jit* NewThreadJit(std::size_t cpu_id);
-
 // Runs guest `va` on this thread with AAPCS32 argument words (four in r0-r3,
 // the rest on the guest stack) and returns when the guest returns; *used is
 // the Jit it ran on (its registers hold the result). The outermost call runs
