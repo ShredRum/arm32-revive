@@ -88,6 +88,11 @@ thread_local int t_jit_depth = 0;
 thread_local const std::array<std::uint32_t, 16>* t_proxy_regs = nullptr;
 thread_local std::uint32_t t_proxy_cpsr = 0x10;
 thread_local bool t_is_proxy = false;
+// Local frames of this thread (Runtime::PushLocalFrame): the real handles
+// made in each, released when it is popped; guest_frames = how many of them
+// the guest pushed (PushLocalFrame) on top of the host's.
+thread_local std::vector<std::vector<std::uint32_t>> t_local_frames;
+thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
@@ -12435,29 +12440,45 @@ std::uint32_t Runtime::Jvm() {
     return jvm_;
 }
 
-std::uint32_t Runtime::WrapObject(void* real) {
+std::uint32_t Runtime::WrapObject(void* real, bool permanent) {
     if (!real) {
         return 0;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto new_handle = [&]() -> std::uint32_t {
+        // Fresh numbers first (a stale handle then reads as unknown instead
+        // of naming another object); released ones once the range is used.
+        if (next_obj_ < 0xF2000000u) {
+            const std::uint32_t h = next_obj_;
+            next_obj_ += 4;
+            return h;
+        }
+        if (obj_free_.empty()) {
+            return 0;
+        }
+        const std::uint32_t h = obj_free_.back();
+        obj_free_.pop_back();
+        return h;
+    };
 #ifdef __ANDROID__
-    // Product host: incoming refs are usually call-local (stale after the
-    // JNI call returns; proven by stale-Local abort on reuse). Promote to
-    // a global ref so the mock stays valid across calls. Identity is kept
-    // by IsSameObject-scan over live globals (both sides valid — safe).
+    // Product host: the reference Java handed us may be call-local; ours is
+    // a global ref, released with the handle (see dispatch.h).
     if (JNIEnv* re = RealEnv()) {
         jobject g = re->NewGlobalRef(static_cast<jobject>(real));
         if (g) {
-            for (const auto& kv : obj_rev_) {
-                if (re->IsSameObject(static_cast<jobject>(kv.second), g)) {
-                    re->DeleteGlobalRef(g);
-                    return kv.first;
-                }
+            const std::uint32_t h = new_handle();
+            if (!h) {
+                re->DeleteGlobalRef(g);
+                std::printf("[jni] LOUD no object handle left (%zu live)\n", obj_rev_.size());
+                return 0;
             }
-            const std::uint32_t h = next_obj_;
-            next_obj_ += 4;
             obj_fwd_[g] = h;
             obj_rev_[h] = g;
+            if (permanent) {
+                obj_permanent_.insert(h);
+            } else if (!t_local_frames.empty()) {
+                t_local_frames.back().push_back(h);
+            }
 #ifdef ABR_DIAG_COUNTERS
             ++diag_.wrap_globals;
 #endif
@@ -12470,11 +12491,65 @@ std::uint32_t Runtime::WrapObject(void* real) {
     if (it != obj_fwd_.end()) {
         return it->second;
     }
-    const std::uint32_t h = next_obj_;
-    next_obj_ += 4;
+    const std::uint32_t h = new_handle();
+    if (!h) {
+        return 0;
+    }
     obj_fwd_[real] = h;
     obj_rev_[h] = real;
     return h;
+}
+
+void Runtime::ReleaseHandleLocked(std::uint32_t h) {
+    const auto it = obj_rev_.find(h);
+    if (it == obj_rev_.end()) {
+        return;
+    }
+#ifdef __ANDROID__
+    if (JNIEnv* re = RealEnv()) {
+        re->DeleteGlobalRef(static_cast<jobject>(it->second));
+    }
+#endif
+    obj_fwd_.erase(it->second);
+    obj_rev_.erase(it);
+    obj_permanent_.erase(h);
+    jni_classes_.erase(h);
+    jni_objclass_.erase(h);
+    obj_free_.push_back(h);
+}
+
+void Runtime::DropLocalLocked(std::uint32_t h) {
+    for (auto& fr : t_local_frames) {
+        const auto at = std::find(fr.begin(), fr.end(), h);
+        if (at != fr.end()) {
+            fr.erase(at);
+            break;
+        }
+    }
+    ReleaseHandleLocked(h);
+}
+
+void Runtime::PushLocalFrame() {
+    t_local_frames.emplace_back();
+}
+
+void Runtime::PopLocalFrame() {
+    if (t_local_frames.empty()) {
+        return;
+    }
+    std::vector<std::uint32_t> frame = std::move(t_local_frames.back());
+    t_local_frames.pop_back();
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const std::uint32_t h : frame) {
+        if (!obj_permanent_.count(h)) {
+            ReleaseHandleLocked(h);
+        }
+    }
+}
+
+long Runtime::WrappedObjectCount() {
+    std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
+    return lock.owns_lock() ? static_cast<long>(obj_rev_.size()) : -1;
 }
 
 void* Runtime::UnwrapObject(std::uint32_t mock) {
@@ -12626,6 +12701,10 @@ std::uint32_t Runtime::JniArrayElemSize(std::uint32_t array_handle) {
         re->DeleteLocalRef(c);
     }
     const std::string n = h ? JniClassName(h) : "";
+    if (h) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        DropLocalLocked(h);  // only its name was wanted
+    }
     if (n.size() == 2 && n[0] == '[') {
         switch (n[1]) {
             case 'Z': case 'B': return 1;
@@ -14078,7 +14157,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 24: {  // IsSameObject(env, obj1, obj2) -> jboolean
-        Ret(regs, (a1 == a2) ? 1u : 0u);  // covers NULL==NULL; handles are VAs
+        // Two references to one real object are two handles: the JVM decides.
+        if (a1 != a2) {
+#ifdef __ANDROID__
+            void* r1 = UnwrapObject(a1);
+            void* r2 = UnwrapObject(a2);
+            JNIEnv* re = (r1 && r2) ? RealEnv() : nullptr;
+            if (re) {
+                Ret(regs, re->IsSameObject(static_cast<jobject>(r1), static_cast<jobject>(r2)) ? 1u : 0u);
+                return;
+            }
+#endif
+            Ret(regs, 0);
+            return;
+        }
+        Ret(regs, 1);  // covers NULL==NULL
         return;
     }
     case 31: {  // GetObjectClass(env, obj) -> jclass (verified vs NDK jni.h)
@@ -14166,9 +14259,11 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         Ret(regs, ch);
         return;
     }
-    case 23:   // DeleteLocalRef(env, obj) -> void: mock handles need no GC
-    case 22:   // DeleteGlobalRef(env, obj) -> void (same)
-    case 227:  // DeleteWeakGlobalRef(env, ref) -> void (same)
+    case 23:   // DeleteLocalRef(env, obj) -> void
+    case 22:   // DeleteGlobalRef(env, obj) -> void
+    case 227:  // DeleteWeakGlobalRef(env, ref) -> void
+        // A real object's handle of the matching kind goes (a local one also
+        // leaves its frame); mock handles need nothing.
         // PROVEN load-bearing: caller @0x267FD0 treats r0!=0 as error and
         // throws "Java method threw an exception". Zero it like Dalvik does.
 #ifdef ABR_DIAG_COUNTERS
@@ -14176,16 +14271,32 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             diag_.jni_delete_global_refs.fetch_add(1, std::memory_order_relaxed);
         }
 #endif
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (a1 && obj_rev_.count(a1) && (obj_permanent_.count(a1) != 0) == (fn != 23)) {
+                if (fn == 23) {
+                    DropLocalLocked(a1);
+                } else {
+                    ReleaseHandleLocked(a1);
+                }
+            }
+        }
         Ret(regs, 0);
         return;
-    case 25:   // NewLocalRef(env, ref) -> same handle (no GC in mock world)
-    case 21:   // NewGlobalRef(env, obj) -> same handle
-    case 226:  // NewWeakGlobalRef(env, obj) -> same handle
+    case 25:   // NewLocalRef(env, ref) -> a new local reference
+    case 21:   // NewGlobalRef(env, obj) -> a new global reference
+    case 226:  // NewWeakGlobalRef(env, obj) -> (held strongly)
+        // A real object gets a new handle of that kind; a mock handle is its
+        // own reference, as before.
 #ifdef ABR_DIAG_COUNTERS
         if (fn == 21) {
             diag_.jni_new_global_refs.fetch_add(1, std::memory_order_relaxed);
         }
 #endif
+        if (void* real = UnwrapObject(a1)) {
+            Ret(regs, WrapObject(real, fn != 25));
+            return;
+        }
         Ret(regs, a1);
         return;
     case 32: {  // IsInstanceOf(env, obj, clazz) -> jboolean (NULL: true)
@@ -14667,14 +14778,37 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
     case 19:  // PushLocalFrame(env, capacity) -> 0
-    case 26:  // EnsureLocalCapacity(env, capacity) -> 0
-        // Every object the guest holds is a global ref (WrapObject): local
-        // frames and capacity do not limit it, so they always succeed.
+        PushLocalFrame();
+        t_guest_frames++;
         Ret(regs, 0);
         return;
-    case 20:  // PopLocalFrame(env, result) -> result, valid as before
-        Ret(regs, a1);
+    case 26:  // EnsureLocalCapacity(env, capacity) -> 0: no limit here
+        Ret(regs, 0);
         return;
+    case 20: {  // PopLocalFrame(env, result) -> result as a reference of the outer frame
+        if (t_guest_frames <= 0) {
+            Ret(regs, a1);  // nothing the guest pushed: the host's frames stay
+            return;
+        }
+        t_guest_frames--;
+        void* keep = nullptr;
+#ifdef __ANDROID__
+        JNIEnv* re = RealEnv();
+        if (void* real = UnwrapObject(a1); real && re) {
+            keep = re->NewGlobalRef(static_cast<jobject>(real));
+        }
+#endif
+        PopLocalFrame();
+        std::uint32_t out = keep ? 0u : a1;
+#ifdef __ANDROID__
+        if (keep) {
+            out = WrapObject(keep);
+            re->DeleteGlobalRef(static_cast<jobject>(keep));
+        }
+#endif
+        Ret(regs, out);
+        return;
+    }
     case 216: {  // UnregisterNatives(env, clazz) -> jint
         std::string cname;
         cname = JniClassName(a1);

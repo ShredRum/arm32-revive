@@ -496,8 +496,21 @@ public:
     // directly, only via GetStringUTFChars which returns the same pointer).
     std::uint32_t JniEnv();
     std::uint32_t NewStringUTF(const char* s);
-    // Product host: real-ART <-> mock-handle map (pointer-width airtight).
-    std::uint32_t WrapObject(void* real);
+    // Product host: a guest handle for a real Java object (a global ref of
+    // ours behind it). As in JNI, a handle is a reference, not the object:
+    // one made during a Java -> native call is that call's local reference
+    // and goes when the call returns (or at DeleteLocalRef / PopLocalFrame);
+    // a `permanent` one (the guest's NewGlobalRef, the host's own) lives
+    // until DeleteGlobalRef. A handle made outside any call (a guest worker
+    // thread) lives until DeleteLocalRef, as on a native-attached thread.
+    std::uint32_t WrapObject(void* real, bool permanent = false);
+    // The local frame of one Java -> native call (the host pushes one per
+    // call it runs, the guest with PushLocalFrame).
+    static void PushLocalFrame();
+    void PopLocalFrame();
+    // How many real objects the guest holds handles for; -1 when the runtime
+    // lock is busy (a watchdog never waits for it).
+    long WrappedObjectCount();
     void* UnwrapObject(std::uint32_t mock);
     // A guest reference as a real Java reference (a native's return value):
     // a wrapped object, a mock jstring as a new String, a mock jclass as its
@@ -969,6 +982,13 @@ private:
     std::uint32_t next_obj_ = 0xF1100000u;
     std::unordered_map<void*, std::uint32_t> obj_fwd_;
     std::unordered_map<std::uint32_t, void*> obj_rev_;
+    std::unordered_set<std::uint32_t> obj_permanent_;  // WrapObject(permanent)
+    std::vector<std::uint32_t> obj_free_;  // released handles, reused once the range is used up
+    // Drops a real handle: its global ref and every map entry keyed by it.
+    void ReleaseHandleLocked(std::uint32_t h);
+    // A local handle of this thread goes now (DeleteLocalRef): out of its
+    // frame, then released.
+    void DropLocalLocked(std::uint32_t h);
 #ifdef __ANDROID__
     // Real-call delegation (product host; see dispatch.cpp).
     bool RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,

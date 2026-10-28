@@ -497,7 +497,8 @@ void Watchdog() {
             static std::uint64_t last_swaps = 0;
             const std::uint64_t sw = g_rt->egl_swaps_.load(std::memory_order_relaxed);
             if (sw != last_swaps) {
-                Log("[frames] %llu presented in the last 10 s", (unsigned long long)(sw - last_swaps));
+                Log("[frames] %llu presented in the last 10 s, %ld wrapped Java objects",
+                    (unsigned long long)(sw - last_swaps), g_rt->WrappedObjectCount());
                 last_swaps = sw;
             }
         }
@@ -961,8 +962,22 @@ std::uint64_t RunSlot(const NativeSlot& s, void* thiz, va_list ap) {
     return RunGuestNative(s.name.c_str(), s.va, s.sig.c_str(), thiz, ap, JniFloatArgs::kRaw);
 }
 
-// The guest's r0 (r1:r0 for J) as the JNI return value of type `ret`.
-jlong WordReturn(char ret, std::uint64_t r) {
+// One Java -> native call's local frame: the handles made while it runs
+// are its local references and go when it returns.
+struct HostLocalFrame {
+    HostLocalFrame() { abr::Runtime::PushLocalFrame(); }
+    ~HostLocalFrame() {
+        if (g_rt) {
+            g_rt->PopLocalFrame();
+        }
+    }
+    HostLocalFrame(const HostLocalFrame&) = delete;
+    HostLocalFrame& operator=(const HostLocalFrame&) = delete;
+};
+
+// The guest's r0 (r1:r0 for J) as the JNI return value of type `ret`; a
+// reference becomes a local one of the JVM's (the handle goes with the frame).
+jlong WordReturn(JNIEnv* env, char ret, std::uint64_t r) {
     const std::uint32_t r0 = static_cast<std::uint32_t>(r);
     switch (ret) {
         case 'Z': return static_cast<std::uint8_t>(r0) ? 1 : 0;
@@ -972,22 +987,27 @@ jlong WordReturn(char ret, std::uint64_t r) {
         case 'I': return static_cast<std::int32_t>(r0);
         case 'J': return static_cast<jlong>(r);
         case 'L':
-        case '[': return reinterpret_cast<jlong>(g_rt->JavaObjectFor(r0));
+        case '[': {
+            jobject o = static_cast<jobject>(g_rt->JavaObjectFor(r0));
+            return reinterpret_cast<jlong>(o ? env->NewLocalRef(o) : nullptr);
+        }
         default: return 0;  // V
     }
 }
 
 template <std::size_t N>
-jlong WordStub(JNIEnv*, jobject thiz, ...) {
+jlong WordStub(JNIEnv* env, jobject thiz, ...) {
+    HostLocalFrame frame;
     va_list ap;
     va_start(ap, thiz);
     const std::uint64_t r = RunSlot(g_word_slots[N], thiz, ap);
     va_end(ap);
-    return WordReturn(g_word_slots[N].ret, r);
+    return WordReturn(env, g_word_slots[N].ret, r);
 }
 
 template <std::size_t N>
 jfloat FloatStub(JNIEnv*, jobject thiz, ...) {
+    HostLocalFrame frame;
     va_list ap;
     va_start(ap, thiz);
     const std::uint32_t r0 = static_cast<std::uint32_t>(RunSlot(g_float_slots[N], thiz, ap));
@@ -999,6 +1019,7 @@ jfloat FloatStub(JNIEnv*, jobject thiz, ...) {
 
 template <std::size_t N>
 jdouble DoubleStub(JNIEnv*, jobject thiz, ...) {
+    HostLocalFrame frame;
     va_list ap;
     va_start(ap, thiz);
     const std::uint64_t r = RunSlot(g_double_slots[N], thiz, ap);
@@ -1161,6 +1182,7 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     }
 #endif
     calln++;
+    HostLocalFrame frame;
     const std::uint64_t rv = AppHost_CallImpl(name, sig, thiz, ap);
     va_end(ap);
     return rv;
@@ -1865,7 +1887,7 @@ extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
         table,
         g_rt->Jvm(),
         g_rt->JniEnv(),
-        g_rt->WrapObject(activity->clazz),
+        g_rt->WrapObject(activity->clazz, true),  // the activity's, for its life
         GuestCString(activity->internalDataPath),
         GuestCString(activity->externalDataPath),
         static_cast<std::uint32_t>(activity->sdkVersion),
