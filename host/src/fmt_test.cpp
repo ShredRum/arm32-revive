@@ -384,6 +384,8 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_setspecific", true, 0, 0, 0});  // 109
     mod.imports.push_back(abr::Import{"pthread_getspecific", true, 0, 0, 0});  // 110
     mod.imports.push_back(abr::Import{"pthread_key_delete", true, 0, 0, 0});   // 111
+    mod.imports.push_back(abr::Import{"pthread_attr_init", true, 0, 0, 0});        // 112
+    mod.imports.push_back(abr::Import{"pthread_attr_setstacksize", true, 0, 0, 0});  // 113
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -2483,6 +2485,19 @@ int main() {
         Expect("tls: this thread keeps its own", std::to_string(call(110, key)), "5");
         call(111, key);
         Expect("tls: a deleted key reads NULL", std::to_string(call(110, key)), "0");
+    }
+
+    // --- pthread_attr_setstacksize: the LP32 PTHREAD_STACK_MIN is 8192
+    //     (FMOD's stream threads ask for exactly that).
+    {
+        const std::uint32_t kAttr = 0x10008F00;
+        const std::uint32_t init[4] = {kAttr, 0, 0, 0};
+        abr::RuntimeTestAccess::Call(rt, 112, init);
+        const std::uint32_t ok[4] = {kAttr, 8192, 0, 0};
+        const std::uint32_t small[4] = {kAttr, 8188, 0, 0};
+        Expect("attr: stack size 8192 accepted", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, ok)), "0");
+        Expect("attr: below 8192 refused", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, small)),
+               std::to_string(EINVAL));
     }
 
     // --- cond wakes: a signal with nobody waiting is not kept, and a signal

@@ -1252,8 +1252,12 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         return out32(a1, f[2]) ? 0u : static_cast<std::uint32_t>(EINVAL);
     }
     if (n == "pthread_attr_setstacksize") {
-        if (a1 < 16384u) {
-            return EINVAL;  // PTHREAD_STACK_MIN
+        // PTHREAD_STACK_MIN of the guest's bionic: 8192 on LP32 (NDK
+        // pthread.h; 16384 is the LP64 value). FMOD asks for 8192 for its
+        // stream threads; refusing it failed every music stream with
+        // FMOD_ERR_INTERNAL.
+        if (a1 < 8192u) {
+            return EINVAL;
         }
         f[2] = a1;
         store();
