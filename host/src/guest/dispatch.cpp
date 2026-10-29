@@ -10,6 +10,7 @@
 #include "realgl.h"
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
+#include <dynarmic/frontend/A32/a32_types.h>
 
 #include <algorithm>
 #include <chrono>
@@ -5224,6 +5225,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 ensure_parent(hp);
             }
             FILE* f = std::fopen(hp.c_str(), mode.c_str());
+            if (EnvOn("HARNESS_PATHLOG")) {
+                std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %s\n", GuestTid(), hp.c_str(),
+                            mode.c_str(), f ? "ok" : "NULL");
+            }
             if (!f) {
                 if (DiagOn()) {
                     std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
@@ -5419,6 +5424,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (r != 0) {
                 SetGuestErrno(errno);
             }
+            if (EnvOn("HARNESS_PATHLOG")) {
+                static std::atomic<int> said{0};
+                if (said.fetch_add(1) < 4000) {
+                    std::printf("[files][t%u] fseek(%08x, %d, %u) -> pos %ld\n", GuestTid(), a0,
+                                static_cast<std::int32_t>(a1), a2, std::ftell(f));
+                }
+            }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
@@ -5612,7 +5624,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[files][t%u] alarm fd %u (clocks served, not null)\n", GuestTid(),
                             g);
             }
-            if (DiagOn()) {
+            if (DiagOn() || EnvOn("HARNESS_PATHLOG")) {
                 std::printf("[files][t%u] open(\"%s\",%o) -> fd %u\n", GuestTid(), hp.c_str(), a1,
                             g);
             }
@@ -5953,6 +5965,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             const off_t r = ::lseek(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)), (int)a2);
+            if (EnvOn("HARNESS_PATHLOG")) {
+                static std::atomic<int> said{0};
+                if (said.fetch_add(1) < 400) {
+                    std::printf("[files][t%u] lseek(fd %u, %d, %u) -> %lld\n", GuestTid(), a0,
+                                static_cast<std::int32_t>(a1), a2, static_cast<long long>(r));
+                }
+            }
             if (r < 0) {
                 SetGuestErrno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -16222,9 +16241,56 @@ std::uint64_t GuestCallbacks::MemoryRead64(VAddr a) { return Read<std::uint64_t>
 void* (*GuestCallbacks::g_real_env_hook)() = nullptr;
 void* (*GuestCallbacks::g_native_stub_hook)(const char*, const char*, const char*,
                                             std::uint32_t) = nullptr;
+// HARNESS_PCLOG=addr[,addr...]: each time a guest block starting at one of
+// these addresses runs, log its r0-r2 and lr (the first 200 per address). For
+// "is this function called, and with what?" without touching guest code.
+namespace {
+struct PcLog {
+    std::vector<std::uint32_t> pcs;
+    PcLog() {
+        if (const char* e = std::getenv("HARNESS_PCLOG")) {
+            for (const char* p = e; *p;) {
+                char* end = nullptr;
+                const unsigned long v = std::strtoul(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                pcs.push_back(static_cast<std::uint32_t>(v));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+    }
+};
+const PcLog& PcLogConfig() {
+    static const PcLog cfg;
+    return cfg;
+}
+void PcLogHit(std::uint64_t pc, std::uint64_t r01, std::uint64_t r23) {
+    static std::mutex mu;
+    static std::unordered_map<std::uint64_t, int> seen;
+    std::lock_guard<std::mutex> l(mu);
+    if (seen[pc]++ < 200) {
+        std::printf("[pclog][t%u] %08llx r0=%08llx r1=%08llx r2=%08llx lr=%08llx\n", t_tid,
+                    static_cast<unsigned long long>(pc),
+                    static_cast<unsigned long long>(r01 & 0xFFFFFFFFu),
+                    static_cast<unsigned long long>(r01 >> 32),
+                    static_cast<unsigned long long>(r23 & 0xFFFFFFFFu),
+                    static_cast<unsigned long long>(r23 >> 32));
+    }
+}
+}  // namespace
+
 void GuestCallbacks::PreCodeTranslationHook(bool is_thumb, VAddr pc,
                                                Dynarmic::A32::IREmitter& ir) {
-    (void)ir;
+    for (const std::uint32_t want : PcLogConfig().pcs) {
+        if (want == pc) {
+            using Dynarmic::A32::Reg;
+            auto pair = [&](Reg lo, Reg hi) {
+                return ir.Pack2x32To1x64(ir.GetRegister(lo), ir.GetRegister(hi));
+            };
+            ir.CallHostFunction(&PcLogHit, ir.Imm64(pc), pair(Reg::R0, Reg::R1), pair(Reg::R2, Reg::LR));
+        }
+    }
     // Translation-time diagnostics only (nothing is emitted into the IR).
     // HARNESS_TRANSLOG=1: every translated block start.
     // HARNESS_PCTRACE=start,len[,cap]: block starts inside [start, start+len).
@@ -16572,6 +16638,102 @@ Runtime::StackScan Runtime::ScanStackForReturnAddresses(std::uint32_t sp,
     return res;
 }
 
+// /proc/cpuinfo and /proc/self/auxv as an arm64 kernel shows them to a
+// 32-bit task (arch/arm64/kernel/cpuinfo.c: compat feature names and a
+// "model name ... (v8l)" line; auxv in 32-bit pairs), built once from the
+// host's file and the same AT_HWCAP getauxval answers (kArmV7Hwcap). The
+// host's own 64-bit view named no "neon"/"vfp", which the guests parse
+// for. "" when the files cannot be made (the host's then pass through).
+std::string Runtime::Proc32File(const std::string& g) {
+    static std::once_flag once;
+    static std::string dir;
+    std::call_once(once, [this] {
+        if (files_hostbase_.empty()) {
+            return;
+        }
+        const std::string d = std::filesystem::path(files_hostbase_).parent_path().string() + "/proc32";
+        std::error_code ec;
+        std::filesystem::create_directories(d, ec);
+        static const char* const kNames[] = {
+            "swp", "half", "thumb", "26bit", "fastmult", "fpa", "vfp", "edsp", "java", "iwmmxt",
+            "crunch", "thumbee", "neon", "vfpv3", "vfpv3d16", "tls", "vfpv4", "idiva", "idivt",
+            "vfpd32", "lpae", "evtstrm"};
+        std::string features;
+        for (std::uint32_t b = 0; b < sizeof(kNames) / sizeof(kNames[0]); b++) {
+            if (kArmV7Hwcap & (1u << b)) {
+                features += features.empty() ? "" : " ";
+                features += kNames[b];
+            }
+        }
+        // cpuinfo: each host block with the compat Features and model name.
+        std::string out, block;
+        auto flush = [&] {
+            if (block.empty()) {
+                return;
+            }
+            std::string rev = "0";
+            static const std::string kRev = "CPU revision\t: ";
+            const std::size_t r = block.find(kRev);
+            if (r != std::string::npos) {
+                const std::size_t v = r + kRev.size();
+                rev = block.substr(v, block.find('\n', v) - v);
+            }
+            std::string res;
+            std::size_t pos = 0;
+            while (pos < block.size()) {
+                const std::size_t e = block.find('\n', pos);
+                std::string line = block.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+                pos = e == std::string::npos ? block.size() : e + 1;
+                if (line.compare(0, 8, "Features") == 0) {
+                    line = "Features\t: " + features;
+                }
+                res += line + "\n";
+                if (line.compare(0, 9, "processor") == 0) {
+                    res += "model name\t: ARMv8 Processor rev " + rev + " (v8l)\n";
+                }
+            }
+            out += res;
+            block.clear();
+        };
+        if (FILE* f = std::fopen("/proc/cpuinfo", "r")) {
+            char line[512];
+            while (std::fgets(line, sizeof line, f)) {
+                if (line[0] == '\n') {
+                    flush();
+                    out += "\n";
+                } else {
+                    block += line;
+                }
+            }
+            flush();
+            std::fclose(f);
+        }
+        // auxv: the entries getauxval answers, then AT_NULL.
+        const std::uint32_t aux[] = {16, kArmV7Hwcap, 26, 0, 6, 4096, 17, 100,
+                                     11, static_cast<std::uint32_t>(::getuid()),
+                                     12, static_cast<std::uint32_t>(::geteuid()),
+                                     13, static_cast<std::uint32_t>(::getgid()),
+                                     14, static_cast<std::uint32_t>(::getegid()), 0, 0};
+        FILE* c = std::fopen((d + "/cpuinfo").c_str(), "w");
+        FILE* a = std::fopen((d + "/auxv").c_str(), "wb");
+        const bool ok = c && a && !out.empty() && std::fwrite(out.data(), 1, out.size(), c) == out.size() &&
+                        std::fwrite(aux, sizeof aux, 1, a) == 1;
+        if (c) {
+            std::fclose(c);
+        }
+        if (a) {
+            std::fclose(a);
+        }
+        if (ok) {
+            dir = d;
+        }
+    });
+    if (dir.empty()) {
+        return "";
+    }
+    return dir + (g == "/proc/cpuinfo" ? "/cpuinfo" : "/auxv");
+}
+
 std::string Runtime::GuestCwd() {
     std::lock_guard<std::mutex> l(cwd_mu_);
     return cwd_.empty() ? (files_prefix_.empty() ? std::string("/") : files_prefix_) : cwd_;
@@ -16612,6 +16774,14 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
         // stack reads them (observed: worker fopen("/etc/hosts") while
         // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
         // synthetic hosts (see below) instead of the host file.
+        // What a 32-bit process reads there on an arm64 kernel (the host
+        // process is 64-bit and would get its own view): see Proc32File.
+        if (g == "/proc/cpuinfo" || g == "/proc/self/auxv") {
+            const std::string p = Proc32File(g);
+            if (!p.empty()) {
+                return p;
+            }
+        }
         if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
             g == "/etc/resolv.conf") {
             return g;

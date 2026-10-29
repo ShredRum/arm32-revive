@@ -579,6 +579,8 @@ public:
     // Map a guest path to the host path (the file bridge's rule).
     std::string MapGuestPath(std::uint32_t guest_path);
     std::string MapGuestPathString(const std::string& g);
+    // A 32-bit task's /proc/cpuinfo or /proc/self/auxv as a host file path.
+    std::string Proc32File(const std::string& g);
     // The guest's environment: getenv/setenv/unsetenv and the `environ`
     // array (NULL-terminated "K=V" guest strings; its variable is
     // environ_var_). SetGuestEnv lets the host seed it before the guest runs.
