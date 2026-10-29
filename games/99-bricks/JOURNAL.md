@@ -319,3 +319,33 @@ reached; R-007 itself (the shared cache with a guest JIT).
 Rovio-visible changes added today: cond waits (a53149d), Jit registry and
 cacheflush to all private Jits (13b053f), packaged target_sdk (Seasons targets
 22: its sem_wait no longer returns EINTR) and jitshare (Rovio: on).
+
+## 2026-10-29: touch lag, page-turn freezes, music
+
+- Touch lag that grew with play time: every Java object reaching the guest
+  stayed a global ref, found again by an O(n) IsSameObject scan under the
+  runtime lock. Handles now have JNI lifetimes (25dbb2a); 32 wrapped objects
+  stay 32.
+- Lesson page turn ~650 -> ~450 ms on the sandbox: pthread_getspecific
+  (~200k per turn) took the runtime lock and a map (52af6ae). The original
+  APK on the same sandbox also freezes there, about half as long; the rest
+  is guest code under Dynarmic (~280 ms, repeats every turn, no cacheflush,
+  few slow-path accesses). HARNESS_PROF=1 breaks slow frames down.
+- No music: FMOD's stream thread asked for an 8 KiB stack; we refused
+  anything under 16 KiB (LP64 PTHREAD_STACK_MIN); FMOD_ERR_INTERNAL in
+  createSound for every stream (ea6f723). Found via HARNESS_PCLOG and the
+  error Unity keeps at audio manager +0x9c/+0xa0 (manager 3 = 0x03b939e8).
+- /proc/cpuinfo and /proc/self/auxv are now the 32-bit task's view (edeec19).
+
+Open (in order):
+1. Device gate of all five Rovio titles before merging bricks (full
+   build-apk.sh, not swap-lib: target_sdk/jitshare are packaged). Watch:
+   JNI ref lifetimes, cond waits, TLS blocks, glUniform*v, key destructors,
+   Seasons sem_wait (target 22), no "interruptible waits on" in the log,
+   compat /proc/cpuinfo.
+2. Freezes: page turn (guest-side pthread_getspecific without a host call:
+   -30..100 ms; memset/memcpy fast path: -10..20 ms); a one-time freeze
+   after the first brick drops (none in the original).
+3. REVIEW R-010 (Mono metadata assert, ~1 in 11 boots), R-007, R-009.
+4. CallNonvirtual* JNI halts LOUD; UNLOCK-FOREIGN log noise.
+Sandbox: SELinux left permissive (setenforce 1 restores).
