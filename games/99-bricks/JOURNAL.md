@@ -342,7 +342,7 @@ Open (in order):
    to play by hand: JNI ref lifetimes, cond waits, glUniform*v, key
    destructors, Seasons sem_wait (target 22).
 2. A one-time freeze after the first brick drops (none in the original).
-   Page turn: see 2026-11-01.
+   Page turn: closed 2026-11-02, see 2026-11-01.
 3. REVIEW R-010 (Mono metadata assert, ~1 in 11 boots), R-007, R-009.
 4. CallNonvirtual* JNI halts LOUD; UNLOCK-FOREIGN log noise.
 Sandbox: SELinux left permissive (setenforce 1 restores).
@@ -389,3 +389,5 @@ jni_strings_ is never freed, so its growth was measured with the new
 time beyond a few KB, so the copies stay: wrapping them would touch the most
 used string path of the Rovio titles for no measurable gain.
 
+Page turn closed 2026-11-02: by the owner's eye on the sandbox it now matches
+the original 32-bit APK there (~225 ms by the earlier estimate, 175-235 ms here).
