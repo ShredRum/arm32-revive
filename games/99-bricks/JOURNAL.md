@@ -341,8 +341,8 @@ Open (in order):
 1. Rovio before merging bricks: boot gate of all five done 2026-11-01. Still
    to play by hand: JNI ref lifetimes, cond waits, glUniform*v, key
    destructors, Seasons sem_wait (target 22).
-2. A one-time freeze after the first brick drops (none in the original).
-   Page turn: closed 2026-11-02, see 2026-11-01.
+2. One-time freeze after the first brick drops: not fixed by decision, see
+   2026-11-02. Page turn: closed 2026-11-02, see 2026-11-01.
 3. REVIEW R-010 (Mono metadata assert, ~1 in 11 boots), R-007, R-009.
 4. CallNonvirtual* JNI halts LOUD; UNLOCK-FOREIGN log noise.
 Sandbox: SELinux left permissive (setenforce 1 restores).
@@ -391,3 +391,17 @@ used string path of the Rovio titles for no measurable gain.
 
 Page turn closed 2026-11-02: by the owner's eye on the sandbox it now matches
 the original 32-bit APK there (~225 ms by the earlier estimate, 175-235 ms here).
+
+## 2026-11-02: the freeze after the first brick stays
+
+`HARNESS_PROF=1`, played to the first dropped brick: all 16 slow frames have
+cacheflushes (83 to 15000, e.g. 1178 flushes, 60 KB in a 700 ms frame), with
+Mono's usual strcmp, memset, free and lock traffic; a repeated page turn has 0.
+So this is most likely Mono compiling C# on first use, slower under Dynarmic,
+with new guest code to translate. The profiler cannot split guest code from
+Dynarmic compiling, and the log has no times, so which frame was the freeze is
+inferred. A disk cache of translations would not help: Mono makes that code
+again every boot. Only faster guest execution would. Left as it is.
+
+R-010 waits for a report from the owner; then a restart loop catches it
+(1 in 11 boots: 50 clean boots would be <1% likely if it were still there).
