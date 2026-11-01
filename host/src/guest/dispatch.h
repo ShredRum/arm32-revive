@@ -509,6 +509,7 @@ public:
     // until DeleteGlobalRef. A handle made outside any call (a guest worker
     // thread) lives until DeleteLocalRef, as on a native-attached thread.
     std::uint32_t WrapObject(void* real, bool permanent = false);
+    std::uint32_t GuestRef(void* env, void* real);  // a JNIEnv*, Android only
     // The local frame of one Java -> native call (the host pushes one per
     // call it runs, the guest with PushLocalFrame).
     static void PushLocalFrame();

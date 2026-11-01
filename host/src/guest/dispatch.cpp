@@ -12536,6 +12536,38 @@ std::uint32_t Runtime::Jvm() {
     return jvm_;
 }
 
+#ifdef __ANDROID__
+// What the guest gets for a Java object it may use as a jstring: the string
+// functions work off jni_strings_, so a String becomes a guest string, whatever
+// path brought it (Rovio reads Build.MANUFACTURER with GetStringLength).
+std::uint32_t Runtime::GuestRef(void* env, void* real) {
+    JNIEnv* re = static_cast<JNIEnv*>(env);
+    static const jclass string_class = [re] {
+        jclass c = re->FindClass("java/lang/String");
+        jclass g = c ? static_cast<jclass>(re->NewGlobalRef(c)) : nullptr;
+        if (c) {
+            re->DeleteLocalRef(c);
+        }
+        re->ExceptionClear();
+        return g;
+    }();
+    jobject o = static_cast<jobject>(real);
+    if (string_class && re->IsInstanceOf(o, string_class)) {
+        const char* p = re->GetStringUTFChars(static_cast<jstring>(o), nullptr);
+        if (p) {
+            const std::string content(p);
+            re->ReleaseStringUTFChars(static_cast<jstring>(o), p);
+            const std::uint32_t g = JniNewString(content);
+            if (g) {
+                return g;
+            }
+        }
+        re->ExceptionClear();
+    }
+    return WrapObject(real);
+}
+#endif
+
 std::uint32_t Runtime::WrapObject(void* real, bool permanent) {
     if (!real) {
         return 0;
@@ -13461,7 +13493,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             Ret(regs, g);
             return true;
         }
-        const std::uint32_t h = WrapObject(ro);
+        const std::uint32_t h = GuestRef(re, ro);  // an Object-typed result may be a String
         re->DeleteLocalRef(ro);
         Ret(regs, h);
         return true;
@@ -14611,7 +14643,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         jstring js = re->NewString(a2 ? H<const jchar>(a1) : nullptr, static_cast<jsize>(a2));
-        const std::uint32_t h = js ? WrapObject(js) : 0;
+        const std::uint32_t h = js ? GuestRef(re, js) : 0;
         if (js) {
             re->DeleteLocalRef(js);
         }
@@ -14682,7 +14714,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (re && arr) {
             if (fn == 173) {
                 jobject o = re->GetObjectArrayElement(arr, static_cast<jsize>(a2));
-                h = o ? WrapObject(o) : 0;
+                h = o ? GuestRef(re, o) : 0;
                 if (o) {
                     re->DeleteLocalRef(o);
                 }
@@ -15245,7 +15277,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             jobject o = fid ? re->GetStaticObjectField(rc, fid) : nullptr;
             re->ExceptionClear();
             if (o) {
-                const std::uint32_t h = WrapObject(o);
+                const std::uint32_t h = GuestRef(re, o);
                 re->DeleteLocalRef(o);
                 if (DiagOn()) {
                     std::printf("[jni] GetStaticObjectField %s -> %08x (real)\n", fdesc.c_str(), h);
@@ -16027,7 +16059,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     if (rk == 'L' || rk == '[') {
                         jobject ro = re->GetObjectField(static_cast<jobject>(robj), rfid);
                         if (!re->ExceptionCheck()) {
-                            const std::uint32_t h = WrapObject(ro);
+                            const std::uint32_t h = ro ? GuestRef(re, ro) : 0;
                             if (ro) {
                                 re->DeleteLocalRef(ro);
                             }

@@ -338,14 +338,34 @@ cacheflush to all private Jits (13b053f), packaged target_sdk (Seasons targets
 - /proc/cpuinfo and /proc/self/auxv are now the 32-bit task's view (edeec19).
 
 Open (in order):
-1. Device gate of all five Rovio titles before merging bricks (full
-   build-apk.sh, not swap-lib: target_sdk/jitshare are packaged). Watch:
-   JNI ref lifetimes, cond waits, TLS blocks, glUniform*v, key destructors,
-   Seasons sem_wait (target 22), no "interruptible waits on" in the log,
-   compat /proc/cpuinfo.
-2. Freezes: page turn (guest-side pthread_getspecific without a host call:
-   -30..100 ms; memset/memcpy fast path: -10..20 ms); a one-time freeze
-   after the first brick drops (none in the original).
+1. Rovio before merging bricks: boot gate of all five done 2026-11-01. Still
+   to play by hand: JNI ref lifetimes, cond waits, glUniform*v, key
+   destructors, Seasons sem_wait (target 22).
+2. A one-time freeze after the first brick drops (none in the original).
+   Page turn: see 2026-11-01.
 3. REVIEW R-010 (Mono metadata assert, ~1 in 11 boots), R-007, R-009.
 4. CallNonvirtual* JNI halts LOUD; UNLOCK-FOREIGN log noise.
 Sandbox: SELinux left permissive (setenforce 1 restores).
+
+## 2026-11-01: page turns twice as fast; a JNI string bug in Rovio found
+
+Slow frame on a lesson page turn, `HARNESS_PROF=1`, same build, 18 turns each:
+
+| `tlsthunk` | Frame | Host calls | Guest code + JIT |
+|---|---|---|---|
+| off | 435-495 ms | 162-187 ms | 273-308 ms |
+| on | 175-235 ms | 51-87 ms | 120-151 ms |
+
+`pthread_getspecific` (~200k calls a frame) no longer leaves guest code. The
+profiler's own clock reads made the off column worse than it is unprofiled, but
+the guest-code share fell too, so the gain is not only the 110 ms the host calls
+showed. The owner saw the difference by eye.
+
+The Rovio check found a regression of this branch, not of this work: since
+4e99625 a real Java String reached the guest as a wrapped object, and
+GetStringLength(Build.MANUFACTURER) halted Rio, Seasons, Space and Star Wars on
+a black screen. `Runtime::GuestRef` now makes every String a guest string.
+
+`fmt_test` on the sandbox: one failure, `statfs f_namelen`, expects 255 and the
+sandbox's ext filesystem reports 256 (the test depends on the filesystem).
+
