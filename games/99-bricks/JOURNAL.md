@@ -381,3 +381,11 @@ The Java copy of a guest string made for one JNI call (a method argument,
 IsInstanceOf, a field, an array element, Monitor*) is now deleted when the call
 ends (TempRefs): an attached native thread has no frame to drop it. Monitor* on
 such a copy still locks a temporary object, so Enter and Exit do not pair.
+
+jni_strings_ is never freed, so its growth was measured with the new
+`[strings]` line, on the sandbox with the owner playing about 5 minutes each:
+99 Bricks 163 -> 196 strings (4.6 KB, 15 from Java method results), Seasons 35
+-> 499 strings (5 KB, 19 from Java method results). Neither grows with play
+time beyond a few KB, so the copies stay: wrapping them would touch the most
+used string path of the Rovio titles for no measurable gain.
+

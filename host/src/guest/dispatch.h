@@ -523,6 +523,9 @@ public:
     // How many real objects the guest holds handles for; -1 when the runtime
     // lock is busy (a watchdog never waits for it).
     long WrappedObjectCount();
+    bool JniStringStats(std::size_t* count, std::size_t* bytes);
+    // Strings kept for good because a Java method returned them.
+    std::atomic<std::uint64_t> jni_string_results_{0};
     void* UnwrapObject(std::uint32_t mock);
     // A guest reference as a real Java reference (a native's return value):
     // a wrapped object, a mock jstring as a new String, a mock jclass as its

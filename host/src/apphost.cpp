@@ -503,6 +503,16 @@ void Watchdog() {
                 last_swaps = sw;
             }
         }
+        {
+            // jni_strings_ is never freed: a line when it has grown.
+            static std::size_t last_strings = 0;
+            std::size_t n = 0, bytes = 0;
+            if (g_rt->JniStringStats(&n, &bytes) && n != last_strings) {
+                last_strings = n;
+                Log("[strings] %zu jstrings kept, %zu bytes; %llu from Java method results", n, bytes,
+                    (unsigned long long)g_rt->jni_string_results_.load(std::memory_order_relaxed));
+            }
+        }
         const unsigned cn = g_rt->HeapCorruptionCount();
         if (cn != last_corrupt) {
             last_corrupt = cn;

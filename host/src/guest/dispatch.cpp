@@ -13532,6 +13532,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 jni_strings_[g] = content;
             }
+            jni_string_results_.fetch_add(1, std::memory_order_relaxed);
             Ret(regs, g);
             return true;
         }
@@ -13981,6 +13982,20 @@ std::size_t Utf8OffsetOfUnit(const std::string& s, std::size_t unit) {
         i += n;
     }
     return i;
+}
+
+// For the watchdog, which must not wait: false when the lock is busy.
+bool Runtime::JniStringStats(std::size_t* count, std::size_t* bytes) {
+    std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return false;
+    }
+    *count = jni_strings_.size();
+    *bytes = 0;
+    for (const auto& kv : jni_strings_) {
+        *bytes += kv.second.size() + 1;
+    }
+    return true;
 }
 
 std::uint32_t Runtime::NewStringUTF(const char* s) {
