@@ -514,6 +514,7 @@ public:
     // thread) lives until DeleteLocalRef, as on a native-attached thread.
     std::uint32_t WrapObject(void* real, bool permanent = false);
     void* RealString(std::uint32_t handle);
+    void* JavaObjectTemp(std::uint32_t handle, std::vector<void*>& made);
     bool RealStringText(std::uint32_t handle, std::string& out);
     // The local frame of one Java -> native call (the host pushes one per
     // call it runs, the guest with PushLocalFrame).

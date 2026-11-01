@@ -12995,6 +12995,39 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
 #endif
 }
 
+#ifdef __ANDROID__
+// Java copies of guest strings made for one guest JNI call: a thread attached
+// from native code has no frame to drop them, they stay until it detaches and
+// fill its local reference table.
+namespace {
+struct TempRefs {
+    JNIEnv* re;
+    std::vector<void*> refs;
+    ~TempRefs() {
+        for (void* o : refs) {
+            re->DeleteLocalRef(static_cast<jobject>(o));
+        }
+    }
+    jobject Keep(jobject o) {
+        if (o) {
+            refs.push_back(o);
+        }
+        return o;
+    }
+};
+}  // namespace
+
+// JavaObjectFor; a local ref it made for a guest string goes on `made`.
+void* Runtime::JavaObjectTemp(std::uint32_t handle, std::vector<void*>& made) {
+    void* o = JavaObjectFor(handle);
+    if (o && !UnwrapObject(handle) &&
+        RealEnv()->GetObjectRefType(static_cast<jobject>(o)) == JNILocalRefType) {
+        made.push_back(o);
+    }
+    return o;
+}
+#endif
+
 void* Runtime::JavaObjectFor(std::uint32_t handle) {
     if (!handle) {
         return nullptr;
@@ -13222,6 +13255,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
     }
     // Marshal guest args -> jvalues (absolute AAPCS word index from r0).
     jvalue jv[16];
+    TempRefs temps{re, {}};
     int nj = 0;
     std::uint32_t word_idx = 3;  // next unread word position (r3 first)
     auto next_word = [&]() -> std::uint32_t {
@@ -13367,7 +13401,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
                             }
                         }
                         if (known) {
-                            ro = re->NewStringUTF(sv.c_str());
+                            ro = temps.Keep(re->NewStringUTF(sv.c_str()));
                         }
                     }
                     if (!ro) {
@@ -13601,6 +13635,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
         real_methods_[a2] = rmid;
     }
     jvalue jv[16];
+    TempRefs temps{re, {}};
     int nj = 0;
     std::uint32_t word_idx = 3;
     auto next_va = [&]() -> std::uint32_t {
@@ -13732,7 +13767,7 @@ bool Runtime::RealNewObject(std::uint32_t fn, std::uint32_t a1, std::uint32_t a2
                         }
                     }
                     if (known) {
-                        ro = re->NewStringUTF(sv.c_str());
+                        ro = temps.Keep(re->NewStringUTF(sv.c_str()));
                     }
                 }
                 if (!ro) {
@@ -14508,7 +14543,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
 #ifdef __ANDROID__
         if (JNIEnv* re = RealEnv()) {
             const std::string cname = JniClassName(a2);
-            void* obj = JavaObjectFor(a1);
+            TempRefs temps{re, {}};
+            void* obj = JavaObjectTemp(a1, temps.refs);
             jclass rc = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
             if (obj && rc) {
                 r = re->IsInstanceOf(static_cast<jobject>(obj), rc) ? 1u : 0u;
@@ -14611,11 +14647,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         jfieldID fid = re ? static_cast<jfieldID>(RealFieldId(a2, stat)) : nullptr;
         jobject obj = nullptr;
         jclass cls = nullptr;
+        TempRefs temps{re, {}};
         if (stat) {
             const std::string cname = JniClassName(a1);
             cls = cname.empty() ? nullptr : static_cast<jclass>(RealClass(re, cname));
         } else {
-            obj = static_cast<jobject>(JavaObjectFor(a1));
+            obj = static_cast<jobject>(JavaObjectTemp(a1, temps.refs));
         }
         if (fid && (stat ? cls != nullptr : obj != nullptr)) {
             std::uint64_t out = 0;
@@ -14658,7 +14695,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             const std::uint32_t lo = static_cast<std::uint32_t>(v);
             switch (t) {
                 case 'L': {
-                    jobject o = static_cast<jobject>(JavaObjectFor(lo));
+                    jobject o = static_cast<jobject>(JavaObjectTemp(lo, temps.refs));
                     stat ? re->SetStaticObjectField(cls, fid, o) : re->SetObjectField(obj, fid, o);
                     break;
                 }
@@ -14728,7 +14765,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // A guest copy of the UTF-16 text (NUL-terminated for convenience),
         // freed by ReleaseStringChars/ReleaseStringCritical.
         JNIEnv* re = RealEnv();
-        jstring js = static_cast<jstring>(JavaObjectFor(a1));
+        TempRefs temps{re, {}};
+        jstring js = static_cast<jstring>(JavaObjectTemp(a1, temps.refs));
         if (!re || !js) {
             Ret(regs, 0);
             return;
@@ -14740,9 +14778,6 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             std::memset(H(g + static_cast<std::uint32_t>(n) * 2u), 0, 2);
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             jni_char_copies_[g] = 1;
-        }
-        if (!UnwrapObject(a1)) {
-            re->DeleteLocalRef(js);  // JavaObjectFor made it from the guest's text
         }
         re->ExceptionClear();
         if (a2 && CheckRange(a2, 1, true)) {
@@ -14768,8 +14803,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         JNIEnv* re = RealEnv();
         const std::string cname = JniClassName(a2);
         jclass rc = (re && !cname.empty()) ? static_cast<jclass>(RealClass(re, cname)) : nullptr;
+        TempRefs temps{re, {}};
         jobjectArray arr = rc ? re->NewObjectArray(static_cast<jsize>(a1), rc,
-                                                   static_cast<jobject>(JavaObjectFor(a3)))
+                                                   static_cast<jobject>(JavaObjectTemp(a3, temps.refs)))
                               : nullptr;
         const std::uint32_t h = arr ? WrapObject(arr) : 0;
         if (arr) {
@@ -14794,8 +14830,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     re->DeleteLocalRef(o);
                 }
             } else {
+                TempRefs temps{re, {}};
                 re->SetObjectArrayElement(arr, static_cast<jsize>(a2),
-                                          static_cast<jobject>(JavaObjectFor(a3)));
+                                          static_cast<jobject>(JavaObjectTemp(a3, temps.refs)));
             }
             re->ExceptionClear();
         }
@@ -14830,7 +14867,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 217:    // MonitorEnter(env, obj) -> jint
     case 218: {  // MonitorExit(env, obj) -> jint
         JNIEnv* re = RealEnv();
-        jobject o = static_cast<jobject>(JavaObjectFor(a1));
+        TempRefs temps{re, {}};
+        jobject o = static_cast<jobject>(JavaObjectTemp(a1, temps.refs));
         jint r = -1;
         if (re && o) {
             r = fn == 217 ? re->MonitorEnter(o) : re->MonitorExit(o);

@@ -376,3 +376,8 @@ ALL OK on arm64.
 
 Left as it was: a String-typed method result is still a jni_strings_ copy,
 kept for the life of the process and not a Java receiver.
+
+The Java copy of a guest string made for one JNI call (a method argument,
+IsInstanceOf, a field, an array element, Monitor*) is now deleted when the call
+ends (TempRefs): an attached native thread has no frame to drop it. Monitor* on
+such a copy still locks a temporary object, so Enter and Exit do not pair.
