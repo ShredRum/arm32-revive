@@ -1900,7 +1900,8 @@ int main() {
         Expect("statfs returns 0", std::to_string(r), "0");
         Expect("statfs f_bsize > 0", bsize > 0 ? "1" : "0", "1");
         Expect("statfs f_blocks (u64 @8) > 0", blocks > 0 ? "1" : "0", "1");
-        Expect("statfs f_namelen @56", std::to_string(namelen), "255");
+        // 255 on most filesystems, 256 on some: the field, not one value.
+        Expect("statfs f_namelen @56", namelen >= 255 && namelen < 1024 ? "1" : "0", "1");
         Expect("statfs writes exactly 88 bytes", tail ? "1" : "0", "1");
     }
 
@@ -2630,6 +2631,24 @@ int main() {
     rt.JniNewString("stage-d-counters");
     rt.DumpDiagCounters();
 #endif
+
+    // --- TLS blocks sit apart from handles, which must stay unmapped. A thread
+    //     past the last block stops instead of reading another's values.
+    {
+        Expect("PtrHandle numbers are not mapped",
+               abr::RuntimeTestAccess::InMapping(rt, 0xF2000000u, 4) ? "1" : "0", "0");
+        std::uint32_t last = 0;
+        for (std::uint32_t i = 0; i < abr::kTlsBlocks; i++) {
+            last = abr::RuntimeTestAccess::TlsBlock(rt, 2000 + i);
+        }
+        Expect("the first thread past the pool stops",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+        Expect("...on a block no thread has", std::to_string(last),
+               std::to_string(abr::kTlsBase + (abr::kTlsBlocks - 1) * abr::kTlsBlockSize));
+        for (std::uint32_t i = 0; i < abr::kTlsBlocks; i++) {
+            rt.ReapHostThread(2000 + i);
+        }
+    }
 
     // --- pthread_getspecific thunk: each Jit reads its own thread's block,
     //     inside guest code once the first call has bound it. The Jits come

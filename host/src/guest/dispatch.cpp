@@ -8819,12 +8819,18 @@ std::uint32_t Runtime::TlsFor(std::uint32_t tid) {
         va = tls_free_.back();
         tls_free_.pop_back();
         std::memset(H(va), 0, kTlsBlockSize);
-    } else if (next_tls_block_ < kTlsBlocks) {
+    } else if (next_tls_block_ < kTlsBlocks - 1) {
         va = kTlsBase + next_tls_block_++ * kTlsBlockSize;
     } else {
-        // Far beyond what the guest heap can give stacks to, like the errno pool.
-        std::printf("[thread] LOUD out of TLS blocks: tid %u shares the first\n", tid);
-        return kTlsBase;
+        // Far beyond what the guest heap can give stacks to. No thread may read
+        // another's values: this one stops, the last block catches what it
+        // still does on the way out.
+        std::printf("[thread] LOUD out of TLS blocks at tid %u -- halting\n", tid);
+        stop_step_ = true;
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+        }
+        return kTlsBase + (kTlsBlocks - 1) * kTlsBlockSize;
     }
     tls_blocks_[tid] = va;
     cached_rt = this;
