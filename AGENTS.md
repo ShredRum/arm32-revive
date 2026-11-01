@@ -94,13 +94,17 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on mallocpad=0 zerofill=off heapwatch=off norelease=off
-clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on`.
+clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on tlsthunk=on`.
 
 - `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
   `patches/dynarmic/README.md`); `HARNESS_NOJITSHARE=1` restores per-thread
   caches. PC builds use dynarmic's x64 backend, which cannot share: run
   `fmt_test` on the sandbox (`cmake --build host/build-android --target
   fmt_test`, copy, run with Termux `TMPDIR`) to test the arm64 path.
+
+- `tlsthunk=on`: `pthread_getspecific` is answered in guest code from the
+  thread's block (`kTlsBase`, `Runtime::BindTls`, `patches/dynarmic/README.md`
+  0002); `HARNESS_NOTLSTHUNK=1` makes every call a host call again.
 
 - One diagnostics switch: `HARNESS_DIAG` (env or `files/abflags.txt`, a
   KEY=VALUE override file read at boot). Never leave `abflags.txt` on a device.

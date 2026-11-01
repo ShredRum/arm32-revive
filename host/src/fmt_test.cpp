@@ -127,18 +127,29 @@ struct RuntimeTestAccess {
     static void SeedHostThreadTls(Runtime& rt, std::uint32_t tid, std::uint32_t slot,
                                   std::uint32_t key, std::uint32_t value) {
         rt.errno_slots_[tid] = slot;
-        auto& b = rt.tls_blocks_[tid];
-        if (!b) {
-            b = std::make_shared<GuestTls>();
-        }
-        b->v[key].store(value);
+        const std::uint32_t saved = rt.GuestTid();
+        rt.ThreadEnter(nullptr, tid);
+        rt.PthreadSetSpecific(key, value);
+        rt.ThreadEnter(nullptr, saved);
     }
+    static std::uint32_t ImportIndex(Runtime& rt, const std::string& name) {
+        for (std::uint32_t i = 0; i < rt.mod_.imports.size(); i++) {
+            if (rt.mod_.imports[i].name == name) {
+                return i;
+            }
+        }
+        return 0xFFFFFFFFu;
+    }
+    static void SetTls(Runtime& rt, std::uint32_t key, std::uint32_t value) {
+        rt.PthreadSetSpecific(key, value);
+    }
+    static std::uint32_t TlsBlock(Runtime& rt, std::uint32_t tid) { return rt.TlsFor(tid); }
     static bool HostThreadHasErrno(Runtime& rt, std::uint32_t tid) {
         return rt.errno_slots_.find(tid) != rt.errno_slots_.end();
     }
     static bool HostThreadHasTls(Runtime& rt, std::uint32_t tid, std::uint32_t key) {
         const auto it = rt.tls_blocks_.find(tid);
-        return it != rt.tls_blocks_.end() && it->second->v[key].load() != 0;
+        return it != rt.tls_blocks_.end() && *rt.H<std::uint32_t>(it->second + key * 4) != 0;
     }
     static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
     static bool InMapping(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, false); }
@@ -2619,6 +2630,76 @@ int main() {
     rt.JniNewString("stage-d-counters");
     rt.DumpDiagCounters();
 #endif
+
+    // --- pthread_getspecific thunk: each Jit reads its own thread's block,
+    //     inside guest code once the first call has bound it. The Jits come
+    //     from NewJit: on arm64 they share one code cache, which must not fix
+    //     the block of the thread that compiled the thunk.
+    {
+        const std::uint32_t kCode = 0x60003000u, kTramp = kCode + 0x40, kHalt = kCode + 0x100;
+        const std::uint32_t idx = abr::RuntimeTestAccess::ImportIndex(rt, "pthread_getspecific");
+        abr::RuntimeTestAccess::MapRwx(rt, kCode, 0x1000);
+        std::memcpy(rt.H(kCode), abr::kTlsGetThunk, sizeof(abr::kTlsGetThunk));
+        const std::uint32_t slow = abr::TlsGetThunkSlowWord(kCode, kTramp);
+        std::memcpy(rt.H(kCode + sizeof(abr::kTlsGetThunk)), &slow, 4);
+        const std::uint32_t svc_get = 0xEF000000u | (idx + 1), svc_halt = 0xEF000000u;
+        std::memcpy(rt.H(kTramp), &svc_get, 4);
+        std::memcpy(rt.H(kHalt), &svc_halt, 4);
+        abr::GuestCallbacks cb(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        const auto ja = rt.NewJit(cfg), jb = rt.NewJit(cfg);
+        auto get = [&](Dynarmic::A32::Jit& j, std::uint32_t key) {
+            j.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+            j.Regs()[0] = key;
+            j.Regs()[14] = kHalt;
+            j.Regs()[15] = kCode;
+            j.SetCpsr(0x10);
+            j.Run();
+            return std::to_string(j.Regs()[0]);
+        };
+        rt.ThreadEnter(ja.get(), 801);
+        abr::RuntimeTestAccess::SetTls(rt, 5, 11);
+        rt.ThreadEnter(jb.get(), 802);
+        abr::RuntimeTestAccess::SetTls(rt, 5, 22);
+        rt.ThreadEnter(ja.get(), 801);
+        auto host_calls = [&](auto fn) {
+            const std::uint64_t n0 = rt.svc_count.load();
+            fn();
+            return std::to_string(rt.svc_count.load() - n0);
+        };
+        // Each run ends in one svc: the halt.
+        Expect("first read goes to the host and binds",
+               host_calls([&] { Expect("thread 801, first read", get(*ja, 5), "11"); }), "2");
+        Expect("next read stays in guest code",
+               host_calls([&] { Expect("thread 801, bound read", get(*ja, 5), "11"); }), "1");
+        rt.ThreadEnter(jb.get(), 802);
+        Expect("another Jit reads its own thread's value", get(*jb, 5), "22");
+        Expect("...also once bound", get(*jb, 5), "22");
+        rt.ThreadEnter(ja.get(), 802);
+        Expect("a Jit that changes threads does not keep the old block", get(*ja, 5), "22");
+        Expect("key past the block is NULL", get(*ja, abr::kTlsKeys + 7), "0");
+        Expect("key at the end of the range is NULL", get(*ja, abr::kTlsKeys), "0");
+        Expect("key never set is NULL", get(*ja, abr::kTlsKeys - 1), "0");
+        const std::uint32_t b802 = abr::RuntimeTestAccess::TlsBlock(rt, 802);
+        Expect("the block lies outside the heap",
+               b802 >= abr::kTlsBase && b802 < abr::kTlsBase + abr::kTlsBlocks * abr::kTlsBlockSize
+                   ? "1"
+                   : "0",
+               "1");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReapHostThread(801);
+        rt.ReapHostThread(802);
+        Expect("a new thread gets a cleared block",
+               std::to_string(*rt.H<std::uint32_t>(abr::RuntimeTestAccess::TlsBlock(rt, 803) + 5 * 4)),
+               "0");
+        rt.ReapHostThread(803);
+        rt.ReleaseCpuId(id);
+    }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
     return g_fail == 0 ? 0 : 1;

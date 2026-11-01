@@ -51,3 +51,15 @@ Measured on the sandbox (Star Wars): steady-state frame time unchanged
 
 Kill switch: `HARNESS_NOJITSHARE=1` (env or `files/abflags.txt`); the boot
 `flags:` line shows `jitshare=on|off`.
+
+## 0002-tpidruro.patch
+
+`mrc p15, 0, Rt, c13, c0, 3` reads a field of the running Jit's state, set with
+`Jit::SetTpidruro` (arm64 and x64 backends). No Coprocessor object is involved:
+upstream's coprocessor interface compiles a fixed host address or callback
+argument into the code, which on a shared code cache would be the address of
+whichever thread compiled the block. Used by the `pthread_getspecific` thunk
+(`kTlsGetThunk`, `Runtime::BindTls`). No guest library reads this register
+itself (raw scan of all executable segments, ARM and Thumb encodings).
+Refresh this patch by diffing against the tree with 0001 applied:
+`git diff` alone shows both patches together.

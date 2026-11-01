@@ -1,0 +1,121 @@
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -39,6 +39,14 @@
+     std::shared_ptr<SharedCodeCache> GetSharedCodeCache() const;
+ 
+     /**
++     * Sets the value `mrc p15, 0, Rt, c13, c0, 3` (TPIDRURO) reads on this Jit.
++     * It is state of the Jit, not of the compiled code, so it stays per thread
++     * on Jits that share a code cache, and it takes no coprocessor. May be
++     * called from a callback of this Jit.
++     */
++    void SetTpidruro(std::uint32_t value);
++
++    /**
+      * Runs the emulated CPU.
+      * Cannot be recursively called.
+      */
+--- a/src/dynarmic/backend/arm64/a32_jitstate.h
++++ b/src/dynarmic/backend/arm64/a32_jitstate.h
+@@ -31,6 +31,8 @@
+ 
+     u32 exclusive_state = 0;
+ 
++    u32 tpidruro = 0;  // Jit::SetTpidruro
++
+     u32 Cpsr() const;
+     void SetCpsr(u32 cpsr);
+ 
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -111,6 +111,10 @@
+         Atomic::Barrier();
+     }
+ 
++    void SetTpidruro(std::uint32_t value) {
++        current_state.tpidruro = value;
++    }
++
+     std::array<std::uint32_t, 16>& Regs() {
+         return current_state.regs;
+     }
+@@ -234,6 +238,10 @@
+     impl->ClearHalt(hr);
+ }
+ 
++void Jit::SetTpidruro(std::uint32_t value) {
++    impl->SetTpidruro(value);
++}
++
+ std::array<std::uint32_t, 16>& Jit::Regs() {
+     return impl->Regs();
+ }
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
+@@ -161,6 +161,14 @@
+     const auto CRm = static_cast<A32::CoprocReg>(coproc_info[4]);
+     const auto opc2 = static_cast<unsigned>(coproc_info[5]);
+ 
++    // TPIDRURO comes from the running Jit's state: code may be shared.
++    if (coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C13 && CRm == A32::CoprocReg::C0 && opc2 == 3) {
++        auto Wvalue = ctx.reg_alloc.WriteW(inst);
++        RegAlloc::Realize(Wvalue);
++        code.LDR(Wvalue, Xstate, offsetof(A32JitState, tpidruro));
++        return;
++    }
++
+     std::shared_ptr<A32::Coprocessor> coproc = ctx.conf.coprocessors[coproc_num];
+     if (!coproc) {
+         EmitCoprocessorException();
+--- a/src/dynarmic/backend/x64/a32_jitstate.h
++++ b/src/dynarmic/backend/x64/a32_jitstate.h
+@@ -45,6 +45,8 @@
+     // Exclusive state
+     u32 exclusive_state = 0;
+ 
++    u32 tpidruro = 0;  // Jit::SetTpidruro
++
+     static constexpr size_t RSBSize = 8;  // MUST be a power of 2.
+     static constexpr size_t RSBPtrMask = RSBSize - 1;
+     u32 rsb_ptr = 0;
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -141,6 +141,10 @@
+         jit_state.exclusive_state = 0;
+     }
+ 
++    void SetTpidruro(std::uint32_t value) {
++        jit_state.tpidruro = value;
++    }
++
+     std::array<u32, 16>& Regs() {
+         return jit_state.Reg;
+     }
+@@ -307,6 +311,10 @@
+     impl->ClearHalt(hr);
+ }
+ 
++void Jit::SetTpidruro(std::uint32_t value) {
++    impl->SetTpidruro(value);
++}
++
+ std::array<std::uint32_t, 16>& Jit::Regs() {
+     return impl->Regs();
+ }
+--- a/src/dynarmic/backend/x64/a32_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+@@ -974,6 +974,14 @@
+     const auto CRm = static_cast<A32::CoprocReg>(coproc_info[4]);
+     const auto opc2 = static_cast<unsigned>(coproc_info[5]);
+ 
++    // TPIDRURO comes from the running Jit's state, as on arm64.
++    if (coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C13 && CRm == A32::CoprocReg::C0 && opc2 == 3) {
++        const Xbyak::Reg32 reg_word = ctx.reg_alloc.ScratchGpr().cvt32();
++        code.mov(reg_word, dword[r15 + offsetof(A32JitState, tpidruro)]);
++        ctx.reg_alloc.DefineValue(inst, reg_word);
++        return;
++    }
++
+     std::shared_ptr<A32::Coprocessor> coproc = conf.coprocessors[coproc_num];
+     if (!coproc) {
+         EmitCoprocessorException();

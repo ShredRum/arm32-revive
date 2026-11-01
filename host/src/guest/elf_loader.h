@@ -91,6 +91,28 @@ inline HotImport HotImportForName(const std::string& n) {
     return HotImport::None;
 }
 
+// pthread_getspecific answered inside the JIT (assembled with the NDK clang,
+// not hand-encoded). r1 = this thread's block (Jit::SetTpidruro), 0 until the
+// host call has bound it; that host call also answers keys out of range:
+//   e3500b01  cmp   r0, #0x400          ; kTlsKeys
+//   2a000004  bhs   slow
+//   ee1d1f70  mrc   p15, 0, r1, c13, c0, 3
+//   e3510000  cmp   r1, #0
+//   0a000001  beq   slow
+//   e7910100  ldr   r0, [r1, r0, lsl #2]
+//   e12fff1e  bx    lr
+//   ea......  slow: b <the import's svc trampoline>
+static_assert(kTlsKeys == 0x400);
+inline constexpr std::uint32_t kTlsGetThunk[7] = {
+    0xe3500b01u, 0x2a000004u, 0xee1d1f70u, 0xe3510000u,
+    0x0a000001u, 0xe7910100u, 0xe12fff1eu,
+};
+// The word after the thunk at `va`: b `tramp_va`.
+inline std::uint32_t TlsGetThunkSlowWord(std::uint32_t va, std::uint32_t tramp_va) {
+    const std::uint32_t at = va + sizeof(kTlsGetThunk);
+    return 0xEA000000u | (((tramp_va - (at + 8)) >> 2) & 0xFFFFFFu);
+}
+
 struct Import {
     std::string name;
     bool is_function;  // false => data object (needs a guest address, not a call trampoline)

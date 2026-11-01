@@ -18,6 +18,13 @@ inline constexpr std::uint32_t kJniTableBase = 0xF0010000u;
 inline constexpr std::uint32_t kJniTableSize = 0x00010000u;
 inline constexpr std::uint32_t kGuestDataBase = 0xF1000000u;
 inline constexpr std::uint32_t kGuestDataSize = 0x00010000u;
+// pthread_*specific values, one block per guest thread (Runtime::TlsFor).
+// Their own area, not the heap: a guest overrun of a heap block must not reach
+// them. Guest code reads a block itself (the pthread_getspecific thunk).
+inline constexpr std::uint32_t kTlsKeys = 1024;  // never reused; bionic allows 128
+inline constexpr std::uint32_t kTlsBlockSize = kTlsKeys * 4;
+inline constexpr std::uint32_t kTlsBlocks = 1024;  // pages are touched on use
+inline constexpr std::uint32_t kTlsBase = 0xF2000000u;
 inline constexpr std::uint32_t kStackBase = 0xFE000000u;
 inline constexpr std::uint32_t kStackSize = 0x00800000u;  // 8MB
 inline constexpr std::uint32_t kStackTop = kStackBase + kStackSize;

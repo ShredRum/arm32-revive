@@ -104,6 +104,9 @@ inline bool JitFastmemOn() {
 // One code cache for all Jits (Runtime::NewJit); HARNESS_NOJITSHARE=1 gives
 // every Jit its own cache again.
 inline bool JitShareOn() { return !EnvOn("HARNESS_NOJITSHARE"); }
+// pthread_getspecific answered in guest code (Runtime::BindTls); with
+// HARNESS_NOTLSTHUNK=1 no Jit gets a block, so every call is a host call.
+inline bool TlsThunkOn() { return !EnvOn("HARNESS_NOTLSTHUNK"); }
 
 // G1.1 (2026-10-18, PLAN.md): JIT cycle counting is pure overhead here. The
 // A32 callbacks make AddTicks a no-op and GetTicksRemaining return a constant
@@ -159,14 +162,6 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 // is a FUNCTIONAL destination bound, not a firewall (an unbounded UTF-16 widen
 // overran a 24 B block into the next chunk head), so it stays on regardless.
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
-
-// One guest thread's pthread_setspecific values, by key (keys are small and
-// never reused; bionic allows 128). Fixed size: read and written without a
-// lock, also by a proxy standing in for the thread or by a key delete.
-struct GuestTls {
-    static constexpr std::uint32_t kKeys = 1024;
-    std::atomic<std::uint32_t> v[kKeys] = {};
-};
 
 class Runtime;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
@@ -878,9 +873,16 @@ private:
     std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
     std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)
     std::uint32_t next_key_ = 1;
-    // Guest thread -> its pthread_*specific values (TlsFor).
-    std::unordered_map<std::uint32_t, std::shared_ptr<GuestTls>> tls_blocks_;
-    GuestTls& TlsFor(std::uint32_t tid);
+    // Guest thread -> guest address of its pthread_*specific values, kTlsKeys
+    // words read and written without a lock, also by a proxy standing in for
+    // the thread or by a key delete.
+    std::unordered_map<std::uint32_t, std::uint32_t> tls_blocks_;
+    std::vector<std::uint32_t> tls_free_;  // blocks of ended threads
+    std::uint32_t next_tls_block_ = 0;
+    std::atomic<std::uint32_t> tls_reaps_{0};  // a block may have changed hands
+    std::uint32_t TlsFor(std::uint32_t tid);
+    // Lets the running Jit's pthread_getspecific thunk read the caller's block.
+    void BindTls();
     // D2 (2026-10-18): flat index of live heap blocks (base -> usable bytes)
     // replaces the std::map that used to sit here. The map allocated a host
     // node per live guest block and freed it on every guest free -- a hidden

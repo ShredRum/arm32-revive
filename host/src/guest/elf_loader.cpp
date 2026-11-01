@@ -462,6 +462,14 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
             std::memcpy(mem_.host(va), kFastSqrtThunk, sizeof(kFastSqrtThunk));
             imp.call_va = va;
         }
+        if (imp.hot == HotImport::TlsGet) {
+            const std::uint32_t va = next_vfp_thunk;
+            next_vfp_thunk += sizeof(kTlsGetThunk) + 4;
+            std::memcpy(mem_.host(va), kTlsGetThunk, sizeof(kTlsGetThunk));
+            const std::uint32_t slow = TlsGetThunkSlowWord(va, imp.tramp_va);
+            std::memcpy(mem_.host(va + sizeof(kTlsGetThunk)), &slow, 4);
+            imp.call_va = va;
+        }
         out.imports.push_back(std::move(imp));
         import_index.emplace(name, idx);
         return idx;
