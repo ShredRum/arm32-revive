@@ -364,8 +364,15 @@ showed. The owner saw the difference by eye.
 The Rovio check found a regression of this branch, not of this work: since
 4e99625 a real Java String reached the guest as a wrapped object, and
 GetStringLength(Build.MANUFACTURER) halted Rio, Seasons, Space and Star Wars on
-a black screen. `Runtime::GuestRef` now makes every String a guest string.
+a black screen. The first fix copied every String into jni_strings_; review
+(/code-review high) showed that broke String receivers, leaked, and missed
+paths. Now wrapped Strings stay Java objects and the string functions accept
+them; lengths and regions count UTF-16 units, also for jni_strings_ text.
 
-`fmt_test` on the sandbox: one failure, `statfs f_namelen`, expects 255 and the
-sandbox's ext filesystem reports 256 (the test depends on the filesystem).
+Same review: the TLS area had taken the PtrHandle range, which must stay
+unmapped (moved to 0xF8000000); a thread past the last TLS block now halts;
+the statfs test no longer fails on the sandbox's filesystem, so `fmt_test` is
+ALL OK on arm64.
 
+Left as it was: a String-typed method result is still a jni_strings_ copy,
+kept for the life of the process and not a Java receiver.

@@ -119,6 +119,15 @@ struct RuntimeTestAccess {
         rt.CallJni(fn, regs);
         return regs[0];
     }
+    static void JniRegion(Runtime& rt, std::uint32_t fn, std::uint32_t str, std::uint32_t start,
+                          std::uint32_t len, std::uint32_t sp) {
+        Runtime::Regs regs{};
+        regs[1] = str;
+        regs[2] = start;
+        regs[3] = len;
+        regs[13] = sp;
+        rt.CallJni(fn, regs);
+    }
     static std::size_t JniStringCount(Runtime& rt) { return rt.jni_strings_.size(); }
     static std::size_t UtfCharCount(Runtime& rt) { return rt.jni_utf_chars_.size(); }
     static void TrackUtfChars(Runtime& rt, std::uint32_t g) { rt.jni_utf_chars_.insert(g); }
@@ -2631,6 +2640,42 @@ int main() {
     rt.JniNewString("stage-d-counters");
     rt.DumpDiagCounters();
 #endif
+
+    // --- jstrings are counted in UTF-16 units, whatever their bytes: a guest
+    //     sizes GetStringChars reads and region buffers from these numbers.
+    {
+        const std::uint32_t kSp = 0x60004000u, kBuf = kSp + 0x100;
+        abr::RuntimeTestAccess::MapRwx(rt, kSp, 0x1000);
+        std::memcpy(rt.H(kSp), &kBuf, 4);
+        const std::uint32_t h = rt.JniNewString("a\xD0\xAF\xE2\x82\xAC\xF0\x9F\x98\x80z");
+        const std::uint32_t a[4] = {0, h, 0, 0};
+        Expect("GetStringLength: 1 + 1 + 1 + 2 + 1 units",
+               std::to_string(abr::RuntimeTestAccess::Jni(rt, 164, a)), "6");
+        abr::RuntimeTestAccess::JniRegion(rt, 220, h, 1, 4, kSp);
+        Expect("GetStringRegion is UTF-16",
+               std::to_string(*rt.H<std::uint16_t>(kBuf)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(kBuf + 2)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(kBuf + 4)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(kBuf + 6)),
+               "1071,8364,55357,56832");
+        abr::RuntimeTestAccess::JniRegion(rt, 221, h, 1, 2, kSp);
+        Expect("GetStringUTFRegion counts units, copies bytes",
+               std::string(rt.H<const char>(kBuf), 5), "\xD0\xAF\xE2\x82\xAC");
+        abr::GuestCallbacks cb(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        const auto jit = rt.NewJit(cfg);
+        rt.ThreadEnter(jit.get(), 900);  // the LOUD path halts the running Jit
+        abr::RuntimeTestAccess::JniRegion(rt, 221, h, 5, 2, kSp);
+        Expect("a region past the units halts", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0",
+               "1");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReleaseCpuId(id);
+    }
 
     // --- TLS blocks sit apart from handles, which must stay unmapped. A thread
     //     past the last block stops instead of reading another's values.

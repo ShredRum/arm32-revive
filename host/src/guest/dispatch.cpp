@@ -12542,37 +12542,39 @@ std::uint32_t Runtime::Jvm() {
     return jvm_;
 }
 
+// A wrapped handle that is a java.lang.String: the real string, else null.
+void* Runtime::RealString(std::uint32_t handle) {
 #ifdef __ANDROID__
-// What the guest gets for a Java object it may use as a jstring: the string
-// functions work off jni_strings_, so a String becomes a guest string, whatever
-// path brought it (Rovio reads Build.MANUFACTURER with GetStringLength).
-std::uint32_t Runtime::GuestRef(void* env, void* real) {
-    JNIEnv* re = static_cast<JNIEnv*>(env);
-    static const jclass string_class = [re] {
-        jclass c = re->FindClass("java/lang/String");
-        jclass g = c ? static_cast<jclass>(re->NewGlobalRef(c)) : nullptr;
-        if (c) {
-            re->DeleteLocalRef(c);
-        }
-        re->ExceptionClear();
-        return g;
-    }();
-    jobject o = static_cast<jobject>(real);
-    if (string_class && re->IsInstanceOf(o, string_class)) {
-        const char* p = re->GetStringUTFChars(static_cast<jstring>(o), nullptr);
-        if (p) {
-            const std::string content(p);
-            re->ReleaseStringUTFChars(static_cast<jstring>(o), p);
-            const std::uint32_t g = JniNewString(content);
-            if (g) {
-                return g;
-            }
+    void* real = UnwrapObject(handle);
+    JNIEnv* re = real ? RealEnv() : nullptr;
+    jclass sc = re ? static_cast<jclass>(RealClass(re, "java/lang/String")) : nullptr;
+    if (sc && re->IsInstanceOf(static_cast<jobject>(real), sc)) {
+        return real;
+    }
+#else
+    (void)handle;
+#endif
+    return nullptr;
+}
+
+// The text of a wrapped String, as jni_strings_ holds it (modified UTF-8).
+bool Runtime::RealStringText(std::uint32_t handle, std::string& out) {
+#ifdef __ANDROID__
+    if (void* real = RealString(handle)) {
+        JNIEnv* re = RealEnv();
+        if (const char* p = re->GetStringUTFChars(static_cast<jstring>(real), nullptr)) {
+            out = p;
+            re->ReleaseStringUTFChars(static_cast<jstring>(real), p);
+            return true;
         }
         re->ExceptionClear();
     }
-    return WrapObject(real);
-}
+#else
+    (void)handle;
+    (void)out;
 #endif
+    return false;
+}
 
 std::uint32_t Runtime::WrapObject(void* real, bool permanent) {
     if (!real) {
@@ -13499,7 +13501,7 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             Ret(regs, g);
             return true;
         }
-        const std::uint32_t h = GuestRef(re, ro);  // an Object-typed result may be a String
+        const std::uint32_t h = WrapObject(ro);
         re->DeleteLocalRef(ro);
         Ret(regs, h);
         return true;
@@ -13895,6 +13897,57 @@ bool Runtime::JniAllocObjectHandle(std::uint32_t* out) {
     return true;
 }
 
+// jni_strings_ holds modified UTF-8, or the plain UTF-8 a guest gave
+// NewStringUTF. Bytes of the character at s[i]; a broken sequence counts as
+// one byte, one unit.
+static std::size_t Utf8CharBytes(const std::string& s, std::size_t i) {
+    const std::uint8_t c = static_cast<std::uint8_t>(s[i]);
+    const std::size_t n = c < 0xC0 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : c < 0xF8 ? 4 : 1;
+    if (i + n > s.size()) {
+        return 1;
+    }
+    for (std::size_t k = 1; k < n; k++) {
+        if ((static_cast<std::uint8_t>(s[i + k]) & 0xC0) != 0x80) {
+            return 1;
+        }
+    }
+    return n;
+}
+
+std::u16string Utf16OfMutf8(const std::string& s) {
+    std::u16string u;
+    u.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        const std::size_t n = Utf8CharBytes(s, i);
+        std::uint32_t cp = static_cast<std::uint8_t>(s[i]);
+        if (n > 1) {
+            cp &= 0xFFu >> (n + 1);
+            for (std::size_t k = 1; k < n; k++) {
+                cp = (cp << 6) | (static_cast<std::uint8_t>(s[i + k]) & 0x3Fu);
+            }
+        }
+        if (cp >= 0x10000u) {
+            u.push_back(static_cast<char16_t>(0xD800u + ((cp - 0x10000u) >> 10)));
+            u.push_back(static_cast<char16_t>(0xDC00u + ((cp - 0x10000u) & 0x3FFu)));
+        } else {
+            u.push_back(static_cast<char16_t>(cp));
+        }
+        i += n;
+    }
+    return u;
+}
+
+// Where UTF-16 unit `unit` of s starts, in bytes.
+std::size_t Utf8OffsetOfUnit(const std::string& s, std::size_t unit) {
+    std::size_t i = 0;
+    while (i < s.size() && unit > 0) {
+        const std::size_t n = Utf8CharBytes(s, i);
+        unit -= n == 4 && unit >= 2 ? 2 : 1;
+        i += n;
+    }
+    return i;
+}
+
 std::uint32_t Runtime::NewStringUTF(const char* s) {
     return JniNewString(s ? s : "");
 }
@@ -14059,12 +14112,19 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_strings_.find(a1);
         if (it == jni_strings_.end()) {
+#ifdef __ANDROID__
+            if (void* real = RealString(a1)) {
+                Ret(regs, static_cast<std::uint32_t>(
+                              RealEnv()->GetStringLength(static_cast<jstring>(real))));
+                return;
+            }
+#endif
             std::printf("[jni] LOUD GetStringLength unknown str %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
-        Ret(regs, static_cast<std::uint32_t>(it->second.size()));  // ASCII: units==bytes
+        Ret(regs, static_cast<std::uint32_t>(Utf16OfMutf8(it->second).size()));
         return;
     }
     case 167: {  // NewStringUTF(env, bytes) -> jstring (verified vs NDK jni.h
@@ -14173,15 +14233,18 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         std::memcpy(&buf, H(regs[13]), 4);
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         const auto it = jni_strings_.find(a1);
-        if (it == jni_strings_.end()) {
+        std::string wrapped;
+        if (it == jni_strings_.end() && !RealStringText(a1, wrapped)) {
             std::printf("[jni] LOUD region unknown str %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
         }
-        const std::string& s = it->second;
-        if (std::uint64_t(a2) + a3 > s.size()) {
-            std::printf("[jni] LOUD region [%u+%u) over len %zu -- halting\n", a2, a3, s.size());
+        const std::string& s = it != jni_strings_.end() ? it->second : wrapped;
+        const std::u16string units = Utf16OfMutf8(s);  // start and len count these
+        if (std::uint64_t(a2) + a3 > units.size()) {
+            std::printf("[jni] LOUD region [%u+%u) over len %zu -- halting\n", a2, a3,
+                        units.size());
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
@@ -14204,18 +14267,21 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             // arena is).
             const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion", true);
             for (std::uint32_t i = 0; i < a3 && (i + 1) * 2 <= wlen; i++) {
-                const std::uint16_t c = static_cast<std::uint8_t>(s[a2 + i]);  // ASCII widen
+                const std::uint16_t c = units[a2 + i];
                 std::memcpy(H(buf + i * 2), &c, 2);
             }
         } else {
-            if (!CheckRange(buf, a3, true)) {
+            const std::size_t from = Utf8OffsetOfUnit(s, a2);
+            const std::uint32_t bytes =
+                static_cast<std::uint32_t>(Utf8OffsetOfUnit(s, a2 + a3) - from);
+            if (!CheckRange(buf, bytes, true)) {
                 std::printf("[jni] region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t wlen = ClampHeapWrite(buf, a3, "GetStringUTFRegion", true);
-            std::memcpy(H(buf), s.data() + a2, wlen);
+            const std::uint32_t wlen = ClampHeapWrite(buf, bytes, "GetStringUTFRegion", true);
+            std::memcpy(H(buf), s.data() + from, wlen);
         }
         {
             // Triage (capped): name the string, the destination and the size we
@@ -14649,7 +14715,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             return;
         }
         jstring js = re->NewString(a2 ? H<const jchar>(a1) : nullptr, static_cast<jsize>(a2));
-        const std::uint32_t h = js ? GuestRef(re, js) : 0;
+        const std::uint32_t h = js ? WrapObject(js) : 0;
         if (js) {
             re->DeleteLocalRef(js);
         }
@@ -14674,6 +14740,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             std::memset(H(g + static_cast<std::uint32_t>(n) * 2u), 0, 2);
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             jni_char_copies_[g] = 1;
+        }
+        if (!UnwrapObject(a1)) {
+            re->DeleteLocalRef(js);  // JavaObjectFor made it from the guest's text
         }
         re->ExceptionClear();
         if (a2 && CheckRange(a2, 1, true)) {
@@ -14720,7 +14789,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (re && arr) {
             if (fn == 173) {
                 jobject o = re->GetObjectArrayElement(arr, static_cast<jsize>(a2));
-                h = o ? GuestRef(re, o) : 0;
+                h = o ? WrapObject(o) : 0;
                 if (o) {
                     re->DeleteLocalRef(o);
                 }
@@ -15283,7 +15352,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             jobject o = fid ? re->GetStaticObjectField(rc, fid) : nullptr;
             re->ExceptionClear();
             if (o) {
-                const std::uint32_t h = GuestRef(re, o);
+                const std::uint32_t h = WrapObject(o);
                 re->DeleteLocalRef(o);
                 if (DiagOn()) {
                     std::printf("[jni] GetStaticObjectField %s -> %08x (real)\n", fdesc.c_str(), h);
@@ -15430,6 +15499,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             const auto it = h ? jni_strings_.find(h) : jni_strings_.end();
             if (it != jni_strings_.end()) {
                 farg = it->second;
+            } else if (h) {
+                RealStringText(h, farg);
             }
         }
         // hasSystemFeature policy (device-plausible): true for core mobile
@@ -16065,7 +16136,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     if (rk == 'L' || rk == '[') {
                         jobject ro = re->GetObjectField(static_cast<jobject>(robj), rfid);
                         if (!re->ExceptionCheck()) {
-                            const std::uint32_t h = ro ? GuestRef(re, ro) : 0;
+                            const std::uint32_t h = WrapObject(ro);
                             if (ro) {
                                 re->DeleteLocalRef(ro);
                             }

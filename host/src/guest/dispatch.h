@@ -163,6 +163,10 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 // overran a 24 B block into the next chunk head), so it stays on regardless.
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
 
+// jni_strings_ text: its UTF-16 form, and where a unit of it starts in bytes.
+std::u16string Utf16OfMutf8(const std::string& s);
+std::size_t Utf8OffsetOfUnit(const std::string& s, std::size_t unit);
+
 class Runtime;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
 struct JitDrop {
@@ -509,7 +513,8 @@ public:
     // until DeleteGlobalRef. A handle made outside any call (a guest worker
     // thread) lives until DeleteLocalRef, as on a native-attached thread.
     std::uint32_t WrapObject(void* real, bool permanent = false);
-    std::uint32_t GuestRef(void* env, void* real);  // a JNIEnv*, Android only
+    void* RealString(std::uint32_t handle);
+    bool RealStringText(std::uint32_t handle, std::string& out);
     // The local frame of one Java -> native call (the host pushes one per
     // call it runs, the guest with PushLocalFrame).
     static void PushLocalFrame();
