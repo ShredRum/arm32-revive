@@ -806,6 +806,10 @@ private:
     void Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1 = 0);
   private:
     void RetVoid(Regs& regs) { Ret(regs, regs[0], regs[1]); }
+    void GuestMemCopy(Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
+                      std::uint32_t len);
+    void GuestMemSet(Regs& regs, const std::string& n, std::uint32_t dst, int fill,
+                     std::uint32_t len);
     // inet_* helpers live here (not inside CallImport): gotos to bad_ptr
     // cannot cross their automatic inits (2026-10-10).
     void InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,

@@ -65,12 +65,29 @@ inline bool BlockingImportName(const std::string& n) {
 
 // Imports the guests call in tight loops, dispatched by a load-time id ahead
 // of the import-name chain (Runtime::CallImport), like FastMath.
-enum class HotImport : std::uint8_t { None, TlsGet, TlsSet, MutexLock, MutexUnlock };
+enum class HotImport : std::uint8_t {
+    None, TlsGet, TlsSet, MutexLock, MutexUnlock, MemCopy, MemSet, MemSetAeabi, MemClr
+};
 inline HotImport HotImportForName(const std::string& n) {
     if (n == "pthread_getspecific") return HotImport::TlsGet;
     if (n == "pthread_setspecific") return HotImport::TlsSet;
     if (n == "pthread_mutex_lock") return HotImport::MutexLock;
     if (n == "pthread_mutex_unlock") return HotImport::MutexUnlock;
+    // memcpy with overlap stays a memmove: guests rely on that on bionic.
+    if (n == "memcpy" || n == "__aeabi_memcpy" || n == "__aeabi_memcpy4" ||
+        n == "__aeabi_memcpy8" || n == "memmove" || n == "__aeabi_memmove" ||
+        n == "__aeabi_memmove4" || n == "__aeabi_memmove8") {
+        return HotImport::MemCopy;
+    }
+    // Three argument orders: memset is (dest, c, n), __aeabi_memset* is
+    // (dest, n, c) and __aeabi_memclr* is (dest, n).
+    if (n == "memset") return HotImport::MemSet;
+    if (n == "__aeabi_memset" || n == "__aeabi_memset4" || n == "__aeabi_memset8") {
+        return HotImport::MemSetAeabi;
+    }
+    if (n == "__aeabi_memclr" || n == "__aeabi_memclr4" || n == "__aeabi_memclr8") {
+        return HotImport::MemClr;
+    }
     return HotImport::None;
 }
 

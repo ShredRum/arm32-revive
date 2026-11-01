@@ -386,6 +386,9 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_key_delete", true, 0, 0, 0});   // 111
     mod.imports.push_back(abr::Import{"pthread_attr_init", true, 0, 0, 0});        // 112
     mod.imports.push_back(abr::Import{"pthread_attr_setstacksize", true, 0, 0, 0});  // 113
+    for (abr::Import& imp : mod.imports) {
+        imp.hot = abr::HotImportForName(imp.name);  // as the loader does
+    }
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {

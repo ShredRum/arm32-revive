@@ -2257,6 +2257,30 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         case HotImport::MutexUnlock:
             Ret(regs, PthreadMutex(n, a0, a1));
             return;
+        case HotImport::MemCopy:
+            if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
+                goto bad_ptr;
+            }
+            GuestMemCopy(regs, n, a0, a1, a2);
+            return;
+        case HotImport::MemSet:
+            if (!CheckRange(a0, a2, true)) {
+                goto bad_ptr;
+            }
+            GuestMemSet(regs, n, a0, static_cast<int>(a1 & 0xFF), a2);
+            return;
+        case HotImport::MemSetAeabi:
+            if (!CheckRange(a0, a1, true)) {
+                goto bad_ptr;
+            }
+            GuestMemSet(regs, n, a0, static_cast<int>(a2 & 0xFF), a1);
+            return;
+        case HotImport::MemClr:
+            if (!CheckRange(a0, a1, true)) {
+                goto bad_ptr;
+            }
+            GuestMemSet(regs, n, a0, 0, a1);
+            return;
         case HotImport::None:
             break;
     }
@@ -2756,59 +2780,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // --- raw memory (host implementations over translated pointers) ---
     // Every bulk access is range-checked first: a wild guest pointer must
-    // halt cleanly, never segfault the host.
-    if (n == "memcpy" || n == "__aeabi_memcpy" || n == "__aeabi_memcpy4" || n == "__aeabi_memcpy8") {
-        if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
-            goto bad_ptr;
-        }
-        const std::uint32_t wlen = ClampHeapWrite(a0, a2, n.c_str());
-        std::memmove(H(a0), H<const void>(a1), wlen);
-        ScanWP(this, a0, wlen, n.c_str());
-        Ret(regs, a0);
-        return;
-    }
-    if (n == "memmove" || n == "__aeabi_memmove" || n == "__aeabi_memmove4" ||
-        n == "__aeabi_memmove8") {
-        if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
-            goto bad_ptr;
-        }
-        const std::uint32_t wlen = ClampHeapWrite(a0, a2, n.c_str());
-        std::memmove(H(a0), H<const void>(a1), wlen);
-        ScanWP(this, a0, wlen, n.c_str());
-        Ret(regs, a0);
-        return;
-    }
-    if (n == "memset" || n == "__aeabi_memset" || n == "__aeabi_memset4" || n == "__aeabi_memset8" ||
-        n == "__aeabi_memclr" || n == "__aeabi_memclr4" || n == "__aeabi_memclr8") {
-        // ABI SPLIT (wall4 root cause): plain C memset is (dest, c, n) but
-        // ARM EABI __aeabi_memset* is (dest, n, c) and __aeabi_memclr* is
-        // (dest, n). Swapping them filled 255B with 0x30 instead of 48B with
-        // 0xFF, poisoning every Technique/Pass vector header downstream.
-        const bool is_clr = n.size() >= 14 && n.compare(0, 14, "__aeabi_memclr") == 0;
-        const bool is_aeabi_set =
-            !is_clr && n.size() >= 14 && n.compare(0, 14, "__aeabi_memset") == 0;
-        const std::uint32_t len = is_clr ? a1 : (is_aeabi_set ? a1 : a2);
-        const int fill = is_clr ? 0 : (is_aeabi_set ? (int)(a2 & 0xFF) : (int)(a1 & 0xFF));
-        if (!CheckRange(a0, len, true)) {
-            goto bad_ptr;
-        }
-        // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
-        // Diagnostic layer (PLAN.md A4): off in shipping.
-        if (DiagOn()) {
-            static int mcount = 0;
-            if (!is_clr && mcount < 400) {
-                mcount++;
-                std::uint32_t lr = ActiveJit() ? ActiveJit()->Regs()[14] : 0;
-                std::printf("[memset] %s dst=%08x len=%u fill=%02x lr=%08x\n", n.c_str(), a0, len,
-                            fill & 0xFF, lr);
-            }
-        }
-        const std::uint32_t wlen = ClampHeapWrite(a0, len, n.c_str());
-        std::memset(H(a0), fill, wlen);
-        ScanWP(this, a0, wlen, n.c_str());
-        Ret(regs, a0);
-        return;
-    }
+    // halt cleanly, never segfault the host. memcpy/memmove/memset and their
+    // __aeabi_ forms: HotImport.
     if (n == "memcmp" || n == "bcmp") {
         if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
@@ -8852,6 +8825,34 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
     }
     TlsFor(GuestTid()).v[key].store(value, std::memory_order_relaxed);
     return 0;
+}
+
+// memcpy too: a copy with overlapping ranges works, as on bionic.
+void Runtime::GuestMemCopy(Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
+                           std::uint32_t len) {
+    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
+    std::memmove(H(dst), H<const void>(src), wlen);
+    ScanWP(this, dst, wlen, n.c_str());
+    Ret(regs, dst);
+}
+
+void Runtime::GuestMemSet(Regs& regs, const std::string& n, std::uint32_t dst, int fill,
+                          std::uint32_t len) {
+    // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
+    // Diagnostic layer (PLAN.md A4): off in shipping.
+    if (DiagOn()) {
+        static int mcount = 0;
+        if (n.compare(0, 14, "__aeabi_memclr") != 0 && mcount < 400) {
+            mcount++;
+            std::uint32_t lr = ActiveJit() ? ActiveJit()->Regs()[14] : 0;
+            std::printf("[memset] %s dst=%08x len=%u fill=%02x lr=%08x\n", n.c_str(), dst, len,
+                        fill & 0xFF, lr);
+        }
+    }
+    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
+    std::memset(H(dst), fill, wlen);
+    ScanWP(this, dst, wlen, n.c_str());
+    Ret(regs, dst);
 }
 
 bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
