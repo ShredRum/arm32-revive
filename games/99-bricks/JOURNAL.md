@@ -405,3 +405,14 @@ again every boot. Only faster guest execution would. Left as it is.
 
 R-010 waits for a report from the owner; then a restart loop catches it
 (1 in 11 boots: 50 clean boots would be <1% likely if it were still there).
+
+Open from 2026-11-02, in this order, all wanted, none dropped:
+1. /code-review of 436a912..HEAD: the first review ended at 0f8536c.
+2. By hand on the final build: Rio, Space, Star Wars, Star Wars II; the
+   owner's phone. Then merge bricks.
+3. jni_strings_ copies as Java objects (method receivers, GetObjectClass,
+   IsSameObject, through JavaObjectTemp); MonitorEnter/Exit on one copy pair up
+   on one Java object; a one-time log line when a guest does either. Copies stay
+   kept for good (`[strings]` watches them), but "no measurable gain" above
+   holds for memory only: a method called on a copy silently gets the mock.
+
