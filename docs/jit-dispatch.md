@@ -72,8 +72,9 @@ on build Nov 2 04:14:33, screenshots read, harness baselines checked. 99 Bricks
 12 boots: no Mono error. That is weak against a 1-in-11 fault (R-010): about 32 %
 chance of seeing none even if the rate is unchanged, so it shows no jump only.
 
-Open: the owner plays this build, then merge. Later: return stack leak above
-(R-007 lead), then each small patch alone with a measurement.
+2026-11-03: the owner played this build (sandbox and phone APKs): all works.
+Merged to master. Next: R-007 lead below (own branch), with the after-numbers
+of the game counters; then each small patch alone with a measurement.
 
 ## R-007 lead (not proven)
 
