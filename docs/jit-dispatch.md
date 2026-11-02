@@ -95,7 +95,8 @@ Each measured with dispatch_bench on the sandbox; one gate of all six at the end
   Branchy loop 2.50 -> 2.40 ns, call and return 2.88 -> 2.78 ns.
 - inline-dispatch: not done. FastDispatch already keeps 94-98 % of indirect
   branches in generated code; nothing left to measure for it.
-Then one gate of all six for 0009-0012.
+Gate of all six on build Nov 2 21:13:26 (0009-0012) clean; the owner played
+it (sandbox and phone APKs): all works. Merged to master 2026-11-03.
 
 ## R-007 (branch `r007`, 2026-11-03)
 
