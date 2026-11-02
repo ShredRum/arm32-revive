@@ -95,7 +95,8 @@ a flush. So "Mono rewrites code without cacheflush" is ruled out for it. Also
 ruled out: constant folding of guest memory (the host never says read-only).
 Private caches, 15 boots: 1 TypeLoadException (R-010 rate); the check then ran
 every 10 s only, so it says nothing about R-010.
-Stopped here (2026-11-03): no lead with evidence left. 99 Bricks stays
+Gate of all six on build Nov 2 20:42:40 (0006, 0007) clean; merged to master
+2026-11-03. Stopped here: no lead with evidence left. 99 Bricks stays
 jitshare=off. Unchecked idea for later: a thread still inside an old block
 while another flushes it.
 
