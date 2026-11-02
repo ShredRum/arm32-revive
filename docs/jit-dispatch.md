@@ -86,6 +86,12 @@ and a private overflow cache, which other Jits never invalidate. 99 Bricks with 
 boots of 16 (Mono `idx < t->rows`, TypeLoadException); private caches ~1 in 11,
 shared before 0006: 4 in 10. No overflow cache seen. Second path proven and
 fixed: 0007 (a block translated from bytes flushed meanwhile was emitted).
+With 0006 and 0007, jitshare on: 2 broken boots of 5 (the same Mono errors),
+stopped there. So another path remains; 99 Bricks stays jitshare=off. 0006 and
+0007 stay: each fixes a bug its test reproduces, in the shared core.
+Next, evidence before any fix: a diag-only check whether the guest writes to
+bytes that have a translation without a cacheflush afterwards. That would also
+explain R-010 (private caches, ~1 in 11), which flushes alone cannot.
 
 ## R-007 lead (proven above)
 
