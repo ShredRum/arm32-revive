@@ -61,6 +61,20 @@ core, more on heavier code. An estimate, not a profile.
   cache starts at a far generation, so its stub never matches primary entries.
 - Hint terminals keep jumping to the one stub; no per-site inline cache.
 
+## Result (2026-11-02)
+
+Patch 0005, `fastdispatch=on` in the `flags:` line, `HARNESS_NOFASTDISPATCH=1`
+turns it off. dispatch_bench on the sandbox: indirect call and return +17.0 ns
+without, +2.95 ns with it; a plain call and return is +2.8 ns. fmt_test has a
+stale-code test across two Jits; with the generation compare removed it fails,
+so it does guard that compare. fmt_test ALL OK on PC and arm64, six gates clean
+on build Nov 2 04:14:33, screenshots read, harness baselines checked. 99 Bricks
+12 boots: no Mono error. That is weak against a 1-in-11 fault (R-010): about 32 %
+chance of seeing none even if the rate is unchanged, so it shows no jump only.
+
+Open: the owner plays this build, then merge. Later: return stack leak above
+(R-007 lead), then each small patch alone with a measurement.
+
 ## R-007 lead (not proven)
 
 Each thread's RSB (on its host stack) holds code pointers. It is reset only on

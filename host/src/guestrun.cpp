@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = &callbacks;
     cfg.optimizations =
-        abr::JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+        abr::JitOptimizations();
     cfg.enable_cycle_counting = abr::kJitCycleCounting;
     if (abr::JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());

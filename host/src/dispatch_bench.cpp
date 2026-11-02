@@ -49,7 +49,7 @@ double Run(Env& env, Dynarmic::A32::Jit& jit, std::uint32_t pc, std::uint32_t it
 
 }  // namespace
 
-int main() {
+int main(int argc, char**) {
     Env env;
     const std::array<std::uint32_t, 3> plain = {
         0xE2500001u,  // loop: subs r0, r0, #1
@@ -82,6 +82,9 @@ int main() {
     Dynarmic::A32::UserConfig cfg;
     cfg.callbacks = &env;
     cfg.enable_cycle_counting = false;
+    if (argc > 1) {  // any argument: the C++ dispatcher only
+        cfg.optimizations = Dynarmic::all_safe_optimizations & ~Dynarmic::OptimizationFlag::FastDispatch;
+    }
     Dynarmic::A32::Jit first(cfg);
     Dynarmic::A32::Jit jit(cfg, first.GetSharedCodeCache());
     Run(env, jit, 0x1000, 1000);  // compile

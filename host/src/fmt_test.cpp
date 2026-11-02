@@ -2230,6 +2230,59 @@ int main() {
         rt.ReleaseCpuId(id);
     }
 
+    // --- rewritten code: an indirect call must not reach the old block from
+    //     the branch table of a Jit that did not flush. On arm64 the two Jits
+    //     share a cache, so the second one's flush is the only one needed.
+    {
+        struct Env : Dynarmic::A32::UserCallbacks {
+            std::array<std::uint32_t, 0x1000> mem{};
+            Dynarmic::A32::Jit* jit = nullptr;
+            std::uint8_t MemoryRead8(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint16_t MemoryRead16(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint32_t MemoryRead32(Dynarmic::A32::VAddr a) override { return mem[a / 4]; }
+            std::uint64_t MemoryRead64(Dynarmic::A32::VAddr) override { return 0; }
+            void MemoryWrite8(Dynarmic::A32::VAddr, std::uint8_t) override {}
+            void MemoryWrite16(Dynarmic::A32::VAddr, std::uint16_t) override {}
+            void MemoryWrite32(Dynarmic::A32::VAddr, std::uint32_t) override {}
+            void MemoryWrite64(Dynarmic::A32::VAddr, std::uint64_t) override {}
+            void InterpreterFallback(Dynarmic::A32::VAddr, std::size_t) override {}
+            void CallSVC(std::uint32_t) override { jit->HaltExecution(Dynarmic::HaltReason::UserDefined1); }
+            void ExceptionRaised(Dynarmic::A32::VAddr, Dynarmic::A32::Exception) override {
+                jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            void AddTicks(std::uint64_t) override {}
+            std::uint64_t GetTicksRemaining() override { return 1000000; }
+        } env;
+        env.mem[0x100 / 4] = 0xe12fff31;  // blx r1
+        env.mem[0x104 / 4] = 0xef000000;  // svc #0
+        env.mem[0x200 / 4] = 0xe3a00001;  // f: mov r0,#1
+        env.mem[0x204 / 4] = 0xe12fff1e;  // bx lr
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &env;
+        cfg.enable_cycle_counting = false;
+        Dynarmic::A32::Jit a(cfg);
+        Dynarmic::A32::Jit b(cfg, a.GetSharedCodeCache());
+        const auto call = [&](Dynarmic::A32::Jit& j) {
+            env.jit = &j;
+            j.Regs()[0] = 0;
+            j.Regs()[1] = 0x200;
+            j.Regs()[15] = 0x100;
+            j.Run();
+            j.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+            return std::to_string(j.Regs()[0]);
+        };
+        Expect("indirect call, first", call(a), "1");
+        Expect("indirect call, from the table", call(a), "1");
+        Expect("the other Jit, first", call(b), "1");
+        env.mem[0x200 / 4] = 0xe3a00002;  // mov r0,#2
+        b.InvalidateCacheRange(0x200, 8);
+        if (!a.GetSharedCodeCache()) {
+            a.InvalidateCacheRange(0x200, 8);  // x64: private caches
+        }
+        Expect("the flushing Jit sees the new code", call(b), "2");
+        Expect("so does the Jit with the old table entry", call(a), "2");
+    }
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.

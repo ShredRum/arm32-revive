@@ -1,0 +1,192 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -187,6 +187,22 @@
+     return ir_block;
+ }
+ 
++CodePtr A32AddressSpace::Dispatch(A32JitState& state) {
++    const IR::LocationDescriptor descriptor = state.GetLocationDescriptor();
++    // Read first: a block invalidated during the lookup then goes in as old.
++    const u64 gen = generation.load(std::memory_order_acquire);
++    const CodePtr entry = GetOrEmit(descriptor);
++    if (!entry) {
++        return GetOrEmitForThread(descriptor);
++    }
++    if (state.fast_dispatch_table) {
++        const u64 value = descriptor.Value();
++        const u64 index = ((value >> 32) ^ (value >> 1)) & (FastDispatchEntries - 1);
++        state.fast_dispatch_table[index] = {value, mcl::bit_cast<u64>(entry), gen, 0};
++    }
++    return entry;
++}
++
+ CodePtr A32AddressSpace::GetOrEmitForThread(IR::LocationDescriptor descriptor) {
+     if (CodePtr entry = GetOrEmit(descriptor)) {
+         return entry;
+@@ -199,6 +215,7 @@
+     if (!*b.overflow) {
+         std::fprintf(stderr, "[dynarmic] shared code cache full: a thread continues in its own cache\n");
+         *b.overflow = std::make_unique<A32AddressSpace>(*b.conf);
++        (*b.overflow)->generation.store(u64{1} << 62);  // entries of the two caches never match
+     }
+     return (*b.overflow)->GetOrEmit(descriptor);
+ }
+@@ -329,7 +346,7 @@
+ 
+     prelude_info.return_to_dispatcher = code.xptr<void*>();
+     {
+-        oaknut::Label l_this, l_addr;
++        oaknut::Label l_this, l_addr, l_generation, fast_dispatch_miss;
+ 
+         code.LDAR(Wscratch0, Xhalt);
+         code.CBNZ(Wscratch0, return_from_run_code);
+@@ -339,6 +356,28 @@
+             code.B(LE, return_from_run_code);
+         }
+ 
++        if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            // Stays in generated code for a target this Jit has seen in this
++            // generation of the cache; see Dispatch for the hash.
++            static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
++            code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
++            code.LDR(X3, Xstate, offsetof(A32JitState, fast_dispatch_table));
++            code.LSR(X1, X0, 32);
++            code.EOR(X1, X1, X0, LSR, 1);
++            code.AND(X1, X1, FastDispatchEntries - 1);
++            code.ADD(X3, X3, X1, LSL, 5);
++            code.LDP(X1, X2, X3);
++            code.CMP(X1, X0);
++            code.B(NE, fast_dispatch_miss);
++            code.LDR(X1, X3, offsetof(FastDispatchEntry, generation));
++            code.LDR(Xscratch0, l_generation);
++            code.LDR(Xscratch0, Xscratch0);
++            code.CMP(X1, Xscratch0);
++            code.B(NE, fast_dispatch_miss);
++            code.BR(X2);
++            code.l(fast_dispatch_miss);
++        }
++
+         code.LDR(X0, l_this);
+         code.MOV(X1, Xstate);
+         code.LDR(Xscratch0, l_addr);
+@@ -349,7 +388,7 @@
+ #ifdef DYNARMIC_DISPATCH_COUNTERS
+             CountDispatch();
+ #endif
+-            return self.GetOrEmitForThread(context.GetLocationDescriptor());
++            return self.Dispatch(context);
+         };
+ 
+         code.align(8);
+@@ -357,6 +396,8 @@
+         code.dx(mcl::bit_cast<u64>(this));
+         code.l(l_addr);
+         code.dx(mcl::bit_cast<u64>(Common::FptrCast(fn)));
++        code.l(l_generation);
++        code.dx(mcl::bit_cast<u64>(&generation));
+     }
+ 
+     prelude_info.return_from_run_code = code.xptr<void*>();
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -27,6 +27,8 @@
+ };
+ extern thread_local A32ThreadBinding tls_a32_binding;
+ 
++struct A32JitState;
++
+ class A32AddressSpace final : public AddressSpace {
+ public:
+     explicit A32AddressSpace(const A32::UserConfig& conf);
+@@ -37,6 +39,9 @@
+     // cache is full. Never returns nullptr.
+     CodePtr GetOrEmitForThread(IR::LocationDescriptor descriptor);
+ 
++    // GetOrEmitForThread for the dispatcher: also fills the Jit's table.
++    CodePtr Dispatch(A32JitState& state);
++
+     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+ 
+ protected:
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: 0BSD
+  */
+ 
++#include <cstdlib>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -35,6 +36,11 @@
+             , current_address_space(cache->space)
+             , core(conf) {
+         current_address_space.AddSharer();
++        if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            fast_dispatch_table.reset(static_cast<FastDispatchEntry*>(std::calloc(FastDispatchEntries, sizeof(FastDispatchEntry))));
++            ASSERT(fast_dispatch_table);
++            current_state.fast_dispatch_table = fast_dispatch_table.get();
++        }
+     }
+ 
+     ~Impl() {
+@@ -99,6 +105,7 @@
+ 
+     void Reset() {
+         current_state = {};
++        current_state.fast_dispatch_table = fast_dispatch_table.get();
+     }
+ 
+     void HaltExecution(HaltReason hr) {
+@@ -186,6 +193,10 @@
+     Jit* jit_interface;
+     A32::UserConfig conf;
+     A32JitState current_state{};
++    struct FreeTable {
++        void operator()(FastDispatchEntry* table) const { std::free(table); }
++    };
++    std::unique_ptr<FastDispatchEntry, FreeTable> fast_dispatch_table;
+     std::shared_ptr<SharedCodeCache> cache;
+     A32AddressSpace& current_address_space;
+     std::unique_ptr<A32AddressSpace> overflow;  // see A32AddressSpace::GetOrEmitForThread
+--- a/src/dynarmic/backend/arm64/a32_jitstate.h
++++ b/src/dynarmic/backend/arm64/a32_jitstate.h
+@@ -14,6 +14,17 @@
+ 
+ namespace Dynarmic::Backend::Arm64 {
+ 
++// One slot of a Jit's indirect branch table. An entry counts only for the
++// generation of the code cache it was filled in, so nothing has to clear the
++// table when code is invalidated; a zero slot matches no generation.
++struct FastDispatchEntry {
++    u64 descriptor;
++    u64 code_ptr;
++    u64 generation;
++    u64 unused;
++};
++constexpr size_t FastDispatchEntries = 4096;  // MUST be a power of 2.
++
+ struct A32JitState {
+     u32 cpsr_nzcv = 0;
+     u32 cpsr_q = 0;
+@@ -33,6 +44,9 @@
+ 
+     u32 tpidruro = 0;  // Jit::SetTpidruro
+ 
++    // Lives with the Jit, not the code: code may be shared between threads.
++    FastDispatchEntry* fast_dispatch_table = nullptr;
++
+     u32 Cpsr() const;
+     void SetCpsr(u32 cpsr);
+ 
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -95,7 +95,7 @@
+     const size_t code_cache_size;
+     std::shared_mutex cache_mutex;
+     std::atomic<int> sharers{0};
+-    std::atomic<u64> generation{0};  // bumped by every invalidation/clear
++    std::atomic<u64> generation{1};  // bumped by every invalidation/clear; 0 = empty table slot
+     oaknut::CodeBlock mem;
+     oaknut::CodeGenerator code;
+ 

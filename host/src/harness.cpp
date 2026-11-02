@@ -745,7 +745,7 @@ int main(int argc, char** argv) {
     // JIT mode: shipping default is all_safe_optimizations (measured ~17.5%
     // less CPU, PLAN.md C1); env NOOPT/SAFEOPTS is handled by JitSafeOpts().
     cfg.optimizations =
-        abr::JitSafeOpts() ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
+        abr::JitOptimizations();
     cfg.enable_cycle_counting = abr::kJitCycleCounting;
     // Fastmem prototype (HARNESS_FASTMEM=1): direct host access to the 1:1
     // 4GB reservation; faults fall back to callbacks (BAD halting

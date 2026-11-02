@@ -56,6 +56,15 @@ bool DiagOn();
 // now the default). Keep all four UserConfig sites + the `flags:` print on this
 // one helper so they can never drift apart.
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
+// HARNESS_NOFASTDISPATCH=1: every indirect branch goes through the C++ dispatcher.
+inline bool FastDispatchOn() { return !EnvOn("HARNESS_NOFASTDISPATCH"); }
+inline Dynarmic::OptimizationFlag JitOptimizations() {
+    if (!JitSafeOpts()) {
+        return Dynarmic::no_optimizations;
+    }
+    return FastDispatchOn() ? Dynarmic::all_safe_optimizations
+                            : Dynarmic::all_safe_optimizations & ~Dynarmic::OptimizationFlag::FastDispatch;
+}
 // A guest signal is pending for the thread whose Jit stops with this reason.
 inline constexpr Dynarmic::HaltReason kSignalHalt = Dynarmic::HaltReason::UserDefined4;
 // Runs the guest handlers of this thread's pending, unblocked signals (no-op

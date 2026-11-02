@@ -79,3 +79,15 @@ barriers of ARMv7 (deprecated but valid), which become DMB, DSB and ISB.
 With `DYNARMIC_DISPATCH_COUNTERS` (set by the diagnostic host build on arm64):
 `A32::DispatchCount()` and `A32::DispatchMemoMissCount()`, printed in the
 `[counters]` line. Nothing is compiled in otherwise.
+
+## 0005-fast-dispatch.patch
+
+The arm64 backend's dispatcher left generated code for C++ on every indirect
+branch that the return stack did not answer. Now its stub probes a table first:
+4096 entries of 32 bytes, one table per Jit, reached from `A32JitState` so that
+shared code stays per thread. Only `A32AddressSpace::Dispatch` fills it.
+
+An entry is valid for one `generation` of the code cache: the stub compares the
+descriptor and the generation, so an invalidation needs no clearing, which
+matters with thousands of cacheflushes a frame. A private overflow cache starts
+at a far generation, so primary entries never match in it.
