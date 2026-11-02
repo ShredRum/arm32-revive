@@ -26,6 +26,9 @@ add_executable(smoke_a32 src/smoke_a32.cpp)
 target_link_libraries(smoke_a32 PRIVATE dynarmic)
 
 # Micro-test for isolated instruction checks.
+add_executable(dispatch_bench src/dispatch_bench.cpp)
+target_link_libraries(dispatch_bench PRIVATE dynarmic)
+
 add_executable(cbnz_test src/cbnz_test.cpp)
 target_link_libraries(cbnz_test PRIVATE dynarmic)
 
@@ -77,6 +80,9 @@ if(ABR_DIAG_COUNTERS)
     # PUBLIC: abhost.cpp and the native harness/fmt_test also include
     # dispatch.h and must see the guarded declaration.
     target_compile_definitions(guest PUBLIC ABR_DIAG_COUNTERS=1)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        target_compile_definitions(dynarmic PUBLIC DYNARMIC_DISPATCH_COUNTERS=1)
+    endif()
     message(STATUS "ABR diagnostic counters: ON")
 endif()
 target_link_libraries(guest PUBLIC dynarmic z)

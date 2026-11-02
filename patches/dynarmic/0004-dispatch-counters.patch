@@ -1,0 +1,84 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -346,6 +346,9 @@
+         code.BR(X0);
+ 
+         const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++            CountDispatch();
++#endif
+             return self.GetOrEmitForThread(context.GetLocationDescriptor());
+         };
+ 
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -73,6 +73,17 @@
+ thread_local LookupMemo tls_lookup_memo;
+ }  // namespace
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++namespace {
++std::atomic<u64> dispatch_count{0};
++std::atomic<u64> dispatch_memo_miss_count{0};
++}  // namespace
++
++void CountDispatch() {
++    dispatch_count.fetch_add(1, std::memory_order_relaxed);
++}
++#endif
++
+ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
+     const bool memo_ok = IsShared();
+     LookupMemo& memo = tls_lookup_memo;
+@@ -87,6 +98,9 @@
+             return it->second;
+         }
+     }
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    dispatch_memo_miss_count.fetch_add(1, std::memory_order_relaxed);
++#endif
+     {
+         std::shared_lock lock{cache_mutex};
+         if (CodePtr block_entry = Get(descriptor)) {
+@@ -413,3 +427,14 @@
+ }
+ 
+ }  // namespace Dynarmic::Backend::Arm64
++
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++namespace Dynarmic::A32 {
++std::uint64_t DispatchCount() {
++    return Backend::Arm64::dispatch_count.load(std::memory_order_relaxed);
++}
++std::uint64_t DispatchMemoMissCount() {
++    return Backend::Arm64::dispatch_memo_miss_count.load(std::memory_order_relaxed);
++}
++}  // namespace Dynarmic::A32
++#endif
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -24,6 +24,10 @@
+ 
+ namespace Dynarmic::Backend::Arm64 {
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++void CountDispatch();
++#endif
++
+ class AddressSpace {
+ public:
+     explicit AddressSpace(size_t code_cache_size);
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -130,4 +130,11 @@
+ };
+ 
+ }  // namespace A32
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++/// Diagnostic builds, arm64: guest branches that left generated code to look up
++/// their target, and how many of those also missed the thread's memo.
++std::uint64_t DispatchCount();
++std::uint64_t DispatchMemoMissCount();
++#endif
++
+ }  // namespace Dynarmic

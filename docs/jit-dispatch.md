@@ -3,8 +3,11 @@
 Current-truth plan, started 2026-11-02. Survives context loss: read this first.
 
 Why: the arm64 backend leaves generated code for C++ on every indirect branch
-and return (`FastDispatchHint` is a TODO there). The project is meant to scale
-to heavier games, so this is done whatever the light titles gain.
+that is not a return (`FastDispatchHint` is a TODO there). Returns are NOT the
+problem: `bx lr`, `pop {pc}` go through the return stack (RSB) in generated code.
+What pays is virtual calls, function pointers, switch tables, `bx rN`. The
+project is meant to scale to heavier games, so this is done whatever the light
+titles gain.
 
 Owner's rule (2026-11-02): no gain on the current games is NOT a reason to drop
 it. Drop it only if it cannot be made reliable or makes something worse (faults,
@@ -33,6 +36,22 @@ ours has one code cache and 99 Bricks flushes up to 15000 times a frame.
 Later, each alone and measured: return stack (inline dispatch), fastmem FPSR,
 relaxed halt, instruction patterns. Not here: GL thread, shader cache, directory
 cache (ideas for heavy games). Not taken: the fully mapped 4 GB memory model.
+
+## Measured
+
+`host/src/dispatch_bench.cpp`, sandbox, shared cache, one thread, one target
+(best case for the memo), 2026-11-02, before FastDispatch:
+loop iteration 2.1 ns; call and return +3.0 ns; indirect call and return +17.5 ns.
+So one trip through the C++ dispatcher costs about 14.5 ns.
+
+## R-007 lead (not proven)
+
+Each thread's RSB (on its host stack) holds code pointers. It is reset only on
+entering Run. `InvalidateBasicBlocks` removes blocks from the tables and relinks
+them, but does not touch other threads' RSBs: a return whose descriptor matches
+jumps into the old block. That is a third suspect for stale translations under
+a shared cache. Any per-thread table has the same trap: an entry must not
+survive an invalidation, which is why it needs the generation check.
 
 ## State
 

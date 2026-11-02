@@ -73,3 +73,9 @@ terminates the process while compiling; a guest branch into data decodes such
 words often. Exceptions: the TPIDRURO read (0002) and the three `mcr p15`
 barriers of ARMv7 (deprecated but valid), which become DMB, DSB and ISB.
 `TranslationOptions::coprocessors` carries the mask from `UserConfig`.
+
+## 0004-dispatch-counters.patch
+
+With `DYNARMIC_DISPATCH_COUNTERS` (set by the diagnostic host build on arm64):
+`A32::DispatchCount()` and `A32::DispatchMemoMissCount()`, printed in the
+`[counters]` line. Nothing is compiled in otherwise.

@@ -12390,6 +12390,11 @@ void Runtime::DumpDiagCounters() {
     } else {
         std::snprintf(fd, sizeof(fd), "fd=?,next=?,free=?,file=?");
     }
+#ifdef DYNARMIC_DISPATCH_COUNTERS
+    std::printf("[counters] dispatch=%llu memo_miss=%llu\n",
+                (unsigned long long)Dynarmic::A32::DispatchCount(),
+                (unsigned long long)Dynarmic::A32::DispatchMemoMissCount());
+#endif
     std::printf(
         "[counters] heap=%llu/%llu jni_str=%u/%u,heap=%llu jni_obj=%u/%u "
         "maps=str=%zu,obj=%zu,rev=%zu,fwd=%zu utf=%zu,%llu/%llu wrapg=%llu newg=%llu delg=%llu "
