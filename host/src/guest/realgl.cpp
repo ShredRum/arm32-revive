@@ -539,34 +539,37 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     if (n == "glShaderSource") {
+        // (shader, count, const char** strings, const GLint* lengths): the
+        // driver gets every part in one call, as the guest gave them (a
+        // Telltale shader is a #define header plus the body, 3-5 parts).
         GLuint s = (GLuint)a0;
-        std::uint32_t cnt = (a1 > 16) ? 16 : a1;
-        if (!r->CheckRange(a2, 4 * cnt, false)) {
-            r->Ret(regs, 0);
-            return true;
-        }
-        bool ok = true;
-        for (std::uint32_t i = 0; i < cnt; i++) {
+        const std::uint32_t cnt = a1;
+        bool ok = cnt <= 256 && r->CheckRange(a2, 4 * cnt, false) && (!a3 || r->CheckRange(a3, 4 * cnt, false));
+        std::vector<std::string> parts;
+        for (std::uint32_t i = 0; ok && i < cnt; i++) {
             std::uint32_t sptr = 0;
             std::memcpy(&sptr, r->H(a2 + i * 4), 4);
             std::int32_t slen = -1;
-            if (a3 && r->CheckRange(a3 + i * 4, 4, false)) {
+            if (a3) {
                 std::memcpy(&slen, r->H(a3 + i * 4), 4);
             }
             if (!sptr || !r->CheckRange(sptr, 1, false)) {
-                ok = false;
-                break;
+                ok = slen == 0 && sptr;  // an empty part needs no bytes
+                if (ok) {
+                    parts.emplace_back();
+                }
+                continue;
             }
             std::size_t L = 0;
             if (slen < 0) {
                 const char* t = reinterpret_cast<const char*>(r->H(sptr));
-                while (L < 65536 && r->CheckRange(sptr + (std::uint32_t)L, 1, false) && t[L]) {
+                while (L < (1u << 20) && r->CheckRange(sptr + (std::uint32_t)L, 1, false) && t[L]) {
                     L++;
                 }
-            } else if (slen > 0 && slen <= 65536) {
+            } else {
                 L = (std::size_t)slen;
             }
-            if (!L || !r->CheckRange(sptr, L, false)) {
+            if (L && !r->CheckRange(sptr, L, false)) {
                 ok = false;
                 break;
             }
@@ -576,22 +579,45 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                     c = '\n';
                 }
             }
-            const char* p = src.c_str();
-            GLint nl = (GLint)src.size();
-            // src dies at scope end but glShaderSource copies synchronously.
-            glShaderSource(s, 1, &p, &nl);
-            if (i + 1 < cnt) {
-                // Multi-string sources are rare here; last wins is wrong —
-                // concatenate instead. Redo properly below if ever hit.
-                std::printf("%s MULTI-STRING source (%u parts) -- only part %u forwarded\n", tag,
-                            cnt, i);
-            }
+            parts.push_back(std::move(src));
         }
         if (!ok) {  // a wild guest pointer: LOUD + halt (AGENTS §6, E-07)
             std::printf("%s LOUD BAD-PTR shader=%u parts=%u -- halting\n", tag, s, cnt);
             r->HaltGuest();
-        } else if (DiagOn()) {
+            r->Ret(regs, 0);
+            return true;
+        }
+        std::vector<const char*> ptrs;
+        std::vector<GLint> lens;
+        for (const std::string& p : parts) {
+            ptrs.push_back(p.c_str());
+            lens.push_back((GLint)p.size());
+        }
+        // The driver copies the strings before returning.
+        glShaderSource(s, (GLsizei)parts.size(), ptrs.data(), lens.data());
+        if (DiagOn()) {
             std::printf("%s shader=%u parts=%u ok\n", tag, s, cnt);
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (n == "glGetShaderSource") {
+        // (shader, bufSize, GLsizei* length, char* source)
+        const GLsizei size = (GLsizei)a1;
+        if (size < 0 || (a2 && !r->CheckRange(a2, 4, true)) || (size > 0 && !r->CheckRange(a3, (std::uint32_t)size, true))) {
+            std::printf("%s LOUD BAD-PTR -- halting\n", tag);
+            r->HaltGuest();
+            r->Ret(regs, 0);
+            return true;
+        }
+        std::vector<char> buf(size > 0 ? (std::size_t)size : 1);
+        GLsizei len = 0;
+        glGetShaderSource((GLuint)a0, size, &len, buf.data());
+        if (size > 0) {
+            std::memcpy(r->H(a3), buf.data(), (std::size_t)std::min<GLsizei>(len + 1, size));
+        }
+        if (a2) {
+            std::memcpy(r->H(a2), &len, 4);
         }
         r->Ret(regs, 0);
         return true;

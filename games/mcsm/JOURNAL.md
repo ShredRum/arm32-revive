@@ -61,7 +61,15 @@ Each step its own generic core fix:
 - pread/pwrite were stubs returning 0: the OBB header read "0 bytes" and
   TTArchive2 got no stream. Note: [stub] lines of worker threads only show
   with HARNESS_DIAG.
-- Now: no LOUD, alive, 60 frames/10 s... per second (600 per 10 s), screen black.
+- Black screen at 60 fps: glShaderSource forwarded one part per call (a
+  Telltale shader is a #define header + body in 3-5 parts): every compile
+  failed, and the engine retried each frame. Now all parts in one call; empty
+  parts allowed, no silent cut at 16; glGetShaderSource added.
+- 2026-11-03: the main menu shows ("Начать"), no LOUD. Side strips on the
+  20.8:9 screen: the vignette covers the 16:9 area only; his port ships
+  split_widescreen/split_hide_border for it, so most likely the original's
+  look (not yet compared with the native 32-bit APK).
+- Open: FMOD audio ("FindClass org/fmod/AudioDevice FAILED").
 
 ## Plan
 
