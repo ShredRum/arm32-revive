@@ -17183,6 +17183,47 @@ std::string Runtime::MapGuestPath(std::uint32_t gp) {
     return MapGuestPathString(GuestStr(gp));
 }
 
+// base + rest, where each component of rest that does not exist as spelled
+// takes the name of an entry of its directory that matches it ignoring case
+// (the device's shared storage ignores case). A component with no match, and
+// everything after it, keeps its spelling (a file about to be created).
+static std::string CaseInsensitivePath(const std::string& base, const std::string& rest) {
+    std::string out = base + rest;
+    struct stat st {};
+    if (rest.empty() || ::stat(out.c_str(), &st) == 0) {
+        return out;
+    }
+    out = base;
+    std::size_t i = 0;
+    bool matching = true;
+    while (i < rest.size()) {
+        if (rest[i] == '/') {
+            out += '/';
+            i++;
+            continue;
+        }
+        const std::size_t j = rest.find('/', i);
+        const std::string part = rest.substr(i, j == std::string::npos ? std::string::npos : j - i);
+        std::string name = part;
+        if (matching && ::stat((out + part).c_str(), &st) != 0) {
+            matching = false;
+            if (DIR* d = ::opendir(out.empty() ? "/" : out.c_str())) {
+                while (const dirent* e = ::readdir(d)) {
+                    if (::strcasecmp(e->d_name, part.c_str()) == 0) {
+                        name = e->d_name;
+                        matching = true;
+                        break;
+                    }
+                }
+                ::closedir(d);
+            }
+        }
+        out += name;
+        i = j == std::string::npos ? rest.size() : j;
+    }
+    return out;
+}
+
 std::string Runtime::MapGuestPathString(const std::string& g) {
         // After a chdir, a relative name is the new directory's entry.
         if (!g.empty() && g[0] != '/') {
@@ -17304,6 +17345,23 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
                 return ext_hostbase_ + g.substr(end);
             }
         }
+        // The directories above a storage root exist on a device (a guest
+        // that creates its path one level at a time from "/" gets EEXIST
+        // there, not ENOENT): an empty host directory stands in for each.
+        if (!files_hostbase_.empty()) {
+            std::string d = g;
+            while (d.size() > 1 && d.back() == '/') {
+                d.pop_back();
+            }
+            if (d == "/storage" || d == "/storage/emulated" || d == "/storage/self" || d == "/mnt") {
+                const std::string base = std::filesystem::path(files_hostbase_).parent_path().string() + "/storage_parent";
+                std::call_once(storage_parent_made_, [&base] {
+                    std::error_code ec;
+                    std::filesystem::create_directories(base, ec);
+                });
+                return base;
+            }
+        }
         // host.private_sdcard: the rest of shared storage is the app's own
         // "<files>/sdcard", where its data was put (nothing reaches the
         // device's shared storage; Java's downloader looks there too).
@@ -17318,7 +17376,9 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
                         std::error_code ec;
                         std::filesystem::create_directories(base, ec);
                     });
-                    return base + g.substr(n);
+                    // Shared storage is case-insensitive on a device (Telltale
+                    // asks for "android/obb/..." of "Android/obb/...").
+                    return CaseInsensitivePath(base, g.substr(n));
                 }
             }
         }

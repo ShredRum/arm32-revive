@@ -71,6 +71,31 @@ Each step its own generic core fix:
   look (not yet compared with the native 32-bit APK).
 - Open: FMOD audio ("FindClass org/fmod/AudioDevice FAILED").
 
+## State 2026-11-03 night (before a context compaction)
+
+Branch mcsm, code committed. Menu works ("Начать"). "Играть" -> storage
+permission (granted) -> "ПОДКЛЮЧЕНИЕ / Проверка на наличие загружаемого
+контента..." with the chest icon animated, forever (sometimes frames stop too).
+Engine makes NO socket calls; worker threads idle in sem_wait; main thread t3
+loops in Thread::PlatformSleep. It loaded _resdesc of episodes 102..108.
+Done meanwhile (core, generic): mkdir of /storage, /storage/emulated (above a
+storage root) -> an existing empty dir (was ENOENT); paths under the private
+sdcard resolve case-insensitively (device shared storage ignores case; the
+engine opens "android/obb/...").
+Sandbox data layout now: files/sdcard/{Android/obb/<pkg>/*.obb, Telltale/},
+episodes moved to /data/data/<pkg>/ext/files/{Temp,Net} (the engine's
+getTelltaleStorageDirectory = <ext>/Android/data/<pkg>/files, which the
+ext_tail_ rule maps to <data>/ext). After this move: still hangs (untested why).
+Next ideas: Java side calls during the wait (HARNESS_DIAG with the owner
+tapping; the [call] log is capped at 5 per name), isNetworkAvailable is real
+(device has wifi) so the engine may wait for its HTTP (curl, services.
+telltalegames.com) that never starts; check what Lua waits on; compare with
+phys-winner's TWAU bridge (same engine). His 4-byte libGameEngine patch =
+Application_SDL::ScaleScreen widescreen skip (b over the 16:9 fit), unrelated.
+Never leave abflags.txt on the device (removed each time so far).
+Before merging: gate the five Rovio titles (glGetString now says GLES2 and
+filters extensions, egl/dlsym changes).
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
