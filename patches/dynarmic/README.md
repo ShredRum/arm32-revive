@@ -133,3 +133,14 @@ VLD1/VST1 with one element per structure, little-endian, move each D register
 with one 64-bit access instead of one access per element (up to 8 for .8).
 Same bytes (fmt_test). dispatch_bench NEON load-add-store loop 24.0 -> 23.0 ns:
 most of that loop is the vector add, not the memory.
+
+## 0011-fpcr-once-per-vector-run.patch
+
+A32 NEON float math runs in the standard FPSCR mode, so each operation set the
+FPCR before and restored the guest's after itself: two MSRs, about 10 ns per
+operation. A run of add/sub/mul/mul-add with only FPCR-neutral nodes between
+them (register file moves, integer and bitwise work) now sets it once at its
+start and restores it once at its end; both ends answer the same adjacency
+question, so they agree. dispatch_bench, four NEON ops: 41.9 -> 19.8 ns.
+fmt_test checks that a VFP scalar op between them keeps the guest's mode (it
+fails if that op counts as neutral).

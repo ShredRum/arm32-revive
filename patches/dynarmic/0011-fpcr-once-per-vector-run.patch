@@ -1,0 +1,132 @@
+--- a/src/dynarmic/backend/arm64/emit_arm64_vector_floating_point.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_vector_floating_point.cpp
+@@ -46,14 +46,106 @@
+ template<typename T>
+ using VectorArray = std::array<T, A64FullVectorWidth::value / mcl::bitsizeof<T>>;
+ 
++// Vector math in the standard FPSCR mode (A32 NEON) whose runs share one FPCR
++// switch: each such operation sets the standard mode and restores the guest's
++// around itself, two MSRs of about 5 ns each.
++static bool ClusteredStandardMath(const IR::Inst& inst) {
++    switch (inst.GetOpcode()) {
++    case IR::Opcode::FPVectorAdd32:
++    case IR::Opcode::FPVectorAdd64:
++    case IR::Opcode::FPVectorSub32:
++    case IR::Opcode::FPVectorSub64:
++    case IR::Opcode::FPVectorMul32:
++    case IR::Opcode::FPVectorMul64:
++    case IR::Opcode::FPVectorMulAdd32:
++    case IR::Opcode::FPVectorMulAdd64:
++        return true;
++    default:
++        return false;
++    }
++}
++
++// Nodes that may sit inside such a run: they neither read the FPCR nor leave
++// the block (register file moves, integer and bitwise work).
++static bool NeutralToFPCR(const IR::Inst& inst) {
++    switch (inst.GetOpcode()) {
++    case IR::Opcode::A32GetRegister:
++    case IR::Opcode::A32SetRegister:
++    case IR::Opcode::A32GetExtendedRegister32:
++    case IR::Opcode::A32GetExtendedRegister64:
++    case IR::Opcode::A32SetExtendedRegister32:
++    case IR::Opcode::A32SetExtendedRegister64:
++    case IR::Opcode::A32GetVector:
++    case IR::Opcode::A32SetVector:
++    case IR::Opcode::VectorGetElement32:
++    case IR::Opcode::VectorGetElement64:
++    case IR::Opcode::VectorSetElement32:
++    case IR::Opcode::VectorSetElement64:
++    case IR::Opcode::VectorBroadcast32:
++    case IR::Opcode::VectorBroadcast64:
++    case IR::Opcode::VectorBroadcastElement32:
++    case IR::Opcode::VectorBroadcastElement64:
++    case IR::Opcode::VectorAnd:
++    case IR::Opcode::VectorOr:
++    case IR::Opcode::VectorEor:
++    case IR::Opcode::VectorNot:
++    case IR::Opcode::VectorAndNot:
++    case IR::Opcode::VectorZeroUpper:
++    case IR::Opcode::ZeroVector:
++    case IR::Opcode::Add32:
++    case IR::Opcode::Sub32:
++    case IR::Opcode::And32:
++    case IR::Opcode::Or32:
++    case IR::Opcode::Eor32:
++    case IR::Opcode::LeastSignificantWord:
++    case IR::Opcode::MostSignificantWord:
++    case IR::Opcode::Pack2x32To1x64:
++        return true;
++    default:
++        return false;
++    }
++}
++
++// Whether a clustered operation is the next non-neutral node from `inst` in
++// the direction `forward`. Both ends of a run ask the same question of each
++// other, so one sets the mode and the other restores it.
++static bool StandardMathAdjacent(const IR::Block& block, const IR::Inst* inst, bool forward) {
++    IR::Block::const_iterator it{inst};
++    for (unsigned budget = 64; budget; budget--) {
++        if (forward) {
++            if (++it == block.end()) {
++                return false;
++            }
++        } else {
++            if (it == block.begin()) {
++                return false;
++            }
++            --it;
++        }
++        if (ClusteredStandardMath(*it)) {
++            return true;
++        }
++        if (!NeutralToFPCR(*it)) {
++            return false;
++        }
++    }
++    return false;
++}
++
+ template<typename EmitFn>
+-static void MaybeStandardFPSCRValue(oaknut::CodeGenerator& code, EmitContext& ctx, bool fpcr_controlled, EmitFn emit) {
++static void MaybeStandardFPSCRValue(oaknut::CodeGenerator& code, EmitContext& ctx, bool fpcr_controlled, EmitFn emit, const IR::Inst* inst = nullptr) {
+     if (ctx.FPCR(fpcr_controlled) != ctx.FPCR()) {
+-        code.MOV(Wscratch0, ctx.FPCR(fpcr_controlled).Value());
+-        code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        // Inside a run of clustered operations the standard mode stays set.
++        const bool clustered = inst && !fpcr_controlled && ClusteredStandardMath(*inst);
++        if (!clustered || !StandardMathAdjacent(ctx.block, inst, false)) {
++            code.MOV(Wscratch0, ctx.FPCR(fpcr_controlled).Value());
++            code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        }
+         emit();
+-        code.MOV(Wscratch0, ctx.FPCR().Value());
+-        code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        if (!clustered || !StandardMathAdjacent(ctx.block, inst, true)) {
++            code.MOV(Wscratch0, ctx.FPCR().Value());
++            code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        }
+     } else {
+         emit();
+     }
+@@ -96,7 +188,7 @@
+     RegAlloc::Realize(Qresult, Qa, Qb);
+     ctx.fpsr.Load();
+ 
+-    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { emit(Qresult, Qa, Qb); });
++    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { emit(Qresult, Qa, Qb); }, inst);
+ }
+ 
+ template<size_t size, typename EmitFn>
+@@ -134,7 +226,7 @@
+         } else {
+             static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
+         }
+-    });
++    }, inst);
+ }
+ 
+ template<size_t size, typename EmitFn>

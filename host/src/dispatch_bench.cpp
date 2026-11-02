@@ -133,6 +133,18 @@ int main(int argc, char**) {
     for (std::size_t i = 0; i < neon_copy.size(); i++) {
         env.mem[0x7000 / 4 + i] = neon_copy[i];
     }
+    const std::array<std::uint32_t, 7> neon_run = {
+        0xF2000D42u,  // loop: vadd.f32 q0, q0, q1
+        0xF3004D52u,  // vmul.f32 q2, q0, q1
+        0xF2046D40u,  // vadd.f32 q3, q2, q0
+        0xF2060D52u,  // vmla.f32 q0, q3, q1
+        0xE2500001u,  // subs r0, r0, #1
+        0x1AFFFFF9u,  // bne loop
+        0xEF000000u,  // svc #0
+    };
+    for (std::size_t i = 0; i < neon_run.size(); i++) {
+        env.mem[0x7800 / 4 + i] = neon_run[i];
+    }
     Dynarmic::A32::UserConfig cfg;
     cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(env.mem);
     cfg.callbacks = &env;
@@ -160,10 +172,11 @@ int main(int argc, char**) {
         jit.Regs()[1] = 0x9000;
         jit.Regs()[2] = 0x9100;
         const double neon = Run(env, jit, 0x7000, 100000000u);
+        const double neon4 = Run(env, jit, 0x7800, 50000000u);
         std::printf("loop %.2f ns, call and return +%.2f ns, indirect call and return +%.2f ns, "
                     "fp and memory loop %.2f ns, conditional vmov loop %.2f ns, branchy loop %.2f ns, "
-                    "neon load-add-store loop %.2f ns\n",
-                    base, call - base, ind - base, fp, cmov, branch, neon);
+                    "neon load-add-store loop %.2f ns, four neon ops loop %.2f ns\n",
+                    base, call - base, ind - base, fp, cmov, branch, neon, neon4);
     }
     return 0;
 }

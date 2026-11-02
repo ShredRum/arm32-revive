@@ -87,6 +87,10 @@ Each measured with dispatch_bench on the sandbox; one gate of all six at the end
 - vmov-select: not taken. Measured slower: conditional vmov loop 10.2 -> 11.9 ns
   (the block split it removes is cheap here, the select costs register moves).
   Its fmt_test stays: conditional vmov semantics.
+- branch-fusion: not taken. Branchy loop 2.61 -> 2.59 ns (noise): block links
+  are cheap here. Its test (a beq in a loop) stays.
+- wide vector transfers: taken (VLD1/VST1 part) as 0010. NEON loop 24.0 -> 23.0.
+- fpcr-cluster: taken as 0011. Four NEON ops 41.9 -> 19.8 ns.
 
 ## R-007 (branch `r007`, 2026-11-03)
 

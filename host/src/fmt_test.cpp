@@ -2569,6 +2569,31 @@ int main() {
         jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
         Expect("beq in a loop: odd counts, all counts",
                std::to_string(jit.Regs()[2]) + "," + std::to_string(jit.Regs()[1]), "6,33");
+        // NEON math runs in the standard FPSCR mode (denormals flushed), a VFP
+        // scalar op between such ops in the guest's mode (here: kept).
+        const std::uint32_t mixed[] = {0xf2000d42,   // vadd.f32 q0, q0, q1
+                                       0xf3004d52,   // vmul.f32 q2, q0, q1
+                                       0xee3aaa8b,   // vadd.f32 s20, s21, s22
+                                       0xf2046d42,   // vadd.f32 q3, q2, q1
+                                       0xef000000};  // svc #0
+        std::memcpy(&env.mem[0x300 / 4], mixed, sizeof(mixed));
+        const std::uint32_t q0[] = {0x3f800000, 0x00000001, 0x40000000, 0x40400000};  // 1, denormal, 2, 3
+        const std::uint32_t q1[] = {0x3f800000, 0x00000000, 0x3f800000, 0x3f800000};  // 1, 0, 1, 1
+        for (int i = 0; i < 4; i++) {
+            jit.ExtRegs()[i] = q0[i];
+            jit.ExtRegs()[4 + i] = q1[i];
+        }
+        jit.ExtRegs()[21] = 0x00000001;  // denormal
+        jit.ExtRegs()[22] = 0;
+        jit.SetFpscr(0);
+        jit.Regs()[15] = 0x300;
+        jit.Run();
+        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+        char lanes[96];
+        std::snprintf(lanes, sizeof(lanes), "%08x,%08x,%08x %08x %08x %08x", jit.ExtRegs()[1], jit.ExtRegs()[20],
+                      jit.ExtRegs()[12], jit.ExtRegs()[13], jit.ExtRegs()[14], jit.ExtRegs()[15]);
+        Expect("NEON flushes a denormal, VFP between keeps it, q3 = q2 + q1", lanes,
+               "00000000,00000001,40400000 00000000 40800000 40a00000");
     }
 
     // --- VLD1/VST1 (one element per structure) move whole registers; the
