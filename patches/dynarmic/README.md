@@ -100,3 +100,12 @@ to the dispatcher. Without it, with a shared cache, a Jit returned into a block
 another Jit had invalidated (the flush halts only the flushing Jit, the only
 one whose RSB is reset): fmt_test "R-007" reproduces it in one thread. One of
 the stale-code paths of REVIEW R-007.
+
+## 0007-translate-again-after-flush.patch
+
+A shared cache translates outside its lock. A block whose bytes another Jit
+rewrote and flushed while it was being translated used to be emitted from the
+old bytes. `GetOrEmit` now notes the generation before translating and, if it
+changed by the time it holds the lock, translates again under the lock, where
+no flush can come in between (so no retry loop). fmt_test "R-007" reproduces
+the old behaviour in one thread.

@@ -2351,6 +2351,64 @@ int main() {
         }
     }
 
+    // --- R-007: a block translated from the old bytes must not be emitted
+    //     after another Jit flushed them. Jit b reads the code to translate
+    //     it; at that moment the code is rewritten and Jit a flushes it.
+    {
+        struct Env : Dynarmic::A32::UserCallbacks {
+            std::array<std::uint32_t, 0x1000> mem{};
+            Dynarmic::A32::Jit* a = nullptr;
+            Dynarmic::A32::Jit* running = nullptr;
+            bool rewrite = false;
+            std::uint8_t MemoryRead8(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint16_t MemoryRead16(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint32_t MemoryRead32(Dynarmic::A32::VAddr v) override {
+                const std::uint32_t word = mem[v / 4];
+                if (v == 0x400 && rewrite) {
+                    rewrite = false;
+                    mem[0x400 / 4] = 0xe3a00002;  // mov r0,#2
+                    a->InvalidateCacheRange(0x400, 4);
+                    Dynarmic::A32::Jit* outer = running;
+                    running = a;
+                    a->Regs()[15] = 0x300;
+                    a->Run();  // applies the flush while b translates
+                    a->ClearHalt(Dynarmic::HaltReason::UserDefined1);
+                    running = outer;
+                }
+                return word;
+            }
+            std::uint64_t MemoryRead64(Dynarmic::A32::VAddr) override { return 0; }
+            void MemoryWrite8(Dynarmic::A32::VAddr, std::uint8_t) override {}
+            void MemoryWrite16(Dynarmic::A32::VAddr, std::uint16_t) override {}
+            void MemoryWrite32(Dynarmic::A32::VAddr, std::uint32_t) override {}
+            void MemoryWrite64(Dynarmic::A32::VAddr, std::uint64_t) override {}
+            void InterpreterFallback(Dynarmic::A32::VAddr, std::size_t) override {}
+            void CallSVC(std::uint32_t) override { running->HaltExecution(Dynarmic::HaltReason::UserDefined1); }
+            void ExceptionRaised(Dynarmic::A32::VAddr, Dynarmic::A32::Exception) override {
+                running->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            void AddTicks(std::uint64_t) override {}
+            std::uint64_t GetTicksRemaining() override { return 1000000; }
+        } env;
+        env.mem[0x300 / 4] = 0xef000003;  // a: svc #3
+        env.mem[0x400 / 4] = 0xe3a00001;  // mov r0,#1
+        env.mem[0x404 / 4] = 0xef000001;  // svc #1
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &env;
+        cfg.enable_cycle_counting = false;
+        Dynarmic::A32::Jit a(cfg);
+        Dynarmic::A32::Jit b(cfg, a.GetSharedCodeCache());
+        env.a = &a;
+        if (a.GetSharedCodeCache()) {
+            env.rewrite = true;
+            env.running = &b;
+            b.Regs()[15] = 0x400;
+            b.Run();
+            Expect("R-007: a block flushed during its translation is translated again",
+                   std::to_string(b.Regs()[0]), "2");
+        }
+    }
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.
