@@ -2409,6 +2409,45 @@ int main() {
         }
     }
 
+#ifdef DYNARMIC_DISPATCH_COUNTERS
+    // --- R-007 diagnostics: a translated block whose bytes change with no
+    //     flush is reported on the second look, not the first.
+    {
+        const std::uint32_t kPage = 0x61020000u;
+        abr::RuntimeTestAccess::MapRwx(rt, kPage, 0x1000);
+        const std::uint32_t tail[] = {0xe3a00001, 0xe3a01002};  // mov r0,#1; mov r1,#2
+        std::memcpy(rt.H(kPage + 0xFF8), tail, sizeof(tail));
+        abr::GuestCallbacks cb5(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb5;
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.H(0));
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        Dynarmic::A32::Jit jit(cfg);
+        rt.ThreadEnter(&jit, 703);
+        jit.Regs()[15] = kPage + 0xFF8;
+        jit.SetCpsr(0x10);
+        jit.Run();
+        abr::RuntimeTestAccess::TakeStopped(rt);
+        std::string ranges;
+        const std::size_t clean = jit.DiagChangedCode(ranges);
+        *rt.H<std::uint32_t>(kPage + 0xFF8) = 0xe3a00003;  // mov r0,#3, no flush
+        const std::size_t first = jit.DiagChangedCode(ranges);
+        const std::size_t second = jit.DiagChangedCode(ranges);
+        Expect("codewatch: unchanged, first look, second look",
+               std::to_string(clean) + "," + std::to_string(first) + "," + std::to_string(second), "0,0,1");
+        jit.InvalidateCacheRange(kPage + 0xFF8, 4);
+        jit.Run();  // applies the flush
+        abr::RuntimeTestAccess::TakeStopped(rt);
+        jit.DiagChangedCode(ranges);
+        Expect("codewatch: nothing after a flush", std::to_string(jit.DiagChangedCode(ranges)), "0");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReleaseCpuId(id);
+    }
+#endif
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.

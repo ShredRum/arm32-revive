@@ -720,6 +720,8 @@ public:
     // Stage D: one compact leak-counter line. Called by the product watchdog
     // every 30 s. No-op and no symbol in the shipping build.
     void DumpDiagCounters();
+    // Translations whose guest bytes changed without a cacheflush (R-007).
+    void DiagCheckCode();
 #endif
     std::uint32_t PthreadJoin(std::uint32_t tid, std::uint32_t retval_out);
     std::uint32_t PthreadDetach(std::uint32_t tid);

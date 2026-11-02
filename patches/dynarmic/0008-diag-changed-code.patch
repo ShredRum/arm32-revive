@@ -1,0 +1,128 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -488,6 +488,46 @@
+     const A32::LocationDescriptor end_location{block.EndLocation()};
+     const auto range = boost::icl::discrete_interval<u32>::closed(descriptor.PC(), end_location.PC() - 1);
+     block_ranges.AddRange(range, descriptor);
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    {
++        code_snapshots[block.Location().Value()] = {descriptor.PC(), end_location.PC(), HashGuestCode(descriptor.PC(), end_location.PC()), false};
++    }
++#endif
+ }
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++u64 A32AddressSpace::HashGuestCode(u32 start, u32 end) const {
++    // Through the callback: a block may end at an unreadable word.
++    u64 hash = 0xcbf29ce484222325ull;  // FNV-1a over words
++    for (u64 a = start & ~u64{3}; a < end; a += 4) {
++        const std::optional<u32> word = conf.callbacks->MemoryReadCode(static_cast<u32>(a));
++        hash = (hash ^ (word ? *word : 0xFFFFFFFFull << 32)) * 0x100000001b3ull;
++    }
++    return hash;
++}
++
++std::size_t A32AddressSpace::DiagChangedCode(std::string& ranges) {
++    std::unique_lock lock{cache_mutex};
++    std::size_t persisting = 0;
++    for (auto it = code_snapshots.begin(); it != code_snapshots.end();) {
++        if (!Get(IR::LocationDescriptor{it->first})) {
++            it = code_snapshots.erase(it);  // invalidated: not stale
++            continue;
++        }
++        CodeSnapshot& snap = it.value();
++        const bool changed = HashGuestCode(snap.start, snap.end) != snap.hash;
++        if (changed && snap.changed) {
++            if (persisting++ < 8) {
++                char line[32];
++                std::snprintf(line, sizeof(line), " %08x-%08x", snap.start, snap.end);
++                ranges += line;
++            }
++        }
++        snap.changed = changed;
++        ++it;
++    }
++    return persisting;
++}
++#endif
++
+ }  // namespace Dynarmic::Backend::Arm64
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -44,6 +44,10 @@
+ 
+     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    std::size_t DiagChangedCode(std::string& ranges);
++#endif
++
+ protected:
+     friend class A32Core;
+ 
+@@ -53,6 +57,18 @@
+ 
+     const A32::UserConfig conf;
+     BlockRangeInformation<u32> block_ranges;
++
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    // The guest bytes each block was translated from (DiagChangedCode).
++    struct CodeSnapshot {
++        u32 start;
++        u32 end;  // exclusive
++        u64 hash;
++        bool changed;
++    };
++    u64 HashGuestCode(u32 start, u32 end) const;
++    tsl::robin_map<u64, CodeSnapshot> code_snapshots;
++#endif
+ };
+ 
+ }  // namespace Dynarmic::Backend::Arm64
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -103,6 +103,12 @@
+         HaltExecution(HaltReason::CacheInvalidation);
+     }
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    std::size_t DiagChangedCode(std::string& ranges) {
++        return current_address_space.DiagChangedCode(ranges);
++    }
++#endif
++
+     void Reset() {
+         current_state = {};
+         current_state.fast_dispatch_table = fast_dispatch_table.get();
+@@ -241,6 +247,12 @@
+     impl->Reset();
+ }
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++std::size_t Jit::DiagChangedCode(std::string& ranges) {
++    return impl->DiagChangedCode(ranges);
++}
++#endif
++
+ void Jit::HaltExecution(HaltReason hr) {
+     impl->HaltExecution(hr);
+ }
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -122,6 +122,16 @@
+      */
+     std::vector<std::string> Disassemble() const;
+ 
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++    /**
++     * Diagnostic builds, arm64: translated blocks of this Jit's cache whose
++     * guest bytes changed with no invalidation, seen on two calls in a row
++     * (one call may fall between a guest's write and its cacheflush). Appends
++     * a few "start-end" ranges to `ranges`.
++     */
++    std::size_t DiagChangedCode(std::string& ranges);
++#endif
++
+ private:
+     bool is_executing = false;
+ 

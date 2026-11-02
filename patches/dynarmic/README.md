@@ -109,3 +109,11 @@ old bytes. `GetOrEmit` now notes the generation before translating and, if it
 changed by the time it holds the lock, translates again under the lock, where
 no flush can come in between (so no retry loop). fmt_test "R-007" reproduces
 the old behaviour in one thread.
+
+## 0008-diag-changed-code.patch
+
+Diagnostic builds only (`DYNARMIC_DISPATCH_COUNTERS`). Each translated A32
+block remembers a hash of its guest words (read through `MemoryReadCode`, as a
+block may end at an unreadable word); `Jit::DiagChangedCode` reports blocks
+still in the cache whose words changed with no invalidation on two calls in a
+row. The host's watchdog calls it every 10 s and prints `[codewatch]` (R-007).

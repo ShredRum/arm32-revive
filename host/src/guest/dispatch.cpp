@@ -12022,6 +12022,26 @@ void JitDrop::operator()(Dynarmic::A32::Jit* j) const {
     }
 }
 
+#ifdef ABR_DIAG_COUNTERS
+void Runtime::DiagCheckCode() {
+#ifdef DYNARMIC_DISPATCH_COUNTERS
+    std::lock_guard<std::mutex> l(live_jits_mu_);
+    std::size_t total = 0;
+    std::string ranges;
+    for (Dynarmic::A32::Jit* jit : live_jits_) {
+        total += jit->DiagChangedCode(ranges);
+        if (JitShareOn()) {
+            break;  // one cache for all
+        }
+    }
+    if (total) {
+        std::printf("[codewatch] %zu translated blocks changed without a cacheflush:%s\n", total,
+                    ranges.c_str());
+    }
+#endif
+}
+#endif
+
 void Runtime::ReleaseJit(Dynarmic::A32::Jit* j) {
     if (!j) {
         return;

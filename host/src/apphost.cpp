@@ -453,6 +453,7 @@ void Watchdog() {
             continue;
         }
 #ifdef ABR_DIAG_COUNTERS
+        g_rt->DiagCheckCode();
         if (WallMs() - last_counters >= 30000) {
             last_counters = WallMs();
             g_rt->DumpDiagCounters();
