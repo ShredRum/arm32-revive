@@ -447,13 +447,24 @@ void Watchdog() {
     // every 10 s; this adds no per-frame work to the guest.
     long long last_counters = WallMs();
 #endif
+#ifdef ABR_DIAG_COUNTERS
+    // [codewatch] twice a second: Mono's boot failures (R-010) come ~10 s in,
+    // and a change is reported on its second look.
+    std::thread([]() {
+        while (true) {
+            usleep(500 * 1000);
+            if (g_rt) {
+                g_rt->DiagCheckCode();
+            }
+        }
+    }).detach();
+#endif
     while (true) {
         sleep(10);
         if (!g_rt) {
             continue;
         }
 #ifdef ABR_DIAG_COUNTERS
-        g_rt->DiagCheckCode();
         if (WallMs() - last_counters >= 30000) {
             last_counters = WallMs();
             g_rt->DumpDiagCounters();

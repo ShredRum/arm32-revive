@@ -89,9 +89,15 @@ fixed: 0007 (a block translated from bytes flushed meanwhile was emitted).
 With 0006 and 0007, jitshare on: 2 broken boots of 5 (the same Mono errors),
 stopped there. So another path remains; 99 Bricks stays jitshare=off. 0006 and
 0007 stay: each fixes a bug its test reproduces, in the shared core.
-Next, evidence before any fix: a diag-only check whether the guest writes to
-bytes that have a translation without a cacheflush afterwards. That would also
-explain R-010 (private caches, ~1 in 11), which flushes alone cannot.
+Diag check (0008, `[codewatch]`, every 0.5 s in diag builds): a jitshare-on
+boot broke (`idx < t->rows`, ~10 s in) with no translated block changed without
+a flush. So "Mono rewrites code without cacheflush" is ruled out for it. Also
+ruled out: constant folding of guest memory (the host never says read-only).
+Private caches, 15 boots: 1 TypeLoadException (R-010 rate); the check then ran
+every 10 s only, so it says nothing about R-010.
+Stopped here (2026-11-03): no lead with evidence left. 99 Bricks stays
+jitshare=off. Unchecked idea for later: a thread still inside an old block
+while another flushes it.
 
 ## R-007 lead (proven above)
 
