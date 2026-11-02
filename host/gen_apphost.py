@@ -36,8 +36,10 @@ OUT = 'host/src/apphost_gen.inc'
 def smali_natives(game):
     """game: dict method -> {class: (ret, is_static)} for one title."""
     smali_nat = {}
-    for f in glob.glob(f'games/{game}/work/apk_prod/smali/com/rovio/**/*.smali', recursive=True):
-        cls = f.split('smali/')[1].replace('/', '_').replace('.smali', '')
+    # Every smali tree (smali, smali_classes2, ...): natives may live outside
+    # com/rovio (SDL titles: org/libsdl, com/telltalegames).
+    for f in glob.glob(f'games/{game}/work/apk_prod/smali*/**/*.smali', recursive=True):
+        cls = re.sub(r'^.*?/smali[^/]*/', '', f).replace('/', '_').replace('.smali', '')
         for ln in open(f, errors='ignore'):
             m = re.search(r'\.method\s+(.*?)\s+native\s+(\w+)\((.*?)\)(.)', ln)
             if m:

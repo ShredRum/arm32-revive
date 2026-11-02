@@ -94,6 +94,16 @@ fi
 
 echo "== stripping host lib =="
 llvm-strip "$LIB_SRC" -o "$LIB_DST"
+# host.stub_libs: names Java loads besides the host's own; each gets an empty
+# arm64 library so System.loadLibrary finds it (the guest's code for that
+# name runs inside the host).
+CLANG="$(ls tools/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/clang 2>/dev/null | head -1)"
+for l in $("${PROF[@]}" host.stub_libs 2>/dev/null || true); do
+    [ -x "$CLANG" ] || { echo "build-apk: no NDK clang for the stub libraries" >&2; exit 1; }
+    "$CLANG" --target=aarch64-linux-android24 -shared -nostdlib -Wl,-z,max-page-size=16384 -x c /dev/null \
+        -o "$(dirname "$LIB_DST")/$l"
+    echo "  stub $l"
+done
 # The profile's strip.libs: the guest's own libraries, if the tree still has
 # them (Seasons links everything statically, so there is nothing to strip
 # there). Stripped in place, when present.
@@ -182,6 +192,14 @@ if [ -f "$GUEST" ]; then
     sed -i "\|^[^-]*- *$GDIRREL/jitshare$|d" "$TREE/apktool.yml"
     sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/jitshare|" "$TREE/apktool.yml"
     echo "jitshare: $JITSHARE -> $GDIRREL/jitshare"
+    # host.private_sdcard = "on": shared storage is the app's files/sdcard
+    # (a title whose data lives there); default off, nothing packaged.
+    if [ "$("${PROF[@]}" host.private_sdcard 2>/dev/null || echo off)" = "on" ]; then
+        printf 'private\n' > "$GDIR/sdcard"
+        sed -i "\|^[^-]*- *$GDIRREL/sdcard$|d" "$TREE/apktool.yml"
+        sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/sdcard|" "$TREE/apktool.yml"
+        echo "shared storage: private -> $GDIRREL/sdcard"
+    fi
     # Several guest libraries (guest.deps): every one is checked, and
     # guest.libs lists them in guest.load_order as "<sha256> <name>", the
     # primary (guest.lib) marked; the host loads them in that order.
@@ -199,14 +217,16 @@ if [ -f "$GUEST" ]; then
             SHA_OF["$l"]="$GOT"
             i=$((i + 1))
         done
+        # guest.java_loads: the libraries Java loads itself (each runs its
+        # JNI_OnLoad), marked "java".
+        JAVA_LOADS=" $("${PROF[@]}" guest.java_loads 2>/dev/null || true) "
         : > "$GDIR/guest.libs"
         for l in $("${PROF[@]}" guest.load_order); do
             [ -n "${SHA_OF[$l]:-}" ] || { echo "build-apk: load_order names unknown $l" >&2; exit 1; }
-            if [ "$l" = "$GUEST_LIB" ]; then
-                printf '%s %s primary\n' "${SHA_OF[$l]}" "$l" >> "$GDIR/guest.libs"
-            else
-                printf '%s %s\n' "${SHA_OF[$l]}" "$l" >> "$GDIR/guest.libs"
-            fi
+            FLAGS=""
+            [ "$l" = "$GUEST_LIB" ] && FLAGS=" primary"
+            case "$JAVA_LOADS" in *" $l "*) FLAGS="$FLAGS java" ;; esac
+            printf '%s %s%s\n' "${SHA_OF[$l]}" "$l" "$FLAGS" >> "$GDIR/guest.libs"
         done
         sed -i "\|^[^-]*- *$GDIRREL/guest\.libs$|d" "$TREE/apktool.yml"
         sed -i "s|^doNotCompress:|doNotCompress:\n- $GDIRREL/guest.libs|" "$TREE/apktool.yml"

@@ -103,6 +103,14 @@ print(f"patched {n} occurrence(s)")
 PY
 fi
 
+# A title's own Java edits (games/<id>/smali.patch, a unified diff against the
+# decoded tree): each one is that title's recorded exception to "Java
+# unchanged" (its JOURNAL says why).
+if [ -f "games/$GAME/smali.patch" ]; then
+    echo "== applying games/$GAME/smali.patch =="
+    patch -p1 -d "$TREE" --forward < "games/$GAME/smali.patch"
+fi
+
 echo "== apktool.yml doNotCompress =="
 python3 - "$TREE/apktool.yml" "$SEEDS" "$TREE/assets/seeds" "$GUEST_LIB" $GUEST_DEPS <<'PY'
 import os, sys

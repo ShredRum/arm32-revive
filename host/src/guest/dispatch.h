@@ -600,6 +600,7 @@ public:
     // directory (harness: <project>/work/files). FILE*/DIR* are opaque guest
     // handles (guest-heap blocks); fds are small ints >= 100.
     void SetFilesDir(const std::string& guest_prefix, const std::string& host_base);
+    void SetPrivateSdcard(bool on) { private_sdcard_ = on; }
     // Map a guest path to the host path (the file bridge's rule).
     std::string MapGuestPath(std::uint32_t guest_path);
     std::string MapGuestPathString(const std::string& g);
@@ -1105,6 +1106,10 @@ private:
     std::string ext_tail_;
     std::string ext_hostbase_;
     std::once_flag ext_made_;
+    // host.private_sdcard: all of shared storage is the app's own
+    // "<files>/sdcard" (a title that keeps its data there, MCSM).
+    bool private_sdcard_ = false;
+    std::once_flag sdcard_made_;
     struct HostFile {
         FILE* f = nullptr;
         std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*

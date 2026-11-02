@@ -17192,6 +17192,24 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
                 return ext_hostbase_ + g.substr(end);
             }
         }
+        // host.private_sdcard: the rest of shared storage is the app's own
+        // "<files>/sdcard", where its data was put (nothing reaches the
+        // device's shared storage; Java's downloader looks there too).
+        if (private_sdcard_ && !files_hostbase_.empty()) {
+            static const char* const kRoots[] = {"/storage/emulated/0", "/storage/self/primary", "/sdcard",
+                                                  "/mnt/sdcard"};
+            for (const char* root : kRoots) {
+                const std::size_t n = std::strlen(root);
+                if (g.compare(0, n, root) == 0 && (g.size() == n || g[n] == '/')) {
+                    const std::string base = files_hostbase_ + "/sdcard";
+                    std::call_once(sdcard_made_, [&base] {
+                        std::error_code ec;
+                        std::filesystem::create_directories(base, ec);
+                    });
+                    return base + g.substr(n);
+                }
+            }
+        }
         // Bare relative names (no leading '/'): the game opens seeds like
         // "highscores.lua" CWD-relative (original CWD = files dir). Route
         // to the files dir (fopen fails gracefully if missing — same as

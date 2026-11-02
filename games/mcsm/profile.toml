@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Minecraft: Story Mode (Telltale engine, SDL2, FMOD)
+# VERIFIED data only (unzip | sha256sum of the original APK). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "mcsm"
+title        = "Minecraft: Story Mode"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
+
+[apk]
+package      = "com.telltalegames.minecraft100"
+version_name = "1.37"
+version_code = 10137
+# The original says min 10 / target 23; Android 14+ refuses to install a
+# package that targets below 24, and arm64-only devices start at 24 anyway.
+min_sdk      = 24
+target_sdk   = 24
+original     = "original/Minecraft-Story-Mode-v1-37-Mali-unlocked.apk"
+activity     = "com.telltalegames.expansion.downloader.SampleDownloaderActivity"  # launcher (devgate)
+
+[guest]
+abi    = "armeabi-v7a"
+# SDL's glue library, the last one Java loads (SDLActivity <clinit>).
+lib    = "libmain.so"
+sha256 = "e0b49842ee2301fabd6e7af9855a83273e5cc0db9457c001220eda4271ac0ca5"
+deps        = ["libSDL2.so", "libfmod.so", "libfmodstudio.so", "libGameEngine.so"]
+deps_sha256 = ["3f3a0d1861bea59b361199f8526862a0268b50ec14df93273a624b23106ef817",
+               "f69cfc24132a860ceb2984a6e66a954dd48f6bdd1c081f2617a6635e4c9860da",
+               "3ba06eaf479c68166ef8e0ec4d53e051d03ff0c78e42b8a573824fd8502135eb",
+               "49fb717eb6336a532b511eaf1d93477c751e2cefa5c1e42f14a1b41a0441ff3d"]
+# The order Java loads them in (System.loadLibrary in SDLActivity <clinit>);
+# each runs its JNI_OnLoad, as it would have under Java.
+load_order  = ["libSDL2.so", "libfmod.so", "libfmodstudio.so", "libGameEngine.so", "libmain.so"]
+java_loads  = ["libSDL2.so", "libfmod.so", "libfmodstudio.so", "libGameEngine.so", "libmain.so"]
+
+[host]
+abi          = "arm64-v8a"
+# Our host carries the name Java loads last ("main"); the other four names
+# Java loads get empty arm64 libraries (stub_libs), so no smali edit.
+lib          = "libmain.so"
+stub_libs    = ["libSDL2.so", "libfmod.so", "libfmodstudio.so", "libGameEngine.so"]
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+jitshare     = "on"
+# The data (OBB, episodes, Telltale/*.mft) lives on shared storage: the app's
+# own files/sdcard stands in for it (never the device's shared storage).
+private_sdcard = "on"
+
+[strip]
+libs = []
+
+[tree]
+smali_lib_name_orig = ""   # no smali edit

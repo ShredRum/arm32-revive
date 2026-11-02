@@ -1306,6 +1306,9 @@ static bool DiagBootWanted(const std::string& files_dir) {
 
 namespace {
 int g_primary = 0;  // the guest library Java loads (index in the module)
+// Every guest library Java loads (System.loadLibrary), in that order; empty
+// when only the primary is (guest.libs lines marked "java").
+std::vector<int> g_java_libs;
 }  // namespace
 
 // Loads and starts the guest once, from whichever entry Android uses first:
@@ -1402,13 +1405,15 @@ static bool Boot(JavaVM* vm) {
     // The guest .so is whatever sits under assets/guestlib/ (the packaging step
     // puts exactly one there). Naming it in C would be a per-title constant.
     const std::string glib_dir = "assets/guestlib/";
-    // Several guest libraries (a Unity title): <abi>/guest.libs lists them in
-    // load order, one "<sha256> <name> [primary]" per line; the primary one is
-    // the library Java loads. Each is extracted under its own name (a guest
-    // dlopen finds it by name) and checked against its digest.
+    // Several guest libraries (Unity, SDL titles): <abi>/guest.libs lists them
+    // in load order, one "<sha256> <name> [primary] [java]" per line; the
+    // primary one is the library Java loads last, "java" marks every one Java
+    // loads itself. Each is extracted under its own name (a guest dlopen finds
+    // it by name) and checked against its digest.
     struct GuestLib {
         std::string name, sha, path;
         bool primary = false;
+        bool java = false;
     };
     std::vector<GuestLib> multi;
     std::string multi_dir;
@@ -1419,10 +1424,12 @@ static bool Boot(JavaVM* vm) {
             FILE* lf = ZipExtractStored(g_apk, e, lp) ? std::fopen(lp.c_str(), "rb") : nullptr;
             char line[512];
             while (lf && std::fgets(line, sizeof(line), lf)) {
-                char sha[80] = {0}, name[256] = {0}, flag[32] = {0};
-                if (std::sscanf(line, "%79s %255s %31s", sha, name, flag) >= 2) {
-                    multi.push_back({name, sha, g_files + "/guestlib/" + name,
-                                     std::strcmp(flag, "primary") == 0});
+                char sha[80] = {0}, name[256] = {0}, f1[32] = {0}, f2[32] = {0};
+                if (std::sscanf(line, "%79s %255s %31s %31s", sha, name, f1, f2) >= 2) {
+                    const auto has = [&](const char* flag) {
+                        return std::strcmp(f1, flag) == 0 || std::strcmp(f2, flag) == 0;
+                    };
+                    multi.push_back({name, sha, g_files + "/guestlib/" + name, has("primary"), has("java")});
                 }
             }
             if (lf) {
@@ -1449,6 +1456,9 @@ static bool Boot(JavaVM* vm) {
             if (gl.primary) {
                 g_primary = static_cast<int>(i);
                 guest_entry = multi_dir + gl.name;
+            }
+            if (gl.java) {
+                g_java_libs.push_back(static_cast<int>(i));
             }
         }
     }
@@ -1664,6 +1674,19 @@ static bool Boot(JavaVM* vm) {
         if (std::strcmp(js, "off") == 0) {
             setenv("HARNESS_NOJITSHARE", "1", 0);
         }
+        // host.private_sdcard: shared storage is the app's "<files>/sdcard".
+        const std::string sd_path = g_files + "/sdcard_mode";
+        char sd[16] = {0};
+        if (ZipExtractStored(g_apk, dir + "sdcard", sd_path)) {
+            if (FILE* f = std::fopen(sd_path.c_str(), "rb")) {
+                if (std::fscanf(f, "%15s", sd) != 1) {
+                    sd[0] = 0;
+                }
+                std::fclose(f);
+            }
+        }
+        g_rt->SetPrivateSdcard(std::strcmp(sd, "private") == 0);
+        Log("shared storage: %s", std::strcmp(sd, "private") == 0 ? "private (files/sdcard)" : "none");
     }
     abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
@@ -1693,10 +1716,13 @@ static bool Boot(JavaVM* vm) {
     // and the initializer runs clean: harness halts 53 -> 54.)
     std::size_t ok = 0;
     if (!multi.empty()) {
-        // As the linker: the primary library (and the guest libraries it
-        // needs) now; the others when the guest dlopens them.
-        if (!g_rt->InitGuestLibrary(g_primary)) {
-            Log("LOUD primary guest library initialisers failed");
+        // As the linker: each library Java loads (and the guest libraries
+        // it needs) now, in Java's order; the others when the guest dlopens
+        // them.
+        for (const int lib : g_java_libs.empty() ? std::vector<int>{g_primary} : g_java_libs) {
+            if (!g_rt->InitGuestLibrary(lib)) {
+                Log("LOUD guest library #%d initialisers failed", lib);
+            }
         }
     }
     for (std::size_t k = 0; multi.empty() && k < g_mod->init_array.size(); k++) {
@@ -1752,8 +1778,9 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     if (!st) {
         return 0;
     }
-    {
-        const auto& defs = g_mod->lib_defined[static_cast<std::size_t>(g_primary)];
+    // Each library Java loads runs its JNI_OnLoad, in Java's order.
+    for (const int lib : g_java_libs.empty() ? std::vector<int>{g_primary} : g_java_libs) {
+        const auto& defs = g_mod->lib_defined[static_cast<std::size_t>(lib)];
         const auto it = defs.find("JNI_OnLoad");
         if (it != defs.end()) {
             auto& regs = st->jit->Regs();
@@ -1768,8 +1795,8 @@ extern "C" jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
             CallGuest(*st->jit, it->second);
             const Dynarmic::HaltReason hr = RunJit(*st->jit);
             st->jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
-            Log("guest OnLoad hr=%d r0=%08x", (int)hr, regs[0]);
-        } else {
+            Log("guest OnLoad #%d hr=%d r0=%08x", lib, (int)hr, regs[0]);
+        } else if (g_java_libs.empty()) {
             Log("guest JNI_OnLoad missing?!");
         }
     }
