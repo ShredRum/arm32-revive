@@ -77,6 +77,8 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 | R-008 | S1 | PthreadCond sliced waits | a slice that timed out re-slept although pthread_cond_timedwait may take the wake with an ETIMEDOUT: the wake was lost (Unity's file queue: the loader asleep on a read already done, asyncProcessor asleep on a non-empty queue). Hangs at the logo, at 25-30%, on placing a block | dump: futex word of the sleeper's cond had counted the wake; 3 of 5 boots hung | fixed a53149d |
 | R-009 | S3 | MapGuestPathString (files dir, app external dir) | the guest tail after the matched prefix is appended as is: a path with ".." could leave the app's data dir on the host. The games never do it, and the files-dir rule was the same on master; normalize (lexically) and refuse an escape when the bridge is next touched | branch review 2026-10-29 | open |
 | R-003 | S2 | JNI mock refs | mock jstrings never freed (~86 KB/h Rio); needs real local/global ref lifetimes | AGENTS §145 | wontfix 2026-10-27 (owner): real local/global ref lifetimes risk use-after-free for ~2 MB/day |
+| R-011 | S3 | JNI CallNonvirtual<T>Method (fns 64-93) | not implemented: a call halts the guest LOUD. No live title uses it (99 Bricks journal); a newer guest may. Fix: delegate like Call<T>Method, through the real JVM with CallNonvirtual on the real class | 99 Bricks JOURNAL 2026-10-28 | open |
+| R-012 | S4 | [mutex] UNLOCK-FOREIGN | the games unlock normal mutexes from another thread (allowed for them); every case is logged, hundreds of lines per session (Rio 4-5 per run, 99 Bricks hundreds) that bury real markers. Fix: first few lines and a count | 99 Bricks JOURNAL, Rio JOURNAL | open |
 
 ### Device gates
 
