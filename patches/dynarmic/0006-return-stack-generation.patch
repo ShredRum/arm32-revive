@@ -1,0 +1,95 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -478,6 +478,8 @@
+         .coprocessors = conf.coprocessors,
+ 
+         .very_verbose_debugging_output = conf.very_verbose_debugging_output,
++
++        .code_generation = &generation,
+     };
+ }
+ 
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: 0BSD
+  */
+ 
++#include <mcl/bit_cast.hpp>
+ #include <mcl/bit/bit_field.hpp>
+ #include <oaknut/oaknut.hpp>
+ 
+@@ -110,6 +111,13 @@
+ 
+         code.CMP(X0, Xscratch0);
+         code.B(NE, fail);
++        if (ctx.conf.code_generation) {
++            code.LDR(Xscratch0, X2, offsetof(StackLayout, rsb) + offsetof(RSBEntry, generation));
++            code.MOV(X2, mcl::bit_cast<u64>(ctx.conf.code_generation));
++            code.LDR(X2, X2);
++            code.CMP(Xscratch0, X2);
++            code.B(NE, fail);
++        }
+         code.BR(Xscratch1);
+ 
+         code.l(fail);
+--- a/src/dynarmic/backend/arm64/emit_arm64.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64.cpp
+@@ -3,6 +3,8 @@
+  * SPDX-License-Identifier: 0BSD
+  */
+ 
++#include <mcl/bit_cast.hpp>
++
+ #include "dynarmic/backend/arm64/emit_arm64.h"
+ 
+ #include <oaknut/oaknut.hpp>
+@@ -60,6 +62,14 @@
+     code.STR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
+     code.ADD(Xscratch2, SP, Xscratch2);
+ 
++    if (ctx.conf.code_generation) {
++        // Read before the code pointer below: a block invalidated in between
++        // then carries the old generation and misses at the return.
++        code.MOV(Xscratch0, mcl::bit_cast<u64>(ctx.conf.code_generation));
++        code.LDAR(Xscratch0, Xscratch0);
++        code.STR(Xscratch0, Xscratch2, offsetof(StackLayout, rsb) + offsetof(RSBEntry, generation));
++    }
++
+     code.MOV(Xscratch0, target.Value());
+     EmitBlockLinkRelocation(code, ctx, target, BlockRelocationType::MoveToScratch1);
+     code.STP(Xscratch0, Xscratch1, Xscratch2, offsetof(StackLayout, rsb));
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -6,6 +6,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <memory>
+ #include <vector>
+@@ -161,6 +162,10 @@
+ 
+     // Debugging
+     bool very_verbose_debugging_output;
++
++    // The code cache's generation, bumped by every invalidation (A32). The
++    // return stack checks it; null: no check.
++    const std::atomic<u64>* code_generation = nullptr;
+ };
+ 
+ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const EmitConfig& emit_conf, FastmemManager& fastmem_manager);
+--- a/src/dynarmic/backend/arm64/stack_layout.h
++++ b/src/dynarmic/backend/arm64/stack_layout.h
+@@ -21,6 +21,10 @@
+ struct alignas(16) RSBEntry {
+     u64 target;
+     u64 code_ptr;
++    // Code cache generation at the push: code_ptr is only trusted in it, as
++    // another Jit sharing the cache may invalidate the block meanwhile.
++    u64 generation;
++    u64 unused;
+ };
+ 
+ constexpr size_t RSBCount = 8;

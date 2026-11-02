@@ -76,7 +76,16 @@ chance of seeing none even if the rate is unchanged, so it shows no jump only.
 Merged to master. Next: R-007 lead below (own branch), with the after-numbers
 of the game counters; then each small patch alone with a measurement.
 
-## R-007 lead (not proven)
+## R-007 (branch `r007`, 2026-11-03)
+
+Proven: fmt_test "R-007" failed on arm64 (a return reached the block another
+Jit had flushed), passes with patch 0006. dispatch_bench: call and return still
++2.8 ns, indirect +3.4 ns (was +3.0). Remaining stale-code paths, unproven: a
+block that is running while another thread flushes it (until its next exit),
+and a private overflow cache, which other Jits never invalidate. Next: 99 Bricks
+with jitshare on, 10-boot batches (before: 4 of 10 broke).
+
+## R-007 lead (proven above)
 
 Each thread's RSB (on its host stack) holds code pointers. It is reset only on
 entering Run. `InvalidateBasicBlocks` removes blocks from the tables and relinks

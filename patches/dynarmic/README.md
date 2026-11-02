@@ -91,3 +91,12 @@ An entry is valid for one `generation` of the code cache: the stub compares the
 descriptor and the generation, so an invalidation needs no clearing, which
 matters with thousands of cacheflushes a frame. A private overflow cache starts
 at a far generation, so primary entries never match in it.
+
+## 0006-return-stack-generation.patch
+
+Each return stack (RSB) entry also records the code cache generation at the
+push, and a return compares it: an invalidation since the call sends the return
+to the dispatcher. Without it, with a shared cache, a Jit returned into a block
+another Jit had invalidated (the flush halts only the flushing Jit, the only
+one whose RSB is reset): fmt_test "R-007" reproduces it in one thread. One of
+the stale-code paths of REVIEW R-007.
