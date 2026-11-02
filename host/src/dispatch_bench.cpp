@@ -7,20 +7,24 @@
 #include <cstdio>
 #include <vector>
 
+#include <sys/mman.h>
+
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
 #include "dynarmic/interface/halt_reason.h"
 
 namespace {
 
+// Guest memory as in the game: the whole 4 GiB reserved, so fastmem works.
 class Env : public Dynarmic::A32::UserCallbacks {
 public:
-    std::vector<std::uint32_t> mem = std::vector<std::uint32_t>(0x1000, 0);
+    std::uint32_t* mem = static_cast<std::uint32_t*>(
+        mmap(nullptr, std::size_t{1} << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
     Dynarmic::A32::Jit* jit = nullptr;
 
     std::uint8_t MemoryRead8(Dynarmic::A32::VAddr) override { return 0; }
     std::uint16_t MemoryRead16(Dynarmic::A32::VAddr) override { return 0; }
-    std::uint32_t MemoryRead32(Dynarmic::A32::VAddr addr) override { return mem[(addr / 4) % mem.size()]; }
+    std::uint32_t MemoryRead32(Dynarmic::A32::VAddr addr) override { return mem[addr / 4]; }
     std::uint64_t MemoryRead64(Dynarmic::A32::VAddr) override { return 0; }
     void MemoryWrite8(Dynarmic::A32::VAddr, std::uint8_t) override {}
     void MemoryWrite16(Dynarmic::A32::VAddr, std::uint16_t) override {}
@@ -79,7 +83,22 @@ int main(int argc, char**) {
     for (std::size_t i = 0; i < indirect.size(); i++) {
         env.mem[0x3000 / 4 + i] = indirect[i];
     }
+    const std::array<std::uint32_t, 9> fp_memory = {
+        0xEE300A20u,  // loop: vadd.f32 s0, s0, s1
+        0xE5932000u,  // ldr r2, [r3]
+        0xEE211A20u,  // vmul.f32 s2, s2, s1
+        0xE5832004u,  // str r2, [r3, #4]
+        0xEE300A01u,  // vadd.f32 s0, s0, s2
+        0xE5932008u,  // ldr r2, [r3, #8]
+        0xE2500001u,  // subs r0, r0, #1
+        0x1AFFFFF7u,  // bne loop
+        0xEF000000u,  // svc #0
+    };
+    for (std::size_t i = 0; i < fp_memory.size(); i++) {
+        env.mem[0x4000 / 4 + i] = fp_memory[i];
+    }
     Dynarmic::A32::UserConfig cfg;
+    cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(env.mem);
     cfg.callbacks = &env;
     cfg.enable_cycle_counting = false;
     if (argc > 1) {  // any argument: the C++ dispatcher only
@@ -89,6 +108,8 @@ int main(int argc, char**) {
     Dynarmic::A32::Jit jit(cfg, first.GetSharedCodeCache());
     Run(env, jit, 0x1000, 1000);  // compile
     Run(env, jit, 0x2000, 1000);
+    jit.Regs()[3] = 0x8000;
+    Run(env, jit, 0x4000, 1000);
     jit.Regs()[1] = 0x3010;
     Run(env, jit, 0x3000, 1000);
     for (int round = 0; round < 3; round++) {
@@ -96,8 +117,10 @@ int main(int argc, char**) {
         const double call = Run(env, jit, 0x2000, 40000000u);
         jit.Regs()[1] = 0x3010;
         const double ind = Run(env, jit, 0x3000, 4000000u);
-        std::printf("loop %.2f ns, call and return +%.2f ns, indirect call and return +%.2f ns\n", base,
-                    call - base, ind - base);
+        jit.Regs()[3] = 0x8000;
+        const double fp = Run(env, jit, 0x4000, 100000000u);
+        std::printf("loop %.2f ns, call and return +%.2f ns, indirect call and return +%.2f ns, "
+                    "fp and memory loop %.2f ns\n", base, call - base, ind - base, fp);
     }
     return 0;
 }

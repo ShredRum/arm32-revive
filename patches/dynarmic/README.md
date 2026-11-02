@@ -117,3 +117,12 @@ block remembers a hash of its guest words (read through `MemoryReadCode`, as a
 block may end at an unreadable word); `Jit::DiagChangedCode` reports blocks
 still in the cache whose words changed with no invalidation on two calls in a
 row. The host's watchdog calls it every 10 s and prints `[codewatch]` (R-007).
+
+## 0009-fastmem-fpsr-on-fallback.patch
+
+A fastmem load or store spilled the FPSR (MRS, ORR, STR) before every direct
+access, though only the callback branch needs it (C++ there may change the
+host FPSR). The spill now happens on that branch, with a reload after the
+callback when the direct branch counts on a loaded FPSR. dispatch_bench, FP and
+memory loop: 25.8 ns -> 9.9 ns. fmt_test checks a guest divide-by-zero flag
+across a faulting access and that the callback's own flags stay out (arm64).

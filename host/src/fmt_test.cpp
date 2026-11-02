@@ -2448,6 +2448,69 @@ int main() {
     }
 #endif
 
+#if defined(__aarch64__)
+    // --- FPSR across a fastmem fallback: a guest division by zero survives a
+    //     memory access that takes the callback, and the host's own FP flags
+    //     from inside that callback do not reach the guest. arm64 only: the
+    //     x64 backend (PC builds) lets the callback's inexact flag through.
+    {
+        struct Env : Dynarmic::A32::UserCallbacks {
+            std::uint8_t* base = nullptr;
+            Dynarmic::A32::Jit* jit = nullptr;
+            std::uint8_t MemoryRead8(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint16_t MemoryRead16(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint32_t MemoryRead32(Dynarmic::A32::VAddr v) override {
+                if (v < 0x10000) {
+                    std::uint32_t w = 0;
+                    std::memcpy(&w, base + v, 4);
+                    return w;
+                }
+                volatile float a = 1.0f, b = 3.0f;
+                volatile float c = a / b;  // host FPSR: inexact
+                (void)c;
+                return 7;
+            }
+            std::uint64_t MemoryRead64(Dynarmic::A32::VAddr) override { return 0; }
+            void MemoryWrite8(Dynarmic::A32::VAddr, std::uint8_t) override {}
+            void MemoryWrite16(Dynarmic::A32::VAddr, std::uint16_t) override {}
+            void MemoryWrite32(Dynarmic::A32::VAddr, std::uint32_t) override {}
+            void MemoryWrite64(Dynarmic::A32::VAddr, std::uint64_t) override {}
+            void InterpreterFallback(Dynarmic::A32::VAddr, std::size_t) override {}
+            void CallSVC(std::uint32_t) override { jit->HaltExecution(Dynarmic::HaltReason::UserDefined1); }
+            void ExceptionRaised(Dynarmic::A32::VAddr, Dynarmic::A32::Exception) override {
+                jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            void AddTicks(std::uint64_t) override {}
+            std::uint64_t GetTicksRemaining() override { return 1000000; }
+        } env;
+        // 4 GiB reserved, only the code page accessible: the load faults.
+        void* m = mmap(nullptr, std::size_t{1} << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        env.base = static_cast<std::uint8_t*>(m);
+        mprotect(env.base, 0x10000, PROT_READ | PROT_WRITE);
+        const std::uint32_t prog[] = {0xee800a81,   // vdiv.f32 s0, s1, s2
+                                      0xe5932000,   // ldr r2, [r3]
+                                      0xeef14a10,   // vmrs r4, fpscr
+                                      0xef000000};  // svc #0
+        std::memcpy(env.base + 0x1000, prog, sizeof(prog));
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &env;
+        cfg.enable_cycle_counting = false;
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(env.base);
+        Dynarmic::A32::Jit jit(cfg);
+        env.jit = &jit;
+        jit.ExtRegs()[1] = 0x3f800000;  // s1 = 1.0f
+        jit.ExtRegs()[2] = 0;           // s2 = 0.0f
+        jit.Regs()[3] = 0x80000;
+        jit.Regs()[15] = 0x1000;
+        jit.Run();
+        Expect("FPSR across a fastmem fallback: r2, divide-by-zero, inexact",
+               std::to_string(jit.Regs()[2]) + "," + std::to_string((jit.Regs()[4] >> 1) & 1) + "," +
+                   std::to_string((jit.Regs()[4] >> 4) & 1),
+               "7,1,0");
+        munmap(m, std::size_t{1} << 32);
+    }
+#endif
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.
