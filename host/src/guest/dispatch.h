@@ -163,10 +163,6 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 // overran a 24 B block into the next chunk head), so it stays on regardless.
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
 
-// jni_strings_ text: its UTF-16 form, and where a unit of it starts in bytes.
-std::u16string Utf16OfMutf8(const std::string& s);
-std::size_t Utf8OffsetOfUnit(const std::string& s, std::size_t unit);
-
 class Runtime;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
 struct JitDrop {
@@ -510,12 +506,25 @@ public:
     // one made during a Java -> native call is that call's local reference
     // and goes when the call returns (or at DeleteLocalRef / PopLocalFrame);
     // a `permanent` one (the guest's NewGlobalRef, the host's own) lives
-    // until DeleteGlobalRef. A handle made outside any call (a guest worker
-    // thread) lives until DeleteLocalRef, as on a native-attached thread.
+    // until DeleteGlobalRef. One made on a guest worker thread outside any call
+    // lives until DeleteLocalRef, DetachCurrentThread or the thread's end, as
+    // on a native-attached thread.
     std::uint32_t WrapObject(void* real, bool permanent = false);
     void* RealString(std::uint32_t handle);
-    void* JavaObjectTemp(std::uint32_t handle, std::vector<void*>& made);
-    bool RealStringText(std::uint32_t handle, std::string& out);
+#ifdef __ANDROID__
+    void* StringMonitorObject(std::uint32_t handle);
+    // Scope of the Java copies JavaObjectFor makes of guest strings: every
+    // caller has one (CallJni does); they are deleted when it ends.
+    class JavaCopies {
+    public:
+        JavaCopies();
+        ~JavaCopies();
+
+    private:
+        std::size_t from_;
+    };
+#endif
+    bool JniStringText(std::uint32_t handle, std::string& out);
     // The local frame of one Java -> native call (the host pushes one per
     // call it runs, the guest with PushLocalFrame).
     static void PushLocalFrame();
@@ -544,6 +553,7 @@ public:
     std::uint32_t JniArrayElemSize(std::uint32_t array_handle);
     std::unordered_map<std::uint32_t, void*> real_static_fields_;
     std::unordered_map<std::uint32_t, std::uint32_t> jni_char_copies_;  // guest copy -> 1
+    std::unordered_map<std::uint32_t, void*> jni_string_monitors_;  // see StringMonitorObject
     // Direct ByteBuffers (GetDirectBufferAddress): their memory is the
     // host's, outside the guest. Each gets a guest shadow of its capacity,
     // filled from the buffer when the guest asks for the address; whatever

@@ -2661,6 +2661,30 @@ int main() {
         abr::RuntimeTestAccess::JniRegion(rt, 221, h, 1, 2, kSp);
         Expect("GetStringUTFRegion counts units, copies bytes",
                std::string(rt.H<const char>(kBuf), 5), "\xD0\xAF\xE2\x82\xAC");
+        // Half a surrogate pair: U+1F600 = D83D DE00, three bytes each.
+        std::memset(rt.H<char>(kBuf), 0x55, 8);
+        abr::RuntimeTestAccess::JniRegion(rt, 221, h, 3, 1, kSp);
+        Expect("GetStringUTFRegion: first half of a pair",
+               std::string(rt.H<const char>(kBuf), 4), "\xED\xA0\xBD\x55");
+        abr::RuntimeTestAccess::JniRegion(rt, 221, h, 4, 2, kSp);
+        Expect("GetStringUTFRegion: second half of a pair, then z",
+               std::string(rt.H<const char>(kBuf), 4), "\xED\xB8\x80z");
+        // Broken and overlong text: one count for length, chars and region.
+        const std::uint32_t bad = rt.JniNewString("caf\xE9 x\xF0\x8F\xBF\xBF!");
+        const std::uint32_t ba[4] = {0, bad, 0, 0};
+        Expect("GetStringLength of broken text: 6 bytes + 1 overlong + 1",
+               std::to_string(abr::RuntimeTestAccess::Jni(rt, 164, ba)), "8");
+        const std::uint32_t chars = abr::RuntimeTestAccess::Jni(rt, 165, ba);
+        Expect("GetStringChars gives what GetStringLength said",
+               std::to_string(*rt.H<std::uint16_t>(chars + 3 * 2)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(chars + 6 * 2)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(chars + 7 * 2)) + "," +
+                   std::to_string(*rt.H<std::uint16_t>(chars + 8 * 2)),
+               "233,65535,33,0");
+        std::memset(rt.H<char>(kBuf), 0, 8);
+        abr::RuntimeTestAccess::JniRegion(rt, 221, bad, 6, 2, kSp);
+        Expect("GetStringUTFRegion counts an overlong character as one unit",
+               std::string(rt.H<const char>(kBuf), 6), std::string("\xF0\x8F\xBF\xBF!\0", 6));
         abr::GuestCallbacks cb(&rt);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = &cb;

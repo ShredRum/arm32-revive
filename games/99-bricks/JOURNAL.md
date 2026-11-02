@@ -416,3 +416,35 @@ Open from 2026-11-02, in this order, all wanted, none dropped:
    kept for good (`[strings]` watches them), but "no measurable gain" above
    holds for memory only: a method called on a copy silently gets the mock.
 
+## 2026-11-02: review of 436a912..HEAD, all findings fixed
+
+Ten findings, none a high regression. All done in one change; item 3 above went
+with them (the owner: fix what only waits for its turn).
+
+- One decoder (`Utf8Char`) behind length, chars and region, so they agree on
+  broken and overlong text. `GetStringChars` decodes guest text itself instead of
+  asking ART, which counts broken bytes differently (one unit past the block).
+- `Mutf8Slice`: half a surrogate pair is 3 bytes, as ART writes it. Wrapped
+  strings go straight to `GetString(UTF)Region`, no round trip through UTF-8.
+- `GetStringLength` counts without building a string.
+- Unknown or non-String handle in `GetStringChars`: LOUD halt, not a silent 0.
+  `GetStringUTFChars`/`UTFLength` still trust a wrapped handle: a type check there
+  costs on the most used path for a guest bug that does not occur.
+- `Runtime::JavaCopies`: one scope in `CallJni` deletes the Java copies of guest
+  strings; `TempRefs` and `JavaObjectTemp` are gone. Costs a read of one
+  thread_local per JNI call, no JNI transition.
+- A guest worker has a base local frame, released at guest DetachCurrentThread
+  and at thread end: real handles no longer leak global refs when the guest
+  leaves them to detach. `[strings]` also prints wrapped objects, on a new peak.
+- Guest strings as objects: method receivers call the real String method,
+  GetObjectClass gives java/lang/String, IsSameObject uses real objects. Monitors
+  lock one kept Java object per string (`StringMonitorObject`), so Enter and Exit
+  pair. A line per kind the first time: none seen in the 99 Bricks gate.
+
+fmt_test ALL OK on PC and arm64; all six gates clean on build Nov 2 03:08:03,
+screenshots read. GetStringChars moved out of the Android block, so PC tests it.
+The frame and monitor paths have no JVM in tests: only the gates ran them, and
+no game is known to reach them.
+
+Open: by hand on this build (Rio, Space, Star Wars, Star Wars II, the phone).
+Then merge bricks. Item 3 above is done.

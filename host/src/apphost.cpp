@@ -504,13 +504,18 @@ void Watchdog() {
             }
         }
         {
-            // jni_strings_ is never freed: a line when it has grown.
+            // jni_strings_ is never freed, and handles held by real objects
+            // are global refs with a limit: a line when either has grown.
             static std::size_t last_strings = 0;
+            static long top_objects = 0;
             std::size_t n = 0, bytes = 0;
-            if (g_rt->JniStringStats(&n, &bytes) && n != last_strings) {
+            const long objects = g_rt->WrappedObjectCount();
+            if (g_rt->JniStringStats(&n, &bytes) && (n != last_strings || objects > top_objects)) {
                 last_strings = n;
-                Log("[strings] %zu jstrings kept, %zu bytes; %llu from Java method results", n, bytes,
-                    (unsigned long long)g_rt->jni_string_results_.load(std::memory_order_relaxed));
+                top_objects = std::max(top_objects, objects);
+                Log("[strings] %zu jstrings kept, %zu bytes; %llu from Java method results; %ld wrapped Java objects",
+                    n, bytes, (unsigned long long)g_rt->jni_string_results_.load(std::memory_order_relaxed),
+                    objects);
             }
         }
         const unsigned cn = g_rt->HeapCorruptionCount();
@@ -1006,6 +1011,7 @@ jlong WordReturn(JNIEnv* env, char ret, std::uint64_t r) {
         case 'J': return static_cast<jlong>(r);
         case 'L':
         case '[': {
+            abr::Runtime::JavaCopies copies;
             jobject o = static_cast<jobject>(g_rt->JavaObjectFor(r0));
             return reinterpret_cast<jlong>(o ? env->NewLocalRef(o) : nullptr);
         }
