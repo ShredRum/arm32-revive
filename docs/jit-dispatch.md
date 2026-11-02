@@ -91,6 +91,11 @@ Each measured with dispatch_bench on the sandbox; one gate of all six at the end
   are cheap here. Its test (a beq in a loop) stays.
 - wide vector transfers: taken (VLD1/VST1 part) as 0010. NEON loop 24.0 -> 23.0.
 - fpcr-cluster: taken as 0011. Four NEON ops 41.9 -> 19.8 ns.
+- relaxed-halt: taken as 0012 (link terminals only; CheckHalt keeps LDAR).
+  Branchy loop 2.50 -> 2.40 ns, call and return 2.88 -> 2.78 ns.
+- inline-dispatch: not done. FastDispatch already keeps 94-98 % of indirect
+  branches in generated code; nothing left to measure for it.
+Then one gate of all six for 0009-0012.
 
 ## R-007 (branch `r007`, 2026-11-03)
 

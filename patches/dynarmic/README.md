@@ -144,3 +144,12 @@ start and restores it once at its end; both ends answer the same adjacency
 question, so they agree. dispatch_bench, four NEON ops: 41.9 -> 19.8 ns.
 fmt_test checks that a VFP scalar op between them keeps the guest's mode (it
 fails if that op counts as neutral).
+
+## 0012-halt-poll-on-backward-links.patch
+
+A linked block polled the halt flag with LDAR at every link. Now only a link
+to the same or a lower guest PC polls it, with a plain LDR: every cycle of
+blocks contains such a link, so a spinning loop still stops (fmt_test halts
+one from another thread), and straight code soon reaches the dispatcher or an
+SVC, which check too. dispatch_bench: branchy loop 2.50 -> 2.40 ns, call and
+return 2.88 -> 2.78 ns.

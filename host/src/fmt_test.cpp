@@ -2594,6 +2594,26 @@ int main() {
                       jit.ExtRegs()[12], jit.ExtRegs()[13], jit.ExtRegs()[14], jit.ExtRegs()[15]);
         Expect("NEON flushes a denormal, VFP between keeps it, q3 = q2 + q1", lanes,
                "00000000,00000001,40400000 00000000 40800000 40a00000");
+        // A loop of a forward link and a backward one still sees a halt from
+        // another thread (only backward links poll the flag).
+        const std::uint32_t spin[] = {0xe2800001,   // loop: add r0, r0, #1
+                                      0xea000000,   // b next (forward link)
+                                      0x00000000,
+                                      0xe2811001,   // next: add r1, r1, #1
+                                      0xeafffffa};  // b loop (backward link)
+        std::memcpy(&env.mem[0x380 / 4], spin, sizeof(spin));
+        jit.Regs()[0] = 0;
+        jit.Regs()[1] = 0;
+        jit.Regs()[15] = 0x380;
+        std::thread stopper([&jit]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            jit.HaltExecution(Dynarmic::HaltReason::UserDefined3);
+        });
+        const Dynarmic::HaltReason why = jit.Run();
+        stopper.join();
+        jit.ClearHalt(Dynarmic::HaltReason::UserDefined3);
+        Expect("a spinning loop halts from another thread",
+               (why == Dynarmic::HaltReason::UserDefined3 && jit.Regs()[0] > 0 && jit.Regs()[1] > 0) ? "1" : "0", "1");
     }
 
     // --- VLD1/VST1 (one element per structure) move whole registers; the

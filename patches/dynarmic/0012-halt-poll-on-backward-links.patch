@@ -1,0 +1,21 @@
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -70,8 +70,16 @@
+             code.B(LE, fail);
+             EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
+         } else {
+-            code.LDAR(Wscratch0, Xhalt);
+-            code.CBNZ(Wscratch0, fail);
++            // Only a link to the same or a lower guest PC polls the halt flag:
++            // every cycle of blocks has such a link (some block start in it is
++            // not above the one before), so a halt is still seen in a loop,
++            // and straight-line code reaches the dispatcher or an SVC soon. A
++            // plain load is enough for a polled flag.
++            const bool forward = A32::LocationDescriptor{terminal.next}.PC() > A32::LocationDescriptor{ctx.block.Location()}.PC();
++            if (!forward) {
++                code.LDR(Wscratch0, Xhalt);
++                code.CBNZ(Wscratch0, fail);
++            }
+             EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
+         }
+     }
