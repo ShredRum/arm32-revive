@@ -446,5 +446,5 @@ screenshots read. GetStringChars moved out of the Android block, so PC tests it.
 The frame and monitor paths have no JVM in tests: only the gates ran them, and
 no game is known to reach them.
 
-Open: by hand on this build (Rio, Space, Star Wars, Star Wars II, the phone).
-Then merge bricks. Item 3 above is done.
+The owner played this build (2026-11-02): all works. bricks merged to master.
+Item 3 above is done.
