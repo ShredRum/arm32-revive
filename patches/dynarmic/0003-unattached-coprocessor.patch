@@ -1,0 +1,242 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -168,7 +168,7 @@
+ }
+ 
+ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
++    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.CoprocessorMask()});
+ 
+     Optimization::PolyfillPass(ir_block, {});
+     Optimization::NamingPass(ir_block);
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -217,7 +217,7 @@
+         }
+         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+ 
+-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
++        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.CoprocessorMask()});
+         Optimization::PolyfillPass(ir_block, polyfill_options);
+         Optimization::NamingPass(ir_block);
+         if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+--- a/src/dynarmic/frontend/A32/translate/a32_translate.h
++++ b/src/dynarmic/frontend/A32/translate/a32_translate.h
+@@ -29,6 +29,11 @@
+     /// If this is false, we treat the instruction as a NOP.
+     /// If this is true, we emit an ExceptionRaised instruction.
+     bool hook_hint_instructions = true;
++
++    /// Bit n: coprocessor n is attached. An instruction for an unattached one
++    /// is UNDEFINED: it raises the exception instead of reaching the emitter,
++    /// which cannot name the instruction and would terminate the process.
++    std::uint16_t coprocessors = 0xFFFF;
+ };
+ 
+ /**
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -39,6 +39,25 @@
+     bool InterpretThisInstruction();
+     bool UnpredictableInstruction();
+     bool UndefinedInstruction();
++    bool CoprocessorAttached(size_t coproc_no) const { return (options.coprocessors >> coproc_no) & 1; }
++    // TPIDRURO is answered from the Jit's state, with no coprocessor attached.
++    bool CoprocessorAttachedForRead(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) const {
++        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3);
++    }
++    // MCR p15 barriers (deprecated but valid on ARMv7): no coprocessor either.
++    enum class Cp15Barrier { None, Dmb, Dsb, Isb };
++    static Cp15Barrier Cp15BarrierOf(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) {
++        if (coproc_no != 15 || two || opc1 != 0 || CRn != CoprocReg::C7) {
++            return Cp15Barrier::None;
++        }
++        if (CRm == CoprocReg::C10 && opc2 == 5) {
++            return Cp15Barrier::Dmb;
++        }
++        if (CRm == CoprocReg::C10 && opc2 == 4) {
++            return Cp15Barrier::Dsb;
++        }
++        return CRm == CoprocReg::C5 && opc2 == 4 ? Cp15Barrier::Isb : Cp15Barrier::None;
++    }
+     bool DecodeError();
+     bool RaiseException(Exception exception);
+ 
+--- a/src/dynarmic/frontend/A32/translate/impl/coprocessor.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/coprocessor.cpp
+@@ -16,6 +16,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         ir.CoprocInternalOperation(coproc_no, two, opc1, CRd, CRn, CRm, opc2);
+     }
+     return true;
+@@ -36,6 +39,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         const u32 imm32 = imm8.ZeroExtend() << 2;
+         const bool index = p;
+         const bool add = u;
+@@ -65,6 +71,19 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        switch (Cp15BarrierOf(coproc_no, two, opc1, CRn, CRm, opc2)) {
++        case Cp15Barrier::Dmb:
++            return arm_DMB(Imm<4>{0xF});
++        case Cp15Barrier::Dsb:
++            return arm_DSB(Imm<4>{0xF});
++        case Cp15Barrier::Isb:
++            return arm_ISB(Imm<4>{0xF});
++        case Cp15Barrier::None:
++            break;
++        }
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         ir.CoprocSendOneWord(coproc_no, two, opc1, CRn, CRm, opc2, ir.GetRegister(t));
+     }
+     return true;
+@@ -83,6 +102,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         ir.CoprocSendTwoWords(coproc_no, two, opc, CRm, ir.GetRegister(t), ir.GetRegister(t2));
+     }
+     return true;
+@@ -97,6 +119,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttachedForRead(coproc_no, two, opc1, CRn, CRm, opc2)) {
++            return UndefinedInstruction();
++        }
+         const auto word = ir.CoprocGetOneWord(coproc_no, two, opc1, CRn, CRm, opc2);
+         if (t != Reg::PC) {
+             ir.SetRegister(t, word);
+@@ -121,6 +146,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
+         ir.SetRegister(t, ir.LeastSignificantWord(two_words));
+         ir.SetRegister(t2, ir.MostSignificantWord(two_words).result);
+@@ -147,6 +175,9 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
++        if (!CoprocessorAttached(coproc_no)) {
++            return UndefinedInstruction();
++        }
+         const u32 imm32 = imm8.ZeroExtend() << 2;
+         const bool index = p;
+         const bool add = u;
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_coprocessor.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_coprocessor.cpp
+@@ -8,11 +8,17 @@
+ namespace Dynarmic::A32 {
+ 
+ bool TranslatorVisitor::thumb32_MCRR(bool two, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     ir.CoprocSendTwoWords(coproc_no, two, opc, CRm, ir.GetRegister(t), ir.GetRegister(t2));
+     return true;
+ }
+ 
+ bool TranslatorVisitor::thumb32_MRRC(bool two, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
+     ir.SetRegister(t, ir.LeastSignificantWord(two_words));
+     ir.SetRegister(t2, ir.MostSignificantWord(two_words).result);
+@@ -20,6 +26,9 @@
+ }
+ 
+ bool TranslatorVisitor::thumb32_STC(bool two, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     const u32 imm32 = imm8.ZeroExtend() << 2;
+     const bool index = p;
+     const bool add = u;
+@@ -36,6 +45,9 @@
+ }
+ 
+ bool TranslatorVisitor::thumb32_LDC(bool two, bool p, bool u, bool d, bool w, Reg n, CoprocReg CRd, size_t coproc_no, Imm<8> imm8) {
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     const u32 imm32 = imm8.ZeroExtend() << 2;
+     const bool index = p;
+     const bool add = u;
+@@ -52,16 +64,35 @@
+ }
+ 
+ bool TranslatorVisitor::thumb32_CDP(bool two, size_t opc1, CoprocReg CRn, CoprocReg CRd, size_t coproc_no, size_t opc2, CoprocReg CRm) {
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     ir.CoprocInternalOperation(coproc_no, two, opc1, CRd, CRn, CRm, opc2);
+     return true;
+ }
+ 
+ bool TranslatorVisitor::thumb32_MCR(bool two, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
++    switch (Cp15BarrierOf(coproc_no, two, opc1, CRn, CRm, opc2)) {
++    case Cp15Barrier::Dmb:
++        return thumb32_DMB(Imm<4>{0xF});
++    case Cp15Barrier::Dsb:
++        return thumb32_DSB(Imm<4>{0xF});
++    case Cp15Barrier::Isb:
++        return thumb32_ISB(Imm<4>{0xF});
++    case Cp15Barrier::None:
++        break;
++    }
++    if (!CoprocessorAttached(coproc_no)) {
++        return UndefinedInstruction();
++    }
+     ir.CoprocSendOneWord(coproc_no, two, opc1, CRn, CRm, opc2, ir.GetRegister(t));
+     return true;
+ }
+ 
+ bool TranslatorVisitor::thumb32_MRC(bool two, size_t opc1, CoprocReg CRn, Reg t, size_t coproc_no, size_t opc2, CoprocReg CRm) {
++    if (!CoprocessorAttachedForRead(coproc_no, two, opc1, CRn, CRm, opc2)) {
++        return UndefinedInstruction();
++    }
+     const auto word = ir.CoprocGetOneWord(coproc_no, two, opc1, CRn, CRm, opc2);
+     if (t != Reg::PC) {
+         ir.SetRegister(t, word);
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -201,6 +201,17 @@
+     // Coprocessors
+     std::array<std::shared_ptr<Coprocessor>, 16> coprocessors{};
+ 
++    /// Bit n: coprocessors[n] is set (TranslationOptions::coprocessors).
++    std::uint16_t CoprocessorMask() const {
++        std::uint16_t mask = 0;
++        for (std::size_t i = 0; i < coprocessors.size(); i++) {
++            if (coprocessors[i]) {
++                mask |= static_cast<std::uint16_t>(1u << i);
++            }
++        }
++        return mask;
++    }
++
+     /// When set to true, UserCallbacks::InstructionSynchronizationBarrierRaised will be
+     /// called when an ISB instruction is executed.
+     /// When set to false, ISB will be treated as a NOP instruction.

@@ -63,3 +63,13 @@ whichever thread compiled the block. Used by the `pthread_getspecific` thunk
 itself (raw scan of all executable segments, ARM and Thumb encodings).
 Refresh this patch by diffing against the tree with 0001 applied:
 `git diff` alone shows both patches together.
+
+## 0003-unattached-coprocessor.patch
+
+An instruction for a coprocessor that is not attached is UNDEFINED: the
+frontend raises `Exception::UndefinedInstruction` at that instruction (the
+guest halts cleanly, LOUD). Upstream reaches `ASSERT_FALSE` in the emitter and
+terminates the process while compiling; a guest branch into data decodes such
+words often. Exceptions: the TPIDRURO read (0002) and the three `mcr p15`
+barriers of ARMv7 (deprecated but valid), which become DMB, DSB and ISB.
+`TranslationOptions::coprocessors` carries the mask from `UserConfig`.

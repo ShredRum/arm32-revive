@@ -6,7 +6,7 @@ small-context models and contains stale and wrong claims. Use it only to learn
 *why* something was tried; never cite it as evidence. When a doc and the running
 build disagree, the build wins.
 
-Active work: the capital review — **read `REVIEW.md` first** (findings register,
+Active work: JIT dispatch, `docs/jit-dispatch.md`. The capital review — **read `REVIEW.md` first** (findings register,
 regression gate, area status).
 
 ## 1. What this is

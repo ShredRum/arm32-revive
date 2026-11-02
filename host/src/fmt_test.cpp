@@ -2193,6 +2193,43 @@ int main() {
         rt.ReleaseCpuId(id);
     }
 
+    // --- coprocessors: none is attached, so an MCR for one is UNDEFINED and
+    //     halts the guest (it used to terminate the process while compiling);
+    //     the MCR p15 barriers are barriers. ARM, then Thumb.
+    {
+        const std::uint32_t kPage = 0x61010000u;
+        abr::RuntimeTestAccess::MapRwx(rt, kPage, 0x1000);
+        // dmb, dsb, isb as mcr p15; mov r0,#7; mcr p3,0,r0,c1,c0,0; mov r1,#9
+        const std::uint32_t arm[] = {0xee070fba, 0xee070f9a, 0xee070f95,
+                                     0xe3a00007, 0xee010310, 0xe3a01009};
+        std::memcpy(rt.H(kPage), arm, sizeof(arm));
+        // mcr p15 dmb; movs r0,#7; mcr p3,0,r0,c1,c0,0; movs r1,#9
+        const std::uint16_t thumb[] = {0xee07, 0x0fba, 0x2007, 0xee01, 0x0310, 0x2109};
+        std::memcpy(rt.H(kPage + 0x100), thumb, sizeof(thumb));
+        abr::GuestCallbacks cb4(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb4;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        Dynarmic::A32::Jit jit(cfg);
+        rt.ThreadEnter(&jit, 702);
+        const auto run = [&](std::uint32_t pc, std::uint32_t cpsr) {
+            jit.ClearHalt(Dynarmic::HaltReason::UserDefined2);
+            jit.Regs().fill(0);
+            jit.Regs()[15] = pc;
+            jit.SetCpsr(cpsr);
+            jit.Run();
+            return std::to_string(jit.Regs()[0]) + "," + std::to_string(jit.Regs()[1]) + "," +
+                   (abr::RuntimeTestAccess::TakeStopped(rt) ? "stopped" : "ran on");
+        };
+        Expect("ARM: barriers run, an unattached coprocessor halts", run(kPage, 0x10), "7,0,stopped");
+        Expect("Thumb: the same", run(kPage + 0x100, 0x30), "7,0,stopped");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReleaseCpuId(id);
+    }
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.
