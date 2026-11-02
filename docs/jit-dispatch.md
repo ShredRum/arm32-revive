@@ -44,6 +44,23 @@ cache (ideas for heavy games). Not taken: the fully mapped 4 GB memory model.
 loop iteration 2.1 ns; call and return +3.0 ns; indirect call and return +17.5 ns.
 So one trip through the C++ dispatcher costs about 14.5 ns.
 
+Games, diag build, sandbox, 2026-11-02 (menus and first screens, blind taps):
+Rio 0.94 M dispatches/s, memo misses ~0; Seasons 6.7 M/s, ~0; 99 Bricks 1.2 M/s,
+all memo misses because the memo is off with private caches (jitshare=off), so
+each one takes the shared lock too. At 14.5 ns: Rio ~1.4 %, Seasons ~10 % of one
+core, more on heavier code. An estimate, not a profile.
+
+## Design decided
+
+- Table lives with the Jit (pointer in A32JitState), reached from Xstate, so
+  shared generated code stays per thread. 4096 entries of 32 bytes, calloc'ed.
+- Entry = descriptor, code pointer, generation. The stub compares descriptor AND
+  generation: an entry from before an invalidation simply misses. No clearing,
+  so 99 Bricks' 15000 flushes a frame cost nothing here.
+- Only the C++ dispatcher fills it, from the primary cache. A private overflow
+  cache starts at a far generation, so its stub never matches primary entries.
+- Hint terminals keep jumping to the one stub; no per-site inline cache.
+
 ## R-007 lead (not proven)
 
 Each thread's RSB (on its host stack) holds code pointers. It is reset only on

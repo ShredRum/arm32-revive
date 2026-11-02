@@ -73,7 +73,6 @@
 @@ -130,4 +130,11 @@
  };
  
- }  // namespace A32
 +#ifdef DYNARMIC_DISPATCH_COUNTERS
 +/// Diagnostic builds, arm64: guest branches that left generated code to look up
 +/// their target, and how many of those also missed the thread's memo.
@@ -81,4 +80,5 @@
 +std::uint64_t DispatchMemoMissCount();
 +#endif
 +
+ }  // namespace A32
  }  // namespace Dynarmic
