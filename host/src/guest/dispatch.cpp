@@ -4149,7 +4149,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 // What a system library exports and the host serves: a
                 // trampoline made now.
                 const std::string sym = GuestStr(a1);
-                if (NdkServes(sym)) {
+                // EGL: one host handler answers every egl* name (the ones it
+                // does not offer return 0, LOUD); SDL loads EGL this way.
+                if (NdkServes(sym) || sym.compare(0, 3, "egl") == 0) {
                     v = RuntimeImport(sym);
                 }
             }
@@ -5851,6 +5853,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[files][t%u] pipe() -> [%u %u]\n", GuestTid(), g0, g1);
             }
             Ret(regs, 0);
+            return;
+        }
+        if (n == "pread" || n == "pwrite") {
+            // (fd, buf, count, off_t offset): bionic arm32 off_t is 32-bit
+            // and signed (the 64-bit forms are pread64/pwrite64).
+            const int hfd = host_fd_of(a0);
+            if (hfd < 0) {
+                set_guest_errno(EBADF);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (static_cast<std::int32_t>(a3) < 0) {
+                set_guest_errno(EINVAL);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            if (!CheckRange(a1, a2, n == "pread")) {
+                set_guest_errno(EFAULT);
+                Ret(regs, 0xFFFFFFFFu);
+                return;
+            }
+            const ssize_t r = n == "pread" ? ::pread(hfd, H(a1), a2, static_cast<off_t>(a3))
+                                           : ::pwrite(hfd, H(a1), a2, static_cast<off_t>(a3));
+            if (r < 0) {
+                set_guest_errno(errno);
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
         if (n == "read" || n == "write") {
@@ -11484,6 +11513,89 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
     if (n == "eglSwapBuffers") {
         egl_swaps_.fetch_add(1, std::memory_order_relaxed);
         Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
+        return true;
+    }
+    if (n == "eglGetConfigs") {
+        // (dpy, EGLConfig* configs, config_size, EGLint* num)
+        const EGLint size = static_cast<EGLint>(a2);
+        if (a1 && (size < 0 || size > 4096 || !CheckRange(a1, static_cast<std::uint32_t>(size) * 4u, true))) {
+            return bad("eglGetConfigs configs");
+        }
+        std::vector<EGLConfig> cfg(a1 && size > 0 ? static_cast<std::size_t>(size) : 0);
+        EGLint num = 0;
+        const EGLBoolean r = ::eglGetConfigs(dpy(a0), a1 ? cfg.data() : nullptr, a1 ? size : 0, &num);
+        if (r && a1) {
+            for (EGLint i = 0; i < num && i < size; i++) {
+                const std::uint32_t h = PtrHandle(cfg[static_cast<std::size_t>(i)]);
+                std::memcpy(H(a1 + static_cast<std::uint32_t>(i) * 4u), &h, 4);
+            }
+        }
+        if (!out32(a3, static_cast<std::uint32_t>(num))) {
+            return bad("eglGetConfigs num");
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglGetCurrentDisplay") {
+        Ret(regs, PtrHandle(::eglGetCurrentDisplay()));
+        return true;
+    }
+    if (n == "eglGetCurrentContext") {
+        Ret(regs, PtrHandle(::eglGetCurrentContext()));
+        return true;
+    }
+    if (n == "eglGetCurrentSurface") {
+        Ret(regs, PtrHandle(::eglGetCurrentSurface(static_cast<EGLint>(a0))));
+        return true;
+    }
+    if (n == "eglQuerySurface" || n == "eglQueryContext") {
+        // (dpy, surface | context, attribute, EGLint* value)
+        EGLint v = 0;
+        const EGLBoolean r =
+            n == "eglQuerySurface"
+                ? ::eglQuerySurface(dpy(a0), static_cast<EGLSurface>(PtrOf(a1)), static_cast<EGLint>(a2), &v)
+                : ::eglQueryContext(dpy(a0), static_cast<EGLContext>(PtrOf(a1)), static_cast<EGLint>(a2), &v);
+        if (!out32(a3, static_cast<std::uint32_t>(v))) {
+            return bad(n.c_str());
+        }
+        Ret(regs, r);
+        return true;
+    }
+    if (n == "eglSwapInterval") {
+        Ret(regs, ::eglSwapInterval(dpy(a0), static_cast<EGLint>(a1)));
+        return true;
+    }
+    if (n == "eglWaitGL" || n == "eglWaitNative" || n == "eglReleaseThread") {
+        Ret(regs, n == "eglWaitGL" ? ::eglWaitGL() : n == "eglWaitNative" ? ::eglWaitNative(static_cast<EGLint>(a0))
+                                                                         : ::eglReleaseThread());
+        return true;
+    }
+    if (n == "eglQueryString") {
+        // (dpy, name): one stable guest copy per name, as the driver's
+        // strings do not change for a display.
+        static std::map<std::uint32_t, std::uint32_t> copies;
+        const char* str = ::eglQueryString(dpy(a0), static_cast<EGLint>(a1));
+        std::uint32_t out = 0;
+        if (str) {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto it = copies.find(a1);
+            if (it == copies.end()) {
+                const std::uint32_t len = static_cast<std::uint32_t>(std::strlen(str)) + 1;
+                const std::uint32_t g = GuestMalloc(len);
+                if (g) {
+                    std::memcpy(H(g), str, len);
+                    it = copies.emplace(a1, g).first;
+                }
+            }
+            out = it != copies.end() ? it->second : 0;
+        }
+        Ret(regs, out);
+        return true;
+    }
+    if (n == "eglBindAPI") {
+        // (api): the host's contexts are OpenGL ES ones; any other API fails
+        // as on a device without it (EGL_OPENGL_ES_API = 0x30A0).
+        Ret(regs, a0 == 0x30A0 ? 1u : 0u);
         return true;
     }
     if (n == "eglGetProcAddress") {

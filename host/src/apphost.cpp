@@ -948,6 +948,10 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
 }
 
 // A generated Java_* forwarder: the guest export of the same name.
+// Every guest library Java loads (System.loadLibrary), in that order; empty
+// when only the primary is (guest.libs lines marked "java").
+std::vector<int> g_java_libs;
+
 std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* thiz, va_list ap) {
     static std::unordered_map<std::string, std::uint32_t> vacache;
     std::uint32_t va = 0;
@@ -958,13 +962,33 @@ std::uint64_t AppHost_CallImpl(const char* name, const char* sig, void* thiz, va
         if (it != vacache.end()) {
             va = it->second;
         } else {
-            const auto jt = g_mod->defined.find(name);
-            if (jt == g_mod->defined.end() || (jt->second & 1u)) {
-                // Thumb entries not expected (all 63 ARM per inventory); log loudly.
-                Log("no guest VA for %s", name);
+            std::uint32_t at = 0;
+            bool found = false;
+            if (const auto jt = g_mod->defined.find(name); jt != g_mod->defined.end()) {
+                at = jt->second;
+                found = true;
+            }
+            // A native of another library Java loads (SDL's in libSDL2).
+            for (std::size_t k = 0; !found && k < g_java_libs.size(); k++) {
+                const auto& defs = g_mod->lib_defined[static_cast<std::size_t>(g_java_libs[k])];
+                if (const auto jt = defs.find(name); jt != defs.end()) {
+                    at = jt->second;
+                    found = true;
+                }
+            }
+            // A Thumb entry keeps its low bit: CallGuest switches the mode.
+            if (!found) {
+                std::string where;
+                for (std::size_t k = 0; k < g_mod->lib_defined.size(); k++) {
+                    if (g_mod->lib_defined[k].count(name)) {
+                        where += " lib#" + std::to_string(k);
+                    }
+                }
+                Log("no guest VA for %s (merged %zu names, java libs %zu, in:%s)", name, g_mod->defined.size(),
+                    g_java_libs.size(), where.empty() ? " none" : where.c_str());
                 return 0;
             }
-            va = jt->second;
+            va = at;
             vacache[name] = va;
         }
     }
@@ -1306,9 +1330,6 @@ static bool DiagBootWanted(const std::string& files_dir) {
 
 namespace {
 int g_primary = 0;  // the guest library Java loads (index in the module)
-// Every guest library Java loads (System.loadLibrary), in that order; empty
-// when only the primary is (guest.libs lines marked "java").
-std::vector<int> g_java_libs;
 }  // namespace
 
 // Loads and starts the guest once, from whichever entry Android uses first:

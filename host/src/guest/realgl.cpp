@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -277,6 +278,51 @@ static GLuint BoundBuffer(GLenum binding) {
     return static_cast<GLuint>(v);
 }
 
+// The driver's extensions a GLES2 guest may use through what the host offers:
+// only those with no entry points of their own (formats, shader and texture
+// features). An extension with functions is left out, since eglGetProcAddress
+// offers none, and a guest that saw it would call NULL.
+static const char* Gles2Extensions(const char* driver) {
+    static const std::set<std::string> kNoEntryPoints = {
+        "GL_OES_compressed_ETC1_RGB8_texture", "GL_OES_compressed_ETC2_RGB8_texture",
+        "GL_OES_compressed_ETC2_RGBA8_texture", "GL_OES_compressed_ETC2_sRGB8_texture",
+        "GL_OES_compressed_ETC2_sRGB8_alpha8_texture", "GL_OES_compressed_ETC2_punchthroughA_RGBA8_texture",
+        "GL_OES_compressed_ETC2_punchthroughA_sRGB8_alpha_texture", "GL_OES_compressed_EAC_R11_unsigned_texture",
+        "GL_OES_compressed_EAC_R11_signed_texture", "GL_OES_compressed_EAC_RG11_unsigned_texture",
+        "GL_OES_compressed_EAC_RG11_signed_texture", "GL_KHR_texture_compression_astc_ldr",
+        "GL_EXT_texture_compression_dxt1", "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_compression_s3tc_srgb",
+        "GL_OES_depth_texture", "GL_OES_depth24", "GL_OES_depth32", "GL_OES_packed_depth_stencil",
+        "GL_OES_stencil8", "GL_OES_rgb8_rgba8", "GL_ARM_rgba8", "GL_OES_standard_derivatives",
+        "GL_OES_texture_float", "GL_OES_texture_float_linear", "GL_OES_texture_half_float",
+        "GL_OES_texture_half_float_linear", "GL_OES_element_index_uint", "GL_OES_texture_npot",
+        "GL_OES_vertex_half_float", "GL_OES_fragment_precision_high", "GL_EXT_texture_filter_anisotropic",
+        "GL_EXT_texture_format_BGRA8888", "GL_EXT_read_format_bgra", "GL_EXT_texture_rg", "GL_EXT_sRGB",
+        "GL_EXT_color_buffer_half_float", "GL_EXT_color_buffer_float", "GL_EXT_shadow_samplers",
+        "GL_EXT_frag_depth", "GL_EXT_shader_texture_lod", "GL_EXT_shader_framebuffer_fetch",
+        "GL_EXT_blend_minmax", "GL_EXT_texture_type_2_10_10_10_REV", "GL_EXT_texture_sRGB_decode"};
+    static std::mutex mu;
+    static std::string kept;
+    std::lock_guard<std::mutex> l(mu);
+    if (kept.empty() && driver) {
+        std::string word;
+        for (const char* p = driver;; p++) {
+            if (*p == ' ' || *p == '\0') {
+                if (!word.empty() && kNoEntryPoints.count(word)) {
+                    kept += (kept.empty() ? "" : " ") + word;
+                }
+                word.clear();
+                if (*p == '\0') {
+                    break;
+                }
+            } else {
+                word += *p;
+            }
+        }
+        std::printf("[realgl] GL_EXTENSIONS for the guest: %s\n", kept.c_str());
+    }
+    return kept.c_str();
+}
+
 bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std::uint32_t a1,
                     std::uint32_t a2, std::uint32_t a3) {
     if (!Ensure()) {
@@ -335,12 +381,14 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glClearDepthf" || n == "glPolygonOffset") {
+    if (n == "glClearDepthf" || n == "glPolygonOffset" || n == "glDepthRangef") {
         float f0 = 0, f1 = 0;
         std::memcpy(&f0, &a0, 4);
         std::memcpy(&f1, &a1, 4);
         if (n == "glClearDepthf") {
             glClearDepthf(f0);
+        } else if (n == "glDepthRangef") {
+            glDepthRangef(f0, f1);
         } else {
             glPolygonOffset(f0, f1);
         }
@@ -1149,6 +1197,13 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (a0 == GL_RENDERER) {
             const char* e = std::getenv("HARNESS_GLRENDERER");
             s = e ? e : (const char*)glGetString(GL_RENDERER);
+        } else if (a0 == GL_VERSION || a0 == GL_SHADING_LANGUAGE_VERSION) {
+            // The host forwards the GLES2 API and no more: a guest told
+            // "OpenGL ES 3.2" asks eglGetProcAddress for ES3 entry points it
+            // will not get (MCSM: mapped buffers, then a NULL store).
+            s = a0 == GL_VERSION ? "OpenGL ES 2.0" : "OpenGL ES GLSL ES 1.00";
+        } else if (a0 == GL_EXTENSIONS) {
+            s = Gles2Extensions((const char*)glGetString(GL_EXTENSIONS));
         } else {
             s = (const char*)glGetString((GLenum)a0);
         }
@@ -1177,6 +1232,16 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             std::printf("%s(%04x) -> \"%s\"\n", tag, a0, s ? s : "(null)");
         }
         r->Ret(regs, out);
+        return true;
+    }
+    if (n == "glGetBufferParameteriv") {
+        // (target, pname, params): one GLint for every GLES2 pname.
+        GLint v = 0;
+        glGetBufferParameteriv((GLenum)a0, (GLenum)a1, &v);
+        if (r->CheckRange(a2, 4, true)) {
+            std::memcpy(r->H(a2), &v, 4);
+        }
+        r->Ret(regs, 0);
         return true;
     }
     if (n == "glGetIntegerv" || n == "glGetFloatv" || n == "glGetBooleanv") {

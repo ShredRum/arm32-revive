@@ -46,6 +46,23 @@ performance against phys-winner's arm64 bridge port of the same version.
 - First boot without data: Java "Telltale File Validation Failed" (OBB check),
   as expected. Data copied to files/sdcard with the sdcard layout.
 
+## Bring-up (2026-11-03)
+
+Each step its own generic core fix:
+- Java natives of any library Java loads (lookup beyond the merged table);
+  Thumb entries allowed (CallGuest switches the mode; SDL's are Thumb).
+- dlsym on a system library handle serves every egl* name (SDL loads EGL by
+  dlsym); eglBindAPI, eglGetConfigs, eglGetCurrent*, eglQuerySurface/Context,
+  eglSwapInterval, eglWaitGL/Native, eglReleaseThread, eglQueryString.
+- GL_VERSION "OpenGL ES 2.0", GLSL "1.00", GL_EXTENSIONS filtered to those
+  without entry points: the host forwards GLES2 and eglGetProcAddress offers
+  nothing, so a guest told ES 3.2 used mapped buffers it never got (NULL store
+  in RenderUtility::Initialize). glDepthRangef, glGetBufferParameteriv.
+- pread/pwrite were stubs returning 0: the OBB header read "0 bytes" and
+  TTArchive2 got no stream. Note: [stub] lines of worker threads only show
+  with HARNESS_DIAG.
+- Now: no LOUD, alive, 60 frames/10 s... per second (600 per 10 s), screen black.
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
