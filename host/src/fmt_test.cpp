@@ -2511,6 +2511,54 @@ int main() {
     }
 #endif
 
+    // --- conditional VMOV (a select in IR, not a block split): each of a
+    //     pair of opposite conditions moves only when its flags say so.
+    {
+        struct Env : Dynarmic::A32::UserCallbacks {
+            std::array<std::uint32_t, 0x400> mem{};
+            Dynarmic::A32::Jit* jit = nullptr;
+            std::uint8_t MemoryRead8(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint16_t MemoryRead16(Dynarmic::A32::VAddr) override { return 0; }
+            std::uint32_t MemoryRead32(Dynarmic::A32::VAddr v) override { return mem[v / 4]; }
+            std::uint64_t MemoryRead64(Dynarmic::A32::VAddr) override { return 0; }
+            void MemoryWrite8(Dynarmic::A32::VAddr, std::uint8_t) override {}
+            void MemoryWrite16(Dynarmic::A32::VAddr, std::uint16_t) override {}
+            void MemoryWrite32(Dynarmic::A32::VAddr, std::uint32_t) override {}
+            void MemoryWrite64(Dynarmic::A32::VAddr, std::uint64_t) override {}
+            void InterpreterFallback(Dynarmic::A32::VAddr, std::size_t) override {}
+            void CallSVC(std::uint32_t) override { jit->HaltExecution(Dynarmic::HaltReason::UserDefined1); }
+            void ExceptionRaised(Dynarmic::A32::VAddr, Dynarmic::A32::Exception) override {
+                jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            void AddTicks(std::uint64_t) override {}
+            std::uint64_t GetTicksRemaining() override { return 1000000; }
+        } env;
+        env.mem[0x100 / 4] = 0xeeb40a41;  // vcmp.f32 s0, s2
+        env.mem[0x104 / 4] = 0xeef1fa10;  // vmrs APSR_nzcv, fpscr
+        env.mem[0x108 / 4] = 0xceb00a61;  // vmovgt.f32 s0, s3
+        env.mem[0x10c / 4] = 0xdeb02a40;  // vmovle.f32 s4, s0
+        env.mem[0x110 / 4] = 0xef000000;  // svc #0
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &env;
+        cfg.enable_cycle_counting = false;
+        Dynarmic::A32::Jit jit(cfg);
+        env.jit = &jit;
+        const auto run = [&](std::uint32_t s0) {
+            jit.ExtRegs()[0] = s0;
+            jit.ExtRegs()[2] = 0x3f800000;  // s2 = 1.0
+            jit.ExtRegs()[3] = 0x40a00000;  // s3 = 5.0
+            jit.ExtRegs()[4] = 0x41100000;  // s4 = 9.0
+            jit.Regs()[15] = 0x100;
+            jit.Run();
+            jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+            char out[32];
+            std::snprintf(out, sizeof(out), "%08x,%08x", jit.ExtRegs()[0], jit.ExtRegs()[4]);
+            return std::string(out);
+        };
+        Expect("vmovgt taken, vmovle not (s0 = 2.0)", run(0x40000000), "40a00000,41100000");
+        Expect("vmovgt not, vmovle taken (s0 = 0.0)", run(0), "00000000,00000000");
+    }
+
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to
     //     wrap to an 8-byte block), calloc(0, x) returns a unique block,
     //     a calloc product that overflows 32 bits fails.

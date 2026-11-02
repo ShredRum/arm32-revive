@@ -76,6 +76,18 @@ chance of seeing none even if the rate is unchanged, so it shows no jump only.
 Merged to master. Next: R-007 lead below (own branch), with the after-numbers
 of the game counters; then each small patch alone with a measurement.
 
+## Small patches (branch `jit-opts`, 2026-11-03)
+
+Each measured with dispatch_bench on the sandbox; one gate of all six at the end.
+- fastmem-fpsr: taken as 0009. FP and memory loop 25.8 -> 9.9 ns.
+- vldr-literal: not taken. It only feeds Dynarmic's read-only folding, which
+  our host never enables (IsReadOnlyMemory false). Enabling it would bake
+  constants into blocks far from where they live; a later mprotect to writable
+  would need a full cache clear, which a shared cache never does (R-007 kind).
+- vmov-select: not taken. Measured slower: conditional vmov loop 10.2 -> 11.9 ns
+  (the block split it removes is cheap here, the select costs register moves).
+  Its fmt_test stays: conditional vmov semantics.
+
 ## R-007 (branch `r007`, 2026-11-03)
 
 Proven: fmt_test "R-007" failed on arm64 (a return reached the block another

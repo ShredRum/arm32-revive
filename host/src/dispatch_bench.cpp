@@ -97,6 +97,19 @@ int main(int argc, char**) {
     for (std::size_t i = 0; i < fp_memory.size(); i++) {
         env.mem[0x4000 / 4 + i] = fp_memory[i];
     }
+    const std::array<std::uint32_t, 8> conditional_moves = {
+        0xEE300A20u,  // loop: vadd.f32 s0, s0, s1
+        0xEEB40A41u,  // vcmp.f32 s0, s2
+        0xEEF1FA10u,  // vmrs APSR_nzcv, fpscr
+        0xCEB00A61u,  // vmovgt.f32 s0, s3
+        0xDEB02A40u,  // vmovle.f32 s4, s0
+        0xE2500001u,  // subs r0, r0, #1
+        0x1AFFFFF8u,  // bne loop
+        0xEF000000u,  // svc #0
+    };
+    for (std::size_t i = 0; i < conditional_moves.size(); i++) {
+        env.mem[0x5000 / 4 + i] = conditional_moves[i];
+    }
     Dynarmic::A32::UserConfig cfg;
     cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(env.mem);
     cfg.callbacks = &env;
@@ -119,8 +132,10 @@ int main(int argc, char**) {
         const double ind = Run(env, jit, 0x3000, 4000000u);
         jit.Regs()[3] = 0x8000;
         const double fp = Run(env, jit, 0x4000, 100000000u);
+        const double cmov = Run(env, jit, 0x5000, 100000000u);
         std::printf("loop %.2f ns, call and return +%.2f ns, indirect call and return +%.2f ns, "
-                    "fp and memory loop %.2f ns\n", base, call - base, ind - base, fp);
+                    "fp and memory loop %.2f ns, conditional vmov loop %.2f ns\n", base, call - base,
+                    ind - base, fp, cmov);
     }
     return 0;
 }
