@@ -2557,6 +2557,72 @@ int main() {
         };
         Expect("vmovgt taken, vmovle not (s0 = 2.0)", run(0x40000000), "40a00000,41100000");
         Expect("vmovgt not, vmovle taken (s0 = 0.0)", run(0), "00000000,00000000");
+        // A conditional branch in the middle of a loop (fused into its block).
+        const std::uint32_t branchy[] = {0xe3100001, 0x0a000000, 0xe2822001, 0xe2811003,
+                                         0xe2500001, 0x1afffff9, 0xef000000};
+        std::memcpy(&env.mem[0x200 / 4], branchy, sizeof(branchy));
+        jit.Regs()[0] = 11;
+        jit.Regs()[1] = 0;
+        jit.Regs()[2] = 0;
+        jit.Regs()[15] = 0x200;
+        jit.Run();
+        jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
+        Expect("beq in a loop: odd counts, all counts",
+               std::to_string(jit.Regs()[2]) + "," + std::to_string(jit.Regs()[1]), "6,33");
+    }
+
+    // --- VLD1/VST1 (one element per structure) move whole registers; the
+    //     bytes land as the element-wise form put them. VLD2 still interleaves.
+    {
+        struct Env : Dynarmic::A32::UserCallbacks {
+            std::array<std::uint8_t, 0x1000> mem{};
+            Dynarmic::A32::Jit* jit = nullptr;
+            std::uint64_t Get(Dynarmic::A32::VAddr v, std::size_t n) {
+                std::uint64_t x = 0;
+                std::memcpy(&x, &mem[v], n);
+                return x;
+            }
+            void Put(Dynarmic::A32::VAddr v, std::uint64_t x, std::size_t n) { std::memcpy(&mem[v], &x, n); }
+            std::uint8_t MemoryRead8(Dynarmic::A32::VAddr v) override { return static_cast<std::uint8_t>(Get(v, 1)); }
+            std::uint16_t MemoryRead16(Dynarmic::A32::VAddr v) override { return static_cast<std::uint16_t>(Get(v, 2)); }
+            std::uint32_t MemoryRead32(Dynarmic::A32::VAddr v) override { return static_cast<std::uint32_t>(Get(v, 4)); }
+            std::uint64_t MemoryRead64(Dynarmic::A32::VAddr v) override { return Get(v, 8); }
+            void MemoryWrite8(Dynarmic::A32::VAddr v, std::uint8_t x) override { Put(v, x, 1); }
+            void MemoryWrite16(Dynarmic::A32::VAddr v, std::uint16_t x) override { Put(v, x, 2); }
+            void MemoryWrite32(Dynarmic::A32::VAddr v, std::uint32_t x) override { Put(v, x, 4); }
+            void MemoryWrite64(Dynarmic::A32::VAddr v, std::uint64_t x) override { Put(v, x, 8); }
+            void InterpreterFallback(Dynarmic::A32::VAddr, std::size_t) override {}
+            void CallSVC(std::uint32_t) override { jit->HaltExecution(Dynarmic::HaltReason::UserDefined1); }
+            void ExceptionRaised(Dynarmic::A32::VAddr, Dynarmic::A32::Exception) override {
+                jit->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+            }
+            void AddTicks(std::uint64_t) override {}
+            std::uint64_t GetTicksRemaining() override { return 1000000; }
+        } env;
+        const std::uint32_t prog[] = {0xf4210a0f,   // vld1.8 {d0-d1}, [r1]
+                                      0xf4020a4f,   // vst1.16 {d0-d1}, [r2]
+                                      0xf421278d,   // vld1.32 {d2}, [r1]!
+                                      0xf423480f,   // vld2.8 {d4-d5}, [r3]
+                                      0xef000000};  // svc #0
+        std::memcpy(&env.mem[0x100], prog, sizeof(prog));
+        for (int i = 0; i < 16; i++) {
+            env.mem[0x400 + i] = static_cast<std::uint8_t>(0x10 + i);
+        }
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &env;
+        cfg.enable_cycle_counting = false;
+        Dynarmic::A32::Jit jit(cfg);
+        env.jit = &jit;
+        jit.Regs()[1] = 0x400;
+        jit.Regs()[2] = 0x500;
+        jit.Regs()[3] = 0x400;
+        jit.Regs()[15] = 0x100;
+        jit.Run();
+        char out[96];
+        std::snprintf(out, sizeof(out), "%d,%08x,%08x%08x,%08x", std::memcmp(&env.mem[0x400], &env.mem[0x500], 16),
+                      jit.Regs()[1], jit.ExtRegs()[5], jit.ExtRegs()[4], jit.ExtRegs()[8]);
+        Expect("vld1.8/vst1.16 copy, vld1.32 writeback, d2, vld2.8 deinterleaves", out,
+               "0,00000408,1716151413121110,16141210");
     }
 
     // --- allocator edges: huge sizes fail with NULL+ENOMEM (malloc used to

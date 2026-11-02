@@ -126,3 +126,10 @@ host FPSR). The spill now happens on that branch, with a reload after the
 callback when the direct branch counts on a loaded FPSR. dispatch_bench, FP and
 memory loop: 25.8 ns -> 9.9 ns. fmt_test checks a guest divide-by-zero flag
 across a faulting access and that the callback's own flags stay out (arm64).
+
+## 0010-vld1-vst1-whole-registers.patch
+
+VLD1/VST1 with one element per structure, little-endian, move each D register
+with one 64-bit access instead of one access per element (up to 8 for .8).
+Same bytes (fmt_test). dispatch_bench NEON load-add-store loop 24.0 -> 23.0 ns:
+most of that loop is the vector add, not the memory.

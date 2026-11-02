@@ -1,0 +1,57 @@
+--- a/src/dynarmic/frontend/A32/translate/impl/asimd_load_store_structures.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/asimd_load_store_structures.cpp
+@@ -98,6 +98,15 @@
+     const bool register_index = m != Reg::R15 && m != Reg::R13;
+ 
+     IR::U32 address = ir.GetRegister(n);
++    if (nelem == 1 && !ir.current_location.EFlag()) {
++        // One element per structure, little-endian: the elements of a D
++        // register are its bytes in order, so each register is one 64-bit
++        // store instead of one store per element.
++        for (size_t r = 0; r < regs; r++) {
++            ir.WriteMemory64(address, ir.GetExtendedRegister(d + r), IR::AccType::NORMAL);
++            address = ir.Add(address, ir.Imm32(8));
++        }
++    } else {
+     for (size_t r = 0; r < regs; r++) {
+         for (size_t e = 0; e < elements; e++) {
+             for (size_t i = 0; i < nelem; i++) {
+@@ -110,6 +119,7 @@
+             }
+         }
+     }
++    }
+ 
+     if (wback) {
+         if (register_index) {
+@@ -146,6 +156,14 @@
+     const bool wback = m != Reg::R15;
+     const bool register_index = m != Reg::R15 && m != Reg::R13;
+ 
++    IR::U32 address = ir.GetRegister(n);
++    if (nelem == 1 && !ir.current_location.EFlag()) {
++        // As in v8_VST_multiple: one 64-bit load per D register.
++        for (size_t r = 0; r < regs; r++) {
++            ir.SetExtendedRegister(d + r, ir.ReadMemory64(address, IR::AccType::NORMAL));
++            address = ir.Add(address, ir.Imm32(8));
++        }
++    } else {
+     for (size_t r = 0; r < regs; r++) {
+         for (size_t i = 0; i < nelem; i++) {
+             const ExtReg ext_reg = d + i * inc + r;
+@@ -153,7 +171,6 @@
+         }
+     }
+ 
+-    IR::U32 address = ir.GetRegister(n);
+     for (size_t r = 0; r < regs; r++) {
+         for (size_t e = 0; e < elements; e++) {
+             for (size_t i = 0; i < nelem; i++) {
+@@ -167,6 +184,7 @@
+             }
+         }
+     }
++    }
+ 
+     if (wback) {
+         if (register_index) {
