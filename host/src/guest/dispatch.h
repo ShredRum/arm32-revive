@@ -1149,6 +1149,7 @@ private:
     // under io_mutex_ (never across the host lock call). Dumped by
     // MutexOwnersDump() when the stuck-update watchdog fires.
     std::unordered_map<std::uint32_t, std::pair<std::uint32_t, int>> mutex_owner_;
+    unsigned long mutex_foreign_unlocks_ = 0;  // under io_mutex_
     void MutexNoteLocked(std::uint32_t obj, std::uint32_t tid) {
         std::lock_guard<std::mutex> io(io_mutex_);
         auto& e = mutex_owner_[obj];
@@ -1168,9 +1169,16 @@ private:
             return;
         }
         if (it->second.first != tid) {
-            std::printf("[mutex] UNLOCK-FOREIGN obj=%08x by=%u owner=%u\n", obj, tid,
-                        it->second.first);
-            return;
+            // A normal mutex unlocked by another thread (bionic allows it; the
+            // host unlock succeeded, so the lock IS released). Minecraft:
+            // Story Mode does it all the time: name the first few, count the
+            // rest (MutexOwnersDump), and keep the books right: a stale
+            // holder made the destroy guard leak the mutex.
+            const unsigned long n = ++mutex_foreign_unlocks_;
+            if (n <= 5) {
+                std::printf("[mutex] UNLOCK-FOREIGN obj=%08x by=%u owner=%u%s\n", obj, tid,
+                            it->second.first, n == 5 ? " (further ones only counted)" : "");
+            }
         }
         if (--(it->second.second) <= 0) {
             mutex_owner_.erase(it);
@@ -1184,6 +1192,7 @@ private:
             std::printf("[mutex] owners: SKIPPED (io guard contested)\n");
             return;
         }
+        std::printf("[mutex] foreign unlocks so far: %lu\n", mutex_foreign_unlocks_);
         if (mutex_owner_.empty()) {
             std::printf("[mutex] owners: none held\n");
             return;

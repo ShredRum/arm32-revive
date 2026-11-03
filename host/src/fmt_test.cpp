@@ -2905,10 +2905,31 @@ int main() {
         Expect("normal: lock", std::to_string(call(9, kMn)), "0");
         Expect("normal: trylock while held = EBUSY", std::to_string(call(66, kMn)), std::to_string(EBUSY));
         std::uint32_t foreign = 1;
-        std::thread([&] { foreign = call(11, kMn); }).join();
+        // Another guest thread (its own tid: a bare std::thread would be
+        // guest tid 1, the same as this one).
+        std::thread([&] {
+            rt.ThreadEnter(nullptr, 77);
+            foreign = call(11, kMn);
+            rt.ThreadEnter(nullptr, 0);
+        }).join();
         Expect("normal: unlock from another thread = 0", std::to_string(foreign), "0");
         Expect("normal: free again after foreign unlock", std::to_string(call(66, kMn)), "0");
         call(11, kMn);
+        {
+            // The foreign unlock released it: the books must say so, or the
+            // destroy guard keeps a free mutex as "held" and leaks it.
+            call(9, kMn);
+            std::thread([&] {
+                rt.ThreadEnter(nullptr, 77);
+                call(11, kMn);
+                rt.ThreadEnter(nullptr, 0);
+            }).join();
+            const unsigned skipped = rt.mutex_destroy_skipped_;
+            call(10, kMn);
+            Expect("normal: destroy after a foreign unlock is not refused",
+                   std::to_string(rt.mutex_destroy_skipped_ - skipped), "0");
+            call(8, kMn, 0);  // init again for the next use
+        }
         call(64, kAt);
         call(65, kAt, 1);  // RECURSIVE
         call(8, kMr, kAt);
