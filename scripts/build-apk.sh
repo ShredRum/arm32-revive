@@ -38,6 +38,10 @@ if [ "$DIAG" = 1 ]; then
     rm -rf "$TREE"
     cp -a "games/$GAME/work/apk_prod" "$TREE"
     sed -i 's/android:debuggable="false"/android:debuggable="true"/' "$TREE/AndroidManifest.xml"
+    # A manifest without the attribute (Minecraft: Story Mode): add it.
+    if ! grep -q 'android:debuggable=' "$TREE/AndroidManifest.xml"; then
+        sed -i '0,/<application /s//<application android:debuggable="true" /' "$TREE/AndroidManifest.xml"
+    fi
     if ! grep -q 'android:debuggable="true"' "$TREE/AndroidManifest.xml"; then
         echo "build-apk: diag: could not flip android:debuggable" >&2
         exit 1

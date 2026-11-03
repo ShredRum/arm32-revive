@@ -1765,6 +1765,20 @@ void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
             }
         }
     }
+#ifdef ABR_DIAG_COUNTERS
+    // Per-import calls and host time (diag builds only): which imports a
+    // game leans on, and what one call costs. The arm64 virtual counter is
+    // read directly (one instruction): clock_gettime is a ~390 ns syscall on
+    // the sandbox (no vDSO), which swamped the numbers. Ticks -> ns at dump.
+    if (idx < DiagCounters::kImportSlots) {
+        const std::uint64_t t0 = DiagTicks();
+        CallImport(idx, regs);
+        const std::uint64_t t1 = DiagTicks();
+        diag_.import_calls[idx].fetch_add(1, std::memory_order_relaxed);
+        diag_.import_ns[idx].fetch_add(t1 - t0, std::memory_order_relaxed);
+        return;
+    }
+#endif
     CallImport(idx, regs);
 }
 
@@ -2089,62 +2103,47 @@ std::string Runtime::ExpandPrintf(const std::string& fmt, GuestFmtArgs& st,
     return out;
 }
 
-// Fast path for the math imports a guest calls in tight loops.
-//
-// The identity was resolved once at load time (Import::fast_math), so a call
-// costs one switch instead of walking the ~200 name comparisons in
-// CallImport. That chain used to dominate the call: Seasons' boot ran a
-// guest-side sort whose comparator called sqrt millions of times, and the
-// name lookup cost more than the libm call itself.
-//
-// The values and the softfp convention are exactly the ones
-// math_thunks.inc uses for the same functions: the double arrives in
-// r0:r1 (low word first) and the result leaves in r0:r1.
+// Fast path for the math imports (fast_math.h): the id was resolved once at
+// load time, so a call is one indexed jump instead of the import-name chain.
+// Softfp as in math_thunks.inc: float in r0, doubles in r0:r1 and r2:r3.
 void Runtime::CallFastMath(std::uint8_t id, Regs& regs, std::uint32_t a0, std::uint32_t a1,
                            std::uint32_t a2, std::uint32_t a3) {
-    auto f64_of = [](std::uint32_t lo, std::uint32_t hi) {
+    const FastMathEntry& e = kFastMath[id - 1u];
+    auto f32 = [](std::uint32_t b) {
+        float v = 0;
+        std::memcpy(&v, &b, 4);
+        return v;
+    };
+    auto f64 = [](std::uint32_t lo, std::uint32_t hi) {
         double v = 0;
-        std::uint32_t w[2] = {lo, hi};
+        const std::uint32_t w[2] = {lo, hi};
         std::memcpy(&v, w, 8);
         return v;
+    };
+    auto ret32 = [&](float v) {
+        std::uint32_t b = 0;
+        std::memcpy(&b, &v, 4);
+        Ret(regs, b);
     };
     auto ret64 = [&](double v) {
         std::uint32_t w[2] = {0, 0};
         std::memcpy(w, &v, 8);
         Ret(regs, w[0], w[1]);
     };
-    const double xd = f64_of(a0, a1);
-    const double yd = f64_of(a2, a3);
-    double r = 0;
-    switch (static_cast<FastMath>(id)) {
-    case FastMath::Sqrt:
-        r = sqrt(xd);
+    switch (e.kind) {
+    case MathKind::F_F:
+        ret32(e.f_f(f32(a0)));
         break;
-    case FastMath::Atan:
-        r = atan(xd);
+    case MathKind::D_D:
+        ret64(e.d_d(f64(a0, a1)));
         break;
-    case FastMath::Sin:
-        r = sin(xd);
+    case MathKind::FF_F:
+        ret32(e.ff_f(f32(a0), f32(a1)));
         break;
-    case FastMath::Cos:
-        r = cos(xd);
+    case MathKind::DD_D:
+        ret64(e.dd_d(f64(a0, a1), f64(a2, a3)));
         break;
-    case FastMath::Floor:
-        r = floor(xd);
-        break;
-    case FastMath::Fmod:
-        r = fmod(xd, yd);
-        break;
-    case FastMath::Pow:
-        r = pow(xd, yd);
-        break;
-    case FastMath::Tan:
-        r = tan(xd);
-        break;
-    default:
-        return;  // not a fast-math id: the caller falls back to the chain
     }
-    ret64(r);
 }
 
 // Bionic 7.1.2's C-locale character classes: U=0x01 L=0x02 N=0x04 S=0x08
@@ -11070,7 +11069,7 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     imp.tramp_va = imp.call_va = va;
     imp.blocking = BlockingImportName(name);
     imp.hot = HotImportForName(name);
-    imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
+    imp.fast_math = FastMathForName(name.c_str());
     const std::uint32_t swi = static_cast<std::uint32_t>(mod_.imports.size()) + 1;  // swi = idx + 1
     const std::uint32_t insn = 0xEF000000u | swi;
     mod_.imports.push_back(imp);  // before the address is handed out
@@ -12521,6 +12520,42 @@ void Runtime::DumpDiagCounters() {
                       fd_free, n_file);
     } else {
         std::snprintf(fd, sizeof(fd), "fd=?,next=?,free=?,file=?");
+    }
+    {
+        // Imports since the last dump: the total and the ten heaviest by
+        // host time (calls, average ns per call).
+        static std::uint64_t last_calls[DiagCounters::kImportSlots];
+        static std::uint64_t last_ns[DiagCounters::kImportSlots];
+        struct Row {
+            std::uint32_t idx;
+            std::uint64_t calls, ns;
+        };
+        std::vector<Row> rows;
+        std::uint64_t all_calls = 0, all_ns = 0;
+        const std::size_t n = std::min<std::size_t>(mod_.imports.size(), DiagCounters::kImportSlots);
+        const double ns_per_tick = 1e9 / static_cast<double>(DiagTickHz());
+        for (std::size_t i = 0; i < n; i++) {
+            const std::uint64_t c = diag_.import_calls[i].load(std::memory_order_relaxed);
+            const std::uint64_t t = static_cast<std::uint64_t>(
+                static_cast<double>(diag_.import_ns[i].load(std::memory_order_relaxed)) * ns_per_tick);
+            const Row r{static_cast<std::uint32_t>(i), c - last_calls[i], t - last_ns[i]};
+            last_calls[i] = c;
+            last_ns[i] = t;
+            if (r.calls) {
+                all_calls += r.calls;
+                all_ns += r.ns;
+                rows.push_back(r);
+            }
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ns > b.ns; });
+        std::printf("[counters] imports: %llu calls, %llu ms host time since the last dump\n",
+                    (unsigned long long)all_calls, (unsigned long long)(all_ns / 1000000));
+        for (std::size_t k = 0; k < rows.size() && k < 12; k++) {
+            std::printf("[counters]   %-28s %10llu calls %7llu ms %6llu ns/call\n",
+                        mod_.imports[rows[k].idx].name.c_str(), (unsigned long long)rows[k].calls,
+                        (unsigned long long)(rows[k].ns / 1000000),
+                        (unsigned long long)(rows[k].ns / rows[k].calls));
+        }
     }
 #ifdef DYNARMIC_DISPATCH_COUNTERS
     std::printf("[counters] dispatch=%llu memo_miss=%llu\n",

@@ -435,7 +435,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         Import imp;
         imp.name = name;
         imp.is_function = is_func;
-        imp.fast_math = static_cast<std::uint8_t>(FastMathForName(name));
+        imp.fast_math = FastMathForName(name.c_str());
         imp.blocking = BlockingImportName(name);
         imp.hot = HotImportForName(name);
         imp.tramp_va = emit_tramp(idx + 1);  // swi = idx+1

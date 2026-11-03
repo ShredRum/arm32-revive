@@ -406,6 +406,14 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_key_delete", true, 0, 0, 0});   // 111
     mod.imports.push_back(abr::Import{"pthread_attr_init", true, 0, 0, 0});        // 112
     mod.imports.push_back(abr::Import{"pthread_attr_setstacksize", true, 0, 0, 0});  // 113
+    // Every fast-math function twice: through the name chain (fast_math 0)
+    // and through the load-time table (fast_math = index + 1).
+    const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
+    for (std::size_t i = 0; i < abr::kFastMathCount; i++) {
+        mod.imports.push_back(abr::Import{abr::kFastMath[i].name, true, 0, 0, 0});
+        mod.imports.push_back(abr::Import{abr::kFastMath[i].name, true, 0, 0,
+                                          static_cast<std::uint8_t>(i + 1)});
+    }
     for (abr::Import& imp : mod.imports) {
         imp.hot = abr::HotImportForName(imp.name);  // as the loader does
     }
@@ -416,6 +424,45 @@ int main() {
     };
     put(kScratch, "hello");
     put(kScratch + 0x40, "world");
+
+    // --- fast-math table: bit-identical to the name chain for every entry
+    //     (r0 and r1 compared: a double result is r0:r1).
+    {
+        const float fx[] = {0.5f, -1.25f, 3.0f, 100.0f, 0.0f};
+        const float fy[] = {2.0f, -0.75f, 0.5f, 3.0f, 1.0f};
+        const double dx[] = {0.5, -1.25, 3.0, 100.0, 0.0};
+        const double dy[] = {2.0, -0.75, 0.5, 3.0, 1.0};
+        int bad = 0;
+        std::string first_bad;
+        for (std::size_t i = 0; i < abr::kFastMathCount; i++) {
+            for (int k = 0; k < 5; k++) {
+                std::uint32_t args[4] = {0, 0, 0, 0};
+                switch (abr::kFastMath[i].kind) {
+                case abr::MathKind::F_F:
+                case abr::MathKind::FF_F:
+                    std::memcpy(&args[0], &fx[k], 4);
+                    std::memcpy(&args[1], &fy[k], 4);
+                    break;
+                case abr::MathKind::D_D:
+                case abr::MathKind::DD_D:
+                    std::memcpy(&args[0], &dx[k], 8);
+                    std::memcpy(&args[2], &dy[k], 8);
+                    break;
+                }
+                abr::RuntimeTestAccess::RegsView chain{}, fast{};
+                const abr::RuntimeTestAccess::RegsView in{};
+                abr::RuntimeTestAccess::Call(rt, kMathBase + 2 * i, args, in, &chain);
+                abr::RuntimeTestAccess::Call(rt, kMathBase + 2 * i + 1, args, in, &fast);
+                if (chain[0] != fast[0] || chain[1] != fast[1]) {
+                    if (bad++ == 0) {
+                        first_bad = std::string(abr::kFastMath[i].name) + " #" + std::to_string(k);
+                    }
+                }
+            }
+        }
+        Expect("fast math = name chain, all " + std::to_string(abr::kFastMathCount) + " functions",
+               bad ? first_bad : std::string("same"), "same");
+    }
 
     // --- 4-byte integer argument: one register slot, the next argument
     //     must survive (%zu used to read 8 bytes and eat the next slot).

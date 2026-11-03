@@ -5,9 +5,33 @@
 
 #ifdef ABR_DIAG_COUNTERS
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 namespace abr {
+
+// A cheap timestamp for diag timing: the arm64 virtual counter (readable from
+// user space on Linux/Android), steady_clock elsewhere (PC builds).
+inline std::uint64_t DiagTicks() {
+#if defined(__aarch64__)
+    std::uint64_t v;
+    asm volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+#endif
+}
+inline std::uint64_t DiagTickHz() {
+#if defined(__aarch64__)
+    std::uint64_t f;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+#else
+    return static_cast<std::uint64_t>(std::chrono::steady_clock::period::den /
+                                      std::chrono::steady_clock::period::num);
+#endif
+}
 
 struct DiagCounters {
     // JNI bump arenas: bytes/handles used and high-water. They only grow
@@ -40,6 +64,10 @@ struct DiagCounters {
     // current values are recomputed from asset_map_ at dump time.
     std::uint64_t asset_peak_open = 0;
     std::uint64_t asset_peak_bytes = 0;
+    // Guest import calls and host time (DiagTicks units), per import index.
+    static constexpr std::size_t kImportSlots = 8192;
+    std::atomic<std::uint64_t> import_calls[kImportSlots] = {};
+    std::atomic<std::uint64_t> import_ns[kImportSlots] = {};
 };
 
 }  // namespace abr

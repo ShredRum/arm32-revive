@@ -2,6 +2,8 @@
 // 4GB reservation, applies REL/JMPREL relocations, emits SVC trampolines for
 // every undefined import.
 #pragma once
+
+#include "fast_math.h"
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -12,35 +14,7 @@
 
 namespace abr {
 
-// Fast-path identity for the math imports a guest can call in a tight loop.
-// Seasons' boot spent tens of seconds in a guest-side sort whose comparator
-// called sqrt millions of times; every one of those calls walked the ~200
-// name comparisons in Runtime::CallImport, which cost far more than the libm
-// call itself. The identity is resolved ONCE at load time, so the per-call
-// dispatch is a switch.
-enum class FastMath : std::uint8_t {
-    None = 0,
-    Sqrt = 1,
-    Atan = 2,
-    Sin = 3,
-    Cos = 4,
-    Floor = 5,
-    Fmod = 6,
-    Pow = 7,
-    Tan = 8,
-};
-
-inline FastMath FastMathForName(const std::string& name) {
-    if (name == "sqrt") return FastMath::Sqrt;
-    if (name == "atan") return FastMath::Atan;
-    if (name == "sin") return FastMath::Sin;
-    if (name == "cos") return FastMath::Cos;
-    if (name == "floor") return FastMath::Floor;
-    if (name == "fmod") return FastMath::Fmod;
-    if (name == "pow") return FastMath::Pow;
-    if (name == "tan") return FastMath::Tan;
-    return FastMath::None;
-}
+// Fast-path math imports: fast_math.h (FastMathForName, the load-time id).
 
 // Imports that wait (for another thread, time or I/O) without moving guest
 // pointers around: while a thread sits in one, a guest signal can be taken
@@ -119,7 +93,7 @@ struct Import {
     std::uint32_t tramp_va = 0;  // guest VA of `svc` trampoline (functions) / data slot
     std::uint32_t call_va = 0;   // guest VA the guest actually branches to (== tramp_va
                                   // unless the import runs guest-side VFP code)
-    std::uint8_t fast_math = 0;  // FastMath id (0 = not a fast-math import)
+    std::uint8_t fast_math = 0;  // kFastMath index + 1 (0 = not a fast-math import)
     bool blocking = false;       // BlockingImportName
     HotImport hot = HotImport::None;  // HotImportForName
 };
