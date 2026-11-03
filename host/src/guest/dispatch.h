@@ -1056,9 +1056,10 @@ private:
 public:
     // The app's ClassLoader (global ref): RealClass falls back to it when
     // FindClass fails on a thread attached from native code.
-    void SetAppClassLoader(void* loader) { app_class_loader_ = loader; }
+    void SetAppClassLoader(void* loader) { app_class_loader_.store(loader); }
+    void* AppClassLoader() const { return app_class_loader_.load(); }
 private:
-    void* app_class_loader_ = nullptr;
+    std::atomic<void*> app_class_loader_{nullptr};
     std::unordered_map<std::uint32_t, void*> real_methods_;
     // Real field IDs per mock GetFieldID cookie (audio buffer fields).
     std::unordered_map<std::uint32_t, void*> real_fields_;

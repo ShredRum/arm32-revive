@@ -13249,9 +13249,9 @@ void* Runtime::RealClass(void* real_env, const std::string& cls) {
     if (!lc || re->ExceptionCheck()) {
         re->ExceptionClear();
         lc = nullptr;
-        if (app_class_loader_) {
+        if (void* app_loader = app_class_loader_.load()) {
             // A thread attached from native code: ask the app's loader.
-            jobject loader = static_cast<jobject>(app_class_loader_);
+            jobject loader = static_cast<jobject>(app_loader);
             jclass lcls = re->GetObjectClass(loader);
             jmethodID load = lcls ? re->GetMethodID(lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : nullptr;
             std::string dotted = cls;

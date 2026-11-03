@@ -1212,6 +1212,52 @@ std::string FindApk() {
     return "";
 }
 
+#ifdef __ANDROID__
+// The loader of the app's own classes, taken once from the first native
+// method Java calls: its `thiz` is an app class (static native) or an object
+// of one. JNI_OnLoad's context loader can be the system loader, which does
+// not know the app's classes (Minecraft: Story Mode: org.fmod.AudioDevice not
+// found from FMOD's thread, so no audio and the sound thread never answered).
+void AdoptAppClassLoader(JNIEnv* env, void* thiz) {
+    static std::atomic<bool> done{false};
+    if (done.load(std::memory_order_relaxed) || !env || !thiz || !g_rt) {
+        return;
+    }
+    if (done.exchange(true)) {
+        return;
+    }
+    jobject self = static_cast<jobject>(thiz);
+    jclass class_class = env->FindClass("java/lang/Class");
+    jclass app_class = nullptr;
+    if (class_class && env->IsInstanceOf(self, class_class)) {
+        app_class = static_cast<jclass>(env->NewLocalRef(self));
+    } else {
+        app_class = env->GetObjectClass(self);
+    }
+    jmethodID gcl = class_class ? env->GetMethodID(class_class, "getClassLoader",
+                                                   "()Ljava/lang/ClassLoader;")
+                                : nullptr;
+    jobject cl = (app_class && gcl) ? env->CallObjectMethod(app_class, gcl) : nullptr;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        cl = nullptr;
+    }
+    if (cl) {
+        // The previous loader's global ref stays: another thread may be
+        // using it right now (one ref, once per process).
+        g_rt->SetAppClassLoader(env->NewGlobalRef(cl));
+        Log("app class loader: from the first native call's class");
+        env->DeleteLocalRef(cl);
+    }
+    if (app_class) {
+        env->DeleteLocalRef(app_class);
+    }
+    if (class_class) {
+        env->DeleteLocalRef(class_class);
+    }
+}
+#endif
+
 }  // namespace
 
 std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* thiz, ...) {
@@ -1243,6 +1289,9 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
 #endif
     calln++;
     HostLocalFrame frame;
+#ifdef __ANDROID__
+    AdoptAppClassLoader(static_cast<JNIEnv*>(env), thiz);
+#endif
     const std::uint64_t rv = AppHost_CallImpl(name, sig, thiz, ap);
     va_end(ap);
     return rv;

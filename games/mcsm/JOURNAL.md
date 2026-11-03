@@ -96,6 +96,19 @@ Never leave abflags.txt on the device (removed each time so far).
 Before merging: gate the five Rovio titles (glGetString now says GLES2 and
 filters extensions, egl/dlsym changes).
 
+## The "Подключение" hang: audio (2026-11-03)
+
+Thread report during the hang: main t3 in GameEngine::OnUserSpaceAvailable ->
+ResourceFramer::ConstructResourceSystemFromGameDataDirectories ->
+SoundSystem::ReloadMasterAudioBus -> Messages::BlockingSend, polling with
+Thread::PlatformSleep for the sound thread's answer; the sound thread never
+ran because FMOD found no org.fmod.AudioDevice. Cause (core, generic): the
+loader RealClass falls back to came from JNI_OnLoad's context class loader,
+which here was the system loader ("DexPathList[[directory "."]]"). Now the
+host takes the loader of the app class behind the first Java->native call
+(its thiz). After it: AudioDevice is a real object, the check passes, the
+Telltale account offer shows ("Войти / Вход / Нет, спасибо").
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
