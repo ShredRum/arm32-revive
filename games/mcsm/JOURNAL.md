@@ -109,6 +109,21 @@ host takes the loader of the app class behind the first Java->native call
 (its thiz). After it: AudioDevice is a real object, the check passes, the
 Telltale account offer shows ("Войти / Вход / Нет, спасибо").
 
+## Speed vs phys-winner's port (2026-11-04, sandbox)
+
+Ours, episode 1 opening (new game, first 60 s), SurfaceFlinger --latency on
+the game's SurfaceView, 5 s windows: 37..53 fps, average 46 (our [frames]
+counter agrees). Same package name, so the ports cannot sit side by side:
+our data dir was moved aside (/data/local, same partition), his base +
+split_hide_border installed (no widescreen split: same pixel count).
+His port aborts ~0.5 s after the GL context on the sandbox, every launch:
+stderr "assertion failed: false / Message: Interpret should never be
+emitted." -- his Dynarmic met a guest instruction its arm64 backend cannot
+run (strace via Termux). Not a data or sandbox-path problem. No comparison
+on the sandbox therefore; the phone (owner, adb) is the only place left.
+Ours restored afterwards (new uid: chown -R + chcon app_data_file), menu OK.
+Note: under sudo, "am" is Termux's (no force-stop): use /system/bin/am.
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
