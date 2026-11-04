@@ -1005,13 +1005,22 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // fired in any session, while poisoned stale reads proved fatal). A full
     // ring hands its oldest block back to dlmalloc as the new one comes in
     // (the set held is the same: the last kQuarantine frees).
-    if (q_count_ < kQuarantine) {
+    // HARNESS_NOQUARANTINE=1 (REVIEW R-013): no delay, the block goes back
+    // to dlmalloc at once (a second free of it is then an unknown address,
+    // ignored as before).
+    QEnt q0{};
+    if (EnvOn("HARNESS_NOQUARANTINE")) {
+        q0 = {addr, size};
+    } else if (q_count_ < kQuarantine) {
         q_ring_[(q_head_ + q_count_) % kQuarantine] = {addr, size};
         q_count_++;
+        return;
     } else {
-        const QEnt q0 = q_ring_[q_head_];
+        q0 = q_ring_[q_head_];
         q_ring_[q_head_] = {addr, size};
         q_head_ = (q_head_ + 1) % kQuarantine;
+    }
+    {
         g_last_free_addr = q0.addr;
         g_last_free_size = q0.size;
         bool skip = false;
