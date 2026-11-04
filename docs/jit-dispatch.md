@@ -145,9 +145,14 @@ Ideas kept for later, each only with a measurement that shows the need:
   E-03 (suspected, never seen failing): bindings belong to the GL context,
   and for the Rovio titles Java's GLSurfaceView creates contexts behind the
   host, so a stale "bound" would hand a buffer offset to the driver as a host
-  pointer. Safe form if ever needed: cache only where the host sees every
-  eglMakeCurrent (titles whose guest drives EGL, like MCSM), reset it there
-  and in glDeleteBuffers; keep asking the driver for the others.
+  pointer. One minimize/resume cannot prove it safe (what the game draws
+  first after resume, timing, drivers that keep the context all vary).
+  Safe by construction instead: Java can switch a thread's context only
+  while Java runs, i.e. between Java->native calls; the guest itself can
+  only through eglMakeCurrent, which the host serves. So a per-thread cache
+  reset at every Java->native entry (AppHost_Call), at every eglMakeCurrent
+  and at glDeleteBuffers is never stale: the first query of each native call
+  asks the driver, the rest of that call uses the copy.
 - free(): ~10 us a call inside the runtime besides the lock wait (MCSM),
   cause not found; the numbers are wall time with ~45 threads on 8 cores.
 - malloc/free still take the runtime-wide mutex_.
