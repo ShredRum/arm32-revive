@@ -13250,6 +13250,7 @@ void Runtime::DumpDiagCounters() {
                         (unsigned long long)(rows[k].ns / rows[k].calls));
         }
     }
+    RealGlDiagDump();
 #ifdef DYNARMIC_DISPATCH_COUNTERS
     std::printf("[counters] dispatch=%llu memo_miss=%llu\n",
                 (unsigned long long)Dynarmic::A32::DispatchCount(),

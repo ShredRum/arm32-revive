@@ -48,6 +48,9 @@ bool EnvOn(const char* name);
 // Java->native entry, guest JNI call into Java, eglMakeCurrent and
 // eglReleaseThread -- every point where its GL context can change.
 void ForgetGlBindings();
+#ifdef ABR_DIAG_COUNTERS
+void RealGlDiagDump();  // [counters] lines: GL state calls that repeat the set state
+#endif
 
 // Master switch for the diagnostic layer: the
 // per-call / per-frame tracing and the hot-path logs. Backed by HARNESS_DIAG,

@@ -295,7 +295,15 @@ struct GlBindings {
 thread_local GlBindings t_bindings;
 }  // namespace
 
-void ForgetGlBindings() { t_bindings = GlBindings{}; }
+#ifdef ABR_DIAG_COUNTERS
+static void DiagGlForget();
+#endif
+void ForgetGlBindings() {
+    t_bindings = GlBindings{};
+#ifdef ABR_DIAG_COUNTERS
+    DiagGlForget();
+#endif
+}
 
 // HARNESS_GLDRAWLOG (draw/upload tracing), read once: EnvOn scans its table
 // on every call, and this is asked on every draw, upload and attrib pointer.
@@ -318,6 +326,127 @@ static GLuint BoundBuffer(GLenum binding) {
     (array ? b.array_known : b.element_known) = true;
     return static_cast<GLuint>(v);
 }
+
+#ifdef ABR_DIAG_COUNTERS
+// Diag only (minimum F9 measurement): how many state calls repeat the state
+// the context already has. Mirrors what an elision would see: a per-thread
+// copy, dropped with the buffer copy (ForgetGlBindings), the driver asked
+// on the first use after a drop. Uniform values belong to the program and
+// survive context-local drops; they are dropped at link/delete. Counts only.
+namespace {
+enum { kRedAttr, kRedBuf, kRedProg, kRedUni, kRedMat, kRedN };
+std::atomic<std::uint64_t> g_red_calls[kRedN], g_red_same[kRedN];
+struct GlShadow {
+    std::int8_t attr[16];  // -1 unknown, 0 off, 1 on
+    bool prog_known = false;
+    GLuint prog = 0;
+    GlShadow() { std::memset(attr, -1, sizeof attr); }
+};
+thread_local GlShadow t_shadow;
+thread_local std::unordered_map<std::uint64_t, std::uint64_t> t_uni;  // (prog,loc) -> value hash
+std::uint64_t Fnv(const void* p, std::size_t n, std::uint64_t h) {
+    const auto* b = static_cast<const unsigned char*>(p);
+    for (std::size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+void RedCount(int k, bool same) {
+    g_red_calls[k].fetch_add(1, std::memory_order_relaxed);
+    if (same) g_red_same[k].fetch_add(1, std::memory_order_relaxed);
+}
+GLuint ShadowProg() {
+    if (!t_shadow.prog_known) {
+        GLint v = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &v);
+        t_shadow.prog = static_cast<GLuint>(v);
+        t_shadow.prog_known = true;
+    }
+    return t_shadow.prog;
+}
+void DiagGlRedundant(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                     std::uint32_t a3, std::uint32_t sp) {
+    using G = GlId;
+    if (id == G::glEnableVertexAttribArray || id == G::glDisableVertexAttribArray) {
+        if (a0 >= 16) return;
+        std::int8_t& st = t_shadow.attr[a0];
+        if (st < 0) {
+            GLint v = 0;
+            glGetVertexAttribiv(a0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &v);
+            st = v ? 1 : 0;
+        }
+        const std::int8_t want = id == G::glEnableVertexAttribArray ? 1 : 0;
+        RedCount(kRedAttr, st == want);
+        st = want;
+        return;
+    }
+    if (id == G::glBindBuffer) {
+        if (a0 == GL_ARRAY_BUFFER || a0 == GL_ELEMENT_ARRAY_BUFFER) {
+            RedCount(kRedBuf, BoundBuffer(a0 == GL_ARRAY_BUFFER ? GL_ARRAY_BUFFER_BINDING
+                                                                : GL_ELEMENT_ARRAY_BUFFER_BINDING) == a1);
+        }
+        return;
+    }
+    if (id == G::glUseProgram) {
+        RedCount(kRedProg, ShadowProg() == a0);
+        t_shadow.prog = a0;
+        return;
+    }
+    if (id == G::glLinkProgram || id == G::glDeleteProgram) {
+        for (auto it = t_uni.begin(); it != t_uni.end();) {
+            it = (it->first >> 32) == a0 ? t_uni.erase(it) : std::next(it);
+        }
+        return;
+    }
+    // Uniforms: comps per element, where the data is.
+    int comps = 0;
+    bool vec = false, mat = false;
+    switch (id) {
+        case G::glUniform1f: case G::glUniform1i: comps = 1; break;
+        case G::glUniform2f: case G::glUniform2i: comps = 2; break;
+        case G::glUniform3f: case G::glUniform3i: comps = 3; break;
+        case G::glUniform4f: case G::glUniform4i: comps = 4; break;
+        case G::glUniform1fv: case G::glUniform1iv: comps = 1; vec = true; break;
+        case G::glUniform2fv: case G::glUniform2iv: comps = 2; vec = true; break;
+        case G::glUniform3fv: case G::glUniform3iv: comps = 3; vec = true; break;
+        case G::glUniform4fv: case G::glUniform4iv: comps = 4; vec = true; break;
+        case G::glUniformMatrix2fv: comps = 4; mat = true; break;
+        case G::glUniformMatrix3fv: comps = 9; mat = true; break;
+        case G::glUniformMatrix4fv: comps = 16; mat = true; break;
+        default: return;
+    }
+    std::uint64_t h = Fnv(&id, sizeof id, 14695981039346656037ull);
+    if (vec || mat) {
+        const std::uint32_t vp = mat ? a3 : a2;
+        const std::size_t nb = (std::size_t)a1 * comps * 4;
+        if (!vp || a1 >= 4096 || !nb || !r->CheckRange(vp, nb, false)) return;
+        h = Fnv(&a1, 4, h);
+        if (mat) h = Fnv(&a2, 4, h);
+        h = Fnv(r->H(vp), nb, h);
+    } else {
+        const std::uint32_t w[4] = {a1, a2, a3, comps == 4 ? Stk(r, sp, 0) : 0u};
+        h = Fnv(w, comps * 4u, h);
+    }
+    const std::uint64_t key = (std::uint64_t)ShadowProg() << 32 | a0;
+    auto [it, fresh] = t_uni.try_emplace(key, h);
+    RedCount(mat ? kRedMat : kRedUni, !fresh && it->second == h);
+    it->second = h;
+}
+}  // namespace
+
+static void DiagGlForget() { t_shadow = GlShadow{}; }
+
+void RealGlDiagDump() {
+    static const char* const kName[kRedN] = {"attrib enable/disable", "glBindBuffer",
+                                             "glUseProgram", "uniform (vec/scalar)",
+                                             "uniform matrix"};
+    for (int k = 0; k < kRedN; k++) {
+        const std::uint64_t c = g_red_calls[k].exchange(0, std::memory_order_relaxed);
+        const std::uint64_t s = g_red_same[k].exchange(0, std::memory_order_relaxed);
+        std::printf("[counters]   gl repeat %-22s %10llu calls, %10llu same as set (%llu%%)\n", kName[k],
+                    (unsigned long long)c, (unsigned long long)s,
+                    (unsigned long long)(c ? s * 100 / c : 0));
+    }
+}
+#endif
 
 // The driver's extensions a GLES2 guest may use through what the host offers:
 // only those with no entry points of their own (formats, shader and texture
@@ -376,6 +505,9 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
     using G = GlId;  // the import's load-time id (gl_ids.h); name is for logs only
+#ifdef ABR_DIAG_COUNTERS
+    DiagGlRedundant(r, id, a0, a1, a2, a3, sp);
+#endif
 
     // --- state (direct forward, scalar args only) ---
     if (id == G::glEnable || id == G::glDisable) {
