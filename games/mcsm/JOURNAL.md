@@ -172,6 +172,13 @@ back to back, so both had the same company). devgate.sh now stops every
 other title of the project before it installs. Measure with only the game
 under test running, and compare builds back to back (the phone heats).
 
+Direct jump (f9a10ec) against e781c23, back to back both ways, nothing else
+running: 97 / 94 (e781c23 first), 88 / 88 (current first). No fps change
+beyond the run-to-run spread (~5 %). Per call the jump is a large cut
+(pthread_self 1413 -> 99 ns, frexpf 5861 -> 544 ns), but those imports
+were ~13 % of one core spread over worker threads: it saves CPU (heat), the
+frame is set by the render thread and the GPU.
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
