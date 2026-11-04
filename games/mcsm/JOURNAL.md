@@ -146,9 +146,12 @@ Left on purpose: BoundBuffer asks the driver (glGetIntegerv) per
 glVertexAttribPointer/glDrawElements, ~17 ms/s; a cached binding could go
 stale when Java recreates a Rovio context behind the host (REVIEW E-03, a
 suspected defect, never seen failing). Safe form: docs/jit-dispatch.md.
-Open: free ~10 us per call inside the runtime (not the lock wait); the
-numbers are wall time with ~45 threads on 8 cores, so descheduling is in
-them. Not measured on the phone (its driver and syscalls are cheaper).
+Later the same day: cached GL buffer bindings, safe by construction
+(dropped at every Java->guest call, JNI call, eglMakeCurrent/ReleaseThread,
+glDeleteBuffers; the context moved t3 -> t47 on resume, handled); free's
+quarantine in a fixed ring (3.3 -> 1.9 us under the lock). Frames 59-60.
+The numbers are wall time with ~45 threads on 8 cores (descheduling is in
+them). Not measured on the phone (its driver and syscalls are cheaper).
 
 ## Plan
 

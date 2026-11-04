@@ -155,8 +155,10 @@ Ideas kept for later, each only with a measurement that shows the need:
   reset at every Java->native entry (AppHost_Call), at every eglMakeCurrent
   and at glDeleteBuffers is never stale: the first query of each native call
   asks the driver, the rest of that call uses the copy.
-- free(): ~10 us a call inside the runtime besides the lock wait (MCSM),
-  cause not found; the numbers are wall time with ~45 threads on 8 cores.
+- DONE 2026-11-04: free(). The "~10 us" was mostly wall time (threads
+  descheduled, ~45 on 8 cores) and the lock wait; split: 1.7 us lock wait,
+  3.3 us under the lock, of it ~2 us the quarantine's set+vector. Now a
+  fixed ring: 1.9 us under the lock.
 - malloc/free still take the runtime-wide mutex_.
 
 ## State
