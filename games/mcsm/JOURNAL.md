@@ -153,6 +153,18 @@ quarantine in a fixed ring (3.3 -> 1.9 us under the lock). Frames 59-60.
 The numbers are wall time with ~45 threads on 8 cores (descheduling is in
 them). Not measured on the phone (its driver and syscalls are cheaper).
 
+## Before/after at 120 Hz (2026-11-04 evening)
+
+The owner raised the sandbox display to 120 Hz; the game has no 60 fps cap
+of its own (eglSwapInterval follows the display), so fps measures the core
+again. Same protocol for both: new game, episode 1, first 60 s,
+SurfaceFlinger counter. Morning core bc3a90b (sound fixed, no speed work):
+average 47 fps (38-57 per 5 s). Current core e781c23 (fast math, GL ids,
+EGL check once, GL binding cache, mutex trylock/map lock/holder book,
+quarantine off, svc counter, knobs read once, signals at first send,
+semaphore map lock): average 100 fps (86-107). Old core built in a
+throwaway git worktree; the current APK was reinstalled after.
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
