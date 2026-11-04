@@ -369,11 +369,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     if (!Ensure()) {
         return false;
     }
-    // RealGL's own lock: its binding/attribute bookkeeping is shared by every
-    // thread with a current context. It is NOT the runtime's mutex_, so a slow
-    // driver call (upload, compile, readback) no longer blocks other guest
-    // threads' malloc/pthread/JNI work.
-    std::lock_guard<std::mutex> gl_lock(mu_);
+    // No lock on the call path: GL state belongs to each thread's context
+    // and the driver keeps it. RealGL's own shared state is the glGetString
+    // slots and the GLDRAWLOG texture-size tracking; each takes mu_ where it
+    // is touched (minimum F3: a lock on every GL call guarded nothing else).
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
     using G = GlId;  // the import's load-time id (gl_ids.h); name is for logs only
@@ -545,7 +544,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glActiveTexture) {
-        active_tex_ = a0 - 0x84C0u;
+        if (GlDrawLog()) {  // texture-size tracking for the draw log only
+            std::lock_guard<std::mutex> l(mu_);
+            active_tex_ = a0 - 0x84C0u;
+        }
         glActiveTexture((GLenum)a0);
         r->Ret(regs, 0);
         return true;
@@ -925,8 +927,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glBindTexture) {
-        if (a0 == 0x0DE1u && active_tex_ < 8) {
-            bound_tex2d_[active_tex_] = a1;
+        if (GlDrawLog()) {
+            std::lock_guard<std::mutex> l(mu_);
+            if (a0 == 0x0DE1u && active_tex_ < 8) {
+                bound_tex2d_[active_tex_] = a1;
+            }
         }
         glBindTexture((GLenum)a0, (GLuint)a1);
         r->Ret(regs, 0);
@@ -973,8 +978,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             const GLenum e = glGetError();
             // TEMP-DIAG: track size by bound texture of active unit (read only
             // by the GLDRAWLOG block at :819, so write under the same gate).
-            if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
-                tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
+            {
+                std::lock_guard<std::mutex> l(mu_);
+                if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
+                    tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
+                }
             }
             std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x\n", name, a3, h, fmt, typ,
                         p ? "data" : "NULL", e);
@@ -1183,6 +1191,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             {
                 // ES2 has no texture readback; report tracked upload size.
                 std::uint32_t tw = 0, th = 0;
+                std::lock_guard<std::mutex> l(mu_);
                 auto it = tex_size_.find((std::uint32_t)tex);
                 if (it != tex_size_.end()) {
                     tw = it->second & 0xFFFFu;
@@ -1290,6 +1299,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             // the driver string for a live context does not change. Refresh the
             // content in place (grows beyond the slot -> fresh allocation).
             std::size_t L = std::strlen(s) + 1;
+            std::lock_guard<std::mutex> l(mu_);  // glstr_slots_
             auto it = glstr_slots_.find(a0);
             if (it != glstr_slots_.end() && r->CheckRange(it->second, L, true)) {
                 out = it->second;
