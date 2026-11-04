@@ -66,6 +66,12 @@ struct DiagCounters {
     std::uint64_t asset_peak_bytes = 0;
     // Guest import calls and host time (DiagTicks units), per import index.
     static constexpr std::size_t kImportSlots = 8192;
+    // Waits for the runtime's mutex_ at three hot sites (0 guest-mutex map
+    // lookup, 1 malloc, 2 free), and time inside the host lock of a guest
+    // pthread_mutex_lock (the guest's own contention). DiagTicks units.
+    std::atomic<std::uint64_t> rt_wait[3] = {};
+    std::atomic<std::uint64_t> rt_wait_n[3] = {};
+    std::atomic<std::uint64_t> guest_lock_wait = 0;
     std::atomic<std::uint64_t> import_calls[kImportSlots] = {};
     std::atomic<std::uint64_t> import_ns[kImportSlots] = {};
 };

@@ -661,7 +661,7 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0,
 // align == 0: plain malloc. Otherwise a power of two (memalign semantics);
 // the block is a normal heap block for free/realloc/usable_size.
 std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    RtLock lock(*this, 1);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
     // disease test for wall4: game memsets 255B into 144B objects; dense bump
     // packing puts live neighbors in the blast radius, dlmalloc may not).
@@ -928,7 +928,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     if (!addr) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    RtLock lock(*this, 2);
     if (quarantine_set_.count(addr)) {
             std::uint32_t lr = 0;
             Dynarmic::A32::Jit* aj = ActiveJit();
@@ -8372,7 +8372,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
     std::shared_ptr<pthread_mutex_t> m;
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        RtLock lock(*this, 0);
         if (n == "pthread_mutex_init") {
             // Type from the attribute word (NULL = NORMAL); bionic also keeps
             // it in the mutex word at bits 14-15 (PTHREAD_*_INITIALIZER).
@@ -8470,7 +8470,15 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         if (SignalsInUse()) {
             // Interruptible (see PthreadCond): handlers run between slices,
             // then the lock attempt goes on (a mutex lock is never EINTR).
-            for (;;) {
+            // A free mutex (the common case) is taken at once: the slices and
+            // their clock read (a ~390 ns syscall on the sandbox) only start
+            // when it is held. trylock answers as lock does for an owner of a
+            // recursive one; any other refusal goes on to the full lock.
+            r = pthread_mutex_trylock(m.get());
+#ifdef ABR_DIAG_COUNTERS
+            const std::uint64_t w0 = DiagTicks();
+#endif
+            while (r != 0) {
                 const struct timespec slice = RealtimeIn(kSigSliceNs);
                 r = pthread_mutex_timedlock(m.get(), &slice);
                 if (r != ETIMEDOUT) {
@@ -8480,8 +8488,17 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
                     DeliverPendingSignals();
                 }
             }
+#ifdef ABR_DIAG_COUNTERS
+            diag_.guest_lock_wait.fetch_add(DiagTicks() - w0, std::memory_order_relaxed);
+#endif
         } else {
+#ifdef ABR_DIAG_COUNTERS
+            const std::uint64_t w0 = DiagTicks();
             r = pthread_mutex_lock(m.get());
+            diag_.guest_lock_wait.fetch_add(DiagTicks() - w0, std::memory_order_relaxed);
+#else
+            r = pthread_mutex_lock(m.get());
+#endif
         }
         if (r == 0) {
             // The owner is recorded WHILE the pending witness is still set,
@@ -12551,6 +12568,21 @@ void Runtime::DumpDiagCounters() {
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ns > b.ns; });
         std::printf("[counters] imports: %llu calls, %llu ms host time since the last dump\n",
                     (unsigned long long)all_calls, (unsigned long long)(all_ns / 1000000));
+        static std::uint64_t last_w[3], last_wn[3], last_g;
+        const char* const site[3] = {"mutex map", "malloc", "free"};
+        for (int k = 0; k < 3; k++) {
+            const std::uint64_t w = diag_.rt_wait[k].load(std::memory_order_relaxed);
+            const std::uint64_t wn = diag_.rt_wait_n[k].load(std::memory_order_relaxed);
+            std::printf("[counters]   runtime lock wait at %-9s %10llu takes %7llu ms\n", site[k],
+                        (unsigned long long)(wn - last_wn[k]),
+                        (unsigned long long)(static_cast<double>(w - last_w[k]) * ns_per_tick / 1e6));
+            last_w[k] = w;
+            last_wn[k] = wn;
+        }
+        const std::uint64_t g = diag_.guest_lock_wait.load(std::memory_order_relaxed);
+        std::printf("[counters]   inside the host lock of guest mutexes %7llu ms\n",
+                    (unsigned long long)(static_cast<double>(g - last_g) * ns_per_tick / 1e6));
+        last_g = g;
         for (std::size_t k = 0; k < rows.size() && k < 12; k++) {
             std::printf("[counters]   %-28s %10llu calls %7llu ms %6llu ns/call\n",
                         mod_.imports[rows[k].idx].name.c_str(), (unsigned long long)rows[k].calls,

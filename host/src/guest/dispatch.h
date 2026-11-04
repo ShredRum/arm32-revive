@@ -892,6 +892,24 @@ private:
     std::unordered_set<std::uint32_t> quarantine_set_;  // O(1) double-free check (vector scan was O(n^2))
     std::uint32_t mmap_next_ = kMmapArenaBase;
     std::recursive_mutex mutex_;
+    // mutex_ held for a scope; diag builds also add the wait to rt_wait[site].
+    struct RtLock {
+        std::recursive_mutex& m;
+        RtLock(Runtime& rt, int site) : m(rt.mutex_) {
+#ifdef ABR_DIAG_COUNTERS
+            const std::uint64_t t0 = DiagTicks();
+            m.lock();
+            rt.diag_.rt_wait[site].fetch_add(DiagTicks() - t0, std::memory_order_relaxed);
+            rt.diag_.rt_wait_n[site].fetch_add(1, std::memory_order_relaxed);
+#else
+            (void)site;
+            m.lock();
+#endif
+        }
+        ~RtLock() { m.unlock(); }
+        RtLock(const RtLock&) = delete;
+        RtLock& operator=(const RtLock&) = delete;
+    };
     std::unordered_map<std::string, std::uint64_t> stub_hits_;
 
     // Host-side pthread object maps (guest addr -> host object).

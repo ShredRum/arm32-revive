@@ -2990,6 +2990,36 @@ int main() {
         call(9, kMe);
         Expect("errorcheck: relock = EDEADLK", std::to_string(call(9, kMe)), std::to_string(EDEADLK));
         call(11, kMe);
+        {
+            // The same answers on the sliced path (signals in use), which
+            // first tries the lock at once and slices only when it is held.
+            abr::RuntimeTestAccess::SetSignalsInUse(rt, true);
+            call(9, kMr);
+            Expect("sliced: recursive relock", std::to_string(call(9, kMr)), "0");
+            call(11, kMr);
+            call(11, kMr);
+            call(9, kMe);
+            Expect("sliced: errorcheck relock = EDEADLK", std::to_string(call(9, kMe)),
+                   std::to_string(EDEADLK));
+            call(11, kMe);
+            call(9, kMn);  // held here; another thread must wait for it
+            std::atomic<bool> got{false};
+            std::thread t([&] {
+                rt.ThreadEnter(nullptr, 78);
+                call(9, kMn);
+                got = true;
+                call(11, kMn);
+                rt.ThreadEnter(nullptr, 0);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            const bool early = got.load();
+            call(11, kMn);
+            t.join();
+            Expect("sliced: a held normal mutex waits, then is taken",
+                   std::string(early ? "early" : "waited") + (got.load() ? ",taken" : ",never"),
+                   "waited,taken");
+            abr::RuntimeTestAccess::SetSignalsInUse(rt, false);
+        }
         const std::uint32_t rec_init = 0x4000;  // PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
         std::memcpy(rt.H(kMs), &rec_init, 4);
         call(9, kMs);
