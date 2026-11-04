@@ -2351,6 +2351,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
 
     // --- memory management ---
+    // Direct jump to the first handler that can take this import (labels
+    // placed by script, 2026-11-04: before the first statement that names the
+    // import, or that could take any import -- prefix rules, generic tests).
+    // Every handler after a label runs as in the chain; an unknown id starts
+    // at the top. No case breaks: falling on is the chain.
+    switch (id) {
+    default:
+    case I::calloc_:
+    case I::malloc_:
+    case I::realloc_:
     if (id == I::malloc_ || id == I::calloc_ || id == I::realloc_) {
         const std::uint32_t r = (id == I::malloc_)   ? GuestMalloc(a0)
                                 : (id == I::calloc_) ? GuestCalloc(a0, a1)
@@ -2362,11 +2372,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, r);
         return;
     }
+    case I::cfree_:
+    case I::free_:
     if (id == I::free_ || id == I::cfree_) {
         GuestFree(a0);
         RetVoid(regs);
         return;
     }
+    case I::madvise_:
     if (id == I::madvise_) {
         // madvise(addr, len, advice) on guest memory. MADV_DONTNEED (4) must
         // keep its meaning for private anonymous memory -- the range reads
@@ -2393,6 +2406,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::mmap_:
+    case I::mmap64_:
     if (id == I::mmap_ || id == I::mmap64_) {
         // mmap(addr, len, prot, flags, int fd, off_t off): fd at [sp], the
         // 32-bit off_t at [sp+4]. mmap64's off64_t is 8-aligned at [sp+8].
@@ -2424,6 +2439,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, off));
         return;
     }
+    case I::mremap_:
     if (id == I::mremap_) {
         // mremap(old, old_size, new_size, flags): a shrink drops the tail; a
         // growth extends in place when the following pages are free, else
@@ -2473,10 +2489,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, moved);
         return;
     }
+    case I::munmap_:
     if (id == I::munmap_) {
         Ret(regs, static_cast<std::uint32_t>(GuestMunmap(a0, a1)));
         return;
     }
+    case I::strdup_:
+    case I::strndup_:
     if (id == I::strdup_ || id == I::strndup_) {
         std::uint32_t len = 0;
         if (!GuestStrnlen(a0, id == I::strndup_ ? a1 : 0xFFFFFFFFu, &len) || len == 0xFFFFFFFFu) {
@@ -2505,6 +2524,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // sysconf x2, getpid x7, syscall x5 (224 gettid x4, 268 tgkill x1).
     // Before this they all fell into the generic tail, which answers 0 --
     // "the two strings are equal", "not found", "0 bytes", "thread id 0".
+    case I::strcoll_:
     if (id == I::strcoll_) {
         // The guest puts itself into the "C" locale (it calls setlocale("C")
         // itself), where the collation is the byte order -- so the C
@@ -2516,6 +2536,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(std::strcoll(sa.c_str(), sb.c_str())));
         return;
     }
+    case I::memmem_:
     if (id == I::memmem_) {
         // memmem(haystack, haylen, needle, needlelen) returns a POINTER
         // into the haystack -- a guest address here.
@@ -2541,6 +2562,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(a0 + (hit - hay)));
         return;
     }
+    case I::sysconf_:
     if (id == I::sysconf_) {
         // The guest asks for the page size and friends. The _SC_* values
         // are the Linux ones on both ABIs, so the host's answer is the
@@ -2548,10 +2570,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(::sysconf(static_cast<int>(a0))));
         return;
     }
+    case I::getpid_:
     if (id == I::getpid_) {
         Ret(regs, static_cast<std::uint32_t>(::getpid()));
         return;
     }
+    case I::btowc_:
+    case I::iswctype_:
+    case I::wctob_:
+    case I::wctype_:
     if (id == I::btowc_ || id == I::wctob_ || id == I::wctype_ || id == I::iswctype_) {
         // The wide-character ctype (the C locale, like the byte one).
         // The guest builds its own classification tables from these answers
@@ -2685,6 +2712,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, wc < 128 ? wc : 0xFFFFFFFFu);
         return;
     }
+    case I::getauxval_:
     if (id == I::getauxval_) {
         // The measured Star Wars consumer sets r0=AT_HWCAP at 0x6708e4,
         // calls getauxval at 0x6708e6, shifts the result left by 19 (tests
@@ -2745,6 +2773,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
+    case I::syscall_:
     if (id == I::syscall_) {
         // The raw syscall() wrapper. The guests' call sites pass only two
         // numbers (measured on the Seasons disassembly): 224 = gettid and
@@ -2776,6 +2805,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // softfp only changes how arguments are passed; guest code keeps values
     // in d8-d15 across calls (e.g. vstr d8/d13 in the WebP fprintf callers),
     // and Lua's error path is a longjmp.
+    case I::__sigsetjmp_:
+    case I::_setjmp_:
+    case I::setjmp_:
+    case I::sigsetjmp_:
     if (id == I::setjmp_ || id == I::_setjmp_ || id == I::sigsetjmp_ || id == I::__sigsetjmp_) {
         if (!CheckRange(a0, kGuestJmpBufBytes, true)) {
             goto bad_ptr;
@@ -2796,6 +2829,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::_longjmp_:
+    case I::longjmp_:
+    case I::siglongjmp_:
     if (id == I::longjmp_ || id == I::_longjmp_ || id == I::siglongjmp_) {
         if (!CheckRange(a0, kGuestJmpBufBytes, false)) {
             goto bad_ptr;
@@ -2818,6 +2854,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- libc odds and ends the guests actually call -------------------
+    case I::gethostname_:
     if (id == I::gethostname_) {
         // gethostname(buf, len): POSIX returns 0 on SUCCESS and -1 on error
         // (bionic truncates and NUL-terminates the name). The guest uses
@@ -2847,6 +2884,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host. memcpy/memmove/memset and their
     // __aeabi_ forms: HotImport.
+    case I::bcmp_:
+    case I::memcmp_:
     if (id == I::memcmp_ || id == I::bcmp_) {
         if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
@@ -2854,6 +2893,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
         return;
     }
+    case I::strlen_:
+    case I::strnlen_:
     if (id == I::strlen_ || id == I::strnlen_) {
         std::uint32_t len = 0;
         if (!GuestStrnlen(a0, id == I::strnlen_ ? a1 : 0xFFFFFFFFu, &len)) {
@@ -2862,6 +2903,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, len);
         return;
     }
+    case I::strcasecmp_:
+    case I::strcmp_:
+    case I::strncasecmp_:
+    case I::strncmp_:
     if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
         // Compare in guest memory. Both strings are validated up to their NUL
         // (or up to n for the n-variants), so the host compare never reads an
@@ -2887,6 +2932,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
+    case I::strcat_:
+    case I::strcpy_:
+    case I::strncat_:
+    case I::strncpy_:
     if (id == I::strcpy_ || id == I::strncpy_ || id == I::strcat_ || id == I::strncat_) {
         // All four work in guest memory. Source and destination are validated
         // for exactly the bytes the real function touches:
@@ -2933,6 +2982,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- string search/scan family (host-forwarded, range-checked) ---
+    case I::memchr_:
+    case I::memrchr_:
     if (id == I::memchr_ || id == I::memrchr_) {
         if (!CheckRange(a0, a2, false)) {
             goto bad_ptr;
@@ -2982,6 +3033,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, f ? a0 + static_cast<std::uint32_t>(f - p) : 0u);
         return;
     }
+    case I::strchr_:
+    case I::strcspn_:
+    case I::strpbrk_:
+    case I::strrchr_:
+    case I::strspn_:
+    case I::strstr_:
     if (id == I::strchr_ || id == I::strrchr_ || id == I::strstr_ || id == I::strpbrk_ || id == I::strspn_ ||
         id == I::strcspn_) {
         // Bounded guest strlen for the haystack (and needle where needed).
@@ -3026,6 +3083,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, f ? a0 + static_cast<std::uint32_t>(f - h) : 0u);
         return;
     }
+    case I::strtok_:
+    case I::strtok_r_:
     if (id == I::strtok_ || id == I::strtok_r_) {
         // Manual strtok on guest memory (host strtok_r can't use guest saveptr:
         // it stores host pointers). Delim = NUL-terminated guest string.
@@ -3131,6 +3190,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             cur++;
         }
     }
+    case I::fscanf_:
+    case I::sscanf_:
+    case I::vsscanf_:
     if (id == I::sscanf_ || id == I::vsscanf_ || id == I::fscanf_) {
         // Manual sscanf (host va_list can't be synthesized; semantics follow
         // C99: ws-skip (not %c/%[/%n), literals, widths, suppression,
@@ -3646,6 +3708,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                       : static_cast<std::uint32_t>(assigned));
         return;
     }
+    case I::atoi_:
+    case I::atol_:
+    case I::strtol_:
+    case I::strtoll_:
+    case I::strtoul_:
+    case I::strtoull_:
     if (id == I::strtol_ || id == I::strtoul_ || id == I::strtoll_ || id == I::strtoull_ || id == I::atoi_ ||
         id == I::atol_) {
         // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol take
@@ -3735,6 +3803,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::strtod_:
     if (id == I::strtod_) {
         // Guest ABI: strtod(nptr=a0, endptr=a1) -> double in r0:r1 (softfp:
         // little-endian, low word in r0 -- see math_thunks.inc and the guest's
@@ -3776,10 +3845,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, w64[0], w64[1]);
         return;
     }
+    case I::__errno_:
     if (id == I::__errno_) {
         Ret(regs, ErrnoSlot());
         return;
     }
+    case I::strerror_:
+    case I::strerror_r_:
     if (id == I::strerror_ || id == I::strerror_r_) {
         // Must hand back a GUEST string: a host pointer is read as guest memory
         // (the engine's own log then printed the .so's ELF header as the
@@ -3823,6 +3895,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
     // HARNESS_TIMEWARP=<sec>: shift all guest clocks forward (timer-gate
     // tests: loading/menu timeouts expire without wall waiting).
+    case I::clock_gettime_:
     if (id == I::clock_gettime_) {
         struct timespec ts {};
         const int r = clock_gettime(a0, &ts);
@@ -3838,6 +3911,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
+    case I::gettimeofday_:
     if (id == I::gettimeofday_) {
         struct timeval tv {};
         const int r = gettimeofday(&tv, nullptr);
@@ -3854,6 +3928,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
+    case I::clock_:
+    case I::time_:
     if (id == I::time_ || id == I::clock_) {
         std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
         if (id == I::time_) {
@@ -3867,6 +3943,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             static_cast<std::uint32_t>(((std::uint64_t)t >> 32) & 0xFFFFFFFFu));
         return;
     }
+    case I::gmtime_:
+    case I::gmtime_r_:
+    case I::localtime_:
+    case I::localtime_r_:
     if (id == I::localtime_r_ || id == I::gmtime_r_ || id == I::localtime_ || id == I::gmtime_) {
         // Bionic ARM struct tm (44B): 9x int + long gmtoff + char* zone.
         // localtime()/gmtime() use a per-thread static buffer: allocate the
@@ -3914,6 +3994,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::__android_log_print_:
     if (id == I::__android_log_print_) {
         // Expand guest printf-style args so the game's own diagnostics (e.g.
         // "Parsing JSON failed! Reason: ...") become visible. This used to
@@ -3937,6 +4018,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
+    case I::__android_log_vprint_:
     if (id == I::__android_log_vprint_) {
         // (prio, tag, fmt, va_list): the arguments start at the va pointer.
         const std::string fmt(GuestStr(a2));
@@ -3950,6 +4032,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
+    case I::__android_log_write_:
     if (id == I::__android_log_write_) {
         // No printf spec: (prio, tag, text). Same sink as log_print.
         const std::string tag(GuestStr(a1));
@@ -3958,6 +4041,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(text.size()));
         return;
     }
+    case I::printf_:
+    case I::vprintf_:
     if (id == I::printf_ || id == I::vprintf_) {
         // Host stdout (the game gated its own logging off, but a crash-time
         // path may call it). GuestFmtArgs consumes r1-r3 then stack args.
@@ -3981,6 +4066,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
+    case I::uname_:
     if (id == I::uname_) {
         // Breakpad stores this in the minidump; machine must look like the
         // guest ABI (armv7l), the rest is informational. struct utsname on
@@ -4010,6 +4096,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     //     although all six titles import them (G-02). Layouts from the NDK
     //     headers, sizes checked with the NDK clang for armv7a: struct
     //     sigaction 16 B, sigset_t 4 B, wchar_t 4 B.
+    case I::vasprintf_:
     if (id == I::vasprintf_) {
         // int vasprintf(char** strp, const char* fmt, va_list ap)
         if (!CheckRange(a0, 4, true) || !CheckRange(a1, 1, false)) {
@@ -4036,6 +4123,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(out.size()));
         return;
     }
+    case I::fnmatch_:
     if (id == I::fnmatch_) {
         // Guest (bionic) flags: NOESCAPE 1, PATHNAME 2, PERIOD 4 -- glibc
         // numbers them differently, so translate. FNM_NOMATCH = 1 in both.
@@ -4051,6 +4139,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, r == 0 ? 0u : 1u);
         return;
     }
+    case I::basename_:
     if (id == I::basename_) {
         // POSIX basename: last path component, "/" for all-slash input, "."
         // for NULL/"". The result lives in a per-thread guest buffer (bionic
@@ -4093,6 +4182,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, tbuf);
         return;
     }
+    case I::setlocale_:
     if (id == I::setlocale_) {
         // Only the "C"/"POSIX" locale exists for the guest (bionic of that era
         // had no others): query or set "C" -> "C", anything else -> NULL.
@@ -4121,16 +4211,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // --- libc pieces first needed by Mono (99 Bricks). Not imported by the
     // Rovio titles, so their behaviour is unchanged.
+    case I::bsd_signal_:
     if (id == I::bsd_signal_) {
         // signal(sig, handler): guest handlers are never delivered (see
         // sigaction below); report SIG_DFL as the previous disposition.
         Ret(regs, 0);
         return;
     }
+    case I::gettid_:
     if (id == I::gettid_) {
         Ret(regs, GuestTid());
         return;
     }
+    case I::getdtablesize_:
     if (id == I::getdtablesize_) {
         // The descriptor table size (RLIMIT_NOFILE soft limit); Android's
         // default is 1024. Mono's io-layer sizes its handle table from it.
@@ -4139,6 +4232,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
         return;
     }
+    case I::dlclose_:
+    case I::dlerror_:
+    case I::dlopen_:
+    case I::dlsym_:
     if (id == I::dlopen_ || id == I::dlsym_ || id == I::dlclose_ || id == I::dlerror_) {
         // Guest libraries this module already holds (several guest .so, e.g.
         // Unity's libmain dlopens libmono/libunity): a handle per library,
@@ -4248,6 +4345,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);  // dlclose: loaded libraries stay
         return;
     }
+    case I::memalign_:
+    case I::posix_memalign_:
     if (id == I::memalign_ || id == I::posix_memalign_) {
         // memalign(align, size) -> ptr; posix_memalign(void** out, align,
         // size) -> errno (EINVAL unless align is a power of two that is a
@@ -4285,6 +4384,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, blk);
         return;
     }
+    case I::strlcpy_:
     if (id == I::strlcpy_) {
         // strlcpy(dst, src, size): copies at most size-1 bytes, always
         // NUL-terminates when size > 0, returns strlen(src).
@@ -4303,6 +4403,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, len);
         return;
     }
+    case I::clock_getres_:
     if (id == I::clock_getres_) {
         // clock_getres(clk, struct timespec* res): 32-bit {time_t, long}.
         struct timespec ts {};
@@ -4322,10 +4423,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::mprotect_:
     if (id == I::mprotect_) {
         Ret(regs, static_cast<std::uint32_t>(GuestMprotect(a0, a1, static_cast<int>(a2))));
         return;
     }
+    case I::readlink_:
     if (id == I::readlink_) {
         // readlink(path, buf, size): through the file bridge. A link target
         // inside the host files dir goes back in guest spelling. No match
@@ -4355,6 +4458,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(len));
         return;
     }
+    case I::pthread_attr_destroy_:
+    case I::pthread_attr_getdetachstate_:
+    case I::pthread_attr_getstack_:
+    case I::pthread_attr_getstacksize_:
+    case I::pthread_attr_init_:
+    case I::pthread_attr_setdetachstate_:
+    case I::pthread_attr_setschedparam_:
+    case I::pthread_attr_setschedpolicy_:
+    case I::pthread_attr_setstacksize_:
+    case I::pthread_getattr_np_:
     if (id == I::pthread_attr_init_ || id == I::pthread_attr_destroy_ || id == I::pthread_getattr_np_ ||
         id == I::pthread_attr_getstack_ || id == I::pthread_attr_getstacksize_ ||
         id == I::pthread_attr_setstacksize_ || id == I::pthread_attr_getdetachstate_ ||
@@ -4363,6 +4476,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadAttr(id, n, a0, a1, a2));
         return;
     }
+    case I::__pthread_cleanup_pop_:
+    case I::__pthread_cleanup_push_:
     if (id == I::__pthread_cleanup_push_ || id == I::__pthread_cleanup_pop_) {
         // bionic __pthread_cleanup_t { prev; routine; arg; } (12 B), a
         // per-thread list. pop(c, execute) runs routine(arg) when asked.
@@ -4391,6 +4506,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::sem_destroy_:
+    case I::sem_getvalue_:
+    case I::sem_init_:
+    case I::sem_post_:
+    case I::sem_timedwait_:
+    case I::sem_trywait_:
+    case I::sem_wait_:
     if (id == I::sem_init_ || id == I::sem_destroy_ || id == I::sem_post_ || id == I::sem_wait_ ||
         id == I::sem_trywait_ || id == I::sem_timedwait_ || id == I::sem_getvalue_) {
         const std::uint32_t r = GuestSem(id, n, a0, a1, a2);
@@ -4403,6 +4525,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Guest signals: dispositions, masks and thread-directed signals (see
     // Runtime::GuestSendSignal). sigaction/sigprocmask/tkill/kill/sigsuspend
     // return -1 + errno; pthread_sigmask/pthread_kill return the errno.
+    case I::kill_:
+    case I::pthread_kill_:
+    case I::pthread_sigmask_:
+    case I::sigaction_:
+    case I::sigprocmask_:
+    case I::sigsuspend_:
+    case I::tkill_:
     if (id == I::sigaction_ || id == I::sigprocmask_ || id == I::pthread_sigmask_ || id == I::tkill_ ||
         id == I::pthread_kill_ || id == I::kill_ || id == I::sigsuspend_) {
         std::uint32_t e = 0;
@@ -4434,6 +4563,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::raise_:
     if (id == I::raise_) {
         if (a0 == 0) {
             Ret(regs, 0);  // signal 0: existence check only
@@ -4457,10 +4587,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::geteuid_:
     if (id == I::geteuid_) {
         Ret(regs, static_cast<std::uint32_t>(::geteuid()));
         return;
     }
+    case I::towlower_:
+    case I::towupper_:
     if (id == I::towlower_ || id == I::towupper_) {
         // C locale: only ASCII letters change.
         std::uint32_t c = a0;
@@ -4469,6 +4602,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, c);
         return;
     }
+    case I::wcslen_:
     if (id == I::wcslen_) {
         std::uint32_t i = 0;
         for (;; i++) {
@@ -4484,6 +4618,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, i);
         return;
     }
+    case I::wmemchr_:
+    case I::wmemcmp_:
+    case I::wmemcpy_:
+    case I::wmemmove_:
+    case I::wmemset_:
     if (id == I::wmemchr_ || id == I::wmemcmp_ || id == I::wmemcpy_ || id == I::wmemmove_ || id == I::wmemset_) {
         // n counts 4-byte wchar_t units.
         const std::uint64_t bytes = std::uint64_t(a2) * 4;
@@ -4540,6 +4679,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::snprintf_:
+    case I::sprintf_:
+    case I::vsnprintf_:
+    case I::vsprintf_:
     if (id == I::snprintf_ || id == I::vsnprintf_ || id == I::sprintf_ || id == I::vsprintf_) {
         const bool sized = (id == I::snprintf_ || id == I::vsnprintf_);
         const bool via_va = (id == I::vsnprintf_ || id == I::vsprintf_);
@@ -4580,6 +4723,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- sleeps: honest (PLAN item 8) --------------------------------------
+    case I::nanosleep_:
     if (id == I::nanosleep_) {
         // nanosleep(const struct timespec* req, struct timespec* rem); guest
         // timespec = {long sec; long nsec} (2 x 32 bits). Live: Rio's
@@ -4610,6 +4754,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- loud exits ---
+    case I::__cxa_guard_abort_:
+    case I::__cxa_guard_acquire_:
+    case I::__cxa_guard_release_:
     if (id == I::__cxa_guard_acquire_ || id == I::__cxa_guard_release_ || id == I::__cxa_guard_abort_) {
         const std::uint32_t r = CxaGuard(id, n, a0);
         if (r == kSemBadPtr) {
@@ -4620,16 +4767,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // Destructors registered for exit never run: an Android app process is
     // killed, it does not exit. Registering succeeds, as in bionic.
+    case I::__aeabi_atexit_:
+    case I::__cxa_atexit_:
     if (id == I::__cxa_atexit_ || id == I::__aeabi_atexit_) {
         Ret(regs, 0);
         return;
     }
+    case I::__cxa_finalize_:
     if (id == I::__cxa_finalize_) {
         RetVoid(regs);
         return;
     }
     // __cxa_pure_virtual: a call through a pure virtual slot; libstdc++
     // aborts.
+    case I::__assert2_:
+    case I::__cxa_pure_virtual_:
+    case I::__stack_chk_fail_:
+    case I::_exit_:
+    case I::abort_:
+    case I::exit_:
     if (id == I::abort_ || id == I::__stack_chk_fail_ || id == I::__assert2_ || id == I::exit_ ||
         id == I::_exit_ || id == I::__cxa_pure_virtual_) {
         std::printf("[svc] FATAL %s() called (r0=%08x) pc=%08x lr=%08x -- halting\n", n.c_str(), a0,
@@ -4643,6 +4799,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // bionic keeps the mutex type in its low 4 bits (NORMAL 0, RECURSIVE 1,
     // ERRORCHECK 2). These used to fall into the generic stub, so the type a
     // guest asked for never reached pthread_mutex_init.
+    case I::pthread_mutexattr_destroy_:
+    case I::pthread_mutexattr_gettype_:
+    case I::pthread_mutexattr_init_:
+    case I::pthread_mutexattr_settype_:
     if (id == I::pthread_mutexattr_init_ || id == I::pthread_mutexattr_destroy_ ||
         id == I::pthread_mutexattr_settype_ || id == I::pthread_mutexattr_gettype_) {
         if (!CheckRange(a0, 4, id != I::pthread_mutexattr_gettype_)) {
@@ -4674,16 +4834,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- pthread: real mutex/cond/key maps, create/join stubbed for now ---
+    case I::pthread_mutex_destroy_:
+    case I::pthread_mutex_init_:
+    case I::pthread_mutex_lock_:
+    case I::pthread_mutex_trylock_:
+    case I::pthread_mutex_unlock_:
     if (id == I::pthread_mutex_init_ || id == I::pthread_mutex_destroy_ || id == I::pthread_mutex_lock_ ||
         id == I::pthread_mutex_unlock_ || id == I::pthread_mutex_trylock_) {
         Ret(regs, PthreadMutex(id, n, a0, a1));
         return;
     }
+    case I::pthread_rwlock_destroy_:
+    case I::pthread_rwlock_init_:
+    case I::pthread_rwlock_rdlock_:
+    case I::pthread_rwlock_unlock_:
+    case I::pthread_rwlock_wrlock_:
     if (id == I::pthread_rwlock_init_ || id == I::pthread_rwlock_destroy_ || id == I::pthread_rwlock_rdlock_ ||
         id == I::pthread_rwlock_wrlock_ || id == I::pthread_rwlock_unlock_) {
         Ret(regs, PthreadRwlock(id, n, a0));
         return;
     }
+    case I::pthread_cond_broadcast_:
+    case I::pthread_cond_destroy_:
+    case I::pthread_cond_init_:
+    case I::pthread_cond_signal_:
+    case I::pthread_cond_timedwait_:
+    case I::pthread_cond_timedwait_monotonic_:
+    case I::pthread_cond_timedwait_monotonic_np_:
+    case I::pthread_cond_wait_:
     if (id == I::pthread_cond_init_ || id == I::pthread_cond_destroy_ || id == I::pthread_cond_signal_ ||
         id == I::pthread_cond_broadcast_ || id == I::pthread_cond_wait_ ||
         id == I::pthread_cond_timedwait_ || id == I::pthread_cond_timedwait_monotonic_ ||
@@ -4696,14 +4874,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, base, a0, a1, a2, mono));
         return;
     }
+    case I::pthread_key_create_:
     if (id == I::pthread_key_create_) {
         Ret(regs, PthreadKeyCreate(a0, a1));
         return;
     }
+    case I::pthread_key_delete_:
     if (id == I::pthread_key_delete_) {
         Ret(regs, PthreadKeyDelete(a0));
         return;
     }
+    case I::pthread_exit_:
     if (id == I::pthread_exit_) {
         // Only a worker's own code can end its thread (the thread was made by
         // pthread_create and this is its Jit, not a callback or a Java thread).
@@ -4734,22 +4915,28 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         ActiveJit()->HaltExecution(kThreadExitHalt);
         return;
     }
+    case I::pthread_getspecific_:
     if (id == I::pthread_getspecific_) {
         Ret(regs, PthreadGetSpecific(a0));
         return;
     }
+    case I::pthread_setspecific_:
     if (id == I::pthread_setspecific_) {
         Ret(regs, PthreadSetSpecific(a0, a1));
         return;
     }
+    case I::pthread_gettid_np_:
+    case I::pthread_self_:
     if (id == I::pthread_self_ || id == I::pthread_gettid_np_) {
         Ret(regs, GuestTid());
         return;
     }
+    case I::pthread_equal_:
     if (id == I::pthread_equal_) {
         Ret(regs, a0 == a1 ? 1 : 0);
         return;
     }
+    case I::pthread_create_:
     if (id == I::pthread_create_) {
         // HARNESS_NOWORKER=1: skip thread creation (return 0, no thread).
         // Diagnosis-only: removes worker/main interleaving nondeterminism
@@ -4814,19 +5001,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
     }
+    case I::pthread_join_:
     if (id == I::pthread_join_) {
         Ret(regs, PthreadJoin(a0, a1));
         return;
     }
+    case I::pthread_detach_:
     if (id == I::pthread_detach_) {
         Ret(regs, PthreadDetach(a0));
         return;
     }
+    case I::sched_yield_:
     if (id == I::sched_yield_) {
         std::this_thread::yield();
         Ret(regs, 0);
         return;
     }
+    case I::poll_:
     if (id == I::poll_) {
         // poll(struct pollfd* fds, nfds_t nfds, int timeout). struct pollfd is
         // {int fd; short events; short revents} = 8 bytes on both sides.
@@ -4897,6 +5088,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r) + n_invalid);
         return;
     }
+    case I::pthread_once_:
     if (id == I::pthread_once_) {
         if (PthreadOnce(a0, a1, regs)) {
             return;  // hijacked: control redirected, no Ret()
@@ -4904,6 +5096,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::__gnu_Unwind_Find_exidx_:
     if (id == I::__gnu_Unwind_Find_exidx_) {
         // Nest guard (subagent #6): the phase driver can re-present the same
         // handler frame forever (pad transfer never happens) — 131K nested
@@ -5002,6 +5195,95 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // and a worker parked in blocking ::read froze all threads). fd/file/dir
     // maps use brief io_mutex_ holds at each touch; blocking syscalls always
     // run unlocked. files_prefix_/hostbase_ are startup-immutable (no lock).
+    case I::accept_:
+    case I::access_:
+    case I::bind_:
+    case I::chdir_:
+    case I::chmod_:
+    case I::clearerr_:
+    case I::close_:
+    case I::closedir_:
+    case I::connect_:
+    case I::dup_:
+    case I::dup2_:
+    case I::epoll_create_:
+    case I::epoll_ctl_:
+    case I::epoll_wait_:
+    case I::fclose_:
+    case I::fcntl_:
+    case I::fdopen_:
+    case I::feof_:
+    case I::ferror_:
+    case I::fflush_:
+    case I::fgets_:
+    case I::fileno_:
+    case I::flock_:
+    case I::fopen_:
+    case I::fprintf_:
+    case I::fputc_:
+    case I::fputs_:
+    case I::fread_:
+    case I::fseek_:
+    case I::fseeko_:
+    case I::fstat_:
+    case I::fsync_:
+    case I::ftell_:
+    case I::ftello_:
+    case I::ftruncate_:
+    case I::fwrite_:
+    case I::getc_:
+    case I::getcwd_:
+    case I::getpeername_:
+    case I::getsockname_:
+    case I::getsockopt_:
+    case I::inet_addr_:
+    case I::inet_aton_:
+    case I::inet_ntoa_:
+    case I::inet_ntop_:
+    case I::inet_pton_:
+    case I::ioctl_:
+    case I::isatty_:
+    case I::listen_:
+    case I::lseek_:
+    case I::lstat_:
+    case I::mkdir_:
+    case I::mkstemp_:
+    case I::open_:
+    case I::opendir_:
+    case I::pathconf_:
+    case I::pipe_:
+    case I::pipe2_:
+    case I::pread_:
+    case I::putc_:
+    case I::pwrite_:
+    case I::read_:
+    case I::readdir_:
+    case I::readdir_r_:
+    case I::recv_:
+    case I::recvfrom_:
+    case I::recvmsg_:
+    case I::remove_:
+    case I::rename_:
+    case I::rmdir_:
+    case I::select_:
+    case I::send_:
+    case I::sendfile_:
+    case I::sendmsg_:
+    case I::sendto_:
+    case I::setsockopt_:
+    case I::setvbuf_:
+    case I::shutdown_:
+    case I::socket_:
+    case I::stat_:
+    case I::statfs_:
+    case I::tmpfile_:
+    case I::truncate_:
+    case I::ungetc_:
+    case I::unlink_:
+    case I::utime_:
+    case I::vfprintf_:
+    case I::write_:
+    case I::writev_:
     {
         auto map_path = [this](std::uint32_t gp) -> std::string {
             return MapGuestPath(gp);
@@ -7215,6 +7497,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // inflating an asset runs unlocked (a whole-block lock used to serialise
     // every import that reached this point, and a 32 MB inflate, against all
     // other guest threads). apk_index_ is built once and then only read.
+    case I::AAssetManager_fromJava_:
+    case I::AAssetManager_open_:
+    case I::AAsset_close_:
+    case I::AAsset_getBuffer_:
+    case I::AAsset_getLength64_:
     {
         if (id == I::AAssetManager_fromJava_) {
             if (!EnsureApkIndex()) {
@@ -7384,8 +7671,152 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
     // --- libm: PURE-MATH-BEGIN ---
+    case I::__fpclassifyd_:
+    case I::__fpclassifyf_:
+    case I::__isfinite_:
+    case I::__isfinitef_:
+    case I::__isnan_:
+    case I::__isnanf_:
+    case I::__isnormal_:
+    case I::__isnormalf_:
+    case I::__signbit_:
+    case I::__signbitf_:
+    case I::__signbitl_:
+    case I::acos_:
+    case I::acosf_:
+    case I::acosh_:
+    case I::asin_:
+    case I::asinf_:
+    case I::asinh_:
+    case I::atan_:
+    case I::atan2_:
+    case I::atan2f_:
+    case I::atanf_:
+    case I::atanh_:
+    case I::cbrt_:
+    case I::cbrtf_:
+    case I::ceil_:
+    case I::ceilf_:
+    case I::copysign_:
+    case I::copysignf_:
+    case I::cos_:
+    case I::cosf_:
+    case I::cosh_:
+    case I::coshf_:
+    case I::erf_:
+    case I::erfc_:
+    case I::erfcf_:
+    case I::erff_:
+    case I::exp_:
+    case I::exp2_:
+    case I::exp2f_:
+    case I::expf_:
+    case I::expm1_:
+    case I::expm1f_:
+    case I::fdim_:
+    case I::fdimf_:
+    case I::floor_:
+    case I::floorf_:
+    case I::fma_:
+    case I::fmaf_:
+    case I::fmax_:
+    case I::fmaxf_:
+    case I::fmin_:
+    case I::fminf_:
+    case I::fmod_:
+    case I::fmodf_:
+    case I::frexp_:
+    case I::frexpf_:
+    case I::hypot_:
+    case I::hypotf_:
+    case I::ilogb_:
+    case I::ilogbf_:
+    case I::isnan_:
+    case I::ldexp_:
+    case I::ldexpf_:
+    case I::lgamma_:
+    case I::lgammaf_:
+    case I::llrint_:
+    case I::llrintf_:
+    case I::llround_:
+    case I::llroundf_:
+    case I::log_:
+    case I::log10_:
+    case I::log10f_:
+    case I::log1p_:
+    case I::log2_:
+    case I::log2f_:
+    case I::logb_:
+    case I::logbf_:
+    case I::logf_:
+    case I::lrint_:
+    case I::lrintf_:
+    case I::lround_:
+    case I::lroundf_:
+    case I::modf_:
+    case I::modff_:
+    case I::nan_:
+    case I::nanf_:
+    case I::nanl_:
+    case I::nearbyint_:
+    case I::nearbyintf_:
+    case I::nextafter_:
+    case I::nextafterf_:
+    case I::nexttoward_:
+    case I::nexttowardf_:
+    case I::pow_:
+    case I::powf_:
+    case I::remainder_:
+    case I::remainderf_:
+    case I::remquo_:
+    case I::remquof_:
+    case I::rint_:
+    case I::rintf_:
+    case I::round_:
+    case I::roundf_:
+    case I::scalbln_:
+    case I::scalblnf_:
+    case I::scalbn_:
+    case I::scalbnf_:
+    case I::scalbnl_:
+    case I::sin_:
+    case I::sinf_:
+    case I::sinh_:
+    case I::sinhf_:
+    case I::sqrt_:
+    case I::sqrtf_:
+    case I::tan_:
+    case I::tanf_:
+    case I::tanh_:
+    case I::tanhf_:
+    case I::tgamma_:
+    case I::tgammaf_:
+    case I::trunc_:
+    case I::truncf_:
 #include "math_thunks.inc"
     // --- libm: PURE-MATH-END ---
+    case I::glBufferData_:
+    case I::glCompressedTexImage2D_:
+    case I::glCopyTexImage2D_:
+    case I::glCreateProgram_:
+    case I::glCreateShader_:
+    case I::glGenBuffers_:
+    case I::glGenFramebuffers_:
+    case I::glGenRenderbuffers_:
+    case I::glGenTextures_:
+    case I::glGetAttribLocation_:
+    case I::glGetIntegerv_:
+    case I::glGetProgramInfoLog_:
+    case I::glGetProgramiv_:
+    case I::glGetShaderInfoLog_:
+    case I::glGetShaderiv_:
+    case I::glGetString_:
+    case I::glGetUniformLocation_:
+    case I::glReadPixels_:
+    case I::glShaderSource_:
+    case I::glTexImage2D_:
+    case I::glTexSubImage2D_:
+    case I::glVertexAttribPointer_:
 #ifndef __ANDROID__
     // --- GLES fake-success shim, PC harness only (no GL there). On Android
     // every gl* import the titles have goes to the driver (RealGL), with or
@@ -7605,6 +8036,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
 #endif  // !__ANDROID__
+    case I::__system_property_get_:
     if (id == I::__system_property_get_) {
         // int __system_property_get(const char* name, char* value): copies the
         // value (at most PROP_VALUE_MAX = 92 bytes incl. NUL) and returns its
@@ -7650,6 +8082,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(val.size()));
         return;
     }
+    case I::difftime_:
+    case I::mktime_:
+    case I::strftime_:
     if (id == I::mktime_ || id == I::difftime_ || id == I::strftime_) {
         // Real time-lib thunks (were stub->0: frozen daily/session timers).
         // Guest Bionic struct tm (44B): 9x int + long gmtoff + char* zone.
@@ -7721,6 +8156,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(o));
         return;
     }
+    case I::rand_:
+    case I::random_:
+    case I::srand_:
+    case I::srandom_:
     if (id == I::rand_ || id == I::random_ || id == I::srand_ || id == I::srandom_) {
         // bionic's rand() IS random() and srand() IS srandom() (AOSP
         // libc/bionic/rand.cpp), and bionic's random() is the BSD TYPE_3
@@ -7738,6 +8177,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(rng.Next()));
         return;
     }
+    case I::lrand48_:
+    case I::srand48_:
     if (id == I::srand48_ || id == I::lrand48_) {
         // Real 48-bit LCG (was stub->0: EVERY lrand48() returned 0, so all
         // per-bird animation phases / blink thresholds / interval picks
@@ -7766,6 +8207,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>((rng_next() >> 17) & 0x7FFFFFFFu));
         return;
     }
+    case I::qsort_:
     if (id == I::qsort_) {
         // Real sort (was silent no-op stub): host stable_sort over indices,
         // guest comparator via callback JIT (PvZ re-enter pattern: separate
@@ -7817,6 +8259,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::bsearch_:
     if (id == I::bsearch_) {
         // Real binary search (was always-NULL stub): key=a0, base=a1,
         // nmemb=a2, size=a3, compar on guest stack. Returns element VA or 0.
@@ -7860,6 +8303,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, found);
         return;
     }
+    case I::getenv_:
     if (id == I::getenv_) {
         if (!CheckRange(a0, 1, false)) {
             goto bad_ptr;
@@ -7878,6 +8322,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, v);
         return;
     }
+    case I::setenv_:
+    case I::unsetenv_:
     if (id == I::setenv_ || id == I::unsetenv_) {
         if (!CheckRange(a0, 1, false) || (id == I::setenv_ && !CheckRange(a1, 1, false))) {
             goto bad_ptr;
@@ -7891,6 +8337,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, e == 0 ? 0u : 0xFFFFFFFFu);
         return;
     }
+    case I::crc32_:
+    case I::deflate_:
+    case I::deflateEnd_:
+    case I::deflateInit2__:
+    case I::deflateReset_:
+    case I::inflate_:
+    case I::inflateEnd_:
+    case I::inflateInit2__:
+    case I::inflateInit__:
+    case I::inflateReset_:
     if (id == I::crc32_ || id == I::inflate_ || id == I::inflateInit__ || id == I::inflateInit2__ ||
         id == I::inflateEnd_ || id == I::inflateReset_ || id == I::deflate_ || id == I::deflateInit2__ ||
         id == I::deflateEnd_ || id == I::deflateReset_) {
@@ -7899,12 +8355,110 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::eglBindAPI_:
+    case I::eglChooseConfig_:
+    case I::eglCreateContext_:
+    case I::eglCreateWindowSurface_:
+    case I::eglDestroyContext_:
+    case I::eglDestroySurface_:
+    case I::eglGetConfigAttrib_:
+    case I::eglGetConfigs_:
+    case I::eglGetCurrentContext_:
+    case I::eglGetCurrentDisplay_:
+    case I::eglGetCurrentSurface_:
+    case I::eglGetDisplay_:
+    case I::eglGetError_:
+    case I::eglGetProcAddress_:
+    case I::eglInitialize_:
+    case I::eglMakeCurrent_:
+    case I::eglQueryContext_:
+    case I::eglQueryString_:
+    case I::eglQuerySurface_:
+    case I::eglReleaseThread_:
+    case I::eglSwapBuffers_:
+    case I::eglSwapInterval_:
+    case I::eglTerminate_:
+    case I::eglWaitGL_:
+    case I::eglWaitNative_:
+    case I::execl_:
+    case I::execv_:
+    case I::execve_:
     if (n[0] == 'e' && EglCall(id, n, regs)) {
         return;
     }
+    case I::AConfiguration_delete_:
+    case I::AConfiguration_fromAssetManager_:
+    case I::AConfiguration_new_:
+    case I::AInputEvent_getDeviceId_:
+    case I::AInputEvent_getSource_:
+    case I::AInputEvent_getType_:
+    case I::AInputQueue_attachLooper_:
+    case I::AInputQueue_detachLooper_:
+    case I::AInputQueue_finishEvent_:
+    case I::AInputQueue_getEvent_:
+    case I::AInputQueue_preDispatchEvent_:
+    case I::AKeyEvent_getAction_:
+    case I::AKeyEvent_getKeyCode_:
+    case I::AKeyEvent_getMetaState_:
+    case I::ALooper_forThread_:
+    case I::ALooper_pollAll_:
+    case I::ALooper_pollOnce_:
+    case I::ALooper_prepare_:
+    case I::ALooper_wake_:
+    case I::AMotionEvent_getAction_:
+    case I::AMotionEvent_getDownTime_:
+    case I::AMotionEvent_getEdgeFlags_:
+    case I::AMotionEvent_getEventTime_:
+    case I::AMotionEvent_getFlags_:
+    case I::AMotionEvent_getHistoricalEventTime_:
+    case I::AMotionEvent_getHistoricalOrientation_:
+    case I::AMotionEvent_getHistoricalPressure_:
+    case I::AMotionEvent_getHistoricalRawX_:
+    case I::AMotionEvent_getHistoricalRawY_:
+    case I::AMotionEvent_getHistoricalSize_:
+    case I::AMotionEvent_getHistoricalToolMajor_:
+    case I::AMotionEvent_getHistoricalToolMinor_:
+    case I::AMotionEvent_getHistoricalTouchMajor_:
+    case I::AMotionEvent_getHistoricalTouchMinor_:
+    case I::AMotionEvent_getHistoricalX_:
+    case I::AMotionEvent_getHistoricalY_:
+    case I::AMotionEvent_getHistorySize_:
+    case I::AMotionEvent_getMetaState_:
+    case I::AMotionEvent_getOrientation_:
+    case I::AMotionEvent_getPointerCount_:
+    case I::AMotionEvent_getPointerId_:
+    case I::AMotionEvent_getPressure_:
+    case I::AMotionEvent_getRawX_:
+    case I::AMotionEvent_getRawY_:
+    case I::AMotionEvent_getSize_:
+    case I::AMotionEvent_getToolMajor_:
+    case I::AMotionEvent_getToolMinor_:
+    case I::AMotionEvent_getTouchMajor_:
+    case I::AMotionEvent_getTouchMinor_:
+    case I::AMotionEvent_getX_:
+    case I::AMotionEvent_getXPrecision_:
+    case I::AMotionEvent_getY_:
+    case I::AMotionEvent_getYPrecision_:
+    case I::ANativeWindow_acquire_:
+    case I::ANativeWindow_fromSurface_:
+    case I::ANativeWindow_release_:
+    case I::ANativeWindow_setBuffersGeometry_:
+    case I::ASensorEventQueue_getEvents_:
+    case I::ASensorEventQueue_hasEvents_:
+    case I::ASensorManager_createEventQueue_:
+    case I::ASensorManager_destroyEventQueue_:
+    case I::ASensorManager_getDefaultSensor_:
+    case I::ASensorManager_getInstance_:
+    case I::ASensorManager_getSensorList_:
     if (n[0] == 'A' && NdkCall(id, n, regs)) {
         return;
     }
+    case I::__get_h_errno_:
+    case I::freeaddrinfo_:
+    case I::gai_strerror_:
+    case I::getaddrinfo_:
+    case I::gethostbyaddr_:
+    case I::gethostbyname_:
     if (id == I::getaddrinfo_ || id == I::freeaddrinfo_ || id == I::gai_strerror_ || id == I::gethostbyname_ ||
         id == I::gethostbyaddr_ || id == I::__get_h_errno_) {
         if (!NetDbCall(id, n, regs)) {
@@ -7912,6 +8466,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::getwc_:
+    case I::mbrtowc_:
+    case I::putwc_:
+    case I::ungetwc_:
+    case I::wcrtomb_:
+    case I::wcscoll_:
+    case I::wcsftime_:
+    case I::wcsxfrm_:
     if (id == I::mbrtowc_ || id == I::wcrtomb_ || id == I::wcscoll_ || id == I::wcsxfrm_ ||
         id == I::wcsftime_ || id == I::getwc_ || id == I::putwc_ || id == I::ungetwc_) {
         if (!WideCall(id, n, regs)) {
@@ -7919,6 +8481,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
+    case I::SHA1Final_:
+    case I::SHA1Init_:
+    case I::SHA1Update_:
     if (id == I::SHA1Init_ || id == I::SHA1Update_ || id == I::SHA1Final_) {
         if (!Sha1Call(id, n, regs)) {
             goto bad_ptr;
@@ -7928,6 +8493,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- processes. The emulator cannot give a guest a child process (a
     //     fork would duplicate the whole host, exec would replace it), so
     //     these fail the way a system without the facility answers.
+    case I::fork_:
+    case I::pclose_:
+    case I::popen_:
+    case I::ptrace_:
+    case I::system_:
+    case I::waitpid_:
     if (id == I::fork_ || id == I::execv_ || id == I::execve_ || id == I::execl_ || id == I::popen_ ||
         id == I::system_ || id == I::pclose_ || id == I::waitpid_ || id == I::ptrace_) {
         {
@@ -7945,6 +8516,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, id == I::popen_ ? 0u : 0xFFFFFFFFu);
         return;
     }
+    case I::setresuid_:
     if (id == I::setresuid_) {
         // An app may "change" to the ids it already has; anything else needs
         // privileges it does not have (EPERM). -1 keeps an id.
@@ -7961,6 +8533,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0xFFFFFFFFu);
         return;
     }
+    case I::setitimer_:
     if (id == I::setitimer_) {
         // setitimer(which, const itimerval* new, itimerval* old). Interval
         // timers would have to raise guest signals; none is offered, so only
@@ -7987,6 +8560,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- ctype functions (for guests that call them rather than reading
     //     _ctype_). Bionic 7.1.2 takes them from OpenBSD's isctype.c: EOF
     //     -> 0, otherwise the byte table entry of (unsigned char)c & mask.
+    case I::isalnum_:
+    case I::isalpha_:
+    case I::isspace_:
+    case I::isxdigit_:
     if (id == I::isalnum_ || id == I::isalpha_ || id == I::isspace_ || id == I::isxdigit_) {
         const std::int32_t c = static_cast<std::int32_t>(a0);
         const std::uint8_t mask = id == I::isalnum_   ? 0x07   // _U|_L|_N
@@ -7996,12 +8573,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, c == -1 ? 0u : BionicCtypeClass(static_cast<std::uint8_t>(c)) & mask);
         return;
     }
+    case I::tolower_:
     if (id == I::tolower_) {
         // OpenBSD tolower: values above 255 (and EOF) unchanged, else the
         // _tolower_tab_ entry (C locale: only A-Z change).
         Ret(regs, a0 >= 'A' && a0 <= 'Z' ? a0 + 32 : a0);
         return;
     }
+    case I::div_:
+    case I::perror_:
+    case I::putchar_:
+    case I::puts_:
+    case I::strcasestr_:
+    case I::strsep_:
+    case I::strxfrm_:
     {
         // Bounded guest strlen; 0xFFFFFFFF = unreadable or unterminated.
         auto guest_strlen = [&](std::uint32_t s) -> std::uint32_t {
@@ -8129,12 +8714,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
+    case I::sleep_:
+    case I::usleep_:
     if (id == I::usleep_ || id == I::sleep_) {
         // Signal-aware like nanosleep; the full time always elapses.
         GuestSleepUs(id == I::usleep_ ? std::uint64_t(a0) : std::uint64_t(a0) * 1000000u);
         Ret(regs, 0);
         return;
     }
+    case I::sched_get_priority_max_:
+    case I::sched_get_priority_min_:
     if (id == I::sched_get_priority_max_ || id == I::sched_get_priority_min_) {
         // Policy numbers are the kernel's on both sides.
         const int r = id == I::sched_get_priority_max_ ? ::sched_get_priority_max(static_cast<int>(a0))
@@ -8145,6 +8734,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
+    case I::pthread_getschedparam_:
+    case I::pthread_setschedparam_:
     if (id == I::pthread_getschedparam_ || id == I::pthread_setschedparam_) {
         // Guest threads keep the policy they started with, SCHED_OTHER at
         // priority 0 (an app's threads); asking for a real-time policy is
@@ -8166,6 +8757,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, (a1 == SCHED_OTHER && prio == 0) ? 0u : static_cast<std::uint32_t>(EPERM));
         return;
     }
+    case I::getpriority_:
+    case I::setpriority_:
     if (id == I::getpriority_ || id == I::setpriority_) {
         // (which, who[, prio]). A PRIO_PROCESS `who` is a thread id on Linux:
         // a guest tid (gettid) maps to its host thread; 0 and the process id
@@ -8190,6 +8783,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
+    case I::getrusage_:
     if (id == I::getrusage_) {
         // Guest struct rusage (LP32, NDK): two timevals of 2 longs, then 14
         // longs; 72 bytes. Values are truncated to 32 bits like the kernel's
@@ -8215,6 +8809,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::prctl_:
     if (id == I::prctl_) {
         // Only the thread name (PR_SET_NAME / PR_GET_NAME: 16 bytes with the
         // NUL) reaches the host thread; other options are not offered.
@@ -8238,10 +8833,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(-1));
         return;
     }
+    case I::getuid_:
     if (id == I::getuid_) {
         Ret(regs, static_cast<std::uint32_t>(::getuid()));
         return;
     }
+    case I::getresuid_:
     if (id == I::getresuid_) {
         if (!CheckRange(a0, 4, true) || !CheckRange(a1, 4, true) || !CheckRange(a2, 4, true)) {
             goto bad_ptr;
@@ -8255,6 +8852,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
+    case I::getgrgid_:
+    case I::getgrnam_:
+    case I::getpwnam_:
+    case I::getpwuid_:
     if (id == I::getpwuid_ || id == I::getpwnam_ || id == I::getgrgid_ || id == I::getgrnam_) {
         // The host's answer (on a device the system's own bionic), in the
         // guest's LP32 structs: passwd {name, passwd, uid, gid, dir, shell}
@@ -8364,6 +8965,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                         n.c_str(), a0, a1, regs[14], hits == 5 ? " (quiet henceforth)" : "");
         }
     }
+    }  // switch (id)
+
     Ret(regs, 0);
     return;
 
