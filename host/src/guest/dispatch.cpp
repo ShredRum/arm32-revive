@@ -8371,8 +8371,10 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     // section spanning an SVC) froze every mutex_-touching thread
     // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
     std::shared_ptr<pthread_mutex_t> m;
-    {
-        RtLock lock(*this, 0);
+    if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy") {
+        // Writers of the map (their own lock, not the runtime's mutex_: lock
+        // and unlock, the hot path, only read it and run in parallel).
+        std::unique_lock<std::shared_mutex> map_lock(mutex_map_mu_);
         if (n == "pthread_mutex_init") {
             // Type from the attribute word (NULL = NORMAL); bionic also keeps
             // it in the mutex word at bits 14-15 (PTHREAD_*_INITIALIZER).
@@ -8449,20 +8451,37 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             }
             return 0;
         }
-    auto it = mutex_map_.find(obj);
-    if (it == mutex_map_.end()) {
-        // Statically initialized guest mutex: the initializer word carries
-        // the type in bits 14-15 (NDK pthread.h: NORMAL 0, RECURSIVE 0x4000,
-        // ERRORCHECK 0x8000).
-        std::uint32_t word = 0;
-        if (CheckRange(obj, 4, false)) {
-            std::memcpy(&word, H(obj), 4);
-        }
-        const int type = static_cast<int>((word >> 14) & 3u);
-        it = mutex_map_.emplace(obj, NewHostMutex(type == 3 ? 0 : type)).first;
     }
+    {
+#ifdef ABR_DIAG_COUNTERS
+        const std::uint64_t w0 = DiagTicks();
+#endif
+        std::shared_lock<std::shared_mutex> map_lock(mutex_map_mu_);
+#ifdef ABR_DIAG_COUNTERS
+        diag_.rt_wait[0].fetch_add(DiagTicks() - w0, std::memory_order_relaxed);
+        diag_.rt_wait_n[0].fetch_add(1, std::memory_order_relaxed);
+#endif
+        const auto it = mutex_map_.find(obj);
+        if (it != mutex_map_.end()) {
+            m = it->second;
+        }
+    }
+    if (!m) {
+        std::unique_lock<std::shared_mutex> map_lock(mutex_map_mu_);
+        auto it = mutex_map_.find(obj);  // another thread may have added it
+        if (it == mutex_map_.end()) {
+            // Statically initialized guest mutex: the initializer word carries
+            // the type in bits 14-15 (NDK pthread.h: NORMAL 0, RECURSIVE 0x4000,
+            // ERRORCHECK 0x8000).
+            std::uint32_t word = 0;
+            if (CheckRange(obj, 4, false)) {
+                std::memcpy(&word, H(obj), 4);
+            }
+            const int type = static_cast<int>((word >> 14) & 3u);
+            it = mutex_map_.emplace(obj, NewHostMutex(type == 3 ? 0 : type)).first;
+        }
         m = it->second;
-    }  // guard released: blocking lock/unlock below must not hold mutex_.
+    }  // map lock released: the blocking lock/unlock below holds none.
     if (n == "pthread_mutex_lock") {
         pend_lock_obj_ = obj;
         pend_lock_tid_ = GuestTid();
@@ -8649,11 +8668,15 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         pthread_mutex_unlock(&hc->m);
         return 0;
     }
-    auto mit = mutex_map_.find(arg1);
-    if (mit == mutex_map_.end()) {
-        return EINVAL;
+    std::shared_ptr<pthread_mutex_t> mx;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(mutex_map_mu_);
+        const auto mit = mutex_map_.find(arg1);
+        if (mit == mutex_map_.end()) {
+            return EINVAL;
+        }
+        mx = mit->second;
     }
-    const std::shared_ptr<pthread_mutex_t> mx = mit->second;
     // The guest mutex back, interruptibly while guest signals are in use
     // (as PthreadMutex locks it).
     auto relock = [&] {

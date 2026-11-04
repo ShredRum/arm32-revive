@@ -6,6 +6,7 @@
 #include <array>
 #include <bitset>
 #include <atomic>
+#include <shared_mutex>
 #include <semaphore.h>
 #include <zlib.h>
 #include <condition_variable>
@@ -918,6 +919,10 @@ private:
     // it blocks, so a guest *_destroy (which only drops the map entry) can
     // never free an object another thread is still waiting in. The deleter
     // runs pthread_*_destroy when the last user lets go.
+    // Guest mutex -> host mutex. Its own reader/writer lock (mutex_map_mu_),
+    // never the runtime's mutex_: lock/unlock only read it. Order: mutex_
+    // (PthreadCond) -> mutex_map_mu_ -> io_mutex_ (the destroy guard).
+    std::shared_mutex mutex_map_mu_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_mutex_t>> mutex_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
