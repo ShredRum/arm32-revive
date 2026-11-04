@@ -165,6 +165,13 @@ quarantine off, svc counter, knobs read once, signals at first send,
 semaphore map lock): average 100 fps (86-107). Old core built in a
 throwaway git worktree; the current APK was reinstalled after.
 
+Caution (same evening): a later 60 s run gave 90 fps, but Rio and a hung
+99 Bricks were still running from earlier gates; that number is void, and
+whether other titles ran during the 47/100 pair is not known (the pair ran
+back to back, so both had the same company). devgate.sh now stops every
+other title of the project before it installs. Measure with only the game
+under test running, and compare builds back to back (the phone heats).
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
