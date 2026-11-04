@@ -923,10 +923,17 @@ private:
     std::unordered_set<std::uint32_t> norelease_set_;
     std::uint32_t mmap_next_ = kMmapArenaBase;
     std::recursive_mutex mutex_;
-    // mutex_ held for a scope; diag builds also add the wait to rt_wait[site].
+    // The guest heap's own lock: dlmalloc's mspace, the live-block index,
+    // heap_used_, the quarantine/norelease lists and the audio array pool.
+    // Not the runtime's mutex_ (malloc/free are among the hottest imports).
+    // Order: mutex_ -> heap_mu_; heap code never takes mutex_.
+    std::recursive_mutex heap_mu_;
+    // A lock held for a scope (mutex_ by default, or the heap's); diag builds
+    // also add the wait to rt_wait[site].
     struct RtLock {
         std::recursive_mutex& m;
-        RtLock(Runtime& rt, int site) : m(rt.mutex_) {
+        RtLock(Runtime& rt, int site, std::recursive_mutex* which = nullptr)
+            : m(which ? *which : rt.mutex_) {
 #ifdef ABR_DIAG_COUNTERS
             const std::uint64_t t0 = DiagTicks();
             m.lock();

@@ -457,9 +457,13 @@ std::uint32_t Runtime::LiveIdxErase(std::uint32_t base) {
     return got;
 }
 
-std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) { return live_idx_.Find(base); }
+std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
+    std::lock_guard<std::recursive_mutex> heap(heap_mu_);
+    return live_idx_.Find(base);
+}
 
 bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
+    std::lock_guard<std::recursive_mutex> heap(heap_mu_);
     // EXACT, two tiers, cheapest first:
     //   1. a live block whose base is this very address (one hash lookup);
     //   2. a block LARGER than the probe's reach -- the only blocks whose
@@ -515,6 +519,7 @@ bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::ui
 
 void Runtime::PrintHeapIdx() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
     // bigscan= walks the flat table independently: it must equal big= (the
     // ordered side-index size) or the two tiers have drifted apart.
     const std::size_t bigscan = live_idx_.CountLargerThan(kProbeReach);
@@ -667,7 +672,7 @@ static bool HeapKnob(HeapKnobId k) {
 }
 
 std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
-    RtLock lock(*this, 1);
+    RtLock lock(*this, 1, &heap_mu_);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
     // disease test for wall4: game memsets 255B into 144B objects; dense bump
     // packing puts live neighbors in the blast radius, dlmalloc may not).
@@ -796,7 +801,7 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         total = 1;
     }
     // mspace_calloc zeroes itself; keep our size map + telemetry in sync.
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(heap_mu_);
     void* hp = heap_ms_ ? mspace_calloc(heap_ms_, (std::size_t)n, size) : nullptr;
     if (!hp) {
         std::printf("[heap] OOM calloc n=%u size=%u used=%llu\n", n, size,
@@ -839,7 +844,7 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
     // (wild addr = host SIGSEGV inside the reservation). Fail loud instead.
     std::uint32_t old = 0;
     bool known = false;
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(heap_mu_);
     {
         old = LiveIdxFind(addr);
         known = (old != 0);
@@ -934,7 +939,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     if (!addr) {
         return;
     }
-    RtLock lock(*this, 2);
+    RtLock lock(*this, 2, &heap_mu_);
 #ifdef ABR_DIAG_COUNTERS
     struct InLock {
         std::atomic<std::uint64_t>& acc;
@@ -10396,6 +10401,7 @@ bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
     // D2: one containment query covers both old branches (an exact base hit is
     // just containment with base == addr).
     std::uint32_t cbase = 0, csize = 0;
@@ -13181,6 +13187,11 @@ void Runtime::DumpDiagCounters() {
         std::unique_lock<std::recursive_mutex> lock(mutex_, std::try_to_lock);
         if (!lock.owns_lock()) {
             std::printf("[counters] SKIPPED (runtime mutex contested)\n");
+            return;
+        }
+        std::unique_lock<std::recursive_mutex> heap(heap_mu_, std::try_to_lock);
+        if (!heap.owns_lock()) {
+            std::printf("[counters] SKIPPED (heap lock contested)\n");
             return;
         }
         heap_used = heap_used_;
@@ -16761,7 +16772,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     // always memcpied in below).
                     std::uint32_t gb = 0;
                     {
-                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
                         for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
                             if (it->second == (std::uint32_t)len) {
                                 if (LiveIdxFind(it->first)) {
@@ -17012,7 +17023,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 // (it must Release before the next Get on the same array).
                 // After JNI_COMMIT the guest still owns the buffer.
                 if (!commit_only && pin.guest_buf && pin.len) {
-                    std::lock_guard<std::recursive_mutex> lock(mutex_);
+                    std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
                     if (array_pool_.size() < 8) {
                         array_pool_.push_back({pin.guest_buf, pin.len});
                     }

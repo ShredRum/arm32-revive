@@ -3438,6 +3438,55 @@ int main() {
         }
     }
 
+    // --- heap under four threads at once (its own lock since 2026-11-04):
+    //     every block keeps its fill while others allocate and free, and the
+    //     heap still serves afterwards. LAST, as the quarantine test: the
+    //     heap grows over the fixed scratch addresses the tests above use.
+    {
+        std::atomic<int> bad{0};
+        std::vector<std::thread> ts;
+        for (int t = 0; t < 4; t++) {
+            ts.emplace_back([&, t] {
+                rt.ThreadEnter(nullptr, 90 + t);
+                std::vector<std::uint32_t> mine;
+                for (int i = 0; i < 4000; i++) {
+                    const std::uint32_t sz = 16 + ((i * 37 + t * 11) % 200);
+                    const std::uint32_t b = rt.GuestMalloc(sz);
+                    if (!b) {
+                        bad++;
+                        continue;
+                    }
+                    std::memset(rt.H(b), 0x40 + t, sz);
+                    mine.push_back(b);
+                    mine.push_back(sz);
+                    if (mine.size() > 64) {
+                        const std::uint32_t ob = mine[0], os = mine[1];
+                        for (std::uint32_t k = 0; k < os; k++) {
+                            if (*rt.H<std::uint8_t>(ob + k) != 0x40 + t) {
+                                bad++;
+                                break;
+                            }
+                        }
+                        rt.GuestFree(ob);
+                        mine.erase(mine.begin(), mine.begin() + 2);
+                    }
+                }
+                for (std::size_t k = 0; k < mine.size(); k += 2) {
+                    rt.GuestFree(mine[k]);
+                }
+                rt.ThreadEnter(nullptr, 0);
+            });
+        }
+        for (auto& th : ts) {
+            th.join();
+        }
+        const std::uint32_t after = rt.GuestMalloc(64);
+        Expect("heap: four threads, every block kept its fill",
+               std::to_string(bad.load()), "0");
+        Expect("heap: serves after the four threads", std::to_string(after != 0), "1");
+        rt.GuestFree(after);
+    }
+
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
