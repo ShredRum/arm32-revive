@@ -85,7 +85,7 @@ first 60 s, back to back), before the direct jump.
 
 | # | what | evidence | note |
 |---|---|---|---|
-| F1 | malloc/memalign/free ~2 us a call: runtime-wide mutex_ + live index (A7) + dlmalloc | MCSM ~250 k calls each per 30 s | the busiest import left; own heap lock, then A7 |
+| F1 PART DONE | malloc/memalign/free ~2.3 us a call | MCSM ~230 k calls each per 30 s | own heap lock (ce40e83): no change per call (memalign 2257 -> 2282 ns, free 2119 -> 2270): the threads waited for each other on the one heap, not for other mutex_ users. Left: ~0.7 us lock wait + ~0.9 us under it (live index ~0.3) = ~3.5 % of one core in all. Further cut only by per-thread block caches (jemalloc-like tcache): a big change for well under 1 %; not planned |
 | F2 | direct jump inside the big nested blocks of CallImport (file bridge ~2200 lines, APK assets, string block) | inner chains of integer compares | a nested switch after each block's declarations |
 | F3 | RealGL's own mutex on every GL call | one render thread mostly; ~0.3-0.6 us over the driver left | check what it guards (active_tex_, glstr slots) |
 | F4 | GL on a thread of its own (queue + flush on sync calls) | driver ~1-2 us x ~150 k calls/s on the render thread | does not cut heat (same work, more threads); only if a phone measurement shows the render thread is the limit |
