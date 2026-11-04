@@ -22,3 +22,31 @@
      new-instance v2, Ljava/lang/StringBuilder;
  
      invoke-direct {v2}, Ljava/lang/StringBuilder;-><init>()V
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -17,12 +17,6 @@
+     <application android:allowBackup="true" android:hardwareAccelerated="true" android:icon="@drawable/ic_launcher" android:isGame="true" android:label="MCSM" android:theme="@style/TelltaleTheme">
+         <activity android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|uiMode|screenSize|smallestScreenSize|layoutDirection|fontScale" android:label="MCSM" android:launchMode="singleTop" android:name="com.telltalegames.telltale.GoogleActivity" android:screenOrientation="sensorLandscape">
+             <intent-filter>
+-                <action android:name="android.intent.action.SEND"/>
+-                <category android:name="android.intent.category.DEFAULT"/>
+-            </intent-filter>
+-        </activity>
+-        <activity android:banner="@drawable/ic_banner" android:label="MCSM" android:name="com.telltalegames.expansion.downloader.SampleDownloaderActivity">
+-            <intent-filter>
+                 <action android:name="android.intent.action.MAIN"/>
+                 <category android:name="android.intent.category.LAUNCHER"/>
+             </intent-filter>
+@@ -30,6 +24,12 @@
+                 <action android:name="android.intent.action.MAIN"/>
+                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+             </intent-filter>
++            <intent-filter>
++                <action android:name="android.intent.action.SEND"/>
++                <category android:name="android.intent.category.DEFAULT"/>
++            </intent-filter>
++        </activity>
++        <activity android:banner="@drawable/ic_banner" android:label="MCSM" android:name="com.telltalegames.expansion.downloader.SampleDownloaderActivity">
+         </activity>
+         <service android:name="com.telltalegames.expansion.downloader.SampleDownloaderService"/>
+         <receiver android:name="com.telltalegames.expansion.downloader.SampleAlarmReceiver"/>

@@ -1,6 +1,7 @@
 # ---- per-game artifacts (never committed: copyrighted APKs, huge trees) ----
 games/*/original/
 games/*/work/
+games/*/data
 
 # ---- signing keys (local only; keep a backup somewhere safe) ----
 keys/

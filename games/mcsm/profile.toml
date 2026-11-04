@@ -16,7 +16,7 @@ version_code = 10137
 min_sdk      = 24
 target_sdk   = 24
 original     = "original/Minecraft-Story-Mode-v1-37-Mali-unlocked.apk"
-activity     = "com.telltalegames.expansion.downloader.SampleDownloaderActivity"  # launcher (devgate)
+activity     = "com.telltalegames.telltale.GoogleActivity"  # launcher (devgate); the downloader is skipped (smali.patch)
 
 [guest]
 abi    = "armeabi-v7a"
@@ -50,3 +50,25 @@ libs = []
 
 [tree]
 smali_lib_name_orig = ""   # no smali edit
+
+# Game data shipped inside APK splits and read in place (packed files,
+# host/src/guest/apk_vfs.h): scripts/pack_apks.py mcsm. base.apk = the program,
+# the OBB (menu + episode 1) and the shared files; one split per episode 2-8.
+[packed]
+source = "data"   # games/mcsm/data (gitignored): the owner's original data tree
+map = [
+    ["Android/obb", "sdcard/Android/obb"],   # main/patch OBB
+    ["Telltale",    "sdcard/Telltale"],      # *.mft manifests (saves go there too)
+    ["Android/data", "ext/files"],           # Net/ archives, Temp/ IN_* markers
+]
+# A file whose packed path has the episode number standing alone (not part of
+# a longer number such as 10129) goes to that episode's split.
+splits = [
+    ["episode_02", "(?<![0-9])102(?![0-9])"],
+    ["episode_03", "(?<![0-9])103(?![0-9])"],
+    ["episode_04", "(?<![0-9])104(?![0-9])"],
+    ["episode_05", "(?<![0-9])105(?![0-9])"],
+    ["episode_06", "(?<![0-9])106(?![0-9])"],
+    ["episode_07", "(?<![0-9])107(?![0-9])"],
+    ["episode_08", "(?<![0-9])108(?![0-9])"],
+]

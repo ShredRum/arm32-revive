@@ -143,6 +143,10 @@ bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::stri
         z.usize = Le32(h + 24);
         const std::uint64_t lho = Le32(h + 42);
         p += 46 + nlen + xlen + clen;
+        if (z.csize == 0xffffffffu || z.usize == 0xffffffffu || lho == 0xffffffffu) {
+            *err = "zip64 entry (not supported: keep each APK under 4 GB): " + z.name;
+            return false;
+        }
         // The local header's name and extra lengths can differ from the
         // central ones (alignment padding lives in the local extra field).
         std::uint8_t lh[30];
