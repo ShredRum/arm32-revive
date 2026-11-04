@@ -8393,23 +8393,50 @@ bad_ptr:
 }
 
 // Host mutex of the guest's type. NORMAL must stay NORMAL: bionic lets any
-// thread unlock a normal mutex (the games do: Rio logs UNLOCK-FOREIGN), while
-// a recursive/errorcheck host mutex answers EPERM and stays locked. Making
-// every guest mutex recursive (as before) also turned a self-relock or
-// trylock of a normal mutex into a silent success.
-static std::shared_ptr<pthread_mutex_t> NewHostMutex(int type) {
-    auto* m = new pthread_mutex_t;
+// thread unlock a normal mutex (the games do), while a recursive/errorcheck
+// host mutex answers EPERM and stays locked. Making every guest mutex
+// recursive (as before) also turned a self-relock or trylock of a normal
+// mutex into a silent success.
+static std::shared_ptr<Runtime::HostMutex> NewHostMutex(int type) {
+    return std::make_shared<Runtime::HostMutex>(type);
+}
+
+Runtime::HostMutex::HostMutex(int t) : type(t) {
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, type == 1   ? PTHREAD_MUTEX_RECURSIVE
-                                     : type == 2 ? PTHREAD_MUTEX_ERRORCHECK
-                                                 : PTHREAD_MUTEX_NORMAL);
-    pthread_mutex_init(m, &attr);
+    pthread_mutexattr_settype(&attr, t == 1   ? PTHREAD_MUTEX_RECURSIVE
+                                     : t == 2 ? PTHREAD_MUTEX_ERRORCHECK
+                                              : PTHREAD_MUTEX_NORMAL);
+    pthread_mutex_init(&m, &attr);
     pthread_mutexattr_destroy(&attr);
-    return std::shared_ptr<pthread_mutex_t>(m, [](pthread_mutex_t* p) {
-        pthread_mutex_destroy(p);
-        delete p;
-    });
+}
+
+Runtime::HostMutex::~HostMutex() { pthread_mutex_destroy(&m); }
+
+// The holder book of one guest mutex, kept in its host object: written only
+// by the thread that owns the lock (or a foreign unlocker of a normal one),
+// so it needs no lock. Read for the stall dump.
+void Runtime::NoteLocked(HostMutex& hm) {
+    hm.holder.store(GuestTid(), std::memory_order_relaxed);
+    hm.depth.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Runtime::NoteUnlocking(HostMutex& hm, std::uint32_t obj) {
+    const std::uint32_t tid = GuestTid();
+    const std::uint32_t holder = hm.holder.load(std::memory_order_relaxed);
+    if (holder != tid) {
+        // A normal mutex unlocked by another thread (bionic allows it). Name
+        // the first few, count the rest (MutexOwnersDump).
+        const unsigned long k = mutex_foreign_unlocks_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (k <= 5) {
+            std::printf("[mutex] UNLOCK-FOREIGN obj=%08x by=%u owner=%u%s\n", obj, tid, holder,
+                        k == 5 ? " (further ones only counted)" : "");
+        }
+    }
+    if (hm.depth.fetch_sub(1, std::memory_order_relaxed) <= 1) {
+        hm.depth.store(0, std::memory_order_relaxed);
+        hm.holder.store(0, std::memory_order_relaxed);
+    }
 }
 
 std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr) {
@@ -8418,7 +8445,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
     // game mutex (held by a halted worker, or ABBA with a guest critical
     // section spanning an SVC) froze every mutex_-touching thread
     // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
-    std::shared_ptr<pthread_mutex_t> m;
+    std::shared_ptr<HostMutex> m;
     if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy") {
         // Writers of the map (their own lock, not the runtime's mutex_: lock
         // and unlock, the hot path, only read it and run in parallel).
@@ -8440,8 +8467,8 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             }
             auto old = mutex_map_.find(obj);
             if (old != mutex_map_.end()) {
-                // Re-init of an existing guest mutex: a fresh host mutex (the
-                // old one is leaked, another thread might still block on it).
+                // Re-init of an existing guest mutex: a fresh host mutex (a
+                // thread still on the old one keeps it alive, shared_ptr).
                 std::printf("[mutex] re-init obj=%08x (t%u) lr=%08x\n", obj, GuestTid(),
                             ActiveJit() ? ActiveJit()->Regs()[14] : 0u);
                 old->second = NewHostMutex(static_cast<int>(type));
@@ -8451,51 +8478,21 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             return 0;
         }
         if (n == "pthread_mutex_destroy") {
+            // As bionic: a held mutex is refused with EBUSY (trylock); a free
+            // one leaves the map. A thread still using it keeps its own
+            // reference (shared_ptr), so nothing is freed under it.
             auto it = mutex_map_.find(obj);
             if (it != mutex_map_.end()) {
-                // Destroy-guard: never free a host mutex still held (dangling
-                // futex = eternal wedge in the next locker, e.g. teardown
-                // racing in-flight workers on early-tap skips). Leak instead.
-                bool held = false;
-                {
-                    std::lock_guard<std::mutex> io(io_mutex_);
-                    auto oit = mutex_owner_.find(obj);
-                    held = (oit != mutex_owner_.end() && oit->second.second > 0);
-                    if (held) {
-                        std::printf("[mutex] DESTROY-HELD obj=%08x holder=%u depth=%d "
-                                    "-- skipped (leak)\n",
-                                    obj, oit->second.first, oit->second.second);
-                        mutex_destroy_skipped_++;
-                    } else {
-                        mutex_owner_.erase(obj);
-                    }
-                }
-                if (held) {
-                    return 0;
-                }
-                // A lock that is IN FLIGHT is not in the owner map yet (the
-                // owner is recorded only after the lock succeeds), and a
-                // thread waiting for this mutex would then wait on a freed
-                // one. The pending-lock witness covers the waiter; the
-                // trylock covers a thread that holds the mutex but has not
-                // recorded it yet. Either way: keep the mutex (leak it) and
-                // leave it in the map, so the guest keeps the same object.
-                if (pend_lock_obj_.load() == obj) {
-                    std::printf("[mutex] DESTROY-PENDING obj=%08x -- skipped (leak)\n", obj);
-                    mutex_destroy_skipped_++;
-                    return 0;
-                }
                 m = it->second;
-                if (pthread_mutex_trylock(m.get()) != 0) {
-                    // Still held by someone: pthread_mutex_destroy on a held
-                    // mutex is undefined, and freeing it would leave the
-                    // holder with a dangling futex. Leak it.
-                    std::printf("[mutex] DESTROY-HELD obj=%08x -- skipped (leak)\n", obj);
-                    mutex_destroy_skipped_++;
-                    return 0;
+                if (pthread_mutex_trylock(&m->m) != 0) {
+                    if (mutex_destroy_skipped_++ < 5) {
+                        std::printf("[mutex] DESTROY-HELD obj=%08x holder=%u -- EBUSY\n", obj,
+                                    m->holder.load(std::memory_order_relaxed));
+                    }
+                    return EBUSY;
                 }
-                pthread_mutex_unlock(m.get());
-                mutex_map_.erase(it);  // freed when the last user lets go
+                pthread_mutex_unlock(&m->m);
+                mutex_map_.erase(it);
             }
             return 0;
         }
@@ -8531,8 +8528,6 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         m = it->second;
     }  // map lock released: the blocking lock/unlock below holds none.
     if (n == "pthread_mutex_lock") {
-        pend_lock_obj_ = obj;
-        pend_lock_tid_ = GuestTid();
         int r = 0;
         if (SignalsInUse()) {
             // Interruptible (see PthreadCond): handlers run between slices,
@@ -8541,13 +8536,13 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             // their clock read (a ~390 ns syscall on the sandbox) only start
             // when it is held. trylock answers as lock does for an owner of a
             // recursive one; any other refusal goes on to the full lock.
-            r = pthread_mutex_trylock(m.get());
+            r = pthread_mutex_trylock(&m->m);
 #ifdef ABR_DIAG_COUNTERS
             const std::uint64_t w0 = DiagTicks();
 #endif
             while (r != 0) {
                 const struct timespec slice = RealtimeIn(kSigSliceNs);
-                r = pthread_mutex_timedlock(m.get(), &slice);
+                r = pthread_mutex_timedlock(&m->m, &slice);
                 if (r != ETIMEDOUT) {
                     break;
                 }
@@ -8561,48 +8556,32 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         } else {
 #ifdef ABR_DIAG_COUNTERS
             const std::uint64_t w0 = DiagTicks();
-            r = pthread_mutex_lock(m.get());
+            r = pthread_mutex_lock(&m->m);
             diag_.guest_lock_wait.fetch_add(DiagTicks() - w0, std::memory_order_relaxed);
 #else
-            r = pthread_mutex_lock(m.get());
+            r = pthread_mutex_lock(&m->m);
 #endif
         }
         if (r == 0) {
-            // The owner is recorded WHILE the pending witness is still set,
-            // and the witness is cleared only afterwards: a destroy in the
-            // window between the lock succeeding and the owner being
-            // recorded then still sees a lock in flight and refuses.
-            if (test_skip_mutex_owner_) {
-                // TEST ONLY: leave the pending witness set and record no
-                // owner -- the exact window the destroy has to survive.
-            } else {
-                MutexNoteLocked(obj, GuestTid());
-                pend_lock_obj_ = 0;
-                pend_lock_tid_ = 0;
-            }
-        } else {
-            pend_lock_obj_ = 0;
-            pend_lock_tid_ = 0;
+            NoteLocked(*m);
         }
         return static_cast<std::uint32_t>(r);
     }
     if (n == "pthread_mutex_unlock") {
-        // Pending-lock witness covers unlock too (main wedged INSIDE unlock
-        // with pending-lock:none is a distinct shape worth naming).
-        pend_lock_obj_ = obj;
-        pend_lock_tid_ = GuestTid();
-        const int r = pthread_mutex_unlock(m.get());
-        pend_lock_obj_ = 0;
-        pend_lock_tid_ = 0;
-        if (r == 0) {
-            MutexNoteUnlocked(obj, GuestTid());
+        // The book is updated while the lock is still held (after the unlock
+        // another thread may already own it). A recursive/errorcheck mutex
+        // unlocked by a non-owner is refused by the host (EPERM): its book
+        // stays as it is.
+        if (m->type != 0 && m->holder.load(std::memory_order_relaxed) != GuestTid()) {
+            return static_cast<std::uint32_t>(pthread_mutex_unlock(&m->m));
         }
-        return static_cast<std::uint32_t>(r);
+        NoteUnlocking(*m, obj);
+        return static_cast<std::uint32_t>(pthread_mutex_unlock(&m->m));
     }
     if (n == "pthread_mutex_trylock") {
-        const int r = pthread_mutex_trylock(m.get());
+        const int r = pthread_mutex_trylock(&m->m);
         if (r == 0) {
-            MutexNoteLocked(obj, GuestTid());
+            NoteLocked(*m);
         }
         return static_cast<std::uint32_t>(r);
     }
@@ -8716,7 +8695,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         pthread_mutex_unlock(&hc->m);
         return 0;
     }
-    std::shared_ptr<pthread_mutex_t> mx;
+    std::shared_ptr<HostMutex> mx;
     {
         std::shared_lock<std::shared_mutex> map_lock(mutex_map_mu_);
         const auto mit = mutex_map_.find(arg1);
@@ -8729,12 +8708,12 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
     // (as PthreadMutex locks it).
     auto relock = [&] {
         if (!SignalsInUse()) {
-            pthread_mutex_lock(mx.get());
+            pthread_mutex_lock(&mx->m);
             return;
         }
         for (;;) {
             const struct timespec slice = RealtimeIn(kSigSliceNs);
-            if (pthread_mutex_timedlock(mx.get(), &slice) != ETIMEDOUT) {
+            if (pthread_mutex_timedlock(&mx->m, &slice) != ETIMEDOUT) {
                 return;
             }
             if (SignalDeliverable()) {
@@ -8765,7 +8744,11 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             t_sig->wait_cv.store(hc.get());
         }
         mutex_.unlock();
-        pthread_mutex_unlock(mx.get());
+        // The guest mutex is let go for the wait: its holder book too (as an
+        // unlock by its owner would), restored after the relock below.
+        const std::int32_t held_depth = mx->depth.exchange(0, std::memory_order_relaxed);
+        mx->holder.store(0, std::memory_order_relaxed);
+        pthread_mutex_unlock(&mx->m);
         int r = 0;
         while (!me.woken) {
             struct timespec now {};
@@ -8812,6 +8795,8 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             r = 0;
         }
         relock();
+        mx->holder.store(GuestTid(), std::memory_order_relaxed);
+        mx->depth.store(held_depth > 0 ? held_depth : 1, std::memory_order_relaxed);
         mutex_.lock();
         return r;
     };
@@ -12502,9 +12487,15 @@ void Runtime::DumpGuestThreads() {
                           (unsigned long long)st->wait_wakes.load(), last_by);
             wait = b;
         }
-        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s%s pending=%08x%s%s\n",
+        // The first argument of a blocking host call (with signals in use its
+        // registers are kept): for pthread_mutex_lock, the mutex it waits for.
+        char a0s[24] = "";
+        if (outside && wait.empty() && st->snap_valid.load(std::memory_order_relaxed)) {
+            std::snprintf(a0s, sizeof a0s, " a0=%08x", st->snap[0]);
+        }
+        std::printf("[threads] tid=%u host=%d %s pc=%08x lr=%08x sp=%08x%s%s%s%s pending=%08x%s%s\n",
                     tid, st->host_tid.load(), parked ? "in-host" : outside ? "host-call" : "guest", pc,
-                    lr, sp, imp.empty() ? "" : " import=", imp.c_str(), wait.c_str(),
+                    lr, sp, imp.empty() ? "" : " import=", imp.c_str(), a0s, wait.c_str(),
                     st->pending.load(), samples.empty() ? "" : " samples:", samples.c_str());
     }
 }

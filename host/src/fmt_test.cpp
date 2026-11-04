@@ -896,31 +896,28 @@ int main() {
                std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
     }
 
-    // --- pthread_mutex_destroy in the window between the lock succeeding and
-    //     the owner being recorded: the destroy must still not free the
-    //     mutex, and the mutex must stay usable afterwards.
+    // --- pthread_mutex_destroy of a held mutex: refused with EBUSY, as bionic
+    //     does (trylock), and the mutex stays usable.
     {
         const std::uint32_t kM = 0x10006800;
         const std::uint32_t init[4] = {kM, 0, 0, 0};
         const std::uint32_t lock[4] = {kM, 0, 0, 0};
         const std::uint32_t destroy[4] = {kM, 0, 0, 0};
         const std::uint32_t unlock[4] = {kM, 0, 0, 0};
-        rt.test_skip_mutex_owner_ = true;  // the owner is NOT recorded
         abr::RuntimeTestAccess::Call(rt, 8, init);
         abr::RuntimeTestAccess::Call(rt, 9, lock);
         const unsigned before = rt.mutex_destroy_skipped_;
-        abr::RuntimeTestAccess::Call(rt, 10, destroy);  // must be refused
-        Expect("the raced destroy was refused",
-               std::to_string(rt.mutex_destroy_skipped_ > before ? 1 : 0), "1");
-        // The mutex is a NORMAL one (bionic default): release the hold the
-        // test took, then it must lock and unlock again.
-        Expect("mutex unlock after a raced destroy",
+        Expect("destroy of a held mutex = EBUSY",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 10, destroy)), std::to_string(EBUSY));
+        Expect("the refusal is counted", std::to_string(rt.mutex_destroy_skipped_ - before), "1");
+        Expect("mutex unlock after a refused destroy",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
-        Expect("mutex usable after a raced destroy",
+        Expect("mutex usable after a refused destroy",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 9, lock)), "0");
         Expect("mutex unlock again",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 11, unlock)), "0");
-        rt.test_skip_mutex_owner_ = false;
+        Expect("destroy of a free mutex = 0",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 10, destroy)), "0");
     }
 
     // --- the stuck-update scan must not read past the mapped region: the

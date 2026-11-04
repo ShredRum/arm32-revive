@@ -629,15 +629,23 @@ public:
     std::mutex cwd_mu_;
     std::string GuestCwd();
 
-    // How many pthread_mutex_destroy calls were REFUSED because the mutex
-    // was held (or a lock was in flight). Diagnostic + test hook.
+    // How many pthread_mutex_destroy calls were refused (EBUSY) because the
+    // mutex was held. Diagnostic + test hook; under mutex_map_mu_.
     unsigned mutex_destroy_skipped_ = 0;
 
-    // TEST ONLY: do not record the owner after a successful lock. It
-    // simulates the window between the lock succeeding and the owner being
-    // recorded -- the window pthread_mutex_destroy has to survive. False in
-    // every real run.
-    bool test_skip_mutex_owner_ = false;
+    // A guest mutex's host side: the host mutex of its type and its holder
+    // book (holder guest tid, depth), written only by the thread that owns
+    // the lock (no lock needed), read for the stall dump.
+    struct HostMutex {
+        explicit HostMutex(int t);
+        ~HostMutex();
+        HostMutex(const HostMutex&) = delete;
+        HostMutex& operator=(const HostMutex&) = delete;
+        pthread_mutex_t m;
+        int type;  // 0 normal, 1 recursive, 2 errorcheck
+        std::atomic<std::uint32_t> holder{0};
+        std::atomic<std::int32_t> depth{0};
+    };
 
     // A return address found on the guest stack.
     struct StackHit {
@@ -754,10 +762,6 @@ public:
     // (no strings here - index resolved against mod_.imports at dump time).
     std::atomic<std::uint32_t> last_svc_idx_{0xFFFFFFFFu};
     std::atomic<std::uint32_t> last_svc_tid_{0};
-    // Pending (blocked-in) mutex lock: obj+tid set BEFORE the host lock
-    // call, cleared after. Names WHAT a stuck thread wants.
-    std::atomic<std::uint32_t> pend_lock_obj_{0};
-    std::atomic<std::uint32_t> pend_lock_tid_{0};
     std::atomic<std::uint64_t> halt_count{0};
     std::atomic<std::uint64_t> bad_count{0};
 
@@ -944,9 +948,12 @@ private:
     // runs pthread_*_destroy when the last user lets go.
     // Guest mutex -> host mutex. Its own reader/writer lock (mutex_map_mu_),
     // never the runtime's mutex_: lock/unlock only read it. Order: mutex_
-    // (PthreadCond) -> mutex_map_mu_ -> io_mutex_ (the destroy guard).
+    // (PthreadCond) -> mutex_map_mu_.
     std::shared_mutex mutex_map_mu_;
-    std::unordered_map<std::uint32_t, std::shared_ptr<pthread_mutex_t>> mutex_map_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<HostMutex>> mutex_map_;
+    void NoteLocked(HostMutex& hm);
+    void NoteUnlocking(HostMutex& hm, std::uint32_t obj);
+    std::atomic<unsigned long> mutex_foreign_unlocks_{0};
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
     std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)
@@ -1190,62 +1197,27 @@ private:
     // every other thread; 2026-10-10). No nesting: never call GuestMalloc
     // or other mutex_-taking code while holding it.
     std::mutex io_mutex_;
-    // Guest-mutex owner tracking (deadlock triage): obj -> (holder
-    // guest-tid, recursion depth). Maintained on successful lock/unlock
-    // under io_mutex_ (never across the host lock call). Dumped by
-    // MutexOwnersDump() when the stuck-update watchdog fires.
-    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, int>> mutex_owner_;
-    unsigned long mutex_foreign_unlocks_ = 0;  // under io_mutex_
-    void MutexNoteLocked(std::uint32_t obj, std::uint32_t tid) {
-        std::lock_guard<std::mutex> io(io_mutex_);
-        auto& e = mutex_owner_[obj];
-        // Diagnostic layer (PLAN.md A): the owner map itself stays maintained
-        // (MutexOwnersDump needs it for the watchdog); only the print is gated.
-        if (DiagOn() && e.second > 0 && e.first != tid) {
-            std::printf("[mutex] OWNER-CHANGE obj=%08x %u->%u (was depth %d)\n", obj, e.first,
-                        tid, e.second);
-        }
-        e.first = tid;
-        e.second++;
-    }
-    void MutexNoteUnlocked(std::uint32_t obj, std::uint32_t tid) {
-        std::lock_guard<std::mutex> io(io_mutex_);
-        auto it = mutex_owner_.find(obj);
-        if (it == mutex_owner_.end()) {
+    // The held guest mutexes and their holders, for the stall dump. Never
+    // blocks (the watchdog must not wedge on the deadlock it reports).
+    void MutexOwnersDump() {
+        std::shared_lock<std::shared_mutex> map_lock(mutex_map_mu_, std::try_to_lock);
+        if (!map_lock.owns_lock()) {
+            std::printf("[mutex] owners: SKIPPED (map lock contested)\n");
             return;
         }
-        if (it->second.first != tid) {
-            // A normal mutex unlocked by another thread (bionic allows it; the
-            // host unlock succeeded, so the lock IS released). Minecraft:
-            // Story Mode does it all the time: name the first few, count the
-            // rest (MutexOwnersDump), and keep the books right: a stale
-            // holder made the destroy guard leak the mutex.
-            const unsigned long n = ++mutex_foreign_unlocks_;
-            if (n <= 5) {
-                std::printf("[mutex] UNLOCK-FOREIGN obj=%08x by=%u owner=%u%s\n", obj, tid,
-                            it->second.first, n == 5 ? " (further ones only counted)" : "");
+        std::printf("[mutex] foreign unlocks so far: %lu\n",
+                    mutex_foreign_unlocks_.load(std::memory_order_relaxed));
+        int held = 0;
+        for (const auto& kv : mutex_map_) {
+            const std::int32_t d = kv.second->depth.load(std::memory_order_relaxed);
+            if (d > 0) {
+                held++;
+                std::printf("[mutex] obj=%08x holder=%u depth=%d\n", kv.first,
+                            kv.second->holder.load(std::memory_order_relaxed), d);
             }
         }
-        if (--(it->second.second) <= 0) {
-            mutex_owner_.erase(it);
-        }
-    }
-    void MutexOwnersDump() {
-        // Watchdog robustness: never block here (a leaked guard would wedge
-        // the watchdog itself, hiding the very deadlock it reports).
-        std::unique_lock<std::mutex> io(io_mutex_, std::try_to_lock);
-        if (!io.owns_lock()) {
-            std::printf("[mutex] owners: SKIPPED (io guard contested)\n");
-            return;
-        }
-        std::printf("[mutex] foreign unlocks so far: %lu\n", mutex_foreign_unlocks_);
-        if (mutex_owner_.empty()) {
+        if (held == 0) {
             std::printf("[mutex] owners: none held\n");
-            return;
-        }
-        for (const auto& kv : mutex_owner_) {
-            std::printf("[mutex] obj=%08x holder=%u depth=%d\n", kv.first, kv.second.first,
-                        kv.second.second);
         }
     }
     struct HostDir {

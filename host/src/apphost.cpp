@@ -550,13 +550,6 @@ void Watchdog() {
             g_upd_entry_n.load(), stuck_ms, entry);
         // Lock-free first (atomics + JIT regs): these always print, even if
         // the map dumps below wedge on a leaked guard.
-        const std::uint32_t plo = g_rt->pend_lock_obj_.load();
-        const std::uint32_t plt = g_rt->pend_lock_tid_.load();
-        if (plo) {
-            Log("STUCK pending-lock obj=%08x tid=%u", plo, plt);
-        } else {
-            Log("STUCK pending-lock: none (not inside mutex_lock)");
-        }
         const std::uint32_t si = g_rt->last_svc_idx_.load();
         const std::uint32_t st = g_rt->last_svc_tid_.load();
         const char* nm = "?";

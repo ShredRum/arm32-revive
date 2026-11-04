@@ -18,12 +18,12 @@ destroy race).
 
 | # | what | where | origin | why it may be dead | do |
 |---|---|---|---|---|---|
-| A1 | `svc_count.fetch_add` on every guest->host call (~540 k/s in MCSM, one shared cache line for all threads) | dispatch.cpp OnSvc | counters | read only by the diag `[counters]` line | diag builds only |
-| A2 | mutex owner books: `io_mutex_` (shared with the fd maps) + unordered_map on every lock and unlock | dispatch.h MutexNote* | c86817e 2026-10-14, hang triage | destroy no longer needs them (A4); the stall dump can read a holder kept in the host mutex object itself | holder tid/depth as atomics in the mutex object; no map, no lock |
-| A3 | pending-lock witness: 4 shared atomic stores per lock/unlock | PthreadMutex | 790bc7d 2026-10-14 | its job (no free under a waiter) is done by shared_ptr since e221e33 (2026-10-25) | drop |
-| A4 | destroy guard via books + witness | PthreadMutex destroy | 15a66e1 2026-10-15 | shared_ptr keeps a held or waited mutex alive; bionic itself only does trylock -> EBUSY | trylock only |
+| A1 DONE | `svc_count.fetch_add` on every guest->host call (~540 k/s in MCSM, one shared cache line for all threads) | dispatch.cpp OnSvc | counters | read only by the diag `[counters]` line | diag builds only |
+| A2 DONE | mutex owner books: `io_mutex_` (shared with the fd maps) + unordered_map on every lock and unlock | dispatch.h MutexNote* | c86817e 2026-10-14, hang triage | destroy no longer needs them (A4); the stall dump can read a holder kept in the host mutex object itself | holder tid/depth as atomics in the mutex object; no map, no lock |
+| A3 DONE | pending-lock witness: 4 shared atomic stores per lock/unlock | PthreadMutex | 790bc7d 2026-10-14 | its job (no free under a waiter) is done by shared_ptr since e221e33 (2026-10-25) | drop |
+| A4 DONE | destroy guard via books + witness | PthreadMutex destroy | 15a66e1 2026-10-15 | shared_ptr keeps a held or waited mutex alive; bionic itself only does trylock -> EBUSY | trylock only |
 | A5 | heap quarantine | GuestFree | 53edf4f, hunt | R-013: off by default, six titles clean | delete the ring once confirmed |
-| A6 | `EnvOn("HARNESS_...")` on hot paths: each call scans the cached table (~50 keys): GLDRAWLOG x24 in realgl (draws, uploads, attrib pointers), MALLOCLOG x2 + NORELEASE + QUARANTINE per free | realgl.cpp, GuestFree | debug knobs | the knobs are off in shipping | read each knob once (static const) or drop the knob (C) |
+| A6 DONE | `EnvOn("HARNESS_...")` on hot paths: each call scans the cached table (~50 keys): GLDRAWLOG x24 in realgl (draws, uploads, attrib pointers), MALLOCLOG x2 + NORELEASE + QUARANTINE per free | realgl.cpp, GuestFree | debug knobs | the knobs are off in shipping | read each knob once (static const) or drop the knob (C) |
 | A7 | live block index next to dlmalloc (~0.4 us per malloc+free in MCSM) | LiveIdx*, GuestFree/Memalign | D2 | dlmalloc knows chunk sizes; but the index also gives "free of an unknown address is ignored" and interior lookups for sscanf/JNI bounds | investigate before touching |
 
 ## B. Survive-instead-of-crash paths (no cost unless they fire)
@@ -35,8 +35,8 @@ reasoning, one by one.
 |---|---|---|---|
 | B1 | heap corruption: dlmalloc hook counts HEAPCORRUPT and "limps on" instead of abort | abr_heap_hook, apphost watchdog | markers have been 0 for weeks; limping hides the next bug |
 | B2 | CHUNKD: a quarantined block with a bad header is leaked, zone dumped | GuestFree | goes with A5 |
-| B3 | DESTROY-HELD / DESTROY-PENDING: leak instead of destroy | PthreadMutex | goes with A4 |
-| B4 | mutex re-init of a live object: old host mutex leaked | PthreadMutex init | shared_ptr makes the leak unnecessary |
+| B3 DONE | DESTROY-HELD / DESTROY-PENDING: leak instead of destroy | PthreadMutex | goes with A4 |
+| B4 DONE | mutex re-init of a live object: old host mutex leaked | PthreadMutex init | shared_ptr makes the leak unnecessary |
 | B5 | free of an unknown address ignored ("legacy lenient no-op", counted) | GuestFree | bionic would abort; check hx_free_unknown_ on all titles first |
 | B6 | realloc on a consumed block: leak deliberately | GuestMemalign/realloc | read the case before deciding |
 | B7 | watchdog STUCK report, abdump, death.log | apphost | KEEP: cheap, our only eyes on the phone |
