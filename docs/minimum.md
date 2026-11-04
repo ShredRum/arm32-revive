@@ -24,7 +24,7 @@ destroy race).
 | A4 DONE | destroy guard via books + witness | PthreadMutex destroy | 15a66e1 2026-10-15 | shared_ptr keeps a held or waited mutex alive; bionic itself only does trylock -> EBUSY | trylock only |
 | A5 DONE | heap quarantine | GuestFree | 53edf4f, hunt | R-013: off by default, six titles clean | delete the ring once confirmed |
 | A6 DONE | `EnvOn("HARNESS_...")` on hot paths: each call scans the cached table (~50 keys): GLDRAWLOG x24 in realgl (draws, uploads, attrib pointers), MALLOCLOG x2 + NORELEASE + QUARANTINE per free | realgl.cpp, GuestFree | debug knobs | the knobs are off in shipping | read each knob once (static const) or drop the knob (C) |
-| A7 | live block index next to dlmalloc (~0.4 us per malloc+free in MCSM) | LiveIdx*, GuestFree/Memalign | D2 | dlmalloc knows chunk sizes; but the index also gives "free of an unknown address is ignored" and interior lookups for sscanf/JNI bounds | investigate before touching |
+| A7 KEEP | live block index next to dlmalloc (~0.3 us per free) | LiveIdx*, GuestFree/Memalign | D2 | not a duplicate: it finds the block around an interior pointer (sscanf %s and JNI region bounds, a project rule) and lets a free of a foreign address be ignored safely | keep |
 | A8 DONE | interruptible (2 ms sliced) waits from the first non-fault handler install: MCSM's never-used SIGINT handler kept ~45 idle workers waking ~1500 times a second each | GuestSigaction | 906d206 (Mono finalizer hang); the proxy delivery 81bdbc3, two commits later, solves it generally | slicing starts at the first signal sent; MCSM workers ~1450 -> ~330 wakeups/s, whole process in the episode scene 144 k -> ~15.5 k/s; 99 Bricks 5/5 boots to the menu. sem_post stays ~26 us of wall time after its map left mutex_: the poster loses the CPU to the worker it wakes (scheduler, as natively) |
 
 
@@ -86,7 +86,7 @@ first 60 s, back to back), before the direct jump.
 | # | what | evidence | note |
 |---|---|---|---|
 | F1 PART DONE | malloc/memalign/free ~2.3 us a call | MCSM ~230 k calls each per 30 s | own heap lock (ce40e83): no change per call (memalign 2257 -> 2282 ns, free 2119 -> 2270): the threads waited for each other on the one heap, not for other mutex_ users. Left: ~0.7 us lock wait + ~0.9 us under it (live index ~0.3) = ~3.5 % of one core in all. Further cut only by per-thread block caches (jemalloc-like tcache): a big change for well under 1 %; not planned |
-| F2 | direct jump inside the big nested blocks of CallImport (file bridge ~2200 lines, APK assets, string block) | inner chains of integer compares | a nested switch after each block's declarations |
+| F2 NOT WORTH | direct jump inside the nested blocks (file bridge, assets, strings) | integer compares there, ~0.05-0.1 us, on calls that cost microseconds of syscalls | a 2200-line scripted cut for noise: dropped (2026-11-04) |
 | F3 DONE | RealGL's own mutex on every GL call | one render thread mostly; ~0.3-0.6 us over the driver left | check what it guards (active_tex_, glstr slots) |
 | F4 | GL on a thread of its own (queue + flush on sync calls) | driver ~1-2 us x ~150 k calls/s on the render thread | does not cut heat (same work, more threads); only if a phone measurement shows the render thread is the limit |
 | F5 | the JIT itself (Dynarmic code quality, block linking, dispatch) | ~half of the process CPU is guest code | biggest reserve, biggest job; needs a profiler that works on the device |
