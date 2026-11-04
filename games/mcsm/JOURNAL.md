@@ -124,6 +124,31 @@ on the sandbox therefore; the phone (owner, adb) is the only place left.
 Ours restored afterwards (new uid: chown -R + chcon app_data_file), menu OK.
 Note: under sudo, "am" is Termux's (no force-stop): use /system/bin/am.
 
+## Host overhead, measured and cut (2026-11-04)
+
+Diag builds now time every import (calls, host time; arm64 virtual counter:
+clock_gettime is a ~390 ns syscall on the sandbox, no vDSO, which first
+swamped the numbers). Episode 1 scene, per 30 s, sandbox:
+
+| change | before | after |
+|---|---|---|
+| sinf etc. in the fast-math table (fast_math.h) | 1.5 M calls x 2.5 us | off the top list |
+| GL by load-time id, no string/snprintf (gl_ids.h) | glUniform4fv 4.3 us | 3.1 us |
+| eglGetCurrentContext once per thread | glUniform4fv 3.1 us | 2.16 us = bare driver |
+| guest mutex: trylock before the sliced wait | lock 5.7 us | 3.2 us |
+| guest mutex map: own shared_mutex | lock 3.2 us | 1.6 us |
+| R-012: foreign unlock line per call | ~470 log lines/s | 5 lines, then a count |
+
+Frames: 40-49 -> 56-60 per second (60 = display cap). Bare ANGLE on the
+sandbox: glUniform4fv 2.16 us, glDisableVertexAttribArray/glBindBuffer/
+glGetIntegerv ~1.04 us, eglGetCurrentContext 0.97 us (a native test).
+Left on purpose: BoundBuffer asks the driver (glGetIntegerv) per
+glVertexAttribPointer/glDrawElements, ~17 ms/s; a cached binding goes stale
+when Java recreates a Rovio context behind the host (E-03).
+Open: free ~10 us per call inside the runtime (not the lock wait); the
+numbers are wall time with ~45 threads on 8 cores, so descheduling is in
+them. Not measured on the phone (its driver and syscalls are cheaper).
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
