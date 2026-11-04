@@ -279,11 +279,36 @@ static std::uint64_t IndexSize(std::uint32_t typ) {
     return 0;
 }
 
+// This thread's copy of its context's two buffer bindings. Bindings belong
+// to the GL context, and the context can change behind the host: Java's
+// GLSurfaceView makes a new one on resume (REVIEW E-03). Java runs only
+// between Java->native calls, and the guest switches contexts only through
+// eglMakeCurrent/eglReleaseThread, which the host serves; so the copy is
+// dropped at each of those (ForgetGlBindings) and at glDeleteBuffers, and
+// is never stale. The first query after a drop asks the driver (~1 us on
+// the sandbox); the rest of that native call uses the copy.
+namespace {
+struct GlBindings {
+    bool array_known = false, element_known = false;
+    GLuint array = 0, element = 0;
+};
+thread_local GlBindings t_bindings;
+}  // namespace
+
+void ForgetGlBindings() { t_bindings = GlBindings{}; }
+
 // The buffer bound to `binding` (GL_ARRAY_BUFFER_BINDING or
 // GL_ELEMENT_ARRAY_BUFFER_BINDING) in the current context.
 static GLuint BoundBuffer(GLenum binding) {
+    GlBindings& b = t_bindings;
+    const bool array = binding == GL_ARRAY_BUFFER_BINDING;
+    if (array ? b.array_known : b.element_known) {
+        return array ? b.array : b.element;
+    }
     GLint v = 0;
     glGetIntegerv(binding, &v);
+    (array ? b.array : b.element) = static_cast<GLuint>(v);
+    (array ? b.array_known : b.element_known) = true;
     return static_cast<GLuint>(v);
 }
 
@@ -786,6 +811,9 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             is_del ? glDeleteTextures((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenTextures((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (id == G::glGenBuffers || id == G::glDeleteBuffers) {
+            if (is_del) {
+                ForgetGlBindings();  // deleting a bound buffer unbinds it
+            }
             is_del ? glDeleteBuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (id == G::glGenFramebuffers || id == G::glDeleteFramebuffers) {
@@ -1057,9 +1085,17 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     // buffer is bound, else a guest address. The binding is asked from the
     // driver at the point of use: bindings are per-context state (GLES2 2.9),
     // and Android recreates the context when the app is paused, so a copy
-    // kept here could go stale (E-03).
+    // kept here could go stale (E-03): the per-thread copy above is dropped
+    // wherever the context can change.
     if (id == G::glBindBuffer) {
         glBindBuffer((GLenum)a0, (GLuint)a1);
+        if (a0 == GL_ARRAY_BUFFER) {
+            t_bindings.array = (GLuint)a1;
+            t_bindings.array_known = true;
+        } else if (a0 == GL_ELEMENT_ARRAY_BUFFER) {
+            t_bindings.element = (GLuint)a1;
+            t_bindings.element_known = true;
+        }
         r->Ret(regs, 0);
         return true;
     }

@@ -43,6 +43,11 @@ namespace abr {
 // happen once pre-guest, nothing unsets).
 bool EnvOn(const char* name);
 
+// Drops this thread's copy of its GL buffer bindings (realgl.cpp): at every
+// Java->native entry, guest JNI call into Java, eglMakeCurrent and
+// eglReleaseThread -- every point where its GL context can change.
+void ForgetGlBindings();
+
 // Master switch for the diagnostic layer: the
 // per-call / per-frame tracing and the hot-path logs. Backed by HARNESS_DIAG,
 // default OFF for shipping (see PLAN.md batch A/B). Explicit values "0",

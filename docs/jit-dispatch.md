@@ -139,7 +139,9 @@ check per thread, trylock before the sliced mutex wait, own lock for the
 guest mutex map. 40-49 -> 56-60 fps on the sandbox.
 
 Ideas kept for later, each only with a measurement that shows the need:
-- Cached buffer bindings in realgl. Today BoundBuffer asks the driver
+- DONE 2026-11-04: cached buffer bindings in realgl (the safe form below):
+  glVertexAttribPointer 3.5 us -> off the top list, glDrawElements 8.8 ->
+  7.7 us; MCSM minimize/resume on the sandbox fine. Was: BoundBuffer asked the driver
   (glGetIntegerv, ~1 us on the sandbox) at every glVertexAttribPointer and
   glDrawElements: ~17 ms/s in MCSM, ~0.35 ms a frame. A host copy was REVIEW
   E-03 (suspected, never seen failing): bindings belong to the GL context,

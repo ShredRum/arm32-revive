@@ -831,6 +831,10 @@ std::uint64_t CallGuestFromHost(const char* name, std::uint32_t va,
 // marshalled to AAPCS32 on this thread's guest stack; returns r0 | r1 << 32.
 std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig, void* thiz,
                              va_list ap, JniFloatArgs floats) {
+    // Every Java->guest call comes here (generated forwarders and
+    // RegisterNatives stubs). Java ran before it, so this thread's GL context
+    // may be another one now.
+    ForgetGlBindings();
     auto st = Enter();
     if (!st) {
         return 1;  // same as a dropped re-entrant frame: logged LOUD in Enter

@@ -11543,6 +11543,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     if (n == "eglMakeCurrent") {
+        ForgetGlBindings();
         const EGLBoolean r =
             ::eglMakeCurrent(dpy(a0), static_cast<EGLSurface>(PtrOf(a1)), static_cast<EGLSurface>(PtrOf(a2)),
                              static_cast<EGLContext>(PtrOf(a3)));
@@ -11606,6 +11607,9 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     if (n == "eglWaitGL" || n == "eglWaitNative" || n == "eglReleaseThread") {
+        if (n == "eglReleaseThread") {
+            ForgetGlBindings();
+        }
         Ret(regs, n == "eglWaitGL" ? ::eglWaitGL() : n == "eglWaitNative" ? ::eglWaitNative(static_cast<EGLint>(a0))
                                                                          : ::eglReleaseThread());
         return true;
@@ -14334,6 +14338,7 @@ std::uint32_t Runtime::NewByteArray(std::uint32_t len) {
 }
 
 void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
+    ForgetGlBindings();  // Java code may run: its GL context may change
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
 #ifdef __ANDROID__
     JavaCopies java_copies;
