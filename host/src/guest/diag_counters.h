@@ -72,6 +72,9 @@ struct DiagCounters {
     std::atomic<std::uint64_t> rt_wait[3] = {};
     std::atomic<std::uint64_t> rt_wait_n[3] = {};
     std::atomic<std::uint64_t> guest_lock_wait = 0;
+    // GuestFree's parts: the whole call under the lock, the live-index
+    // erase, and dlmalloc's mspace_free of the block leaving quarantine.
+    std::atomic<std::uint64_t> free_in_lock = 0, free_live = 0, free_mspace = 0;
     std::atomic<std::uint64_t> import_calls[kImportSlots] = {};
     std::atomic<std::uint64_t> import_ns[kImportSlots] = {};
 };

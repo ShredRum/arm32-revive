@@ -111,9 +111,6 @@ size_t mspace_usable_size(const void*);
 }  // extern "C"
 
 
-// Quarantine depth: freed blocks held out of reuse (UAF oracle).
-static constexpr std::uint32_t kQuarantineCap = 64;
-
 
 // HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
 // goto bad_ptr initializations inside CallImport).
@@ -922,14 +919,21 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
 
 void Runtime::GuestFree(std::uint32_t addr) {
     // Real free with quarantine (UAF oracle): the block is poisoned and held
-    // out of reuse for kQuarantineCap frees; on release the poison is
+    // out of reuse for kQuarantine frees; on release the poison is
     // verified -- a clobbered block names a live use-after-free LOUD.
     // Double-free of a quarantined block is LOUD, not fatal.
     if (!addr) {
         return;
     }
     RtLock lock(*this, 2);
-    if (quarantine_set_.count(addr)) {
+#ifdef ABR_DIAG_COUNTERS
+    struct InLock {
+        std::atomic<std::uint64_t>& acc;
+        const std::uint64_t t0 = DiagTicks();
+        ~InLock() { acc.fetch_add(DiagTicks() - t0, std::memory_order_relaxed); }
+    } in_lock{diag_.free_in_lock};
+#endif
+    if (QuarantineHas(addr) || (!norelease_set_.empty() && norelease_set_.count(addr))) {
             std::uint32_t lr = 0;
             Dynarmic::A32::Jit* aj = ActiveJit();
             if (aj) {
@@ -942,7 +946,13 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // map needed find + erase + a host node free). 0 = "we never handed this
     // out" -> the legacy lenient no-op, counted so a session can show whether
     // that path ever actually fires.
+#ifdef ABR_DIAG_COUNTERS
+    const std::uint64_t le0 = DiagTicks();
+#endif
     const std::uint32_t size = LiveIdxErase(addr);
+#ifdef ABR_DIAG_COUNTERS
+    diag_.free_live.fetch_add(DiagTicks() - le0, std::memory_order_relaxed);
+#endif
     if (!size) {
         ++hx_free_unknown_;
         if (EnvOn("HARNESS_MALLOCLOG")) {
@@ -972,8 +982,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
         std::printf("[heap] LOUD free with bad range %08x size=%u -- skipped poison\\n", addr,
                     size);
     }
-    quarantine_.push_back({addr, size});
-    quarantine_set_.insert(addr);
     if (EnvOn("HARNESS_MALLOCLOG")) {
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
@@ -989,15 +997,23 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // fclose/free vanishes with it, the killer is mspace_free detonating
     // pre-smashed headers (writer hunt continues, game runs meanwhile).
     if (EnvOn("HARNESS_NORELEASE")) {
+        norelease_held_.push_back({addr, size});
+        norelease_set_.insert(addr);
         return;
     }
     // Delay-only quarantine (no poison, no verify: the tripwire never
-    // fired in any session, while poisoned stale reads proved fatal).
-    while (quarantine_.size() > kQuarantineCap) {
-        const QEnt q0 = quarantine_.front();
+    // fired in any session, while poisoned stale reads proved fatal). A full
+    // ring hands its oldest block back to dlmalloc as the new one comes in
+    // (the set held is the same: the last kQuarantine frees).
+    if (q_count_ < kQuarantine) {
+        q_ring_[(q_head_ + q_count_) % kQuarantine] = {addr, size};
+        q_count_++;
+    } else {
+        const QEnt q0 = q_ring_[q_head_];
+        q_ring_[q_head_] = {addr, size};
+        q_head_ = (q_head_ + 1) % kQuarantine;
         g_last_free_addr = q0.addr;
         g_last_free_size = q0.size;
-        quarantine_set_.erase(q0.addr);
         bool skip = false;
         // HUNT (2026-10-17): verify the chunk head before handing a
         // quarantined block back to dlmalloc. mspace_free aborted at
@@ -1044,14 +1060,19 @@ void Runtime::GuestFree(std::uint32_t addr) {
             }
         }
         if (heap_ms_ && !skip) {
+#ifdef ABR_DIAG_COUNTERS
+            const std::uint64_t mf0 = DiagTicks();
+#endif
             mspace_free(heap_ms_, H(q0.addr));
+#ifdef ABR_DIAG_COUNTERS
+            diag_.free_mspace.fetch_add(DiagTicks() - mf0, std::memory_order_relaxed);
+#endif
         }
         if (heap_used_ >= q0.size) {
             heap_used_ -= q0.size;
         } else {
             heap_used_ = 0;
         }
-        quarantine_.erase(quarantine_.begin());
     }
 }
 
@@ -9748,7 +9769,11 @@ bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
         return false;  // fully inside a live allocation
     }
     // Quarantined (freed, held)? Distinct verdict: UAF write.
-    for (const auto& q : quarantine_) {
+    std::vector<QEnt> held(norelease_held_);
+    for (std::uint32_t i = 0; i < q_count_; i++) {
+        held.push_back(q_ring_[(q_head_ + i) % kQuarantine]);
+    }
+    for (const auto& q : held) {
         if (a >= q.addr && a + size <= (std::uint64_t)q.addr + q.size) {
             static int qn = 0;
             if (qn < 30) {
@@ -12607,6 +12632,20 @@ void Runtime::DumpDiagCounters() {
             last_wn[k] = wn;
         }
         const std::uint64_t g = diag_.guest_lock_wait.load(std::memory_order_relaxed);
+        {
+            static std::uint64_t l_in, l_live, l_ms;
+            const std::uint64_t in = diag_.free_in_lock.load(), lv = diag_.free_live.load(),
+                                ms = diag_.free_mspace.load();
+            auto ms_of = [&](std::uint64_t t) {
+                return (unsigned long long)(static_cast<double>(t) * ns_per_tick / 1e6);
+            };
+            std::printf("[counters]   free: %llu ms under the lock, of it live index %llu ms, "
+                        "mspace_free %llu ms\n",
+                        ms_of(in - l_in), ms_of(lv - l_live), ms_of(ms - l_ms));
+            l_in = in;
+            l_live = lv;
+            l_ms = ms;
+        }
         std::printf("[counters]   inside the host lock of guest mutexes %7llu ms\n",
                     (unsigned long long)(static_cast<double>(g - last_g) * ns_per_tick / 1e6));
         last_g = g;

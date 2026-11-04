@@ -38,6 +38,7 @@
 #include <zlib.h>
 
 #include "jni_call_words.h"
+#include <set>
 #include <thread>
 #include <atomic>
 #include <sys/mman.h>
@@ -3363,6 +3364,38 @@ int main() {
                "0");
         rt.ReapHostThread(803);
         rt.ReleaseCpuId(id);
+    }
+
+    // --- quarantine: the last 64 freed blocks stay out of reuse; a double
+    //     free of one of them is refused (LOUD) and the heap goes on. LAST on
+    //     purpose: the heap starts below the fixed scratch addresses the
+    //     tests above write (kScratch 0x10001000...), and ~9 KB of blocks
+    //     reach them.
+    {
+        std::vector<std::uint32_t> blocks;
+        for (int i = 0; i < 100; i++) {
+            blocks.push_back(rt.GuestMalloc(48));
+        }
+        for (const std::uint32_t b : blocks) {
+            rt.GuestFree(b);
+        }
+        std::set<std::uint32_t> held(blocks.end() - 64, blocks.end());
+        int reused = 0;
+        std::vector<std::uint32_t> again;
+        for (int i = 0; i < 64; i++) {
+            const std::uint32_t b = rt.GuestMalloc(48);
+            again.push_back(b);
+            reused += held.count(b) ? 1 : 0;
+        }
+        Expect("quarantine: the last 64 frees are not handed out again", std::to_string(reused), "0");
+        rt.GuestFree(blocks.back());  // still quarantined: a double free
+        const std::uint32_t after = rt.GuestMalloc(48);
+        Expect("quarantine: malloc works after a refused double free",
+               std::to_string(after != 0 && !held.count(after)), "1");
+        rt.GuestFree(after);
+        for (const std::uint32_t b : again) {
+            rt.GuestFree(b);
+        }
     }
 
     std::printf(g_fail == 0 ? "\nALL OK\n" : "\n%d FAILURES\n", g_fail);
