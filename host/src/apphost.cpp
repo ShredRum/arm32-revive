@@ -1755,6 +1755,8 @@ static bool Boot(JavaVM* vm) {
         g_rt->SetPrivateSdcard(std::strcmp(sd, "private") == 0);
         Log("shared storage: %s", std::strcmp(sd, "private") == 0 ? "private (files/sdcard)" : "none");
     }
+    // Packed files (apk_vfs.h): assets/abport/ of base.apk and its splits.
+    Log("packed files: %s", g_rt->InitPackedFiles().c_str());
     abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s "

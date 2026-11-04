@@ -2346,6 +2346,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 hfd = it->second;
             }
         }
+        // A packed file maps its window of the APK; the packer aligns each
+        // entry to 16 KiB, so a page-aligned file offset stays page-aligned.
+        // Otherwise (or for a range past the file's end) a private copy.
+        if (const std::shared_ptr<abvfs::Slice> sl =
+                (hfd >= 0 && off != ~std::uint64_t(0)) ? FdSlice(static_cast<std::uint32_t>(gfd))
+                                                       : nullptr) {
+            const std::uint64_t at = sl->off + off;
+            const std::uint64_t page = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
+            if (at % page == 0 && off + a1 <= sl->size) {
+                Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, at));
+                return;
+            }
+            const int flags = (static_cast<int>(a3) & ~MAP_SHARED) | MAP_PRIVATE | MAP_ANONYMOUS;
+            const std::uint32_t g = GuestMmap(a0, a1, static_cast<int>(a2) | PROT_WRITE, flags, -1, 0);
+            if (g != 0xFFFFFFFFu && CheckRange(g, a1, true)) {
+                abvfs::SlicePread(*sl, hfd, H(g), a1, off);  // past the end stays zero
+            }
+            Ret(regs, g);
+            return;
+        }
         Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, off));
         return;
     }
@@ -5226,6 +5246,31 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::filesystem::create_directories(hp.substr(0, slash), ec);
             }
         };
+        // Packed files (apk_vfs.h): the packed file at host path hp when
+        // there is no real one (a real file, even a dangling link, wins).
+        auto packed_at = [&](const std::string& hp) -> const abvfs::File* {
+            if (!vfs_on_) {
+                return nullptr;
+            }
+            struct stat st {};
+            if (::lstat(hp.c_str(), &st) == 0 || errno != ENOENT) {
+                return nullptr;
+            }
+            return vfs_.Find(hp);
+        };
+        // Makes the real file a write needs at hp: an empty one when the
+        // caller truncates anyway, else a copy of the packed one.
+        auto materialize = [&](const abvfs::File& pf, const std::string& hp, bool truncating) -> bool {
+            if (truncating) {
+                const int fd = ::open(hp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                if (fd < 0) {
+                    return false;
+                }
+                ::close(fd);
+                return true;
+            }
+            return vfs_.CopyUp(pf, hp);
+        };
         auto file_of = [&](std::uint32_t h) -> FILE* {
             std::lock_guard<std::mutex> io(io_mutex_);
             const auto it = file_map_.find(h);
@@ -5290,8 +5335,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // fd for fdopen), expose it at Bionic __sFile offset +14 (_file,
         // ldrsh-loaded inline by guest code for fsync etc.) and in fd_map_ for
         // fd-based thunks. Returns false on exhaustion.
-        auto bind_file = [&](std::uint32_t h, FILE* f,
-                             std::uint32_t existing_gfd = 0xFFFFFFFFu) -> bool {
+        auto bind_file = [&](std::uint32_t h, FILE* f, std::uint32_t existing_gfd = 0xFFFFFFFFu,
+                             int host_fd = -1,
+                             std::shared_ptr<abvfs::Slice> slice = nullptr) -> bool {
             std::uint32_t g = existing_gfd;
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
@@ -5303,7 +5349,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 } else if (fd_map_.find(g) == fd_map_.end()) {
                     return false;
                 }
-                fd_map_[g] = fileno(f);
+                fd_map_[g] = host_fd >= 0 ? host_fd : fileno(f);
+                SetFdSliceLocked(g, std::move(slice));
                 file_map_[h].f = f;
                 file_map_[h].gfd = g;
             }
@@ -5325,6 +5372,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return g;
             }
             fd_map_[g] = hfd;
+            SetFdSliceLocked(g, nullptr);
             return g;
         };
         auto erase_guest_fd = [&](std::uint32_t g) -> int {
@@ -5335,6 +5383,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             const int h = it->second;
             fd_map_.erase(it);
+            SetFdSliceLocked(g, nullptr);
             release_guest_fd_locked(g);
             return h;
         };
@@ -5453,6 +5502,44 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             const std::string mode = GuestStr(a1);
+            if (const abvfs::File* pf = packed_at(hp)) {
+                if (mode.find('x') != std::string::npos) {
+                    SetGuestErrno(EEXIST);
+                    Ret(regs, 0);
+                    return;
+                }
+                if (mode[0] == 'r' && mode.find('+') == std::string::npos) {
+                    // Read-only: a FILE over the packed bytes, with a guest fd.
+                    std::shared_ptr<abvfs::Slice> sl;
+                    const int hfd = vfs_.Open(*pf, &sl);
+                    FILE* pfile = hfd >= 0 ? abvfs::SliceFile(hfd, sl) : nullptr;
+                    if (!pfile) {
+                        SetGuestErrno(errno ? errno : EIO);
+                        if (hfd >= 0) {
+                            ::close(hfd);
+                        }
+                        Ret(regs, 0);
+                        return;
+                    }
+                    const std::uint32_t h = new_file_handle();
+                    if (!h || !bind_file(h, pfile, 0xFFFFFFFFu, hfd, sl)) {
+                        std::fclose(pfile);
+                        if (h) {
+                            discard_file_handle(h);
+                        }
+                        Ret(regs, 0);
+                        return;
+                    }
+                    Ret(regs, h);
+                    return;
+                }
+                // "w" truncates; "r+" and "a" keep the bytes: copy up first.
+                if (!materialize(*pf, hp, mode[0] == 'w')) {
+                    SetGuestErrno(errno ? errno : EIO);
+                    Ret(regs, 0);
+                    return;
+                }
+            }
             if (mode.find_first_of("wax+") != std::string::npos) {
                 ensure_parent(hp);
             }
@@ -5539,6 +5626,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     }
                     if (gfd != 0xFFFFFFFFu) {
                         fd_map_.erase(gfd);
+                        SetFdSliceLocked(gfd, nullptr);
                         release_guest_fd_locked(gfd);
                     }
                 }
@@ -5794,7 +5882,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            FILE* f = ::fdopen(hfd, GuestStr(a1));
+            // A packed file: a read-only FILE over the same open file (its
+            // position is the fd's, as fdopen shares the description).
+            std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            if (sl && std::strpbrk(GuestStr(a1), "wa+") != nullptr) {
+                set_guest_errno(EINVAL);  // the fd is open read-only
+                Ret(regs, 0);
+                return;
+            }
+            FILE* f = sl ? abvfs::SliceFile(hfd, sl) : ::fdopen(hfd, GuestStr(a1));
             if (!f) {
                 Ret(regs, 0);
                 return;
@@ -5805,7 +5901,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (!bind_file(h, f, a0)) {
+            if (!bind_file(h, f, a0, hfd, sl)) {
                 std::fclose(f);
                 discard_file_handle(h);
                 Ret(regs, 0);
@@ -5839,6 +5935,42 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "open")) {
                 return;
+            }
+            if (const abvfs::File* pf = packed_at(hp)) {
+                // Guest open flags are the arm32 Linux values, as the host's
+                // for these bits (O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC).
+                if ((a1 & O_CREAT) && (a1 & O_EXCL)) {
+                    SetGuestErrno(EEXIST);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
+                if ((a1 & O_ACCMODE) == O_RDONLY && !(a1 & O_TRUNC)) {
+                    std::shared_ptr<abvfs::Slice> sl;
+                    const int hfd = vfs_.Open(*pf, &sl);
+                    if (hfd < 0) {
+                        SetGuestErrno(errno);
+                        Ret(regs, 0xFFFFFFFFu);
+                        return;
+                    }
+                    const std::uint32_t g = alloc_guest_fd(hfd);
+                    if (g == 0xFFFFFFFFu) {
+                        ::close(hfd);
+                        SetGuestErrno(EMFILE);
+                        Ret(regs, 0xFFFFFFFFu);
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> io(io_mutex_);
+                        SetFdSliceLocked(g, std::move(sl));
+                    }
+                    Ret(regs, g);
+                    return;
+                }
+                if (!materialize(*pf, hp, (a1 & O_TRUNC) != 0)) {
+                    SetGuestErrno(errno ? errno : EIO);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
             }
             if ((a1 & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0) {
                 ensure_parent(hp);
@@ -5971,7 +6103,47 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::memcpy(&o32, H(a2), 4);
                 off = o32;
             }
-            const ssize_t r = ::sendfile(ho, hi, a2 ? &off : nullptr, a3);
+            ssize_t r = 0;
+            if (const std::shared_ptr<abvfs::Slice> sl = FdSlice(a1)) {
+                // A packed input: copy through a buffer from the slice
+                // (at *offset, which is advanced, or at the fd position).
+                std::vector<std::uint8_t> buf(std::min<std::uint32_t>(a3, 1u << 20));
+                std::uint64_t at = 0;
+                if (a2) {
+                    at = static_cast<std::uint64_t>(off);
+                } else {
+                    std::lock_guard<std::mutex> l(sl->mu);
+                    at = sl->pos;
+                }
+                std::uint64_t done = 0;
+                while (done < a3) {
+                    const std::size_t want =
+                        static_cast<std::size_t>(std::min<std::uint64_t>(buf.size(), a3 - done));
+                    const ssize_t k = abvfs::SlicePread(*sl, hi, buf.data(), want, at + done);
+                    if (k <= 0) {
+                        if (k < 0 && done == 0) r = -1;
+                        break;
+                    }
+                    const ssize_t w = ::write(ho, buf.data(), static_cast<std::size_t>(k));
+                    if (w <= 0) {
+                        if (done == 0) r = -1;
+                        break;
+                    }
+                    done += static_cast<std::uint64_t>(w);
+                    if (w < k) break;
+                }
+                if (r == 0) {
+                    r = static_cast<ssize_t>(done);
+                    if (a2) {
+                        off = static_cast<off_t>(at + done);
+                    } else {
+                        std::lock_guard<std::mutex> l(sl->mu);
+                        sl->pos = at + done;
+                    }
+                }
+            } else {
+                r = ::sendfile(ho, hi, a2 ? &off : nullptr, a3);
+            }
             if (r < 0) {
                 set_guest_errno(errno);
             } else if (a2) {
@@ -6011,10 +6183,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             int old_host = -1;
             {
+                std::shared_ptr<abvfs::Slice> ss = FdSlice(a0);
                 std::lock_guard<std::mutex> io(io_mutex_);
                 int& slot = fd_map_[a1];
                 old_host = slot;
                 slot = nfd;
+                SetFdSliceLocked(a1, std::move(ss));  // shares the open file
             }
             ::close(old_host);
             Ret(regs, a1);
@@ -6043,6 +6217,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
+            if (std::shared_ptr<abvfs::Slice> ss = FdSlice(a0)) {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                SetFdSliceLocked(g, std::move(ss));  // shares the open file
+            }
             Ret(regs, g);
             return;
         }
@@ -6052,6 +6230,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "utime")) {
                 return;
+            }
+            if (const abvfs::File* pf = packed_at(hp)) {
+                if (!vfs_.CopyUp(*pf, hp)) {  // the times are the file's own
+                    set_guest_errno(errno ? errno : EIO);
+                    Ret(regs, 0xFFFFFFFFu);
+                    return;
+                }
             }
             struct utimbuf ub {};
             const struct utimbuf* up = nullptr;
@@ -6128,8 +6313,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            const ssize_t r = id == I::pread_ ? ::pread(hfd, H(a1), a2, static_cast<off_t>(a3))
-                                           : ::pwrite(hfd, H(a1), a2, static_cast<off_t>(a3));
+            const std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            const ssize_t r = id == I::pread_
+                                  ? (sl ? abvfs::SlicePread(*sl, hfd, H(a1), a2, a3)
+                                        : ::pread(hfd, H(a1), a2, static_cast<off_t>(a3)))
+                                  : ::pwrite(hfd, H(a1), a2, static_cast<off_t>(a3));
             if (r < 0) {
                 set_guest_errno(errno);
             }
@@ -6167,7 +6355,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // so other threads keep running (2026-10-10 deadlock fix). A read
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
-            ssize_t r = (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
+            const std::shared_ptr<abvfs::Slice> sl = id == I::read_ ? FdSlice(a0) : nullptr;
+            ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
+                           : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped). Skip
             // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
@@ -6223,7 +6413,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            const off_t r = ::lseek(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)), (int)a2);
+            const std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            const off_t r =
+                sl ? static_cast<off_t>(abvfs::SliceSeek(*sl, static_cast<std::int32_t>(a1), (int)a2))
+                   : ::lseek(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)), (int)a2);
             if (EnvOn("HARNESS_PATHLOG")) {
                 static std::atomic<int> said{0};
                 if (said.fetch_add(1) < 400) {
@@ -6954,7 +7147,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
                 }
-                Ret(regs, alloc_guest_fd(r));
+                const std::uint32_t g = alloc_guest_fd(r);
+                if (g == 0xFFFFFFFFu) {
+                    ::close(r);
+                    set_guest_errno(EMFILE);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (std::shared_ptr<abvfs::Slice> ss = FdSlice(a0)) {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    SetFdSliceLocked(g, std::move(ss));  // shares the open file
+                }
+                Ret(regs, g);
                 return;
             }
             // File locks etc.: success-lie (single-process bring-up; revisit
@@ -7133,6 +7337,101 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, n.c_str())) {
                 return;
             }
+            // Packed files (apk_vfs.h): a path with only a packed file.
+            if (const abvfs::File* pf = packed_at(hp)) {
+                auto fail = [&](int e) {
+                    SetGuestErrno(e);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                };
+                if (id == I::stat_ || id == I::lstat_) {
+                    struct stat st {};
+                    vfs_.Stat(*pf, &st);
+                    if (!fill_stat(a1, st)) {
+                        fail(EFAULT);
+                        return;
+                    }
+                    Ret(regs, 0);
+                    return;
+                }
+                if (id == I::access_) {
+                    // The app's own file: readable and writable (by copy-up).
+                    if (a1 & X_OK) {
+                        fail(EACCES);
+                        return;
+                    }
+                    Ret(regs, 0);
+                    return;
+                }
+                if (id == I::unlink_ || id == I::remove_) {
+                    vfs_.MarkDeleted(hp);
+                    Ret(regs, 0);
+                    return;
+                }
+                if (id == I::rename_) {
+                    const std::string hp2 = map_path(a1);
+                    if (!need_host(hp2, "rename-dst")) {
+                        return;
+                    }
+                    if (hp2 == hp) {
+                        Ret(regs, 0);
+                        return;
+                    }
+                    ensure_parent(hp2);
+                    if (!vfs_.CopyUp(*pf, hp2)) {
+                        fail(errno ? errno : EIO);
+                        return;
+                    }
+                    vfs_.MarkDeleted(hp);
+                    Ret(regs, 0);
+                    return;
+                }
+                if (id == I::mkdir_) {
+                    fail(EEXIST);
+                    return;
+                }
+                if (id == I::rmdir_) {
+                    fail(ENOTDIR);
+                    return;
+                }
+                if (id == I::chmod_) {
+                    // The mode of the app's private file is not kept (stat
+                    // reports 0600 either way); copying a packed archive for
+                    // it would be the only effect.
+                    Ret(regs, 0);
+                    return;
+                }
+                if (id == I::truncate_) {
+                    if (!materialize(*pf, hp, static_cast<std::int32_t>(a1) == 0)) {
+                        fail(errno ? errno : EIO);
+                        return;
+                    }
+                    // the real truncate below
+                } else if (id == I::statfs_) {
+                    const std::size_t sl = hp.rfind('/');
+                    struct statfs st {};
+                    if (::statfs(hp.substr(0, sl == std::string::npos ? 0 : sl).c_str(), &st) != 0 ||
+                        !fill_statfs(a1, st)) {
+                        fail(errno);
+                        return;
+                    }
+                    Ret(regs, 0);
+                    return;
+                }
+            } else if (vfs_on_) {
+                // A real path that also has packed content under or at it.
+                if (id == I::rmdir_ && !vfs_.Children(hp).empty()) {
+                    SetGuestErrno(ENOTEMPTY);  // packed entries are still in it
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (id == I::rename_ && !vfs_.Children(hp).empty()) {
+                    // Packed entries cannot move with the directory: the
+                    // cross-device answer, after which callers copy.
+                    SetGuestErrno(EXDEV);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+            }
             if (id == I::truncate_) {
                 const int r = ::truncate(hp.c_str(),
                                          static_cast<off_t>(static_cast<std::int32_t>(a1)));
@@ -7188,6 +7487,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 const int r = ::unlink(hp.c_str());
                 if (r != 0) {
                     SetGuestErrno(errno);
+                } else if (vfs_on_) {
+                    vfs_.MarkDeleted(hp);  // a packed file it hid stays gone
                 }
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
@@ -7201,6 +7502,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 const int r = ::rename(hp.c_str(), hp2.c_str());
                 if (r != 0) {
                     SetGuestErrno(errno);
+                } else if (vfs_on_) {
+                    vfs_.MarkDeleted(hp);  // a packed file it hid stays gone
                 }
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
@@ -7231,7 +7534,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             struct stat st {};
-            if (::fstat(hfd, &st) != 0 || !fill_stat(a1, st)) {
+            const std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            if (sl) {
+                abvfs::SliceStat(*sl, &st);
+            }
+            if ((!sl && ::fstat(hfd, &st) != 0) || !fill_stat(a1, st)) {
                 SetGuestErrno(errno);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
@@ -7265,16 +7572,65 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
+            // Packed entries this directory lists after its real ones: those
+            // with no real entry of the same name (ignoring case).
+            std::vector<std::pair<std::string, bool>> packed;
+            if (vfs_on_) {
+                packed = vfs_.Children(hp);
+                if (!packed.empty()) {
+                    std::unordered_set<std::string> real;
+                    if (DIR* scan = ::opendir(hp.c_str())) {
+                        while (const dirent* e = ::readdir(scan)) {
+                            std::string lc = e->d_name;
+                            for (char& c : lc) {
+                                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            }
+                            real.insert(lc);
+                        }
+                        ::closedir(scan);
+                    }
+                    packed.erase(std::remove_if(packed.begin(), packed.end(),
+                                                [&](const std::pair<std::string, bool>& c) {
+                                                    std::string lc = c.first;
+                                                    for (char& ch : lc) {
+                                                        ch = static_cast<char>(std::tolower(
+                                                            static_cast<unsigned char>(ch)));
+                                                    }
+                                                    return real.count(lc) != 0;
+                                                }),
+                                 packed.end());
+                }
+            }
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 HostDir hd;
                 hd.d = d;
                 hd.path = hp;
-                dir_map_[h] = hd;
+                hd.packed = std::move(packed);
+                dir_map_[h] = std::move(hd);
             }
             Ret(regs, h);
             return;
         }
+        // The next packed entry of guest DIR a0 once its real entries are
+        // done (apk_vfs.h); false when there is none left.
+        auto next_packed = [&](std::uint32_t dirh, struct dirent* out) -> bool {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = dir_map_.find(dirh);
+            if (it == dir_map_.end() || it->second.packed_next >= it->second.packed.size()) {
+                return false;
+            }
+            const std::size_t i = it->second.packed_next++;
+            const auto& c = it->second.packed[i];
+            std::memset(out, 0, sizeof *out);
+            out->d_ino = static_cast<ino_t>(std::hash<std::string>{}(it->second.path + "/" + c.first) |
+                                            (1ull << 62)) &
+                         ~(1ull << 63);
+            out->d_off = static_cast<off_t>(0x40000000 + i);
+            out->d_type = c.second ? DT_DIR : DT_REG;
+            std::snprintf(out->d_name, sizeof out->d_name, "%s", c.first.c_str());
+            return true;
+        };
         if (id == I::readdir_r_) {
             // readdir_r(DIR* a0, struct dirent* a1, struct dirent** a2) -> 0 or
             // an error number. Bionic arm32 struct dirent (NDK dirent.h,
@@ -7299,6 +7655,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             errno = 0;
             const struct dirent* de = ::readdir(dd);
+            struct dirent packed_de {};
+            if (!de && errno == 0 && next_packed(a0, &packed_de)) {
+                de = &packed_de;
+            }
             if (!de) {
                 const std::uint32_t z = 0;
                 std::memcpy(H(a2), &z, 4);
@@ -7355,6 +7715,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             errno = 0;
             const struct dirent* de = ::readdir(dd);
+            struct dirent packed_de {};
+            if (!de && errno == 0 && next_packed(a0, &packed_de)) {
+                de = &packed_de;
+            }
             if (!de) {
                 if (errno != 0) {
                     set_guest_errno(errno);
@@ -10083,7 +10447,10 @@ void Runtime::OnGuestSyscall(Regs& regs) {
             regs[0] = static_cast<std::uint32_t>(-EFAULT);
             return;
         }
-        const ssize_t n = is_write ? ::write(hfd, H(r1), regs[2]) : ::read(hfd, H(r1), regs[2]);
+        const std::shared_ptr<abvfs::Slice> sl = is_write ? nullptr : FdSlice(r0);
+        const ssize_t n = is_write ? ::write(hfd, H(r1), regs[2])
+                          : sl     ? abvfs::SliceRead(*sl, hfd, H(r1), regs[2])
+                                   : ::read(hfd, H(r1), regs[2]);
         regs[0] = (n < 0) ? static_cast<std::uint32_t>(-errno) : static_cast<std::uint32_t>(n);
         return;
     }
@@ -10095,6 +10462,7 @@ void Runtime::OnGuestSyscall(Regs& regs) {
             if (it != fd_map_.end()) {
                 hfd = it->second;
                 fd_map_.erase(it);
+                SetFdSliceLocked(r0, nullptr);
             }
         }
         if (hfd < 0) {
@@ -14739,6 +15107,25 @@ void Runtime::SetApkPath(const std::string& path) {
     apk_indexed_ = false;
     apk_index_.clear();
     std::printf("[asset] apk \"%s\"\n", path.c_str());
+}
+
+std::string Runtime::InitPackedFiles() {
+    if (apk_path_.empty() || files_hostbase_.empty()) {
+        return "off (no apk or files dir)";
+    }
+    vfs_.AddRoot("files", files_hostbase_);
+    if (!ext_hostbase_.empty()) {
+        vfs_.AddRoot("ext", ext_hostbase_);
+    }
+    if (private_sdcard_) {
+        vfs_.AddRoot("sdcard", files_hostbase_ + "/sdcard");
+    }
+    // The deletion marks live next to the files dir, out of the guest's view.
+    const std::string marks =
+        std::filesystem::path(files_hostbase_).parent_path().string() + "/abport_deleted.txt";
+    const std::string line = vfs_.Build(abvfs::AppApks(apk_path_), marks);
+    vfs_on_ = !vfs_.Empty();
+    return line;
 }
 
 bool JniStringFits(std::uint32_t next, std::size_t len, std::uint32_t* out) {

@@ -32,6 +32,7 @@
 #include "arm_hwcap.h"
 #include "diag_counters.h"
 #include "import_ids.h"
+#include "apk_vfs.h"
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"
@@ -670,6 +671,10 @@ public:
     StackScan ScanStackForReturnAddresses(std::uint32_t sp, std::uint32_t max_bytes,
                                          StackHit* hits, unsigned hit_cap);
     void SetApkPath(const std::string& path);
+    // Packed files (apk_vfs.h): indexes assets/abport/ of base.apk and its
+    // splits once SetFilesDir, SetApkPath and SetPrivateSdcard are done.
+    // Returns the summary line for the boot log.
+    std::string InitPackedFiles();
     // Per-title network policy from the packaging (default offline, R-005).
     void SetNetworkAllowed(bool on) { network_allowed_ = on; }
     bool NetworkAllowed() const { return network_allowed_; }
@@ -1196,6 +1201,32 @@ private:
     // every other thread; 2026-10-10). No nesting: never call GuestMalloc
     // or other mutex_-taking code while holding it.
     std::mutex io_mutex_;
+    // Packed files (apk_vfs.h). vfs_ is built at boot, then only read (its
+    // deletion marks have their own lock). fd_slice_: guest fds that read a
+    // packed file through their host fd of the APK; every place that drops
+    // or rebinds a guest fd number goes through SetFdSliceLocked, so a
+    // reused number never inherits a slice. fd_slices_ = its size, read
+    // without the lock so titles with no packed files pay one load.
+    abvfs::Pack vfs_;
+    bool vfs_on_ = false;
+    std::unordered_map<std::uint32_t, std::shared_ptr<abvfs::Slice>> fd_slice_;
+    std::atomic<std::size_t> fd_slices_{0};
+    void SetFdSliceLocked(std::uint32_t g, std::shared_ptr<abvfs::Slice> s) {
+        if (s) {
+            fd_slice_[g] = std::move(s);
+        } else {
+            fd_slice_.erase(g);
+        }
+        fd_slices_.store(fd_slice_.size(), std::memory_order_relaxed);
+    }
+    std::shared_ptr<abvfs::Slice> FdSlice(std::uint32_t g) {
+        if (fd_slices_.load(std::memory_order_relaxed) == 0) {
+            return nullptr;
+        }
+        std::lock_guard<std::mutex> io(io_mutex_);
+        const auto it = fd_slice_.find(g);
+        return it == fd_slice_.end() ? nullptr : it->second;
+    }
     // The held guest mutexes and their holders, for the stall dump. Never
     // blocks (the watchdog must not wedge on the deadlock it reports).
     void MutexOwnersDump() {
@@ -1223,6 +1254,10 @@ private:
         DIR* d = nullptr;
         std::string path;
         std::uint32_t ent = 0;  // readdir's guest struct dirent (280 bytes), lazily
+        // Packed entries with no real file of the same name (apk_vfs.h),
+        // listed after the real ones: name, is a directory.
+        std::vector<std::pair<std::string, bool>> packed;
+        std::size_t packed_next = 0;
     };
     std::unordered_map<std::uint32_t, HostDir> dir_map_;  // guest DIR* -> host
 

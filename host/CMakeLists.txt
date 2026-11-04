@@ -55,6 +55,7 @@ add_library(guest STATIC
     src/guest/elf_loader.cpp
     src/guest/dispatch.cpp
     src/guest/realgl.cpp
+    src/guest/apk_vfs.cpp
     src/guest/dlmalloc.c
 )
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like

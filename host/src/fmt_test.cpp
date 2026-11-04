@@ -64,6 +64,7 @@ namespace abr {
 // Test-only bridge to the private import dispatcher (see dispatch.h).
 struct RuntimeTestAccess {
     using RegsView = std::array<std::uint32_t, 16>;
+    static std::size_t FdSlices(Runtime& rt) { return rt.fd_slices_.load(); }
     // Call the dispatcher with the given argument registers; returns r0.
     static void SetSignalsInUse(Runtime& rt, bool on) { rt.signals_in_use_ = on; }
     static std::uint32_t Call(Runtime& rt, std::uint32_t idx, const std::uint32_t args[4]) {
@@ -289,6 +290,87 @@ void JniArgsProbe::Raw(void*, void* thiz, ...) {
     va_end(ap);
 }
 
+// A minimal zip with the given entries, all written as stored; an entry
+// whose method is 8 is labelled deflated (its bytes stay as given), enough
+// to check that the packed-file index refuses it.
+struct TestZipEntry {
+    std::string name, data;
+    std::uint16_t method;
+};
+static void WriteTestZip(const std::string& path, const std::vector<TestZipEntry>& es) {
+    std::string out, cd;
+    auto le16 = [](std::string& b, std::uint32_t v) {
+        b += static_cast<char>(v & 0xff);
+        b += static_cast<char>((v >> 8) & 0xff);
+    };
+    auto le32 = [&](std::string& b, std::uint32_t v) {
+        le16(b, v & 0xffff);
+        le16(b, v >> 16);
+    };
+    for (const TestZipEntry& e : es) {
+        const std::uint32_t lho = static_cast<std::uint32_t>(out.size());
+        const std::uint32_t sz = static_cast<std::uint32_t>(e.data.size());
+        le32(out, 0x04034b50u);
+        le16(out, 10);
+        le16(out, 0);
+        le16(out, e.method);
+        le16(out, 0x6000);  // 12:00:00
+        le16(out, 0x5821);  // 2024-01-01
+        le32(out, 0);       // crc (not checked)
+        le32(out, sz);
+        le32(out, sz);
+        le16(out, static_cast<std::uint32_t>(e.name.size()));
+        le16(out, 3);  // a local extra field the central one does not have
+        out += e.name;
+        out += std::string(3, '\0');
+        out += e.data;
+        le32(cd, 0x02014b50u);
+        le16(cd, 20);
+        le16(cd, 10);
+        le16(cd, 0);
+        le16(cd, e.method);
+        le16(cd, 0x6000);
+        le16(cd, 0x5821);
+        le32(cd, 0);
+        le32(cd, sz);
+        le32(cd, sz);
+        le16(cd, static_cast<std::uint32_t>(e.name.size()));
+        le16(cd, 0);
+        le16(cd, 0);
+        le16(cd, 0);
+        le16(cd, 0);
+        le32(cd, 0);
+        le32(cd, lho);
+        cd += e.name;
+    }
+    const std::uint32_t cd_off = static_cast<std::uint32_t>(out.size());
+    out += cd;
+    le32(out, 0x06054b50u);
+    le16(out, 0);
+    le16(out, 0);
+    le16(out, static_cast<std::uint32_t>(es.size()));
+    le16(out, static_cast<std::uint32_t>(es.size()));
+    le32(out, static_cast<std::uint32_t>(cd.size()));
+    le32(out, cd_off);
+    le16(out, 0);
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (f) {
+        std::fwrite(out.data(), 1, out.size(), f);
+        std::fclose(f);
+    }
+}
+
+static std::string ReadHostFile(const std::string& path) {
+    std::string out;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        char buf[256];
+        std::size_t n;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+        std::fclose(f);
+    }
+    return out;
+}
+
 int main() {
     abr::GuestMemory mem;
     abr::LoadedModule mod;
@@ -413,6 +495,13 @@ int main() {
     mod.imports.push_back(abr::Import{"sem_trywait", true, 0, 0, 0});   // 117
     mod.imports.push_back(abr::Import{"sem_getvalue", true, 0, 0, 0});  // 118
     mod.imports.push_back(abr::Import{"sem_destroy", true, 0, 0, 0});   // 119
+    mod.imports.push_back(abr::Import{"fread", true, 0, 0, 0});         // 120
+    mod.imports.push_back(abr::Import{"lseek", true, 0, 0, 0});         // 121
+    mod.imports.push_back(abr::Import{"unlink", true, 0, 0, 0});        // 122
+    mod.imports.push_back(abr::Import{"fstat", true, 0, 0, 0});         // 123
+    mod.imports.push_back(abr::Import{"pread", true, 0, 0, 0});         // 124
+    mod.imports.push_back(abr::Import{"rename", true, 0, 0, 0});        // 125
+    mod.imports.push_back(abr::Import{"rmdir", true, 0, 0, 0});         // 126
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -3401,6 +3490,157 @@ int main() {
                "0");
         rt.ReapHostThread(803);
         rt.ReleaseCpuId(id);
+    }
+
+    // --- packed files (apk_vfs.h): files under assets/abport/<root>/ of
+    //     base.apk and its split_*.apk read in place as ordinary guest files,
+    //     an overlay where real files win, copy-up on write, deletion marks.
+    {
+        const std::string root = TestTmp() + "/opencode/abr-vfs";
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root + "/app");
+        std::filesystem::create_directories(root + "/data/files");
+        WriteTestZip(root + "/app/base.apk",
+                     {{"lib/arm64-v8a/x.so", "elf", 0},
+                      {"assets/abport/files/Net/A.bin", "hello packed world", 0},
+                      {"assets/abport/files/Net/D.txt", "abc", 0},
+                      {"assets/abport/files/Net/Z.bin", "zz", 8},
+                      {"assets/abport/nosuchroot/Q.txt", "q", 0}});
+        WriteTestZip(root + "/app/split_two.apk", {{"assets/abport/files/Net/Sub/B.txt", "second", 0}});
+        WriteTestZip(root + "/app/other.apk", {{"assets/abport/files/Net/C.txt", "not a split", 0}});
+
+        std::vector<abvfs::ZipEntry> zs;
+        std::string err;
+        Expect("vfs: zip index reads every entry",
+               std::to_string(abvfs::ReadZipIndex(root + "/app/base.apk", &zs, &err) ? zs.size() : 0), "5");
+        Expect("vfs: data offset skips the local extra field",
+               zs.size() > 1 ? ReadHostFile(root + "/app/base.apk").substr(zs[1].data_off, 5) : "", "hello");
+        Expect("vfs: base.apk and split_*.apk only",
+               std::to_string(abvfs::AppApks(root + "/app/base.apk").size()), "2");
+
+        rt.SetFilesDir("/data/data/abr.vfs/files", root + "/data/files");
+        rt.SetApkPath(root + "/app/base.apk");
+        const std::string line = rt.InitPackedFiles();
+        Expect("vfs: three stored files indexed", line.substr(0, line.find(" from")), "3 files");
+        Expect("vfs: the deflated entry is refused", std::to_string(line.find("1 deflated") != std::string::npos), "1");
+        Expect("vfs: directory skeleton made",
+               std::to_string(std::filesystem::is_directory(root + "/data/files/Net/Sub")), "1");
+
+        const std::uint32_t kP = 0x1000E000, kP2 = 0x1000E200, kMode = 0x1000E400, kBuf = 0x1000E500,
+                            kSt = 0x1000E800;
+        auto call = [&](std::uint32_t idx, std::uint32_t a0, std::uint32_t a1 = 0, std::uint32_t a2 = 0,
+                        std::uint32_t a3 = 0) {
+            const std::uint32_t args[4] = {a0, a1, a2, a3};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        auto bytes = [&](std::uint32_t at, std::size_t n) {
+            return std::string(rt.H<const char>(at), n);
+        };
+        // Sequenced: the call first, then what it wrote (the operands of +
+        // are evaluated in no fixed order).
+        auto rd = [&](std::uint32_t r, std::uint32_t at, std::size_t n) {
+            return std::to_string(r) + bytes(at, n);
+        };
+        auto st_size = [&]() {
+            std::uint64_t v = 0;
+            std::memcpy(&v, rt.H<std::uint8_t>(kSt + 48), 8);
+            return std::to_string(v);
+        };
+        // Case is ignored, as on shared storage.
+        put(kP, "/data/data/abr.vfs/files/net/a.BIN");
+        Expect("vfs: stat of a packed file", std::to_string(call(29, kP, kSt)), "0");
+        Expect("vfs: stat size", st_size(), "18");
+        Expect("vfs: access", std::to_string(call(63, kP, R_OK | W_OK)), "0");
+        const std::uint32_t fd = call(54, kP, O_RDONLY, 0);
+        Expect("vfs: open read-only", std::to_string(static_cast<std::int32_t>(fd) >= 100), "1");
+        Expect("vfs: read", rd(call(60, fd, kBuf, 5), kBuf, 5), "5hello");
+        Expect("vfs: lseek SEEK_CUR", std::to_string(call(121, fd, 0, SEEK_CUR)), "5");
+        Expect("vfs: pread inside the file", rd(call(124, fd, kBuf, 6, 6), kBuf, 6),
+               "6packed");
+        Expect("vfs: pread past the end", std::to_string(call(124, fd, kBuf, 4, 30)), "0");
+        const std::uint32_t fsr = call(123, fd, kSt);
+        Expect("vfs: fstat", std::to_string(fsr) + "/" + st_size(), "0/18");
+        const std::uint32_t fd2 = call(58, fd);
+        Expect("vfs: dup shares the position", rd(call(60, fd2, kBuf, 7), kBuf, 7),
+               "7 packed");
+        Expect("vfs: read stops at the end", std::to_string(call(60, fd, kBuf, 100)), "6");
+        Expect("vfs: lseek SEEK_END", std::to_string(call(121, fd, static_cast<std::uint32_t>(-5), SEEK_END)),
+               "13");
+        call(36, fd);
+        call(36, fd2);
+        Expect("vfs: no slice left after close", std::to_string(abr::RuntimeTestAccess::FdSlices(rt)), "0");
+
+        put(kMode, "r");
+        const std::uint32_t f = call(21, kP, kMode);
+        Expect("vfs: fopen r", std::to_string(f != 0), "1");
+        if (f) {
+            Expect("vfs: fread whole file", rd(call(120, kBuf, 1, 64, f), kBuf, 18),
+                   "18hello packed world");
+            Expect("vfs: fseek -5 from the end", std::to_string(call(30, f, static_cast<std::uint32_t>(-5), SEEK_END)),
+                   "0");
+            Expect("vfs: ftell", std::to_string(call(31, f)), "13");
+            call(22, f);
+        }
+        Expect("vfs: fclose drops the slice", std::to_string(abr::RuntimeTestAccess::FdSlices(rt)), "0");
+
+        // opendir lists packed entries; the deflated and non-split ones are absent.
+        put(kP2, "/data/data/abr.vfs/files/Net");
+        std::set<std::string> names;
+        if (const std::uint32_t d = call(26, kP2)) {
+            for (std::uint32_t e; (e = call(84, d)) != 0;) {
+                const std::string nm = rt.H<const char>(e + 19);
+                if (nm != "." && nm != "..") names.insert(nm);
+            }
+            call(28, d);
+        }
+        std::string joined;
+        for (const auto& nm : names) joined += nm + ",";
+        Expect("vfs: opendir merges packed entries", joined, "A.bin,D.txt,Sub,");
+
+        // r+ copies up, then writes reach the real file.
+        put(kP2, "/data/data/abr.vfs/files/Net/D.txt");
+        put(kMode, "r+");
+        put(kBuf, "Z");
+        if (const std::uint32_t g = call(21, kP2, kMode)) {
+            call(32, kBuf, 1, 1, g);
+            call(22, g);
+        }
+        Expect("vfs: r+ copy-up", ReadHostFile(root + "/data/files/Net/D.txt"), "Zbc");
+
+        // rename of a packed file: a real copy at the target, the source gone.
+        put(kP, "/data/data/abr.vfs/files/Net/Sub/B.txt");
+        put(kP2, "/data/data/abr.vfs/files/B2.txt");
+        Expect("vfs: rename packed", std::to_string(call(125, kP, kP2)), "0");
+        Expect("vfs: renamed bytes", ReadHostFile(root + "/data/files/B2.txt"), "second");
+        Expect("vfs: rename source gone", std::to_string(static_cast<std::int32_t>(call(29, kP, kSt))), "-1");
+        put(kP, "/data/data/abr.vfs/files/Net/Sub");
+        Expect("vfs: an emptied packed dir can go", std::to_string(call(126, kP)), "0");
+
+        // unlink: gone now and after a restart (the mark is persistent).
+        put(kP, "/data/data/abr.vfs/files/Net/A.bin");
+        Expect("vfs: unlink packed", std::to_string(call(122, kP)), "0");
+        Expect("vfs: unlinked is gone", std::to_string(static_cast<std::int32_t>(call(29, kP, kSt))), "-1");
+        put(kP2, "/data/data/abr.vfs/files/Net");
+        Expect("vfs: rmdir of a directory that still has files fails",
+               std::to_string(static_cast<std::int32_t>(call(126, kP2))), "-1");
+        {
+            abvfs::Pack again;
+            again.AddRoot("files", root + "/data/files");
+            again.Build(abvfs::AppApks(root + "/app/base.apk"), root + "/data/abport_deleted.txt");
+            Expect("vfs: deletion survives a restart",
+                   std::to_string(again.Find(root + "/data/files/Net/A.bin") == nullptr), "1");
+            Expect("vfs: other packed files stay",
+                   std::to_string(again.Find(root + "/data/files/Net/D.txt") != nullptr), "1");
+        }
+        // A real file written after the unlink wins over nothing; unlink again works.
+        put(kMode, "w");
+        put(kBuf, "new");
+        if (const std::uint32_t g = call(21, kP, kMode)) {
+            call(32, kBuf, 1, 3, g);
+            call(22, g);
+        }
+        const std::uint32_t sr = call(29, kP, kSt);
+        Expect("vfs: recreated as a real file", std::to_string(sr) + "/" + st_size(), "0/3");
     }
 
     // --- no quarantine: a freed block is handed out again (dlmalloc's LIFO
