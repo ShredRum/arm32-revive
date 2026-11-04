@@ -1234,14 +1234,15 @@ void Runtime::SetThreadStack(std::uint32_t lo, std::uint32_t size) {
     }
 }
 
-std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
+std::uint32_t Runtime::PthreadAttr(ImportId id, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                                    std::uint32_t a2) {
+    using I = ImportId;
     // bionic arm32 pthread_attr_t (NDK pthread.h), 24 bytes:
     // { u32 flags; void* stack_base; size_t stack_size; size_t guard_size;
     //   s32 sched_policy; s32 sched_priority; }. flags bit 0 = detached.
     constexpr std::uint32_t kSize = 24, kDetached = 1;
     std::uint32_t at = 0;
-    if (n == "pthread_getattr_np") {
+    if (id == I::pthread_getattr_np_) {
         at = a1;  // (thread, attr)
     } else {
         at = a0;
@@ -1261,7 +1262,7 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         std::memcpy(H(p), &v, 4);
         return true;
     };
-    if (n == "pthread_attr_init") {
+    if (id == I::pthread_attr_init_) {
         // bionic defaults: joinable, 1 MiB stack (minus its own guard), one
         // page of guard, SCHED_NORMAL.
         const std::uint32_t d[6] = {0, 0, 1024u * 1024u, 4096u, 0, 0};
@@ -1269,12 +1270,12 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         store();
         return 0;
     }
-    if (n == "pthread_attr_destroy") {
+    if (id == I::pthread_attr_destroy_) {
         std::memset(f, 0, kSize);
         store();
         return 0;
     }
-    if (n == "pthread_getattr_np") {
+    if (id == I::pthread_getattr_np_) {
         // Only the calling thread's own stack is known here (enough for the
         // GC/stack-bounds use); other threads get the defaults.
         std::uint32_t lo = t_stack_lo, sz = t_stack_size;
@@ -1288,13 +1289,13 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         store();
         return 0;
     }
-    if (n == "pthread_attr_getstack") {  // (attr, void** addr, size_t* size)
+    if (id == I::pthread_attr_getstack_) {  // (attr, void** addr, size_t* size)
         return (out32(a1, f[1]) && out32(a2, f[2])) ? 0u : static_cast<std::uint32_t>(EINVAL);
     }
-    if (n == "pthread_attr_getstacksize") {
+    if (id == I::pthread_attr_getstacksize_) {
         return out32(a1, f[2]) ? 0u : static_cast<std::uint32_t>(EINVAL);
     }
-    if (n == "pthread_attr_setstacksize") {
+    if (id == I::pthread_attr_setstacksize_) {
         // PTHREAD_STACK_MIN of the guest's bionic: 8192 on LP32 (NDK
         // pthread.h; 16384 is the LP64 value). FMOD asks for 8192 for its
         // stream threads; refusing it failed every music stream with
@@ -1306,10 +1307,10 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         store();
         return 0;
     }
-    if (n == "pthread_attr_getdetachstate") {
+    if (id == I::pthread_attr_getdetachstate_) {
         return out32(a1, (f[0] & kDetached) ? 1u : 0u) ? 0u : static_cast<std::uint32_t>(EINVAL);
     }
-    if (n == "pthread_attr_setdetachstate") {
+    if (id == I::pthread_attr_setdetachstate_) {
         if (a1 > 1) {
             return EINVAL;
         }
@@ -1317,12 +1318,12 @@ std::uint32_t Runtime::PthreadAttr(const std::string& n, std::uint32_t a0, std::
         store();
         return 0;
     }
-    if (n == "pthread_attr_setschedpolicy") {
+    if (id == I::pthread_attr_setschedpolicy_) {
         f[4] = a1;
         store();
         return 0;
     }
-    if (n == "pthread_attr_setschedparam") {  // (attr, const sched_param*)
+    if (id == I::pthread_attr_setschedparam_) {  // (attr, const sched_param*)
         if (!CheckRange(a1, 4, false)) {
             return EINVAL;
         }
@@ -1350,16 +1351,17 @@ bool Before(const struct timespec& a, const struct timespec& b) {
 }
 }  // namespace
 
-std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,
+std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t sem, std::uint32_t a1,
                                 std::uint32_t a2) {
+    using I = ImportId;
     // A guest sem_t (4 bytes on arm32) is backed by a host sem_t, keyed by
     // its address like the mutex map. Blocking waits run outside mutex_.
     if (!CheckRange(sem, 4, true)) {
         return kSemBadPtr;
     }
     std::shared_ptr<sem_t> s;
-    if (n == "sem_post" || n == "sem_wait" || n == "sem_trywait" || n == "sem_timedwait" ||
-        n == "sem_getvalue") {
+    if (id == I::sem_post_ || id == I::sem_wait_ || id == I::sem_trywait_ || id == I::sem_timedwait_ ||
+        id == I::sem_getvalue_) {
         // The hot path only reads the map: its own reader lock, never the
         // runtime's mutex_ (as the guest mutex map).
         std::shared_lock<std::shared_mutex> map_lock(sem_map_mu_);
@@ -1371,7 +1373,7 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
         s = it->second;
     } else {
         std::unique_lock<std::shared_mutex> map_lock(sem_map_mu_);
-        if (n == "sem_init") {  // (sem, pshared, value)
+        if (id == I::sem_init_) {  // (sem, pshared, value)
             auto ns = std::shared_ptr<sem_t>(new sem_t, [](sem_t* p) {
                 ::sem_destroy(p);
                 delete p;
@@ -1389,17 +1391,17 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
             return 0xFFFFFFFFu;
         }
         s = it->second;
-        if (n == "sem_destroy") {
+        if (id == I::sem_destroy_) {
             sem_map_.erase(it);
             return 0;
         }
     }
     int r = 0;
-    if (n == "sem_post") {
+    if (id == I::sem_post_) {
         r = ::sem_post(s.get());
-    } else if (n == "sem_trywait") {
+    } else if (id == I::sem_trywait_) {
         r = ::sem_trywait(s.get());
-    } else if (n == "sem_getvalue") {  // (sem, int* value)
+    } else if (id == I::sem_getvalue_) {  // (sem, int* value)
         int v = 0;
         r = ::sem_getvalue(s.get(), &v);
         if (r == 0) {
@@ -1408,7 +1410,7 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
             }
             std::memcpy(H(a1), &v, 4);
         }
-    } else if (n == "sem_wait" && SignalsInUse()) {
+    } else if (id == I::sem_wait_ && SignalsInUse()) {
         // Interruptible: a handler runs between slices, then EINTR (sem_wait
         // is never restarted after a handler, whatever SA_RESTART says) --
         // for an app targeting 24 or later. Below that bionic waits on
@@ -1431,7 +1433,7 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
                 }
             }
         }
-    } else if (n == "sem_wait") {
+    } else if (id == I::sem_wait_) {
         do {
             r = ::sem_wait(s.get());
         } while (r != 0 && errno == EINTR);
@@ -2258,6 +2260,8 @@ static std::uint8_t BionicCtypeClass(int c) {
 void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
+    const ImportId id = imp.import_id;
+    using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
     // GL fast path. gl* calls are the hottest imports (12-20 per draw): send
     // them to the real driver before the long name chain below, and without
@@ -2271,9 +2275,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
     // DIAG off this also stops paying the ~17 string compares per call.
     if (DiagOn() &&
-        (n == "socket" || n == "connect" || n == "send" || n == "sendto" || n == "recv" ||
-         n == "recvfrom" || n == "bind" || n == "listen" || n == "setsockopt" ||
-         n == "shutdown")) {
+        (id == I::socket_ || id == I::connect_ || id == I::send_ || id == I::sendto_ || id == I::recv_ ||
+         id == I::recvfrom_ || id == I::bind_ || id == I::listen_ || id == I::setsockopt_ ||
+         id == I::shutdown_)) {
         std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
                     GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
     }
@@ -2316,54 +2320,54 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         case HotImport::MutexLock:
         case HotImport::MutexUnlock:
-            Ret(regs, PthreadMutex(n, a0, a1));
+            Ret(regs, PthreadMutex(id, n, a0, a1));
             return;
         case HotImport::MemCopy:
             if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
                 goto bad_ptr;
             }
-            GuestMemCopy(regs, n, a0, a1, a2);
+            GuestMemCopy(id, regs, n, a0, a1, a2);
             return;
         case HotImport::MemSet:
             if (!CheckRange(a0, a2, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(regs, n, a0, static_cast<int>(a1 & 0xFF), a2);
+            GuestMemSet(id, regs, n, a0, static_cast<int>(a1 & 0xFF), a2);
             return;
         case HotImport::MemSetAeabi:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(regs, n, a0, static_cast<int>(a2 & 0xFF), a1);
+            GuestMemSet(id, regs, n, a0, static_cast<int>(a2 & 0xFF), a1);
             return;
         case HotImport::MemClr:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(regs, n, a0, 0, a1);
+            GuestMemSet(id, regs, n, a0, 0, a1);
             return;
         case HotImport::None:
             break;
     }
 
     // --- memory management ---
-    if (n == "malloc" || n == "calloc" || n == "realloc") {
-        const std::uint32_t r = (n == "malloc")   ? GuestMalloc(a0)
-                                : (n == "calloc") ? GuestCalloc(a0, a1)
+    if (id == I::malloc_ || id == I::calloc_ || id == I::realloc_) {
+        const std::uint32_t r = (id == I::malloc_)   ? GuestMalloc(a0)
+                                : (id == I::calloc_) ? GuestCalloc(a0, a1)
                                                   : GuestRealloc(a0, a1);
         // realloc(p, 0) frees and legitimately returns NULL.
-        if (r == 0 && !(n == "realloc" && a1 == 0)) {
+        if (r == 0 && !(id == I::realloc_ && a1 == 0)) {
             SetGuestErrno(ENOMEM);
         }
         Ret(regs, r);
         return;
     }
-    if (n == "free" || n == "cfree") {
+    if (id == I::free_ || id == I::cfree_) {
         GuestFree(a0);
         RetVoid(regs);
         return;
     }
-    if (n == "madvise") {
+    if (id == I::madvise_) {
         // madvise(addr, len, advice) on guest memory. MADV_DONTNEED (4) must
         // keep its meaning for private anonymous memory -- the range reads
         // back as zeros -- so it is honoured exactly: by the host kernel when
@@ -2389,10 +2393,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "mmap" || n == "mmap64") {
+    if (id == I::mmap_ || id == I::mmap64_) {
         // mmap(addr, len, prot, flags, int fd, off_t off): fd at [sp], the
         // 32-bit off_t at [sp+4]. mmap64's off64_t is 8-aligned at [sp+8].
-        const bool m64 = (n == "mmap64");
+        const bool m64 = (id == I::mmap64_);
         if (!CheckRange(regs[13], m64 ? 16 : 8, false)) {
             goto bad_ptr;
         }
@@ -2420,7 +2424,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, off));
         return;
     }
-    if (n == "mremap") {
+    if (id == I::mremap_) {
         // mremap(old, old_size, new_size, flags): a shrink drops the tail; a
         // growth extends in place when the following pages are free, else
         // moves under MREMAP_MAYMOVE (1): a new mapping with the same
@@ -2469,13 +2473,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, moved);
         return;
     }
-    if (n == "munmap") {
+    if (id == I::munmap_) {
         Ret(regs, static_cast<std::uint32_t>(GuestMunmap(a0, a1)));
         return;
     }
-    if (n == "strdup" || n == "strndup") {
+    if (id == I::strdup_ || id == I::strndup_) {
         std::uint32_t len = 0;
-        if (!GuestStrnlen(a0, n == "strndup" ? a1 : 0xFFFFFFFFu, &len) || len == 0xFFFFFFFFu) {
+        if (!GuestStrnlen(a0, id == I::strndup_ ? a1 : 0xFFFFFFFFu, &len) || len == 0xFFFFFFFFu) {
             goto bad_ptr;
         }
         if (DiagOn()) {
@@ -2501,7 +2505,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // sysconf x2, getpid x7, syscall x5 (224 gettid x4, 268 tgkill x1).
     // Before this they all fell into the generic tail, which answers 0 --
     // "the two strings are equal", "not found", "0 bytes", "thread id 0".
-    if (n == "strcoll") {
+    if (id == I::strcoll_) {
         // The guest puts itself into the "C" locale (it calls setlocale("C")
         // itself), where the collation is the byte order -- so the C
         // library's strcoll in the harness' own locale is the guest's
@@ -2512,7 +2516,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(std::strcoll(sa.c_str(), sb.c_str())));
         return;
     }
-    if (n == "memmem") {
+    if (id == I::memmem_) {
         // memmem(haystack, haylen, needle, needlelen) returns a POINTER
         // into the haystack -- a guest address here.
         if (!CheckRange(a0, a1, false) || !CheckRange(a2, a3, false)) {
@@ -2537,25 +2541,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(a0 + (hit - hay)));
         return;
     }
-    if (n == "sysconf") {
+    if (id == I::sysconf_) {
         // The guest asks for the page size and friends. The _SC_* values
         // are the Linux ones on both ABIs, so the host's answer is the
         // guest's.
         Ret(regs, static_cast<std::uint32_t>(::sysconf(static_cast<int>(a0))));
         return;
     }
-    if (n == "getpid") {
+    if (id == I::getpid_) {
         Ret(regs, static_cast<std::uint32_t>(::getpid()));
         return;
     }
-    if (n == "btowc" || n == "wctob" || n == "wctype" || n == "iswctype") {
+    if (id == I::btowc_ || id == I::wctob_ || id == I::wctype_ || id == I::iswctype_) {
         // The wide-character ctype (the C locale, like the byte one).
         // The guest builds its own classification tables from these answers
         // at init (measured: Star Wars fills a 256-entry btowc table and a
         // 16-entry wctype table), so the answers must be the bionic ones --
         // answering 0 silently produces an all-zero table (no letter, no
         // space, no digit recognized) and the text comes out wrong.
-        if (n == "wctype") {
+        if (id == I::wctype_) {
             // Bionic 7.1.2: wctype(const char*) maps a property NAME to the
             // WC_TYPE_* enum 1..12; it is not a character classifier. The
             // order is the one in libc/include/wchar.h.
@@ -2613,7 +2617,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "iswctype") {
+        if (id == I::iswctype_) {
             // Bionic 7.1.2: iswctype(wint_t, wctype_t) switches on the enum
             // and calls the narrow classifier. Those classifiers return the
             // class MASK, not merely 1 (isblank is the one explicit 0/1
@@ -2667,7 +2671,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, r);
             return;
         }
-        if (n == "btowc") {
+        if (id == I::btowc_) {
             // btowc(int c): the wide char for a single byte, WEOF (-1) when
             // the locale cannot represent it (C locale: ASCII only).
             const std::uint32_t c = a0;
@@ -2681,7 +2685,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, wc < 128 ? wc : 0xFFFFFFFFu);
         return;
     }
-    if (n == "getauxval") {
+    if (id == I::getauxval_) {
         // The measured Star Wars consumer sets r0=AT_HWCAP at 0x6708e4,
         // calls getauxval at 0x6708e6, shifts the result left by 19 (tests
         // bit 12), and on set reads AT_HWCAP2 at 0x6708f0. On ARM32 bit 12
@@ -2741,7 +2745,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
-    if (n == "syscall") {
+    if (id == I::syscall_) {
         // The raw syscall() wrapper. The guests' call sites pass only two
         // numbers (measured on the Seasons disassembly): 224 = gettid and
         // 268 = tgkill.
@@ -2772,7 +2776,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // softfp only changes how arguments are passed; guest code keeps values
     // in d8-d15 across calls (e.g. vstr d8/d13 in the WebP fprintf callers),
     // and Lua's error path is a longjmp.
-    if (n == "setjmp" || n == "_setjmp" || n == "sigsetjmp" || n == "__sigsetjmp") {
+    if (id == I::setjmp_ || id == I::_setjmp_ || id == I::sigsetjmp_ || id == I::__sigsetjmp_) {
         if (!CheckRange(a0, kGuestJmpBufBytes, true)) {
             goto bad_ptr;
         }
@@ -2792,7 +2796,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "longjmp" || n == "_longjmp" || n == "siglongjmp") {
+    if (id == I::longjmp_ || id == I::_longjmp_ || id == I::siglongjmp_) {
         if (!CheckRange(a0, kGuestJmpBufBytes, false)) {
             goto bad_ptr;
         }
@@ -2814,7 +2818,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- libc odds and ends the guests actually call -------------------
-    if (n == "gethostname") {
+    if (id == I::gethostname_) {
         // gethostname(buf, len): POSIX returns 0 on SUCCESS and -1 on error
         // (bionic truncates and NUL-terminates the name). The guest uses
         // the return value AS A POINTER in one place ("if (r != 0) return
@@ -2843,26 +2847,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host. memcpy/memmove/memset and their
     // __aeabi_ forms: HotImport.
-    if (n == "memcmp" || n == "bcmp") {
+    if (id == I::memcmp_ || id == I::bcmp_) {
         if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
             goto bad_ptr;
         }
         Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
         return;
     }
-    if (n == "strlen" || n == "strnlen") {
+    if (id == I::strlen_ || id == I::strnlen_) {
         std::uint32_t len = 0;
-        if (!GuestStrnlen(a0, n == "strnlen" ? a1 : 0xFFFFFFFFu, &len)) {
+        if (!GuestStrnlen(a0, id == I::strnlen_ ? a1 : 0xFFFFFFFFu, &len)) {
             goto bad_ptr;
         }
         Ret(regs, len);
         return;
     }
-    if (n == "strcmp" || n == "strncmp" || n == "strcasecmp" || n == "strncasecmp") {
+    if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
         // Compare in guest memory. Both strings are validated up to their NUL
         // (or up to n for the n-variants), so the host compare never reads an
         // unmapped byte.
-        const bool bounded = (n == "strncmp" || n == "strncasecmp");
+        const bool bounded = (id == I::strncmp_ || id == I::strncasecmp_);
         const std::uint32_t lim = bounded ? a2 : 0xFFFFFFFFu;
         std::uint32_t la = 0, lb = 0;
         if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
@@ -2871,11 +2875,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         const char* pa = H<const char>(a0);
         const char* pb = H<const char>(a1);
         int r = 0;
-        if (n == "strcmp") {
+        if (id == I::strcmp_) {
             r = std::strcmp(pa, pb);
-        } else if (n == "strncmp") {
+        } else if (id == I::strncmp_) {
             r = std::strncmp(pa, pb, a2);
-        } else if (n == "strcasecmp") {
+        } else if (id == I::strcasecmp_) {
             r = strcasecmp(pa, pb);
         } else {
             r = strncasecmp(pa, pb, a2);
@@ -2883,7 +2887,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    if (n == "strcpy" || n == "strncpy" || n == "strcat" || n == "strncat") {
+    if (id == I::strcpy_ || id == I::strncpy_ || id == I::strcat_ || id == I::strncat_) {
         // All four work in guest memory. Source and destination are validated
         // for exactly the bytes the real function touches:
         //   strcpy:  src up to NUL; dst [0, slen]
@@ -2893,8 +2897,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         //   strncat: src up to NUL or n; dst [dlen, dlen+min(slen,n)] + NUL
         // ClampHeapWrite is the optional overflow firewall (off by default);
         // when it shortens a write the result is still NUL terminated.
-        const bool cat = (n == "strcat" || n == "strncat");
-        const bool bounded = (n == "strncpy" || n == "strncat");
+        const bool cat = (id == I::strcat_ || id == I::strncat_);
+        const bool bounded = (id == I::strncpy_ || id == I::strncat_);
         std::uint32_t slen = 0, dlen = 0;
         if (!GuestStrnlen(a1, bounded ? a2 : 0xFFFFFFFFu, &slen)) {
             goto bad_ptr;
@@ -2905,13 +2909,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         const std::uint32_t dst = a0 + dlen;
         // Bytes written at dst: strncpy writes exactly n; the others copy the
         // string plus a terminating NUL.
-        const std::uint64_t want = (n == "strncpy") ? std::uint64_t(a2) : std::uint64_t(slen) + 1;
+        const std::uint64_t want = (id == I::strncpy_) ? std::uint64_t(a2) : std::uint64_t(slen) + 1;
         if (want > 0xFFFFFFFFu || !CheckRange(dst, static_cast<std::size_t>(want), true)) {
             goto bad_ptr;
         }
         const std::uint32_t room =
             ClampHeapWrite(dst, static_cast<std::uint32_t>(want), n.c_str());
-        if (n == "strncpy") {
+        if (id == I::strncpy_) {
             const std::uint32_t copy = std::min(slen, room);
             std::memmove(H(dst), H<const void>(a1), copy);
             if (room > copy) {
@@ -2929,7 +2933,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- string search/scan family (host-forwarded, range-checked) ---
-    if (n == "memchr" || n == "memrchr") {
+    if (id == I::memchr_ || id == I::memrchr_) {
         if (!CheckRange(a0, a2, false)) {
             goto bad_ptr;
         }
@@ -2963,10 +2967,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         const char* p = H<const char>(a0);
-        const char* f = (n == "memchr")
+        const char* f = (id == I::memchr_)
                             ? static_cast<const char*>(std::memchr(p, a1 & 0xFF, a2))
                             : nullptr;
-        if (n == "memrchr") {
+        if (id == I::memrchr_) {
             f = nullptr;
             for (std::uint32_t i = a2; i > 0; i--) {
                 if (p[i - 1] == static_cast<char>(a1 & 0xFF)) {
@@ -2978,8 +2982,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, f ? a0 + static_cast<std::uint32_t>(f - p) : 0u);
         return;
     }
-    if (n == "strchr" || n == "strrchr" || n == "strstr" || n == "strpbrk" || n == "strspn" ||
-        n == "strcspn") {
+    if (id == I::strchr_ || id == I::strrchr_ || id == I::strstr_ || id == I::strpbrk_ || id == I::strspn_ ||
+        id == I::strcspn_) {
         // Bounded guest strlen for the haystack (and needle where needed).
         auto gstrlen = [&](std::uint32_t s) -> std::uint32_t {
             for (std::uint32_t i = 0; i < 0x100000u; i++) {
@@ -2998,20 +3002,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         const char* h = H<const char>(a0);
         const char* f = nullptr;
-        if (n == "strchr" || n == "strrchr") {
+        if (id == I::strchr_ || id == I::strrchr_) {
             const char c = static_cast<char>(a1 & 0xFF);
-            f = (n == "strchr") ? std::strchr(h, c) : std::strrchr(h, c);
+            f = (id == I::strchr_) ? std::strchr(h, c) : std::strrchr(h, c);
         } else {
             const std::uint32_t nl = gstrlen(a1);
             if (nl == 0xFFFFFFFFu) {
                 goto bad_ptr;
             }
             const char* nd = H<const char>(a1);
-            if (n == "strstr") {
+            if (id == I::strstr_) {
                 f = std::strstr(h, nd);
-            } else if (n == "strpbrk") {
+            } else if (id == I::strpbrk_) {
                 f = std::strpbrk(h, nd);
-            } else if (n == "strspn") {
+            } else if (id == I::strspn_) {
                 Ret(regs, static_cast<std::uint32_t>(std::strspn(h, nd)));
                 return;
             } else {
@@ -3022,14 +3026,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, f ? a0 + static_cast<std::uint32_t>(f - h) : 0u);
         return;
     }
-    if (n == "strtok" || n == "strtok_r") {
+    if (id == I::strtok_ || id == I::strtok_r_) {
         // Manual strtok on guest memory (host strtok_r can't use guest saveptr:
         // it stores host pointers). Delim = NUL-terminated guest string.
         // thread_local: legacy strtok state is per-thread (a global tore
         // tokens across main/worker and crashed with wild pointers).
         thread_local std::uint32_t strtok_state = 0;
         std::uint32_t state = 0;
-        if (n == "strtok_r") {
+        if (id == I::strtok_r_) {
             if (!CheckRange(a2, 4, false)) {
                 goto bad_ptr;
             }
@@ -3056,7 +3060,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         };
         const std::uint32_t dl = gstrlen2(a1);
         if (dl == 0xFFFFFFFFu || state == 0) {
-            if (n == "strtok_r" && state == 0) {
+            if (id == I::strtok_r_ && state == 0) {
                 Ret(regs, 0);
                 return;
             }
@@ -3071,7 +3075,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             char c = *H<const char>(cur);
             if (c == '\0') {
-                if (n == "strtok_r") {
+                if (id == I::strtok_r_) {
                     std::uint32_t z = 0;
                     if (CheckRange(a2, 4, true)) {
                         std::memcpy(H(a2), &z, 4);
@@ -3098,7 +3102,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             char c = *H<const char>(cur);
             if (c == '\0') {
-                if (n == "strtok_r") {
+                if (id == I::strtok_r_) {
                     if (CheckRange(a2, 4, true)) {
                         std::memcpy(H(a2), &cur, 4);
                     }
@@ -3114,7 +3118,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
                 *H<char>(cur) = '\0';
                 const std::uint32_t next = cur + 1;
-                if (n == "strtok_r") {
+                if (id == I::strtok_r_) {
                     if (CheckRange(a2, 4, true)) {
                         std::memcpy(H(a2), &next, 4);
                     }
@@ -3127,7 +3131,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             cur++;
         }
     }
-    if (n == "sscanf" || n == "vsscanf" || n == "fscanf") {
+    if (id == I::sscanf_ || id == I::vsscanf_ || id == I::fscanf_) {
         // Manual sscanf (host va_list can't be synthesized; semantics follow
         // C99: ws-skip (not %c/%[/%n), literals, widths, suppression,
         // lengths hh/h/l/ll, conversions d i u o x X f e g a s c [ p n %).
@@ -3136,7 +3140,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // stream (up to 64 KiB), then the stream is put back right after the
         // characters the conversion consumed -- exact for seekable files
         // (the /proc and data files guests read); other streams are refused.
-        const bool from_stream = (n == "fscanf");
+        const bool from_stream = (id == I::fscanf_);
         FILE* sf = nullptr;
         long sf_start = 0;
         if (from_stream) {
@@ -3194,7 +3198,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // r3). The same AAPCS32 even-pair rule is visible in the WebP
         // `fprintf(fp, "%lu %f", lu, d)` call: the double is wholly at [sp],
         // not in r3.
-        const bool via_va = (n == "vsscanf");
+        const bool via_va = (id == I::vsscanf_);
         std::uint32_t va_area = 0;
         if (via_va) {
             va_area = a2;
@@ -3642,8 +3646,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                       : static_cast<std::uint32_t>(assigned));
         return;
     }
-    if (n == "strtol" || n == "strtoul" || n == "strtoll" || n == "strtoull" || n == "atoi" ||
-        n == "atol") {
+    if (id == I::strtol_ || id == I::strtoul_ || id == I::strtoll_ || id == I::strtoull_ || id == I::atoi_ ||
+        id == I::atol_) {
         // Guest ABI: strtoX(nptr=a0, endptr=a1, base=a2); atoi/atol take
         // only a0. Guest `long` is 32-bit while the host's is 64-bit, so the
         // 32-bit variants parse with the 64-bit host functions and saturate
@@ -3669,7 +3673,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return static_cast<std::uint32_t>(static_cast<std::int32_t>(v));
         };
-        if (n == "atoi" || n == "atol") {
+        if (id == I::atoi_ || id == I::atol_) {
             int err = 0;
             Ret(regs, strtol32(10, nullptr, &err));
             return;
@@ -3687,9 +3691,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return true;
         };
         int err = 0;
-        if (n == "strtoll" || n == "strtoull") {
+        if (id == I::strtoll_ || id == I::strtoull_) {
             errno = 0;
-            const unsigned long long v = (n == "strtoull") ? std::strtoull(s.c_str(), &end, base)
+            const unsigned long long v = (id == I::strtoull_) ? std::strtoull(s.c_str(), &end, base)
                                                            : (unsigned long long)std::strtoll(
                                                                  s.c_str(), &end, base);
             err = errno;
@@ -3700,7 +3704,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 static_cast<std::uint32_t>((v >> 32) & 0xFFFFFFFFu));
         } else {
             std::uint32_t v = 0;
-            if (n == "strtoul") {
+            if (id == I::strtoul_) {
                 errno = 0;
                 const unsigned long long u = std::strtoull(s.c_str(), &end, base);
                 err = errno;
@@ -3731,7 +3735,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
-    if (n == "strtod") {
+    if (id == I::strtod_) {
         // Guest ABI: strtod(nptr=a0, endptr=a1) -> double in r0:r1 (softfp:
         // little-endian, low word in r0 -- see math_thunks.inc and the guest's
         // luaO_str2d, which reads the value back as CONCAT44(r1, r0)).
@@ -3772,11 +3776,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, w64[0], w64[1]);
         return;
     }
-    if (n == "__errno") {
+    if (id == I::__errno_) {
         Ret(regs, ErrnoSlot());
         return;
     }
-    if (n == "strerror" || n == "strerror_r") {
+    if (id == I::strerror_ || id == I::strerror_r_) {
         // Must hand back a GUEST string: a host pointer is read as guest memory
         // (the engine's own log then printed the .so's ELF header as the
         // "errno text"). Per-host-thread guest scratch; callers never free it.
@@ -3785,7 +3789,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!msg) {
             msg = "Unknown error";
         }
-        if (n == "strerror_r") {
+        if (id == I::strerror_r_) {
             // bionic: int strerror_r(int err, char* buf, size_t len).
             if (a1 == 0 || a2 == 0) {
                 Ret(regs, static_cast<std::uint32_t>(EINVAL));
@@ -3819,7 +3823,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
     // HARNESS_TIMEWARP=<sec>: shift all guest clocks forward (timer-gate
     // tests: loading/menu timeouts expire without wall waiting).
-    if (n == "clock_gettime") {
+    if (id == I::clock_gettime_) {
         struct timespec ts {};
         const int r = clock_gettime(a0, &ts);
         if (r == 0) {
@@ -3834,7 +3838,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    if (n == "gettimeofday") {
+    if (id == I::gettimeofday_) {
         struct timeval tv {};
         const int r = gettimeofday(&tv, nullptr);
         if (r == 0 && a0 != 0) {
@@ -3850,12 +3854,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    if (n == "time" || n == "clock") {
-        std::time_t t = (n == "time") ? std::time(nullptr) : std::clock();
-        if (n == "time") {
+    if (id == I::time_ || id == I::clock_) {
+        std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
+        if (id == I::time_) {
             t += (time_t)TimeWarp();
         }
-        if (n == "time" && a0 != 0 && CheckRange(a0, 4, true)) {
+        if (id == I::time_ && a0 != 0 && CheckRange(a0, 4, true)) {
             const std::uint32_t w = static_cast<std::uint32_t>(t & 0xFFFFFFFFu);
             std::memcpy(H(a0), &w, 4);
         }
@@ -3863,13 +3867,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             static_cast<std::uint32_t>(((std::uint64_t)t >> 32) & 0xFFFFFFFFu));
         return;
     }
-    if (n == "localtime_r" || n == "gmtime_r" || n == "localtime" || n == "gmtime") {
+    if (id == I::localtime_r_ || id == I::gmtime_r_ || id == I::localtime_ || id == I::gmtime_) {
         // Bionic ARM struct tm (44B): 9x int + long gmtoff + char* zone.
         // localtime()/gmtime() use a per-thread static buffer: allocate the
         // guest block once, then return the same pointer on every call. The
         // _r forms keep writing the caller's buffer.
         const bool is_local = (n[0] == 'l');
-        const bool use_static = (n == "localtime" || n == "gmtime");
+        const bool use_static = (id == I::localtime_ || id == I::gmtime_);
         thread_local std::uint32_t static_tm = 0;
         std::int32_t gt = 0;
         if (CheckRange(a0, 4, false)) {
@@ -3910,7 +3914,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
-    if (n == "__android_log_print") {
+    if (id == I::__android_log_print_) {
         // Expand guest printf-style args so the game's own diagnostics (e.g.
         // "Parsing JSON failed! Reason: ...") become visible. This used to
         // carry its OWN formatter, which had diverged from the printf
@@ -3933,7 +3937,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
-    if (n == "__android_log_vprint") {
+    if (id == I::__android_log_vprint_) {
         // (prio, tag, fmt, va_list): the arguments start at the va pointer.
         const std::string fmt(GuestStr(a2));
         GuestFmtArgs st{};
@@ -3946,7 +3950,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
-    if (n == "__android_log_write") {
+    if (id == I::__android_log_write_) {
         // No printf spec: (prio, tag, text). Same sink as log_print.
         const std::string tag(GuestStr(a1));
         const std::string text(GuestStr(a2));
@@ -3954,7 +3958,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(text.size()));
         return;
     }
-    if (n == "printf" || n == "vprintf") {
+    if (id == I::printf_ || id == I::vprintf_) {
         // Host stdout (the game gated its own logging off, but a crash-time
         // path may call it). GuestFmtArgs consumes r1-r3 then stack args.
         const std::string fmt(GuestStr(a0));
@@ -3963,7 +3967,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         st.gargs[1] = a1;
         st.gargs[2] = a2;
         st.gargs[3] = a3;
-        if (n == "printf") {
+        if (id == I::printf_) {
             st.ai = 1;
             st.stack = regs[13];
         } else {
@@ -3977,7 +3981,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(total));
         return;
     }
-    if (n == "uname") {
+    if (id == I::uname_) {
         // Breakpad stores this in the minidump; machine must look like the
         // guest ABI (armv7l), the rest is informational. struct utsname on
         // arm32 bionic is 6 fields x 65 bytes.
@@ -4006,7 +4010,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     //     although all six titles import them (G-02). Layouts from the NDK
     //     headers, sizes checked with the NDK clang for armv7a: struct
     //     sigaction 16 B, sigset_t 4 B, wchar_t 4 B.
-    if (n == "vasprintf") {
+    if (id == I::vasprintf_) {
         // int vasprintf(char** strp, const char* fmt, va_list ap)
         if (!CheckRange(a0, 4, true) || !CheckRange(a1, 1, false)) {
             goto bad_ptr;
@@ -4032,7 +4036,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(out.size()));
         return;
     }
-    if (n == "fnmatch") {
+    if (id == I::fnmatch_) {
         // Guest (bionic) flags: NOESCAPE 1, PATHNAME 2, PERIOD 4 -- glibc
         // numbers them differently, so translate. FNM_NOMATCH = 1 in both.
         std::uint32_t lp = 0, ls = 0;
@@ -4047,7 +4051,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, r == 0 ? 0u : 1u);
         return;
     }
-    if (n == "basename") {
+    if (id == I::basename_) {
         // POSIX basename: last path component, "/" for all-slash input, "."
         // for NULL/"". The result lives in a per-thread guest buffer (bionic
         // also returns thread-local storage).
@@ -4089,7 +4093,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, tbuf);
         return;
     }
-    if (n == "setlocale") {
+    if (id == I::setlocale_) {
         // Only the "C"/"POSIX" locale exists for the guest (bionic of that era
         // had no others): query or set "C" -> "C", anything else -> NULL.
         static std::uint32_t c_str = 0;
@@ -4117,17 +4121,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // --- libc pieces first needed by Mono (99 Bricks). Not imported by the
     // Rovio titles, so their behaviour is unchanged.
-    if (n == "bsd_signal") {
+    if (id == I::bsd_signal_) {
         // signal(sig, handler): guest handlers are never delivered (see
         // sigaction below); report SIG_DFL as the previous disposition.
         Ret(regs, 0);
         return;
     }
-    if (n == "gettid") {
+    if (id == I::gettid_) {
         Ret(regs, GuestTid());
         return;
     }
-    if (n == "getdtablesize") {
+    if (id == I::getdtablesize_) {
         // The descriptor table size (RLIMIT_NOFILE soft limit); Android's
         // default is 1024. Mono's io-layer sizes its handle table from it.
         struct rlimit rl {};
@@ -4135,14 +4139,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, ok && rl.rlim_cur < 65536 ? static_cast<std::uint32_t>(rl.rlim_cur) : 1024u);
         return;
     }
-    if (n == "dlopen" || n == "dlsym" || n == "dlclose" || n == "dlerror") {
+    if (id == I::dlopen_ || id == I::dlsym_ || id == I::dlclose_ || id == I::dlerror_) {
         // Guest libraries this module already holds (several guest .so, e.g.
         // Unity's libmain dlopens libmono/libunity): a handle per library,
         // dlsym from the module's definitions. Any other name -- host
         // libraries such as libc.so -- gets NULL as it always did here.
         // dlerror's message of this thread's last failure (bionic wording).
         thread_local std::string dl_error;
-        if (n == "dlopen") {
+        if (id == I::dlopen_) {
             // dlopen(NULL): the program's own handle (app_process). Its dlsym
             // searches the executable's global group, which libraries loaded
             // from Java are not part of: no guest symbol is found through it.
@@ -4181,7 +4185,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "dlsym") {
+        if (id == I::dlsym_) {
             // That library's own definition first (dlsym(handle) searches the
             // library, then its dependencies: the merged table stands in).
             // RTLD_DEFAULT (0, or 0xffffffff in the LP32 headers of the
@@ -4219,7 +4223,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, v);
             return;
         }
-        if (n == "dlerror") {
+        if (id == I::dlerror_) {
             // The message once, then NULL until the next failure; the text
             // lives in a per-thread guest buffer.
             if (dl_error.empty()) {
@@ -4244,12 +4248,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);  // dlclose: loaded libraries stay
         return;
     }
-    if (n == "memalign" || n == "posix_memalign") {
+    if (id == I::memalign_ || id == I::posix_memalign_) {
         // memalign(align, size) -> ptr; posix_memalign(void** out, align,
         // size) -> errno (EINVAL unless align is a power of two that is a
         // multiple of sizeof(void*)). bionic's memalign rounds a bad
         // alignment up to a power of two.
-        const bool posix = (n == "posix_memalign");
+        const bool posix = (id == I::posix_memalign_);
         std::uint32_t align = posix ? a1 : a0;
         const std::uint32_t size = posix ? a2 : a1;
         const bool pow2 = align != 0 && (align & (align - 1)) == 0;
@@ -4281,7 +4285,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, blk);
         return;
     }
-    if (n == "strlcpy") {
+    if (id == I::strlcpy_) {
         // strlcpy(dst, src, size): copies at most size-1 bytes, always
         // NUL-terminates when size > 0, returns strlen(src).
         std::uint32_t len = 0;
@@ -4299,7 +4303,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, len);
         return;
     }
-    if (n == "clock_getres") {
+    if (id == I::clock_getres_) {
         // clock_getres(clk, struct timespec* res): 32-bit {time_t, long}.
         struct timespec ts {};
         if (::clock_getres(static_cast<clockid_t>(a0), &ts) != 0) {
@@ -4318,11 +4322,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "mprotect") {
+    if (id == I::mprotect_) {
         Ret(regs, static_cast<std::uint32_t>(GuestMprotect(a0, a1, static_cast<int>(a2))));
         return;
     }
-    if (n == "readlink") {
+    if (id == I::readlink_) {
         // readlink(path, buf, size): through the file bridge. A link target
         // inside the host files dir goes back in guest spelling. No match
         // (unmapped path) is ENOENT; a plain file or dir is EINVAL as usual.
@@ -4351,21 +4355,21 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(len));
         return;
     }
-    if (n == "pthread_attr_init" || n == "pthread_attr_destroy" || n == "pthread_getattr_np" ||
-        n == "pthread_attr_getstack" || n == "pthread_attr_getstacksize" ||
-        n == "pthread_attr_setstacksize" || n == "pthread_attr_getdetachstate" ||
-        n == "pthread_attr_setdetachstate" || n == "pthread_attr_setschedpolicy" ||
-        n == "pthread_attr_setschedparam") {
-        Ret(regs, PthreadAttr(n, a0, a1, a2));
+    if (id == I::pthread_attr_init_ || id == I::pthread_attr_destroy_ || id == I::pthread_getattr_np_ ||
+        id == I::pthread_attr_getstack_ || id == I::pthread_attr_getstacksize_ ||
+        id == I::pthread_attr_setstacksize_ || id == I::pthread_attr_getdetachstate_ ||
+        id == I::pthread_attr_setdetachstate_ || id == I::pthread_attr_setschedpolicy_ ||
+        id == I::pthread_attr_setschedparam_) {
+        Ret(regs, PthreadAttr(id, n, a0, a1, a2));
         return;
     }
-    if (n == "__pthread_cleanup_push" || n == "__pthread_cleanup_pop") {
+    if (id == I::__pthread_cleanup_push_ || id == I::__pthread_cleanup_pop_) {
         // bionic __pthread_cleanup_t { prev; routine; arg; } (12 B), a
         // per-thread list. pop(c, execute) runs routine(arg) when asked.
-        if (!CheckRange(a0, 12, n == "__pthread_cleanup_push")) {
+        if (!CheckRange(a0, 12, id == I::__pthread_cleanup_push_)) {
             goto bad_ptr;
         }
-        if (n == "__pthread_cleanup_push") {
+        if (id == I::__pthread_cleanup_push_) {
             const std::uint32_t c[3] = {t_cleanup_head, a1, a2};
             std::memcpy(H(a0), c, 12);
             t_cleanup_head = a0;
@@ -4387,9 +4391,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "sem_init" || n == "sem_destroy" || n == "sem_post" || n == "sem_wait" ||
-        n == "sem_trywait" || n == "sem_timedwait" || n == "sem_getvalue") {
-        const std::uint32_t r = GuestSem(n, a0, a1, a2);
+    if (id == I::sem_init_ || id == I::sem_destroy_ || id == I::sem_post_ || id == I::sem_wait_ ||
+        id == I::sem_trywait_ || id == I::sem_timedwait_ || id == I::sem_getvalue_) {
+        const std::uint32_t r = GuestSem(id, n, a0, a1, a2);
         if (r == kSemBadPtr) {
             goto bad_ptr;
         }
@@ -4399,16 +4403,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Guest signals: dispositions, masks and thread-directed signals (see
     // Runtime::GuestSendSignal). sigaction/sigprocmask/tkill/kill/sigsuspend
     // return -1 + errno; pthread_sigmask/pthread_kill return the errno.
-    if (n == "sigaction" || n == "sigprocmask" || n == "pthread_sigmask" || n == "tkill" ||
-        n == "pthread_kill" || n == "kill" || n == "sigsuspend") {
+    if (id == I::sigaction_ || id == I::sigprocmask_ || id == I::pthread_sigmask_ || id == I::tkill_ ||
+        id == I::pthread_kill_ || id == I::kill_ || id == I::sigsuspend_) {
         std::uint32_t e = 0;
-        if (n == "sigaction") {
+        if (id == I::sigaction_) {
             e = GuestSigaction(a0, a1, a2);
-        } else if (n == "sigprocmask" || n == "pthread_sigmask") {
+        } else if (id == I::sigprocmask_ || id == I::pthread_sigmask_) {
             e = GuestSigmask(a0, a1, a2);
-        } else if (n == "tkill" || n == "pthread_kill") {
+        } else if (id == I::tkill_ || id == I::pthread_kill_) {
             e = GuestSendSignal(a0, a1);
-        } else if (n == "kill") {
+        } else if (id == I::kill_) {
             // Only this process exists for the guest: a signal to it goes to
             // the calling thread, as the kernel picks one that can take it.
             e = (a0 == static_cast<std::uint32_t>(::getpid()) || a0 == 0)
@@ -4420,7 +4424,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (e == EFAULT) {
             goto bad_ptr;
         }
-        if (n == "pthread_sigmask" || n == "pthread_kill") {
+        if (id == I::pthread_sigmask_ || id == I::pthread_kill_) {
             Ret(regs, e);
         } else if (e != 0) {
             SetGuestErrno(static_cast<int>(e));
@@ -4430,7 +4434,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
-    if (n == "raise") {
+    if (id == I::raise_) {
         if (a0 == 0) {
             Ret(regs, 0);  // signal 0: existence check only
             return;
@@ -4453,19 +4457,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         return;
     }
-    if (n == "geteuid") {
+    if (id == I::geteuid_) {
         Ret(regs, static_cast<std::uint32_t>(::geteuid()));
         return;
     }
-    if (n == "towlower" || n == "towupper") {
+    if (id == I::towlower_ || id == I::towupper_) {
         // C locale: only ASCII letters change.
         std::uint32_t c = a0;
-        if (n == "towlower" && c >= 'A' && c <= 'Z') c += 32;
-        if (n == "towupper" && c >= 'a' && c <= 'z') c -= 32;
+        if (id == I::towlower_ && c >= 'A' && c <= 'Z') c += 32;
+        if (id == I::towupper_ && c >= 'a' && c <= 'z') c -= 32;
         Ret(regs, c);
         return;
     }
-    if (n == "wcslen") {
+    if (id == I::wcslen_) {
         std::uint32_t i = 0;
         for (;; i++) {
             if (!CheckRange(a0 + i * 4, 4, false)) {
@@ -4480,14 +4484,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, i);
         return;
     }
-    if (n == "wmemchr" || n == "wmemcmp" || n == "wmemcpy" || n == "wmemmove" || n == "wmemset") {
+    if (id == I::wmemchr_ || id == I::wmemcmp_ || id == I::wmemcpy_ || id == I::wmemmove_ || id == I::wmemset_) {
         // n counts 4-byte wchar_t units.
         const std::uint64_t bytes = std::uint64_t(a2) * 4;
         if (bytes > 0xFFFFFFFFu) {
             goto bad_ptr;
         }
         const std::size_t nb = static_cast<std::size_t>(bytes);
-        if (n == "wmemset") {
+        if (id == I::wmemset_) {
             if (nb && !CheckRange(a0, nb, true)) {
                 goto bad_ptr;
             }
@@ -4497,7 +4501,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, a0);
             return;
         }
-        if (n == "wmemcpy" || n == "wmemmove") {
+        if (id == I::wmemcpy_ || id == I::wmemmove_) {
             if (nb && (!CheckRange(a0, nb, true) || !CheckRange(a1, nb, false))) {
                 goto bad_ptr;
             }
@@ -4505,7 +4509,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, a0);
             return;
         }
-        if (n == "wmemcmp") {
+        if (id == I::wmemcmp_) {
             if (nb && (!CheckRange(a0, nb, false) || !CheckRange(a1, nb, false))) {
                 goto bad_ptr;
             }
@@ -4536,9 +4540,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "snprintf" || n == "vsnprintf" || n == "sprintf" || n == "vsprintf") {
-        const bool sized = (n == "snprintf" || n == "vsnprintf");
-        const bool via_va = (n == "vsnprintf" || n == "vsprintf");
+    if (id == I::snprintf_ || id == I::vsnprintf_ || id == I::sprintf_ || id == I::vsprintf_) {
+        const bool sized = (id == I::snprintf_ || id == I::vsnprintf_);
+        const bool via_va = (id == I::vsnprintf_ || id == I::vsprintf_);
         const std::uint32_t dst = a0;
         const std::uint32_t cap = sized ? a1 : 0xFFFFFFFFu;
         const std::uint32_t fmtp = sized ? a2 : a1;
@@ -4576,7 +4580,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- sleeps: honest (PLAN item 8) --------------------------------------
-    if (n == "nanosleep") {
+    if (id == I::nanosleep_) {
         // nanosleep(const struct timespec* req, struct timespec* rem); guest
         // timespec = {long sec; long nsec} (2 x 32 bits). Live: Rio's
         // std::this_thread::sleep_for (0x4428fc).
@@ -4606,8 +4610,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- loud exits ---
-    if (n == "__cxa_guard_acquire" || n == "__cxa_guard_release" || n == "__cxa_guard_abort") {
-        const std::uint32_t r = CxaGuard(n, a0);
+    if (id == I::__cxa_guard_acquire_ || id == I::__cxa_guard_release_ || id == I::__cxa_guard_abort_) {
+        const std::uint32_t r = CxaGuard(id, n, a0);
         if (r == kSemBadPtr) {
             goto bad_ptr;
         }
@@ -4616,18 +4620,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     // Destructors registered for exit never run: an Android app process is
     // killed, it does not exit. Registering succeeds, as in bionic.
-    if (n == "__cxa_atexit" || n == "__aeabi_atexit") {
+    if (id == I::__cxa_atexit_ || id == I::__aeabi_atexit_) {
         Ret(regs, 0);
         return;
     }
-    if (n == "__cxa_finalize") {
+    if (id == I::__cxa_finalize_) {
         RetVoid(regs);
         return;
     }
     // __cxa_pure_virtual: a call through a pure virtual slot; libstdc++
     // aborts.
-    if (n == "abort" || n == "__stack_chk_fail" || n == "__assert2" || n == "exit" ||
-        n == "_exit" || n == "__cxa_pure_virtual") {
+    if (id == I::abort_ || id == I::__stack_chk_fail_ || id == I::__assert2_ || id == I::exit_ ||
+        id == I::_exit_ || id == I::__cxa_pure_virtual_) {
         std::printf("[svc] FATAL %s() called (r0=%08x) pc=%08x lr=%08x -- halting\n", n.c_str(), a0,
                     regs[15] - 4, regs[14]);
         DumpEventRing();
@@ -4639,23 +4643,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // bionic keeps the mutex type in its low 4 bits (NORMAL 0, RECURSIVE 1,
     // ERRORCHECK 2). These used to fall into the generic stub, so the type a
     // guest asked for never reached pthread_mutex_init.
-    if (n == "pthread_mutexattr_init" || n == "pthread_mutexattr_destroy" ||
-        n == "pthread_mutexattr_settype" || n == "pthread_mutexattr_gettype") {
-        if (!CheckRange(a0, 4, n != "pthread_mutexattr_gettype")) {
+    if (id == I::pthread_mutexattr_init_ || id == I::pthread_mutexattr_destroy_ ||
+        id == I::pthread_mutexattr_settype_ || id == I::pthread_mutexattr_gettype_) {
+        if (!CheckRange(a0, 4, id != I::pthread_mutexattr_gettype_)) {
             Ret(regs, EINVAL);
             return;
         }
         std::uint32_t v = 0;
         std::memcpy(&v, H(a0), 4);
-        if (n == "pthread_mutexattr_init") {
+        if (id == I::pthread_mutexattr_init_) {
             v = 0;  // PTHREAD_MUTEX_DEFAULT = NORMAL
-        } else if (n == "pthread_mutexattr_settype") {
+        } else if (id == I::pthread_mutexattr_settype_) {
             if (a1 > 2) {
                 Ret(regs, EINVAL);
                 return;
             }
             v = (v & ~0xFu) | a1;
-        } else if (n == "pthread_mutexattr_gettype") {
+        } else if (id == I::pthread_mutexattr_gettype_) {
             if (!CheckRange(a1, 4, true)) {
                 Ret(regs, EINVAL);
                 return;
@@ -4670,37 +4674,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- pthread: real mutex/cond/key maps, create/join stubbed for now ---
-    if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy" || n == "pthread_mutex_lock" ||
-        n == "pthread_mutex_unlock" || n == "pthread_mutex_trylock") {
-        Ret(regs, PthreadMutex(n, a0, a1));
+    if (id == I::pthread_mutex_init_ || id == I::pthread_mutex_destroy_ || id == I::pthread_mutex_lock_ ||
+        id == I::pthread_mutex_unlock_ || id == I::pthread_mutex_trylock_) {
+        Ret(regs, PthreadMutex(id, n, a0, a1));
         return;
     }
-    if (n == "pthread_rwlock_init" || n == "pthread_rwlock_destroy" || n == "pthread_rwlock_rdlock" ||
-        n == "pthread_rwlock_wrlock" || n == "pthread_rwlock_unlock") {
-        Ret(regs, PthreadRwlock(n, a0));
+    if (id == I::pthread_rwlock_init_ || id == I::pthread_rwlock_destroy_ || id == I::pthread_rwlock_rdlock_ ||
+        id == I::pthread_rwlock_wrlock_ || id == I::pthread_rwlock_unlock_) {
+        Ret(regs, PthreadRwlock(id, n, a0));
         return;
     }
-    if (n == "pthread_cond_init" || n == "pthread_cond_destroy" || n == "pthread_cond_signal" ||
-        n == "pthread_cond_broadcast" || n == "pthread_cond_wait" ||
-        n == "pthread_cond_timedwait" || n == "pthread_cond_timedwait_monotonic" ||
-        n == "pthread_cond_timedwait_monotonic_np") {
+    if (id == I::pthread_cond_init_ || id == I::pthread_cond_destroy_ || id == I::pthread_cond_signal_ ||
+        id == I::pthread_cond_broadcast_ || id == I::pthread_cond_wait_ ||
+        id == I::pthread_cond_timedwait_ || id == I::pthread_cond_timedwait_monotonic_ ||
+        id == I::pthread_cond_timedwait_monotonic_np_) {
         // The _np name is bionic's other export of the same function
         // (absolute CLOCK_MONOTONIC deadline).
-        const bool mono = (n == "pthread_cond_timedwait_monotonic" ||
-                           n == "pthread_cond_timedwait_monotonic_np");
+        const bool mono = (id == I::pthread_cond_timedwait_monotonic_ ||
+                           id == I::pthread_cond_timedwait_monotonic_np_);
         std::string base = mono ? "pthread_cond_timedwait" : n;
-        Ret(regs, PthreadCond(base, a0, a1, a2, mono));
+        Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, base, a0, a1, a2, mono));
         return;
     }
-    if (n == "pthread_key_create") {
+    if (id == I::pthread_key_create_) {
         Ret(regs, PthreadKeyCreate(a0, a1));
         return;
     }
-    if (n == "pthread_key_delete") {
+    if (id == I::pthread_key_delete_) {
         Ret(regs, PthreadKeyDelete(a0));
         return;
     }
-    if (n == "pthread_exit") {
+    if (id == I::pthread_exit_) {
         // Only a worker's own code can end its thread (the thread was made by
         // pthread_create and this is its Jit, not a callback or a Java thread).
         if (t_worker_jit == nullptr || ActiveJit() != t_worker_jit) {
@@ -4730,23 +4734,23 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         ActiveJit()->HaltExecution(kThreadExitHalt);
         return;
     }
-    if (n == "pthread_getspecific") {
+    if (id == I::pthread_getspecific_) {
         Ret(regs, PthreadGetSpecific(a0));
         return;
     }
-    if (n == "pthread_setspecific") {
+    if (id == I::pthread_setspecific_) {
         Ret(regs, PthreadSetSpecific(a0, a1));
         return;
     }
-    if (n == "pthread_self" || n == "pthread_gettid_np") {
+    if (id == I::pthread_self_ || id == I::pthread_gettid_np_) {
         Ret(regs, GuestTid());
         return;
     }
-    if (n == "pthread_equal") {
+    if (id == I::pthread_equal_) {
         Ret(regs, a0 == a1 ? 1 : 0);
         return;
     }
-    if (n == "pthread_create") {
+    if (id == I::pthread_create_) {
         // HARNESS_NOWORKER=1: skip thread creation (return 0, no thread).
         // Diagnosis-only: removes worker/main interleaving nondeterminism
         // (shared bump-heap addresses -> hash orders -> path variance).
@@ -4810,20 +4814,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
     }
-    if (n == "pthread_join") {
+    if (id == I::pthread_join_) {
         Ret(regs, PthreadJoin(a0, a1));
         return;
     }
-    if (n == "pthread_detach") {
+    if (id == I::pthread_detach_) {
         Ret(regs, PthreadDetach(a0));
         return;
     }
-    if (n == "sched_yield") {
+    if (id == I::sched_yield_) {
         std::this_thread::yield();
         Ret(regs, 0);
         return;
     }
-    if (n == "poll") {
+    if (id == I::poll_) {
         // poll(struct pollfd* fds, nfds_t nfds, int timeout). struct pollfd is
         // {int fd; short events; short revents} = 8 bytes on both sides.
         // POSIX: an entry with fd < 0 is ignored and gets revents = 0; an fd
@@ -4893,14 +4897,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r) + n_invalid);
         return;
     }
-    if (n == "pthread_once") {
+    if (id == I::pthread_once_) {
         if (PthreadOnce(a0, a1, regs)) {
             return;  // hijacked: control redirected, no Ret()
         }
         Ret(regs, 0);
         return;
     }
-    if (n == "__gnu_Unwind_Find_exidx") {
+    if (id == I::__gnu_Unwind_Find_exidx_) {
         // Nest guard (subagent #6): the phase driver can re-present the same
         // handler frame forever (pad transfer never happens) — 131K nested
         // throws, 64B/level, 8MB stack blow. Legit retry loops REUSE stack;
@@ -5251,7 +5255,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             w32(64, (std::uint64_t)st.f_flags);
             return true;
         };
-        if (n == "fopen") {
+        if (id == I::fopen_) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "fopen")) {
                 return;
@@ -5300,19 +5304,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "fflush" && a0 == 0) {
+        if (id == I::fflush_ && a0 == 0) {
             // fflush(NULL) flushes every output stream and returns 0.
             std::fflush(nullptr);
             Ret(regs, 0);
             return;
         }
-        if (n == "fclose" || n == "fflush") {
+        if (id == I::fclose_ || id == I::fflush_) {
             FILE* f = file_of(a0);
             if (!f) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (n == "fclose") {
+            if (id == I::fclose_) {
                 // The guest's std streams point into __sF; closing them must
                 // not shut down the host's own stdout/stderr. Flush and report
                 // success (bionic fclose on a standard stream does close the fd,
@@ -5324,12 +5328,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
             }
-            if (n == "fclose" && DiagOn()) {
+            if (id == I::fclose_ && DiagOn()) {
                 std::lock_guard<std::mutex> io(io_mutex_);
                 g_regfiles.erase(f);  // a reused FILE* must not inherit the tag
             }
-            int r = (n == "fclose") ? std::fclose(f) : std::fflush(f);
-            if (n == "fclose") {
+            int r = (id == I::fclose_) ? std::fclose(f) : std::fflush(f);
+            if (id == I::fclose_) {
                 // fclose owns both the host fd and the 96-byte guest FILE.
                 // Erase the fd mapping and only then make the number
                 // reusable; GuestFree must run outside io_mutex_.
@@ -5351,7 +5355,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "fread") {
+        if (id == I::fread_) {
             // fread(ptr=a0, size=a1, nmemb=a2, stream=a3): the handle is LAST.
             // (An earlier revision keyed on a0 and silently returned 0 — every
             // file read was empty; empty seed files masked it.)
@@ -5412,7 +5416,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(got));
             return;
         }
-        if (n == "fwrite") {
+        if (id == I::fwrite_) {
             // fwrite(ptr=a0, size=a1, nmemb=a2, stream=a3): handle is LAST
             // (same a0-keying bug as fread had — fixed together).
             FILE* f = file_of(a3);
@@ -5444,13 +5448,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(wrote));
             return;
         }
-        if (n == "fseek" || n == "fseeko" || n == "ftell" || n == "ftello") {
+        if (id == I::fseek_ || id == I::fseeko_ || id == I::ftell_ || id == I::ftello_) {
             FILE* f = file_of(a0);
             if (!f) {
-                Ret(regs, (n == "fseek" || n == "fseeko") ? static_cast<std::uint32_t>(-1) : 0u);
+                Ret(regs, (id == I::fseek_ || id == I::fseeko_) ? static_cast<std::uint32_t>(-1) : 0u);
                 return;
             }
-            if (n == "ftell" || n == "ftello") {
+            if (id == I::ftell_ || id == I::ftello_) {
                 Ret(regs, static_cast<std::uint32_t>(std::ftell(f)));
                 return;
             }
@@ -5470,17 +5474,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "feof" || n == "ferror" || n == "clearerr" || n == "fileno") {
+        if (id == I::feof_ || id == I::ferror_ || id == I::clearerr_ || id == I::fileno_) {
             FILE* f = file_of(a0);
             if (!f) {
-                Ret(regs, (n == "fileno") ? static_cast<std::uint32_t>(-1) : 0u);
+                Ret(regs, (id == I::fileno_) ? static_cast<std::uint32_t>(-1) : 0u);
                 return;
             }
-            if (n == "feof") {
+            if (id == I::feof_) {
                 Ret(regs, (std::uint32_t)std::feof(f));
-            } else if (n == "ferror") {
+            } else if (id == I::ferror_) {
                 Ret(regs, (std::uint32_t)std::ferror(f));
-            } else if (n == "clearerr") {
+            } else if (id == I::clearerr_) {
                 std::clearerr(f);
                 Ret(regs, 0);
             } else {
@@ -5491,9 +5495,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return;
         }
-        if (n == "fgets" || n == "fputs" || n == "fputc" || n == "putc" || n == "getc" ||
-            n == "ungetc") {
-            if (n == "fgets") {
+        if (id == I::fgets_ || id == I::fputs_ || id == I::fputc_ || id == I::putc_ || id == I::getc_ ||
+            id == I::ungetc_) {
+            if (id == I::fgets_) {
                 FILE* f = file_of(a2);
                 if (!f || a1 == 0 || !CheckRange(a0, a1, true)) {
                     Ret(regs, 0);
@@ -5512,12 +5516,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // getc(FILE*) has the handle in a0; fputs/fputc/putc/ungetc put it
             // in a1 (C signature: value first, stream last). The old code keyed
             // fputc on a0, so every fputc call was a silent no-op.
-            FILE* f = file_of(n == "getc" ? a0 : a1);
+            FILE* f = file_of(id == I::getc_ ? a0 : a1);
             if (!f) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (n == "fputs") {
+            if (id == I::fputs_) {
                 if (!CheckRange(a0, 1, false)) {
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
@@ -5525,18 +5529,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(std::fputs(GuestStr(a0), f)));
                 return;
             }
-            if (n == "fputc" || n == "putc") {
+            if (id == I::fputc_ || id == I::putc_) {
                 Ret(regs, static_cast<std::uint32_t>(std::fputc((int)a0, f)));
                 return;
             }
-            if (n == "ungetc") {
+            if (id == I::ungetc_) {
                 Ret(regs, static_cast<std::uint32_t>(std::ungetc((int)a0, f)));
                 return;
             }
             Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
             return;
         }
-        if (n == "vfprintf") {
+        if (id == I::vfprintf_) {
             // vfprintf(stream, fmt, va_list): the arguments start at the va
             // pointer, as in vprintf.
             FILE* f = file_of(a0);
@@ -5553,7 +5557,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(std::fwrite(out.data(), 1, out.size(), f)));
             return;
         }
-        if (n == "setvbuf") {
+        if (id == I::setvbuf_) {
             // setvbuf(stream, buf, mode, size): the mode reaches the host
             // stream (bionic and the host share _IOFBF 0, _IOLBF 1, _IONBF
             // 2); a guest buffer cannot back a host FILE, so the host picks.
@@ -5572,7 +5576,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                           std::setvbuf(f, nullptr, static_cast<int>(a2), a3)));
             return;
         }
-        if (n == "fprintf") {
+        if (id == I::fprintf_) {
             // fprintf(stream=a0, fmt=a1, ...): handle is FIRST here.
             FILE* f = file_of(a0);
             if (!f || !CheckRange(a1, 1, false)) {
@@ -5592,7 +5596,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(w));
             return;
         }
-        if (n == "fdopen") {
+        if (id == I::fdopen_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 Ret(regs, 0);
@@ -5618,7 +5622,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "tmpfile") {
+        if (id == I::tmpfile_) {
             FILE* f = std::tmpfile();
             if (!f) {
                 Ret(regs, 0);
@@ -5639,7 +5643,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "open") {
+        if (id == I::open_) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "open")) {
                 return;
@@ -5667,7 +5671,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, g);
             return;
         }
-        if (n == "mkstemp") {
+        if (id == I::mkstemp_) {
             // Breakpad's descriptor writer creates the dump file with
             // mkstemp(dirname(FILES_PATH) + "/hockeyapp_errors_XXXXXX").
             const std::string hp = map_path(a0);
@@ -5705,7 +5709,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, g);
             return;
         }
-        if (n == "ftruncate") {
+        if (id == I::ftruncate_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 SetGuestErrno(EBADF);
@@ -5719,9 +5723,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "close" || n == "fsync") {
-            const int hfd = (n == "close") ? erase_guest_fd(a0) : host_fd_of(a0);
-            if (n == "close") {
+        if (id == I::close_ || id == I::fsync_) {
+            const int hfd = (id == I::close_) ? erase_guest_fd(a0) : host_fd_of(a0);
+            if (id == I::close_) {
                 ForgetAlarmFd(a0);
             }
             if (hfd < 0) {
@@ -5731,33 +5735,33 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // Unlocked I/O: fsync can block; close must not run under the map
             // lock either (a concurrent in-flight read keeps its own copy).
-            const int r = (n == "close") ? ::close(hfd) : ::fsync(hfd);
+            const int r = (id == I::close_) ? ::close(hfd) : ::fsync(hfd);
             if (r != 0) {
                 set_guest_errno(errno);
             }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "isatty" || n == "flock") {
+        if (id == I::isatty_ || id == I::flock_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
-                Ret(regs, n == "isatty" ? 0u : 0xFFFFFFFFu);
+                Ret(regs, id == I::isatty_ ? 0u : 0xFFFFFFFFu);
                 return;
             }
             int r = 0;
-            if (n == "isatty") {
+            if (id == I::isatty_) {
                 r = ::isatty(hfd);
             } else {
                 r = ::flock(hfd, static_cast<int>(a1));
             }
-            if ((n == "isatty" && r == 0) || (n == "flock" && r != 0)) {
+            if ((id == I::isatty_ && r == 0) || (id == I::flock_ && r != 0)) {
                 set_guest_errno(errno);
             }
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "sendfile") {
+        if (id == I::sendfile_) {
             // sendfile(out_fd, in_fd, off_t* offset, size_t count); the guest
             // off_t is 32 bits.
             const int ho = host_fd_of(a0), hi = host_fd_of(a1);
@@ -5785,7 +5789,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "dup2") {
+        if (id == I::dup2_) {
             // dup2(old, new) onto a guest fd that is open: that fd now names
             // old's file. Guest fds 0-2 are the host's own streams (stdout is
             // apphost.log) and a free number is not ours to hand out: both
@@ -5824,7 +5828,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, a1);
             return;
         }
-        if (n == "dup") {
+        if (id == I::dup_) {
             // dup(fd): a new guest fd for the same open file. It fell into the
             // generic stub and returned 0, so the guest wrote "its" copy to
             // stdin (Rio 0x4da11a, 0x4da16e). Guest fds 0-2 are the host's.
@@ -5850,7 +5854,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, g);
             return;
         }
-        if (n == "utime") {
+        if (id == I::utime_) {
             // utime(path, const struct utimbuf* t): guest utimbuf is
             // {time_t actime; time_t modtime} = 2 x 32 bits; NULL = now.
             const std::string hp = map_path(a0);
@@ -5878,7 +5882,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "pipe" || n == "pipe2") {
+        if (id == I::pipe_ || id == I::pipe2_) {
             // Fills int[2] with guest fds. The old stub returned 0 WITHOUT
             // writing fds (stack garbage downstream -> throw-nest). Real ones.
             if (!CheckRange(a0, 8, true)) {
@@ -5887,7 +5891,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             int hfds[2] = {-1, -1};
-            const int r = (n == "pipe") ? ::pipe(hfds) : ::pipe2(hfds, (int)a1);
+            const int r = (id == I::pipe_) ? ::pipe(hfds) : ::pipe2(hfds, (int)a1);
             if (r != 0) {
                 set_guest_errno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -5913,7 +5917,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "pread" || n == "pwrite") {
+        if (id == I::pread_ || id == I::pwrite_) {
             // (fd, buf, count, off_t offset): bionic arm32 off_t is 32-bit
             // and signed (the 64-bit forms are pread64/pwrite64).
             const int hfd = host_fd_of(a0);
@@ -5927,12 +5931,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            if (!CheckRange(a1, a2, n == "pread")) {
+            if (!CheckRange(a1, a2, id == I::pread_)) {
                 set_guest_errno(EFAULT);
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            const ssize_t r = n == "pread" ? ::pread(hfd, H(a1), a2, static_cast<off_t>(a3))
+            const ssize_t r = id == I::pread_ ? ::pread(hfd, H(a1), a2, static_cast<off_t>(a3))
                                            : ::pwrite(hfd, H(a1), a2, static_cast<off_t>(a3));
             if (r < 0) {
                 set_guest_errno(errno);
@@ -5940,9 +5944,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "read" || n == "write") {
+        if (id == I::read_ || id == I::write_) {
             if (a0 <= 2) {  // stdio: read(0)=EOF, write(1/2)->host log
-                if (n == "read") {
+                if (id == I::read_) {
                     Ret(regs, 0);
                     return;
                 }
@@ -5962,7 +5966,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            if (!CheckRange(a1, a2, n == "read")) {
+            if (!CheckRange(a1, a2, id == I::read_)) {
                 set_guest_errno(EFAULT);
                 Ret(regs, 0xFFFFFFFFu);
                 return;
@@ -5971,13 +5975,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // so other threads keep running (2026-10-10 deadlock fix). A read
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
-            ssize_t r = (n == "read") ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
+            ssize_t r = (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
             // pipes show up here via fd_map_; files too, capped). Skip
             // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
             // Diagnostic layer (PLAN.md B7): with DIAG off skip the per-I/O
             // fstat + io_mutex + fd_map probe that only fed this capped log.
-            if (DiagOn() && (n == "write" || n == "read") && r > 0) {
+            if (DiagOn() && (id == I::write_ || id == I::read_) && r > 0) {
                 static int wlog = 0;
                 bool interesting = false;
                 {
@@ -6017,7 +6021,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "lseek") {
+        if (id == I::lseek_) {
             // lseek(int fd, off_t off, int whence): off_t is a signed 32-bit
             // long on the guest, so the offset must be sign-extended (a
             // negative SEEK_CUR/SEEK_END offset used to become +4 GB).
@@ -6048,7 +6052,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "writev") {
+        if (id == I::writev_) {
             // writev(fd, const struct iovec* iov, int iovcnt); guest iovec =
             // {void* base; size_t len} = 2 x 32 bits. One host writev keeps
             // the call's atomicity (pipes/sockets).
@@ -6096,7 +6100,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // guest set itself (fcntl, setsockopt). Network destinations are
         // refused unless the title is online (offline_refuses above).
         // sendmsg/recvmsg marshal the 32-bit msghdr (data only, see there).
-        if (n == "socket") {
+        if (id == I::socket_) {
             int hfd = ::socket((int)a0, (int)a1, (int)a2);
             if (hfd < 0) {
                 set_guest_errno(errno);
@@ -6110,7 +6114,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, g);
             return;
         }
-        if (n == "connect") {
+        if (id == I::connect_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
@@ -6139,7 +6143,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "accept") {
+        if (id == I::accept_) {
             // accept(fd, sockaddr* addr, socklen_t* len): the new connection
             // becomes a guest fd; the sockaddr layout is the host's.
             const int hfd = host_fd_of(a0);
@@ -6179,7 +6183,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, g);
             return;
         }
-        if (n == "sendmsg" || n == "recvmsg") {
+        if (id == I::sendmsg_ || id == I::recvmsg_) {
             // (fd, msghdr*, flags). Guest msghdr (LP32, NDK): name @0,
             // namelen @4, iov @8, iovlen @12, control @16, controllen @20,
             // flags @24; iovec {base, len} = 8 bytes. Ancillary data is not
@@ -6192,12 +6196,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            if (!CheckRange(a1, 28, n == "recvmsg")) {
+            if (!CheckRange(a1, 28, id == I::recvmsg_)) {
                 goto bad_ptr;
             }
             std::uint32_t m[7];
             std::memcpy(m, H(a1), 28);
-            const bool rec = (n == "recvmsg");
+            const bool rec = (id == I::recvmsg_);
             if (m[3] > 1024 || (m[3] && !CheckRange(m[2], m[3] * 8, false)) ||
                 (m[0] && (m[1] > 128 || !CheckRange(m[0], m[1], rec)))) {
                 goto bad_ptr;
@@ -6253,7 +6257,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "select") {
+        if (id == I::select_) {
             // select(nfds, fd_set* r, fd_set* w, fd_set* e, timeval* t) over
             // guest fd numbers, run as a host poll (host fds may exceed
             // FD_SETSIZE). Guest fd_set = 1024 bits; timeval {long, long},
@@ -6357,11 +6361,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, count);
             return;
         }
-        if (n == "epoll_create" || n == "epoll_ctl" || n == "epoll_wait") {
+        if (id == I::epoll_create_ || id == I::epoll_ctl_ || id == I::epoll_wait_) {
             // Guest struct epoll_event (arm EABI, not packed): events @0,
             // 64-bit data @8; 16 bytes. The data word is the guest's, kept
             // as given.
-            if (n == "epoll_create") {
+            if (id == I::epoll_create_) {
                 if (static_cast<std::int32_t>(a0) <= 0) {
                     set_guest_errno(EINVAL);
                     Ret(regs, 0xFFFFFFFFu);
@@ -6387,7 +6391,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            if (n == "epoll_ctl") {
+            if (id == I::epoll_ctl_) {
                 // (epfd, op, fd, event*)
                 const int hfd = a2 <= 2 ? static_cast<int>(a2) : host_fd_of(a2);
                 if (hfd < 0) {
@@ -6442,8 +6446,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "shutdown" || n == "bind" || n == "listen" || n == "setsockopt" ||
-            n == "getsockopt") {
+        if (id == I::shutdown_ || id == I::bind_ || id == I::listen_ || id == I::setsockopt_ ||
+            id == I::getsockopt_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
@@ -6451,10 +6455,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             int r = -1;
-            if (n == "shutdown") {
+            if (id == I::shutdown_) {
                 r = ::shutdown(hfd, (int)a1);
-            } else if (n == "bind" || n == "listen") {
-                if (n == "bind") {
+            } else if (id == I::bind_ || id == I::listen_) {
+                if (id == I::bind_) {
                     if (a2 == 0 || a2 > 128 || !CheckRange(a1, a2, false)) {
                         set_guest_errno(EFAULT);
                         Ret(regs, static_cast<std::uint32_t>(-1));
@@ -6481,7 +6485,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
                 std::memcpy(&arg5, H(regs[13]), 4);
-                const bool is_set = (n == "setsockopt");
+                const bool is_set = (id == I::setsockopt_);
                 const bool tv_opt = ((int)a1 == SOL_SOCKET &&
                                      ((int)a2 == SO_RCVTIMEO || (int)a2 == SO_SNDTIMEO));
                 std::uint32_t len = 0;
@@ -6541,7 +6545,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "send" || n == "sendto") {
+        if (id == I::send_ || id == I::sendto_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
@@ -6550,7 +6554,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             // sendto: addr=a4, addrlen=a5 live on guest stack (ARM APCS).
             std::uint32_t addr = 0, addrlen = 0;
-            if (n == "sendto") {
+            if (id == I::sendto_) {
                 if (!CheckRange(regs[13] + 4, 4, false)) {
                     set_guest_errno(EFAULT);
                     Ret(regs, static_cast<std::uint32_t>(-1));
@@ -6576,7 +6580,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             ssize_t r =
-                (n == "send")
+                (id == I::send_)
                     ? ::send(hfd, H(a1), a2, (int)a3)
                     : ::sendto(hfd, H(a1), a2, (int)a3,
                                addr ? reinterpret_cast<const struct sockaddr*>(H(addr)) : nullptr,
@@ -6593,7 +6597,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r));
             return;
         }
-        if (n == "recv" || n == "recvfrom") {
+        if (id == I::recv_ || id == I::recvfrom_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
@@ -6601,7 +6605,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             std::uint32_t addr = 0, addrlenptr = 0, addrlen = 0;
-            if (n == "recvfrom") {
+            if (id == I::recvfrom_) {
                 if (!CheckRange(regs[13] + 4, 4, false)) {
                     set_guest_errno(EFAULT);
                     Ret(regs, static_cast<std::uint32_t>(-1));
@@ -6627,7 +6631,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             struct sockaddr_storage ss {};
             socklen_t sl = (socklen_t)(addrlen != 0 ? addrlen : sizeof(ss));
             ssize_t r =
-                (n == "recv")
+                (id == I::recv_)
                     ? ::recv(hfd, H(a1), a2, (int)a3)
                     : ::recvfrom(hfd, H(a1), a2, (int)a3,
                                  addr ? reinterpret_cast<struct sockaddr*>(&ss) : nullptr,
@@ -6675,7 +6679,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // getpeername/getsockname: the engine stringifies socket addrs
         // (sa_addr inet_ntop) and logs "Trying %s...". Stubs left the
         // buffers zeroed (family 0) -> ntop failed -> HttpRequestException.
-        if (n == "getpeername" || n == "getsockname") {
+        if (id == I::getpeername_ || id == I::getsockname_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
@@ -6696,7 +6700,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             struct sockaddr_storage ss {};
             socklen_t sl = (socklen_t)(len != 0 ? len : sizeof(ss));
-            int r = (n == "getpeername" ? ::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&ss),
+            int r = (id == I::getpeername_ ? ::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&ss),
                                                        &sl)
                                         : ::getsockname(hfd, reinterpret_cast<struct sockaddr*>(&ss),
                                                         &sl));
@@ -6717,7 +6721,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
         // stub kept fds blocking -> handshake breakage -> HttpRequestException).
-        if (n == "fcntl") {
+        if (id == I::fcntl_) {
             // TEMP-DIAG (stuck workers): pinpoint the parking line.
             static int fcl = 0;
             const int fldiag = (DiagOn() && fcl < 40) ? fcl++ : -1;
@@ -6766,7 +6770,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "ioctl" && IsAlarmFd(a0)) {
+        if (id == I::ioctl_ && IsAlarmFd(a0)) {
             // Android alarm driver: the game's TICK source
             // (tick-fn opens /dev/alarm, GET_TIME per init; observed live:
             // cmd 0x40086134 = GET_TIME(ELAPSED_REALTIME)). Served from
@@ -6830,16 +6834,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
         }
-        if (n == "inet_addr" || n == "inet_aton" || n == "inet_pton" || n == "inet_ntoa" ||
-            n == "inet_ntop") {
-            InetThunk(regs, n, a0, a1, a2, a3);
+        if (id == I::inet_addr_ || id == I::inet_aton_ || id == I::inet_pton_ || id == I::inet_ntoa_ ||
+            id == I::inet_ntop_) {
+            InetThunk(id, regs, n, a0, a1, a2, a3);
             return;
         }
-        if (n == "stat" || n == "access" || n == "mkdir" || n == "unlink" || n == "remove" ||
-            n == "rename" || n == "rmdir" || n == "chmod" || n == "getcwd" ||
-            n == "pathconf" || n == "statfs" || n == "lstat" || n == "truncate" ||
-            n == "chdir") {
-            if (n == "chdir") {
+        if (id == I::stat_ || id == I::access_ || id == I::mkdir_ || id == I::unlink_ || id == I::remove_ ||
+            id == I::rename_ || id == I::rmdir_ || id == I::chmod_ || id == I::getcwd_ ||
+            id == I::pathconf_ || id == I::statfs_ || id == I::lstat_ || id == I::truncate_ ||
+            id == I::chdir_) {
+            if (id == I::chdir_) {
                 // The new directory in guest spelling (relative to the
                 // current one, normalized); it must be a directory the
                 // bridge can reach.
@@ -6876,7 +6880,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (n == "getcwd") {
+            if (id == I::getcwd_) {
                 // The guest's view of the CWD: its files dir, which is what
                 // bare relative names resolve to (MapGuestPath), in GUEST
                 // spelling. The host path leaked into guest paths and was
@@ -6910,7 +6914,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, dst);
                 return;
             }
-            if (n == "pathconf") {
+            if (id == I::pathconf_) {
                 // Faithful host query. This MUST NOT be a 0 stub: the engine
                 // sizes its path/dirent buffers from _PC_PATH_MAX (=4) and
                 // would otherwise overflow a 24-byte heap block on the second
@@ -6937,7 +6941,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, n.c_str())) {
                 return;
             }
-            if (n == "truncate") {
+            if (id == I::truncate_) {
                 const int r = ::truncate(hp.c_str(),
                                          static_cast<off_t>(static_cast<std::int32_t>(a1)));
                 if (r != 0) {
@@ -6946,9 +6950,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            if (n == "stat" || n == "lstat") {
+            if (id == I::stat_ || id == I::lstat_) {
                 struct stat st {};
-                const int sr = n == "stat" ? ::stat(hp.c_str(), &st) : ::lstat(hp.c_str(), &st);
+                const int sr = id == I::stat_ ? ::stat(hp.c_str(), &st) : ::lstat(hp.c_str(), &st);
                 if (sr != 0 || !fill_stat(a1, st)) {
                     SetGuestErrno(errno);
                     Ret(regs, static_cast<std::uint32_t>(-1));
@@ -6957,7 +6961,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (n == "statfs") {
+            if (id == I::statfs_) {
                 // statfs(path, buf): the guest asks how much room its data
                 // directory has.
                 struct statfs st {};
@@ -6969,7 +6973,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            if (n == "access") {
+            if (id == I::access_) {
                 const int r = ::access(hp.c_str(), (int)a1);
                 if (r != 0) {
                     SetGuestErrno(errno);
@@ -6977,7 +6981,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            if (n == "mkdir") {
+            if (id == I::mkdir_) {
                 // POSIX mkdir: one level, EEXIST if present, ENOENT if the
                 // parent is missing, honours the mode. (create_directories
                 // made it "mkdir -p" and left a stale errno on EEXIST.)
@@ -6988,7 +6992,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            if (n == "unlink" || n == "remove") {
+            if (id == I::unlink_ || id == I::remove_) {
                 const int r = ::unlink(hp.c_str());
                 if (r != 0) {
                     SetGuestErrno(errno);
@@ -6996,7 +7000,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            if (n == "rename") {
+            if (id == I::rename_) {
                 const std::string hp2 = map_path(a1);
                 if (!need_host(hp2, "rename-dst")) {
                     return;
@@ -7009,7 +7013,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            if (n == "rmdir") {
+            if (id == I::rmdir_) {
                 const int r = ::rmdir(hp.c_str());
                 if (r != 0) {
                     SetGuestErrno(errno);
@@ -7027,7 +7031,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return;
         }
-        if (n == "fstat") {
+        if (id == I::fstat_) {
             const int hfd = host_fd_of(a0);
             if (hfd < 0) {
                 SetGuestErrno(EBADF);
@@ -7043,7 +7047,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "opendir") {
+        if (id == I::opendir_) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "opendir")) {
                 return;
@@ -7079,7 +7083,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "readdir_r") {
+        if (id == I::readdir_r_) {
             // readdir_r(DIR* a0, struct dirent* a1, struct dirent** a2) -> 0 or
             // an error number. Bionic arm32 struct dirent (NDK dirent.h,
             // checked with offsetof): u64 d_ino@0, s64 d_off@8, u16 d_reclen@16,
@@ -7129,7 +7133,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "readdir") {
+        if (id == I::readdir_) {
             // readdir(DIR*) -> struct dirent*: the entry lives in a buffer
             // that belongs to the DIR (as in bionic), overwritten by the
             // next call; same layout as readdir_r above. NULL at the end
@@ -7182,7 +7186,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, ent);
             return;
         }
-        if (n == "closedir") {
+        if (id == I::closedir_) {
             // Frees the guest DIR handle and readdir's entry with it.
             DIR* dd = nullptr;
             std::uint32_t ent = 0;
@@ -7212,7 +7216,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // every import that reached this point, and a 32 MB inflate, against all
     // other guest threads). apk_index_ is built once and then only read.
     {
-        if (n == "AAssetManager_fromJava") {
+        if (id == I::AAssetManager_fromJava_) {
             if (!EnsureApkIndex()) {
                 std::printf("[asset] LOUD no apk index -- halting\n");
                 stop_step_ = true;
@@ -7225,7 +7229,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, m);
             return;
         }
-        if (n == "AAssetManager_open") {
+        if (id == I::AAssetManager_open_) {
             // NOTE: no mutex held across GuestMalloc (it locks internally).
             const ApkEntry* found = nullptr;
             std::string want;
@@ -7341,7 +7345,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, gbuf);  // handle IS the guest buffer (getBuffer model)
             return;
         }
-        if (n == "AAsset_close") {
+        if (id == I::AAsset_close_) {
             bool known = false;
             {
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -7357,7 +7361,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "AAsset_getBuffer") {
+        if (id == I::AAsset_getBuffer_) {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             const auto it = asset_map_.find(a0);
             if (it == asset_map_.end()) {
@@ -7367,7 +7371,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, it->second.guest_ptr);
             return;
         }
-        if (n == "AAsset_getLength64") {
+        if (id == I::AAsset_getLength64_) {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             const auto it = asset_map_.find(a0);
             if (it == asset_map_.end()) {
@@ -7395,7 +7399,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // The real backend was tried at the top of CallImport; this is the
         // fake shim (PC harness without GL, threads without a context).
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (n == "glGetString") {
+        if (id == I::glGetString_) {
             // No GL context in the harness (real EGL comes later), so report
             // era-correct 2014-Android strings. EXTENSIONS claims ETC1 (the
             // game's sprite textures use it); real decode/forwarding is the
@@ -7447,12 +7451,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, out);
             return;
         }
-        if (n == "glCreateShader" || n == "glCreateProgram") {
+        if (id == I::glCreateShader_ || id == I::glCreateProgram_) {
             static std::uint32_t gl_next = 0;
             Ret(regs, ++gl_next);
             return;
         }
-        if (n == "glGetIntegerv") {
+        if (id == I::glGetIntegerv_) {
             // Era-correct Mali-400-ish limits (verified enum vs
             // /usr/include/GLES2/gl2.h). Signature: (pname=a0, params=a1).
             std::uint32_t v0 = 0, v1 = 0, cnt = 1;
@@ -7484,7 +7488,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "glGetShaderiv" || n == "glGetProgramiv") {            if (CheckRange(a2, 4, true)) {
+        if (id == I::glGetShaderiv_ || id == I::glGetProgramiv_) {            if (CheckRange(a2, 4, true)) {
                 const std::uint32_t one = 1;  // COMPILE/LINK_STATUS = GL_TRUE
                 std::memcpy(H(a2), &one, 4);
             }
@@ -7492,7 +7496,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "glGetShaderInfoLog" || n == "glGetProgramInfoLog") {
+        if (id == I::glGetShaderInfoLog_ || id == I::glGetProgramInfoLog_) {
             if (a2 && CheckRange(a2, 4, true)) {
                 const std::uint32_t zero = 0;
                 std::memcpy(H(a2), &zero, 4);
@@ -7504,8 +7508,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "glGenTextures" || n == "glGenBuffers" || n == "glGenFramebuffers" ||
-            n == "glGenRenderbuffers") {
+        if (id == I::glGenTextures_ || id == I::glGenBuffers_ || id == I::glGenFramebuffers_ ||
+            id == I::glGenRenderbuffers_) {
             // (n=a0, handles=a1): write incrementing nonzero handles.
             static std::uint32_t gl_handle = 100;
             if (a0 > 0 && a0 < 1024 && CheckRange(a1, 4 * a0, true)) {
@@ -7518,7 +7522,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "glGetUniformLocation" || n == "glGetAttribLocation") {
+        if (id == I::glGetUniformLocation_ || id == I::glGetAttribLocation_) {
             // Fake but stable locations (hash of name, nonzero).
             std::uint32_t h = 0;
             if (a1 && CheckRange(a1, 1, false)) {
@@ -7534,14 +7538,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, h);
             return;
         }
-        if (n == "glTexImage2D" || n == "glTexSubImage2D" || n == "glCompressedTexImage2D" ||
-            n == "glCopyTexImage2D" || n == "glReadPixels" || n == "glBufferData" ||
-            n == "glVertexAttribPointer" || n == "glShaderSource") {
+        if (id == I::glTexImage2D_ || id == I::glTexSubImage2D_ || id == I::glCompressedTexImage2D_ ||
+            id == I::glCopyTexImage2D_ || id == I::glReadPixels_ || id == I::glBufferData_ ||
+            id == I::glVertexAttribPointer_ || id == I::glShaderSource_) {
             // Accepted and ignored (no real GL yet): fake upload succeeds.
             // Bulk-pointer args are range-checked but not consumed.
             // TEMP-DIAG (real-GLES prep): log call signatures to learn what
             // the host GPU must accept (formats, sizes, shader sources).
-            if (n == "glShaderSource" && a1 > 0 && a1 < 16 && CheckRange(a2, 4 * a1, false)) {
+            if (id == I::glShaderSource_ && a1 > 0 && a1 < 16 && CheckRange(a2, 4 * a1, false)) {
                 std::printf("[glsrc] shader=%u count=%u\n", a0, a1);
                 for (std::uint32_t i = 0; i < a1; i++) {
                     std::uint32_t sp = 0;
@@ -7581,7 +7585,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
 #endif
                 }
             }
-            if ((n == "glTexImage2D" || n == "glCompressedTexImage2D") && a1 <= 8) {
+            if ((id == I::glTexImage2D_ || id == I::glCompressedTexImage2D_) && a1 <= 8) {
                 // APCS: (target,level,intfmt,width) in regs; the rest on guest
                 // stack: height,border,format,type,data.
                 std::uint32_t stk[5] = {0};
@@ -7601,7 +7605,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
 #endif  // !__ANDROID__
-    if (n == "__system_property_get") {
+    if (id == I::__system_property_get_) {
         // int __system_property_get(const char* name, char* value): copies the
         // value (at most PROP_VALUE_MAX = 92 bytes incl. NUL) and returns its
         // length; a missing property gives "" and 0. On the device the real
@@ -7646,10 +7650,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(val.size()));
         return;
     }
-    if (n == "mktime" || n == "difftime" || n == "strftime") {
+    if (id == I::mktime_ || id == I::difftime_ || id == I::strftime_) {
         // Real time-lib thunks (were stub->0: frozen daily/session timers).
         // Guest Bionic struct tm (44B): 9x int + long gmtoff + char* zone.
-        if (n == "mktime") {
+        if (id == I::mktime_) {
             std::int32_t f[9] = {};
             if (CheckRange(a0, 36, false)) {
                 for (int i = 0; i < 9; i++) {
@@ -7678,7 +7682,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(r & 0xFFFFFFFFu));
             return;
         }
-        if (n == "difftime") {
+        if (id == I::difftime_) {
             const double d = std::difftime((std::time_t)(std::int32_t)a0,
                                            (std::time_t)(std::int32_t)a1);
             std::uint64_t u = 0;
@@ -7717,7 +7721,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(o));
         return;
     }
-    if (n == "rand" || n == "random" || n == "srand" || n == "srandom") {
+    if (id == I::rand_ || id == I::random_ || id == I::srand_ || id == I::srandom_) {
         // bionic's rand() IS random() and srand() IS srandom() (AOSP
         // libc/bionic/rand.cpp), and bionic's random() is the BSD TYPE_3
         // generator -- see guest/bsd_random.h. The drand48 LCG that used to
@@ -7726,7 +7730,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // not a device's.
         static abr::BsdRandom rng;
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (n == "srand" || n == "srandom") {
+        if (id == I::srand_ || id == I::srandom_) {
             rng.Seed(a0);
             Ret(regs, 0);
             return;
@@ -7734,7 +7738,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(rng.Next()));
         return;
     }
-    if (n == "srand48" || n == "lrand48") {
+    if (id == I::srand48_ || id == I::lrand48_) {
         // Real 48-bit LCG (was stub->0: EVERY lrand48() returned 0, so all
         // per-bird animation phases / blink thresholds / interval picks
         // collapsed to one value -> synchronous jumps + every-frame blinks).
@@ -7751,7 +7755,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return rng_x;
         };
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (n == "srand48") {
+        if (id == I::srand48_) {
             rng_x = ((std::uint64_t)(a0 & 0xFFFFFFFFu) << 16) | 0x330Eull;
             rng_seeded = true;
             (void)rng_seeded;
@@ -7762,7 +7766,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>((rng_next() >> 17) & 0x7FFFFFFFu));
         return;
     }
-    if (n == "qsort") {
+    if (id == I::qsort_) {
         // Real sort (was silent no-op stub): host stable_sort over indices,
         // guest comparator via callback JIT (PvZ re-enter pattern: separate
         // Jit, lr=halt slot). Atomic commit: guest memory written only on
@@ -7813,7 +7817,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "bsearch") {
+    if (id == I::bsearch_) {
         // Real binary search (was always-NULL stub): key=a0, base=a1,
         // nmemb=a2, size=a3, compar on guest stack. Returns element VA or 0.
         const std::uint32_t key = a0, base = a1, cnt = a2, sz = a3;
@@ -7856,7 +7860,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, found);
         return;
     }
-    if (n == "getenv") {
+    if (id == I::getenv_) {
         if (!CheckRange(a0, 1, false)) {
             goto bad_ptr;
         }
@@ -7874,49 +7878,49 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, v);
         return;
     }
-    if (n == "setenv" || n == "unsetenv") {
-        if (!CheckRange(a0, 1, false) || (n == "setenv" && !CheckRange(a1, 1, false))) {
+    if (id == I::setenv_ || id == I::unsetenv_) {
+        if (!CheckRange(a0, 1, false) || (id == I::setenv_ && !CheckRange(a1, 1, false))) {
             goto bad_ptr;
         }
         const std::string key = GuestStr(a0);
-        const std::string val = n == "setenv" ? std::string(GuestStr(a1)) : std::string();
-        const std::uint32_t e = GuestSetenv(key, n == "setenv" ? &val : nullptr, a2 != 0);
+        const std::string val = id == I::setenv_ ? std::string(GuestStr(a1)) : std::string();
+        const std::uint32_t e = GuestSetenv(key, id == I::setenv_ ? &val : nullptr, a2 != 0);
         if (e != 0) {
             SetGuestErrno(static_cast<int>(e));
         }
         Ret(regs, e == 0 ? 0u : 0xFFFFFFFFu);
         return;
     }
-    if (n == "crc32" || n == "inflate" || n == "inflateInit_" || n == "inflateInit2_" ||
-        n == "inflateEnd" || n == "inflateReset" || n == "deflate" || n == "deflateInit2_" ||
-        n == "deflateEnd" || n == "deflateReset") {
-        if (!ZlibCall(n, regs)) {
+    if (id == I::crc32_ || id == I::inflate_ || id == I::inflateInit__ || id == I::inflateInit2__ ||
+        id == I::inflateEnd_ || id == I::inflateReset_ || id == I::deflate_ || id == I::deflateInit2__ ||
+        id == I::deflateEnd_ || id == I::deflateReset_) {
+        if (!ZlibCall(id, n, regs)) {
             goto bad_ptr;
         }
         return;
     }
-    if (n[0] == 'e' && EglCall(n, regs)) {
+    if (n[0] == 'e' && EglCall(id, n, regs)) {
         return;
     }
-    if (n[0] == 'A' && NdkCall(n, regs)) {
+    if (n[0] == 'A' && NdkCall(id, n, regs)) {
         return;
     }
-    if (n == "getaddrinfo" || n == "freeaddrinfo" || n == "gai_strerror" || n == "gethostbyname" ||
-        n == "gethostbyaddr" || n == "__get_h_errno") {
-        if (!NetDbCall(n, regs)) {
+    if (id == I::getaddrinfo_ || id == I::freeaddrinfo_ || id == I::gai_strerror_ || id == I::gethostbyname_ ||
+        id == I::gethostbyaddr_ || id == I::__get_h_errno_) {
+        if (!NetDbCall(id, n, regs)) {
             goto bad_ptr;
         }
         return;
     }
-    if (n == "mbrtowc" || n == "wcrtomb" || n == "wcscoll" || n == "wcsxfrm" ||
-        n == "wcsftime" || n == "getwc" || n == "putwc" || n == "ungetwc") {
-        if (!WideCall(n, regs)) {
+    if (id == I::mbrtowc_ || id == I::wcrtomb_ || id == I::wcscoll_ || id == I::wcsxfrm_ ||
+        id == I::wcsftime_ || id == I::getwc_ || id == I::putwc_ || id == I::ungetwc_) {
+        if (!WideCall(id, n, regs)) {
             goto bad_ptr;
         }
         return;
     }
-    if (n == "SHA1Init" || n == "SHA1Update" || n == "SHA1Final") {
-        if (!Sha1Call(n, regs)) {
+    if (id == I::SHA1Init_ || id == I::SHA1Update_ || id == I::SHA1Final_) {
+        if (!Sha1Call(id, n, regs)) {
             goto bad_ptr;
         }
         return;
@@ -7924,8 +7928,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- processes. The emulator cannot give a guest a child process (a
     //     fork would duplicate the whole host, exec would replace it), so
     //     these fail the way a system without the facility answers.
-    if (n == "fork" || n == "execv" || n == "execve" || n == "execl" || n == "popen" ||
-        n == "system" || n == "pclose" || n == "waitpid" || n == "ptrace") {
+    if (id == I::fork_ || id == I::execv_ || id == I::execve_ || id == I::execl_ || id == I::popen_ ||
+        id == I::system_ || id == I::pclose_ || id == I::waitpid_ || id == I::ptrace_) {
         {
             static std::set<std::string> said;
             std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -7933,15 +7937,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[svc] %s is not offered (no guest processes) -> failure\n", n.c_str());
             }
         }
-        if (n == "system" && a0 == 0) {
+        if (id == I::system_ && a0 == 0) {
             Ret(regs, 0);  // system(NULL): no command processor available
             return;
         }
-        SetGuestErrno(n == "pclose" || n == "waitpid" ? ECHILD : n == "ptrace" ? EPERM : ENOSYS);
-        Ret(regs, n == "popen" ? 0u : 0xFFFFFFFFu);
+        SetGuestErrno(id == I::pclose_ || id == I::waitpid_ ? ECHILD : id == I::ptrace_ ? EPERM : ENOSYS);
+        Ret(regs, id == I::popen_ ? 0u : 0xFFFFFFFFu);
         return;
     }
-    if (n == "setresuid") {
+    if (id == I::setresuid_) {
         // An app may "change" to the ids it already has; anything else needs
         // privileges it does not have (EPERM). -1 keeps an id.
         uid_t r = 0, e = 0, sv = 0;
@@ -7957,7 +7961,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0xFFFFFFFFu);
         return;
     }
-    if (n == "setitimer") {
+    if (id == I::setitimer_) {
         // setitimer(which, const itimerval* new, itimerval* old). Interval
         // timers would have to raise guest signals; none is offered, so only
         // disarming succeeds (old reads as disarmed).
@@ -7983,16 +7987,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // --- ctype functions (for guests that call them rather than reading
     //     _ctype_). Bionic 7.1.2 takes them from OpenBSD's isctype.c: EOF
     //     -> 0, otherwise the byte table entry of (unsigned char)c & mask.
-    if (n == "isalnum" || n == "isalpha" || n == "isspace" || n == "isxdigit") {
+    if (id == I::isalnum_ || id == I::isalpha_ || id == I::isspace_ || id == I::isxdigit_) {
         const std::int32_t c = static_cast<std::int32_t>(a0);
-        const std::uint8_t mask = n == "isalnum"   ? 0x07   // _U|_L|_N
-                                  : n == "isalpha" ? 0x03   // _U|_L
-                                  : n == "isspace" ? 0x08   // _S
+        const std::uint8_t mask = id == I::isalnum_   ? 0x07   // _U|_L|_N
+                                  : id == I::isalpha_ ? 0x03   // _U|_L
+                                  : id == I::isspace_ ? 0x08   // _S
                                                    : 0x44;  // _N|_X
         Ret(regs, c == -1 ? 0u : BionicCtypeClass(static_cast<std::uint8_t>(c)) & mask);
         return;
     }
-    if (n == "tolower") {
+    if (id == I::tolower_) {
         // OpenBSD tolower: values above 255 (and EOF) unchanged, else the
         // _tolower_tab_ entry (C locale: only A-Z change).
         Ret(regs, a0 >= 'A' && a0 <= 'Z' ? a0 + 32 : a0);
@@ -8011,7 +8015,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             return 0xFFFFFFFFu;
         };
-        if (n == "strcasestr") {
+        if (id == I::strcasestr_) {
             const std::uint32_t hl = guest_strlen(a0), nl = guest_strlen(a1);
             if (hl == 0xFFFFFFFFu || nl == 0xFFFFFFFFu) {
                 goto bad_ptr;
@@ -8032,7 +8036,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, 0);
             return;
         }
-        if (n == "strsep") {
+        if (id == I::strsep_) {
             // strsep(char** stringp, delim): returns *stringp, ends that token at
             // the first delimiter and points *stringp past it (NULL at the end).
             if (!CheckRange(a0, 4, true)) {
@@ -8060,7 +8064,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, sp);
             return;
         }
-        if (n == "strxfrm") {
+        if (id == I::strxfrm_) {
             // C locale (OpenBSD): strlcpy(dst, src, n), or strlen(src) for n = 0.
             const std::uint32_t sl = guest_strlen(a1);
             if (sl == 0xFFFFFFFFu) {
@@ -8077,9 +8081,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, sl);
             return;
         }
-        if (n == "puts" || n == "putchar" || n == "perror") {
+        if (id == I::puts_ || id == I::putchar_ || id == I::perror_) {
             // stdout/stderr of the guest are the host's (as for printf).
-            if (n == "putchar") {
+            if (id == I::putchar_) {
                 std::fputc(static_cast<int>(a0 & 0xFFu), stdout);
                 Ret(regs, a0 & 0xFFu);
                 return;
@@ -8087,7 +8091,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (a0 != 0 && guest_strlen(a0) == 0xFFFFFFFFu) {
                 goto bad_ptr;
             }
-            if (n == "puts") {
+            if (id == I::puts_) {
                 std::fputs(GuestStr(a0), stdout);
                 std::fputc('\n', stdout);
                 Ret(regs, '\n');  // OpenBSD puts: a non-negative value
@@ -8104,7 +8108,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             RetVoid(regs);
             return;
         }
-        if (n == "div") {
+        if (id == I::div_) {
             // div_t div(int, int): an 8-byte struct, returned through the hidden
             // pointer in r0 (AAPCS32); the operands are in r1, r2. The two cases
             // C leaves undefined would trap the host divider: answer 0.
@@ -8125,15 +8129,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
     }
-    if (n == "usleep" || n == "sleep") {
+    if (id == I::usleep_ || id == I::sleep_) {
         // Signal-aware like nanosleep; the full time always elapses.
-        GuestSleepUs(n == "usleep" ? std::uint64_t(a0) : std::uint64_t(a0) * 1000000u);
+        GuestSleepUs(id == I::usleep_ ? std::uint64_t(a0) : std::uint64_t(a0) * 1000000u);
         Ret(regs, 0);
         return;
     }
-    if (n == "sched_get_priority_max" || n == "sched_get_priority_min") {
+    if (id == I::sched_get_priority_max_ || id == I::sched_get_priority_min_) {
         // Policy numbers are the kernel's on both sides.
-        const int r = n == "sched_get_priority_max" ? ::sched_get_priority_max(static_cast<int>(a0))
+        const int r = id == I::sched_get_priority_max_ ? ::sched_get_priority_max(static_cast<int>(a0))
                                                     : ::sched_get_priority_min(static_cast<int>(a0));
         if (r < 0) {
             SetGuestErrno(errno);
@@ -8141,12 +8145,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    if (n == "pthread_getschedparam" || n == "pthread_setschedparam") {
+    if (id == I::pthread_getschedparam_ || id == I::pthread_setschedparam_) {
         // Guest threads keep the policy they started with, SCHED_OTHER at
         // priority 0 (an app's threads); asking for a real-time policy is
         // refused as Android refuses it to an app (EPERM).
         // get(thread, int* policy, sched_param* p); set(thread, policy, p).
-        const bool get = (n == "pthread_getschedparam");
+        const bool get = (id == I::pthread_getschedparam_);
         if (!CheckRange(a2, 4, get) || (get && !CheckRange(a1, 4, true))) {
             goto bad_ptr;
         }
@@ -8162,7 +8166,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, (a1 == SCHED_OTHER && prio == 0) ? 0u : static_cast<std::uint32_t>(EPERM));
         return;
     }
-    if (n == "getpriority" || n == "setpriority") {
+    if (id == I::getpriority_ || id == I::setpriority_) {
         // (which, who[, prio]). A PRIO_PROCESS `who` is a thread id on Linux:
         // a guest tid (gettid) maps to its host thread; 0 and the process id
         // pass through, other ids are unknown (ESRCH).
@@ -8176,7 +8180,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
         }
         errno = 0;
-        const int r = n == "getpriority"
+        const int r = id == I::getpriority_
                           ? ::getpriority(static_cast<int>(a0), static_cast<id_t>(who))
                           : ::setpriority(static_cast<int>(a0), static_cast<id_t>(who),
                                           static_cast<int>(a2));
@@ -8186,7 +8190,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
     }
-    if (n == "getrusage") {
+    if (id == I::getrusage_) {
         // Guest struct rusage (LP32, NDK): two timevals of 2 longs, then 14
         // longs; 72 bytes. Values are truncated to 32 bits like the kernel's
         // compat layer does.
@@ -8211,7 +8215,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "prctl") {
+    if (id == I::prctl_) {
         // Only the thread name (PR_SET_NAME / PR_GET_NAME: 16 bytes with the
         // NUL) reaches the host thread; other options are not offered.
         if (a0 == PR_SET_NAME || a0 == PR_GET_NAME) {
@@ -8234,11 +8238,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, static_cast<std::uint32_t>(-1));
         return;
     }
-    if (n == "getuid") {
+    if (id == I::getuid_) {
         Ret(regs, static_cast<std::uint32_t>(::getuid()));
         return;
     }
-    if (n == "getresuid") {
+    if (id == I::getresuid_) {
         if (!CheckRange(a0, 4, true) || !CheckRange(a1, 4, true) || !CheckRange(a2, 4, true)) {
             goto bad_ptr;
         }
@@ -8251,20 +8255,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, 0);
         return;
     }
-    if (n == "getpwuid" || n == "getpwnam" || n == "getgrgid" || n == "getgrnam") {
+    if (id == I::getpwuid_ || id == I::getpwnam_ || id == I::getgrgid_ || id == I::getgrnam_) {
         // The host's answer (on a device the system's own bionic), in the
         // guest's LP32 structs: passwd {name, passwd, uid, gid, dir, shell}
         // = 24 bytes (pw_gecos aliases the NULL pw_passwd), group {name,
         // passwd, gid, mem} = 16 bytes. Like bionic, one result buffer per
         // thread, overwritten by the next call.
-        const bool by_name = (n == "getpwnam" || n == "getgrnam");
+        const bool by_name = (id == I::getpwnam_ || id == I::getgrnam_);
         if (by_name && !CheckRange(a0, 1, false)) {
             goto bad_ptr;
         }
         const std::string key = by_name ? std::string(GuestStr(a0)) : std::string();
         std::vector<std::string> strs;  // passwd: name dir shell; group: name, members...
         std::uint32_t id1 = 0, id2 = 0;
-        const bool pw = (n == "getpwuid" || n == "getpwnam");
+        const bool pw = (id == I::getpwuid_ || id == I::getpwnam_);
         if (pw) {
             const struct passwd* p = by_name ? ::getpwnam(key.c_str()) : ::getpwuid(a0);
             if (p) {
@@ -8348,8 +8352,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
         // Enriched logging for environment queries: names matter.
-        if (n == "__system_property_get" || n == "dlopen" || n == "open" ||
-            n == "fopen" || n == "stat" || n == "access") {
+        if (id == I::__system_property_get_ || id == I::dlopen_ || id == I::open_ ||
+            id == I::fopen_ || id == I::stat_ || id == I::access_) {
             std::printf("[env]%s %s(\"%s\") lr=%08x\n", GuestTid() == 1 ? "" : "(T2+)", n.c_str(),
                         GuestStr(a0), regs[14]);
         }
@@ -8450,18 +8454,19 @@ void Runtime::NoteUnlocking(HostMutex& hm, std::uint32_t obj) {
     }
 }
 
-std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr) {
+std::uint32_t Runtime::PthreadMutex(ImportId id, const std::string& n, std::uint32_t obj, std::uint32_t attr) {
+    using I = ImportId;
     // Resolve the host mutex under guard, then operate OUTSIDE it. The old
     // code held mutex_ across pthread_mutex_lock: a thread blocking on a
     // game mutex (held by a halted worker, or ABBA with a guest critical
     // section spanning an SVC) froze every mutex_-touching thread
     // (gdb-proven total freeze, 8 threads in pthread_mutex_lock, 2026-10-10).
     std::shared_ptr<HostMutex> m;
-    if (n == "pthread_mutex_init" || n == "pthread_mutex_destroy") {
+    if (id == I::pthread_mutex_init_ || id == I::pthread_mutex_destroy_) {
         // Writers of the map (their own lock, not the runtime's mutex_: lock
         // and unlock, the hot path, only read it and run in parallel).
         std::unique_lock<std::shared_mutex> map_lock(mutex_map_mu_);
-        if (n == "pthread_mutex_init") {
+        if (id == I::pthread_mutex_init_) {
             // Type from the attribute word (NULL = NORMAL); bionic also keeps
             // it in the mutex word at bits 14-15 (PTHREAD_*_INITIALIZER).
             std::uint32_t type = 0;
@@ -8488,7 +8493,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
             }
             return 0;
         }
-        if (n == "pthread_mutex_destroy") {
+        if (id == I::pthread_mutex_destroy_) {
             // As bionic: a held mutex is refused with EBUSY (trylock); a free
             // one leaves the map. A thread still using it keeps its own
             // reference (shared_ptr), so nothing is freed under it.
@@ -8538,7 +8543,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         }
         m = it->second;
     }  // map lock released: the blocking lock/unlock below holds none.
-    if (n == "pthread_mutex_lock") {
+    if (id == I::pthread_mutex_lock_) {
         int r = 0;
         if (SignalsInUse()) {
             // Interruptible (see PthreadCond): handlers run between slices,
@@ -8578,7 +8583,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         }
         return static_cast<std::uint32_t>(r);
     }
-    if (n == "pthread_mutex_unlock") {
+    if (id == I::pthread_mutex_unlock_) {
         // The book is updated while the lock is still held (after the unlock
         // another thread may already own it). A recursive/errorcheck mutex
         // unlocked by a non-owner is refused by the host (EPERM): its book
@@ -8589,7 +8594,7 @@ std::uint32_t Runtime::PthreadMutex(const std::string& n, std::uint32_t obj, std
         NoteUnlocking(*m, obj);
         return static_cast<std::uint32_t>(pthread_mutex_unlock(&m->m));
     }
-    if (n == "pthread_mutex_trylock") {
+    if (id == I::pthread_mutex_trylock_) {
         const int r = pthread_mutex_trylock(&m->m);
         if (r == 0) {
             NoteLocked(*m);
@@ -8608,18 +8613,19 @@ static std::shared_ptr<pthread_rwlock_t> NewHostRwlock() {
     });
 }
 
-std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
+std::uint32_t Runtime::PthreadRwlock(ImportId id, const std::string& n, std::uint32_t obj) {
+    using I = ImportId;
     // Same discipline as PthreadMutex: resolve under guard (taking a
     // reference), operate outside. Lazy-creates static initializers
     // (PTHREAD_RWLOCK_INITIALIZER).
     std::shared_ptr<pthread_rwlock_t> rw;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (n == "pthread_rwlock_init") {
+        if (id == I::pthread_rwlock_init_) {
             rwlock_map_[obj] = NewHostRwlock();
             return 0;
         }
-        if (n == "pthread_rwlock_destroy") {
+        if (id == I::pthread_rwlock_destroy_) {
             rwlock_map_.erase(obj);  // freed when the last user lets go
             return 0;
         }
@@ -8630,13 +8636,13 @@ std::uint32_t Runtime::PthreadRwlock(const std::string& n, std::uint32_t obj) {
         rw = it->second;
     }  // guard released: blocking rdlock/wrlock below must not hold mutex_.
     pthread_rwlock_t* r = rw.get();
-    if (n == "pthread_rwlock_rdlock") {
+    if (id == I::pthread_rwlock_rdlock_) {
         return static_cast<std::uint32_t>(pthread_rwlock_rdlock(r));
     }
-    if (n == "pthread_rwlock_wrlock") {
+    if (id == I::pthread_rwlock_wrlock_) {
         return static_cast<std::uint32_t>(pthread_rwlock_wrlock(r));
     }
-    if (n == "pthread_rwlock_unlock") {
+    if (id == I::pthread_rwlock_unlock_) {
         return static_cast<std::uint32_t>(pthread_rwlock_unlock(r));
     }
     return EINVAL;
@@ -8658,11 +8664,12 @@ static std::shared_ptr<Runtime::HostCond> NewHostCond() {
     });
 }
 
-std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
+std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                                    std::uint32_t arg2, bool monotonic) {
+    using I = ImportId;
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (n == "pthread_cond_init" || n == "pthread_cond_destroy") {
-        if (n == "pthread_cond_init") {
+    if (id == I::pthread_cond_init_ || id == I::pthread_cond_destroy_) {
+        if (id == I::pthread_cond_init_) {
             if (cond_map_.count(cond) != 0) {
                 std::printf("[cond] re-init obj=%08x (t%u)\n", cond, GuestTid());
             }
@@ -8687,7 +8694,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         (w->next ? w->next->prev : hc->tail) = w->prev;
         w->next = w->prev = nullptr;
     };
-    if (n == "pthread_cond_signal" || n == "pthread_cond_broadcast") {
+    if (id == I::pthread_cond_signal_ || id == I::pthread_cond_broadcast_) {
         // The oldest sleeper (a broadcast: every sleeper) takes a wake; with
         // nobody asleep the wake is gone, as POSIX says.
         pthread_mutex_lock(&hc->m);
@@ -8699,7 +8706,7 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
             w->woken = true;
             hc->wakes++;
             pthread_cond_signal(&w->cv);
-            if (n == "pthread_cond_signal") {
+            if (id == I::pthread_cond_signal_) {
                 break;
             }
         }
@@ -8811,11 +8818,11 @@ std::uint32_t Runtime::PthreadCond(const std::string& n, std::uint32_t cond, std
         mutex_.lock();
         return r;
     };
-    if (n == "pthread_cond_wait") {
+    if (id == I::pthread_cond_wait_) {
         // Untimed wait: block until signalled, as bionic does.
         return static_cast<std::uint32_t>(wait(nullptr));
     }
-    if (n == "pthread_cond_timedwait") {
+    if (id == I::pthread_cond_timedwait_) {
         // Guest struct timespec is {long tv_sec; long tv_nsec;}, 2 x 32 bits.
         if (!CheckRange(arg2, 8, false)) {
             return EINVAL;
@@ -8980,16 +8987,18 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
 }
 
 // memcpy too: a copy with overlapping ranges works, as on bionic.
-void Runtime::GuestMemCopy(Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
+void Runtime::GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
                            std::uint32_t len) {
+    using I = ImportId;
     const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
     std::memmove(H(dst), H<const void>(src), wlen);
     ScanWP(this, dst, wlen, n.c_str());
     Ret(regs, dst);
 }
 
-void Runtime::GuestMemSet(Regs& regs, const std::string& n, std::uint32_t dst, int fill,
+void Runtime::GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, int fill,
                           std::uint32_t len) {
+    using I = ImportId;
     // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
     // Diagnostic layer (PLAN.md A4): off in shipping.
     if (DiagOn()) {
@@ -10210,9 +10219,10 @@ void Runtime::SetGuestEnv(const std::string& key, const std::string& value) {
 // them back. The guest's zalloc/zfree are not used: the host stream's memory
 // is the host's. `state` reads as the guest stream itself (non-NULL while
 // initialised, as zlib callers test), msg as a guest copy of the host text.
-bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
+bool Runtime::ZlibCall(ImportId id, const std::string& n, Regs& regs) {
+    using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2];
-    if (n == "crc32") {
+    if (id == I::crc32_) {
         // uLong crc32(uLong crc, const Bytef* buf, uInt len); buf NULL -> 0.
         if (a1 == 0) {
             Ret(regs, 0);
@@ -10230,13 +10240,13 @@ bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
     std::uint32_t g[14];
     std::memcpy(g, H(a0), 56);
     std::lock_guard<std::mutex> l(zlib_mu_);
-    const bool init = n == "inflateInit_" || n == "inflateInit2_" || n == "deflateInit2_";
+    const bool init = id == I::inflateInit__ || id == I::inflateInit2__ || id == I::deflateInit2__;
     if (init) {
         // The version/size handshake is with the guest's zlib.h: the major
         // version must match and the size must be the 32-bit z_stream.
-        const std::uint32_t ver = n == "inflateInit_" ? a1 : n == "inflateInit2_" ? a2 : 0;
-        std::uint32_t ver_ptr = ver, size = n == "inflateInit_" ? a2 : regs[3];
-        if (n == "deflateInit2_") {
+        const std::uint32_t ver = id == I::inflateInit__ ? a1 : id == I::inflateInit2__ ? a2 : 0;
+        std::uint32_t ver_ptr = ver, size = id == I::inflateInit__ ? a2 : regs[3];
+        if (id == I::deflateInit2__) {
             // (strm, level, method, windowBits, memLevel, strategy, version,
             // stream_size): the last four on the stack.
             if (!CheckRange(regs[13], 16, false)) {
@@ -10252,9 +10262,9 @@ bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
         }
         auto zs = std::make_unique<z_stream>();
         int r = Z_OK;
-        if (n == "inflateInit_") {
+        if (id == I::inflateInit__) {
             r = ::inflateInit(zs.get());
-        } else if (n == "inflateInit2_") {
+        } else if (id == I::inflateInit2__) {
             r = ::inflateInit2(zs.get(), static_cast<int>(a1));
         } else {
             std::int32_t mem_level = 0, strategy = 0;
@@ -10279,8 +10289,8 @@ bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
         return true;
     }
     z_stream* zs = it->second.get();
-    if (n == "inflateEnd" || n == "deflateEnd") {
-        const int r = n == "inflateEnd" ? ::inflateEnd(zs) : ::deflateEnd(zs);
+    if (id == I::inflateEnd_ || id == I::deflateEnd_) {
+        const int r = id == I::inflateEnd_ ? ::inflateEnd(zs) : ::deflateEnd(zs);
         zstreams_.erase(it);
         g[7] = 0;
         std::memcpy(H(a0), g, 56);
@@ -10300,13 +10310,13 @@ bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
     zs->total_out = g[5];
     zs->data_type = static_cast<int>(g[11]);
     int r = Z_STREAM_ERROR;
-    if (n == "inflate") {
+    if (id == I::inflate_) {
         r = ::inflate(zs, static_cast<int>(a1));
-    } else if (n == "deflate") {
+    } else if (id == I::deflate_) {
         r = ::deflate(zs, static_cast<int>(a1));
-    } else if (n == "inflateReset") {
+    } else if (id == I::inflateReset_) {
         r = ::inflateReset(zs);
-    } else if (n == "deflateReset") {
+    } else if (id == I::deflateReset_) {
         r = ::deflateReset(zs);
     }
     const std::uint32_t used_in = in_len - zs->avail_in, used_out = out_len - zs->avail_out;
@@ -10335,17 +10345,18 @@ bool Runtime::ZlibCall(const std::string& n, Regs& regs) {
     return true;
 }
 
-bool Runtime::Sha1Call(const std::string& n, Regs& regs) {
+bool Runtime::Sha1Call(ImportId id, const std::string& n, Regs& regs) {
+    using I = ImportId;
     // SHA1Init(ctx); SHA1Update(ctx, data, len); SHA1Final(digest[20], ctx).
-    const std::uint32_t ctx = n == "SHA1Final" ? regs[1] : regs[0];
+    const std::uint32_t ctx = id == I::SHA1Final_ ? regs[1] : regs[0];
     if (!CheckRange(ctx, sizeof(GuestSha1Ctx), true)) {
         return false;
     }
     GuestSha1Ctx c;
     std::memcpy(&c, H(ctx), sizeof(c));
-    if (n == "SHA1Init") {
+    if (id == I::SHA1Init_) {
         Sha1Init(&c);
-    } else if (n == "SHA1Update") {
+    } else if (id == I::SHA1Update_) {
         if (regs[2] && !CheckRange(regs[1], regs[2], false)) {
             return false;
         }
@@ -10443,7 +10454,8 @@ std::uint32_t Utf8Encode(std::uint32_t c, std::uint8_t out[4]) {
 }
 }  // namespace
 
-bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+bool Runtime::WideCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
     // A NUL-terminated guest wide string: its length, or -1 if unreadable.
     auto wlen = [&](std::uint32_t w) -> std::uint32_t {
@@ -10464,7 +10476,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         const auto it = file_map_.find(h);
         return it == file_map_.end() ? nullptr : it->second.f;
     };
-    if (n == "mbrtowc") {
+    if (id == I::mbrtowc_) {
         // (wchar_t* pwc, const char* s, size_t n, mbstate_t* ps); s NULL is
         // mbrtowc(NULL, "", 1, ps).
         std::uint8_t* st = mbrtowc_state_;
@@ -10507,7 +10519,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         Ret(regs, r);
         return true;
     }
-    if (n == "wcrtomb") {
+    if (id == I::wcrtomb_) {
         // (char* s, wchar_t wc, mbstate_t* ps); s NULL resets: returns 1.
         if (a2 && !CheckRange(a2, 4, true)) {
             return false;
@@ -10540,7 +10552,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         Ret(regs, k);
         return true;
     }
-    if (n == "wcscoll") {
+    if (id == I::wcscoll_) {
         // The C locale: wcscmp (wchar_t compares as a signed 32-bit int).
         const std::uint32_t la = wlen(a0), lb = wlen(a1);
         if (la == 0xFFFFFFFFu || lb == 0xFFFFFFFFu) {
@@ -10556,7 +10568,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
             }
         }
     }
-    if (n == "wcsxfrm") {
+    if (id == I::wcsxfrm_) {
         // The C locale: wcslcpy(dst, src, n), the length of src.
         const std::uint32_t l = wlen(a1);
         if (l == 0xFFFFFFFFu) {
@@ -10573,7 +10585,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         Ret(regs, l);
         return true;
     }
-    if (n == "wcsftime") {
+    if (id == I::wcsftime_) {
         // (wchar_t* s, size_t max, const wchar_t* fmt, const struct tm* t):
         // as FreeBSD does it -- the format narrowed to UTF-8, strftime, the
         // result widened back; 0 when it does not fit.
@@ -10631,7 +10643,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         return true;
     }
     // Wide stdio: the stream holds UTF-8; WEOF = 0xFFFFFFFF.
-    if (n == "putwc") {
+    if (id == I::putwc_) {
         FILE* f = file(a1);
         std::uint8_t b[4];
         const std::uint32_t k = f ? Utf8Encode(a0, b) : 0xFFFFFFFFu;
@@ -10643,7 +10655,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
         Ret(regs, a0);
         return true;
     }
-    if (n == "getwc") {
+    if (id == I::getwc_) {
         FILE* f = file(a0);
         if (!f) {
             SetGuestErrno(EBADF);
@@ -10672,7 +10684,7 @@ bool Runtime::WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs
             }
         }
     }
-    if (n == "ungetwc") {
+    if (id == I::ungetwc_) {
         // The host stream can push back one byte for sure: an ASCII
         // character is pushed back; a wider one is refused (WEOF).
         FILE* f = file(a1);
@@ -10743,7 +10755,8 @@ bool NumericHost(const char* h) {
 }
 }  // namespace
 
-bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+bool Runtime::NetDbCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
     // This thread's h_errno (a guest int, per thread as in bionic).
     auto h_errno_cell = [&]() -> std::uint32_t {
@@ -10768,11 +10781,11 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         }
         return g;
     };
-    if (n == "__get_h_errno") {
+    if (id == I::__get_h_errno_) {
         Ret(regs, h_errno_cell());
         return true;
     }
-    if (n == "gai_strerror") {
+    if (id == I::gai_strerror_) {
         // NetBSD's texts, which bionic uses.
         static const char* const kText[] = {
             "Success", "Address family for hostname not supported",
@@ -10791,7 +10804,7 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         Ret(regs, g);
         return true;
     }
-    if (n == "freeaddrinfo") {
+    if (id == I::freeaddrinfo_) {
         // Our chains: one guest block per entry (struct, address, name).
         for (std::uint32_t ai = a0; ai != 0;) {
             if (!CheckRange(ai, 32, false)) {
@@ -10805,7 +10818,7 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         RetVoid(regs);
         return true;
     }
-    if (n == "getaddrinfo") {
+    if (id == I::getaddrinfo_) {
         // (node, service, hints, res**). Guest struct addrinfo (LP32): flags
         // @0, family @4, socktype @8, protocol @12, addrlen @16, canonname
         // @20, addr @24, next @28; 32 bytes.
@@ -10883,7 +10896,7 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         Ret(regs, 0);
         return true;
     }
-    if (n == "gethostbyname" || n == "gethostbyaddr") {
+    if (id == I::gethostbyname_ || id == I::gethostbyaddr_) {
         // struct hostent (LP32): name @0, aliases @4, addrtype @8, length @12,
         // addr_list @16; 20 bytes. One result per thread, overwritten by the
         // next call (bionic's per-thread buffer).
@@ -10892,7 +10905,7 @@ bool Runtime::NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& reg
         int type = AF_INET, length = 4;
         static std::mutex host_resolver_mu;  // the host's gethostby* share a static result
         std::lock_guard<std::mutex> resolver_lock(host_resolver_mu);
-        if (n == "gethostbyname") {
+        if (id == I::gethostbyname_) {
             if (!CheckRange(a0, 1, false)) {
                 return false;
             }
@@ -11159,6 +11172,7 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     imp.hot = HotImportForName(name);
     imp.fast_math = FastMathForName(name.c_str());
     imp.gl_id = GlIdForName(name.c_str());
+    imp.import_id = ImportIdForName(name.c_str());
     const std::uint32_t swi = static_cast<std::uint32_t>(mod_.imports.size()) + 1;  // swi = idx + 1
     const std::uint32_t insn = 0xEF000000u | swi;
     mod_.imports.push_back(imp);  // before the address is handed out
@@ -11170,7 +11184,8 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     return va;
 }
 
-bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    using I = ImportId;
     const bool ours = n.compare(0, 7, "ALooper") == 0 || n.compare(0, 11, "AInputQueue") == 0 ||
                       n.compare(0, 11, "AInputEvent") == 0 || n.compare(0, 12, "AMotionEvent") == 0 ||
                       n.compare(0, 9, "AKeyEvent") == 0 || n.compare(0, 14, "AConfiguration") == 0 ||
@@ -11200,22 +11215,22 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
     };
     auto ev = [&]() { return static_cast<const AInputEvent*>(PtrOf(a0)); };
     // --- looper
-    if (n == "ALooper_prepare") {
+    if (id == I::ALooper_prepare_) {
         Ret(regs, PtrHandle(::ALooper_prepare(static_cast<int>(a0))));
         return true;
     }
-    if (n == "ALooper_forThread") {
+    if (id == I::ALooper_forThread_) {
         Ret(regs, PtrHandle(::ALooper_forThread()));
         return true;
     }
-    if (n == "ALooper_wake") {
+    if (id == I::ALooper_wake_) {
         if (auto* l = static_cast<ALooper*>(PtrOf(a0))) {
             ::ALooper_wake(l);
         }
         RetVoid(regs);
         return true;
     }
-    if (n == "ALooper_pollAll" || n == "ALooper_pollOnce") {
+    if (id == I::ALooper_pollAll_ || id == I::ALooper_pollOnce_) {
         // (timeout, int* outFd, int* outEvents, void** outData): the data is
         // the guest word given at registration, returned as it was.
         int fd = 0, events = 0;
@@ -11225,7 +11240,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         int r = 0;
         do {
             r = ::ALooper_pollOnce(static_cast<int>(a0), &fd, &events, &data);
-        } while (n == "ALooper_pollAll" && r == ALOOPER_POLL_CALLBACK);
+        } while (id == I::ALooper_pollAll_ && r == ALOOPER_POLL_CALLBACK);
         out32(a1, static_cast<std::uint32_t>(fd));
         out32(a2, static_cast<std::uint32_t>(events));
         out32(a3, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(data)));
@@ -11233,7 +11248,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     // --- input queue
-    if (n == "AInputQueue_attachLooper") {
+    if (id == I::AInputQueue_attachLooper_) {
         // (queue, looper, ident, callback, data@[sp]). A guest callback
         // cannot be a host ALooper callback: the queue is polled by ident.
         std::uint32_t data = 0;
@@ -11253,14 +11268,14 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         RetVoid(regs);
         return true;
     }
-    if (n == "AInputQueue_detachLooper") {
+    if (id == I::AInputQueue_detachLooper_) {
         if (auto* q = static_cast<AInputQueue*>(PtrOf(a0))) {
             ::AInputQueue_detachLooper(q);
         }
         RetVoid(regs);
         return true;
     }
-    if (n == "AInputQueue_getEvent") {
+    if (id == I::AInputQueue_getEvent_) {
         auto* q = static_cast<AInputQueue*>(PtrOf(a0));
         AInputEvent* e = nullptr;
         const int r = q ? ::AInputQueue_getEvent(q, &e) : -1;
@@ -11268,7 +11283,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "AInputQueue_preDispatchEvent") {
+    if (id == I::AInputQueue_preDispatchEvent_) {
         auto* q = static_cast<AInputQueue*>(PtrOf(a0));
         auto* e = static_cast<AInputEvent*>(PtrOf(a1));
         const int r = (q && e) ? ::AInputQueue_preDispatchEvent(q, e) : 0;
@@ -11278,7 +11293,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "AInputQueue_finishEvent") {
+    if (id == I::AInputQueue_finishEvent_) {
         auto* q = static_cast<AInputQueue*>(PtrOf(a0));
         auto* e = static_cast<AInputEvent*>(PtrOf(a1));
         if (q && e) {
@@ -11289,20 +11304,20 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     // --- input events (int32 in r0, int64 in r0:r1, float bits in r0)
-    if (n == "AInputEvent_getType" || n == "AInputEvent_getDeviceId" || n == "AInputEvent_getSource") {
+    if (id == I::AInputEvent_getType_ || id == I::AInputEvent_getDeviceId_ || id == I::AInputEvent_getSource_) {
         const AInputEvent* e = ev();
         const std::int32_t v = !e ? 0
-                               : n == "AInputEvent_getType"     ? ::AInputEvent_getType(e)
-                               : n == "AInputEvent_getDeviceId" ? ::AInputEvent_getDeviceId(e)
+                               : id == I::AInputEvent_getType_     ? ::AInputEvent_getType(e)
+                               : id == I::AInputEvent_getDeviceId_ ? ::AInputEvent_getDeviceId(e)
                                                                 : ::AInputEvent_getSource(e);
         Ret(regs, static_cast<std::uint32_t>(v));
         return true;
     }
-    if (n == "AKeyEvent_getAction" || n == "AKeyEvent_getKeyCode" || n == "AKeyEvent_getMetaState") {
+    if (id == I::AKeyEvent_getAction_ || id == I::AKeyEvent_getKeyCode_ || id == I::AKeyEvent_getMetaState_) {
         const AInputEvent* e = ev();
         const std::int32_t v = !e ? 0
-                               : n == "AKeyEvent_getAction"  ? ::AKeyEvent_getAction(e)
-                               : n == "AKeyEvent_getKeyCode" ? ::AKeyEvent_getKeyCode(e)
+                               : id == I::AKeyEvent_getAction_  ? ::AKeyEvent_getAction(e)
+                               : id == I::AKeyEvent_getKeyCode_ ? ::AKeyEvent_getKeyCode(e)
                                                              : ::AKeyEvent_getMetaState(e);
         Ret(regs, static_cast<std::uint32_t>(v));
         return true;
@@ -11314,47 +11329,47 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
             return true;
         }
         const std::size_t i = a1, h = a2;
-        if (n == "AMotionEvent_getAction") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getAction(e))); return true; }
-        if (n == "AMotionEvent_getFlags") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getFlags(e))); return true; }
-        if (n == "AMotionEvent_getMetaState") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getMetaState(e))); return true; }
-        if (n == "AMotionEvent_getEdgeFlags") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getEdgeFlags(e))); return true; }
-        if (n == "AMotionEvent_getPointerCount") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerCount(e))); return true; }
-        if (n == "AMotionEvent_getPointerId") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerId(e, i))); return true; }
-        if (n == "AMotionEvent_getHistorySize") { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getHistorySize(e))); return true; }
-        if (n == "AMotionEvent_getDownTime") { ret_64(::AMotionEvent_getDownTime(e)); return true; }
-        if (n == "AMotionEvent_getEventTime") { ret_64(::AMotionEvent_getEventTime(e)); return true; }
-        if (n == "AMotionEvent_getHistoricalEventTime") { ret_64(::AMotionEvent_getHistoricalEventTime(e, i)); return true; }
-        if (n == "AMotionEvent_getXPrecision") { ret_f(::AMotionEvent_getXPrecision(e)); return true; }
-        if (n == "AMotionEvent_getYPrecision") { ret_f(::AMotionEvent_getYPrecision(e)); return true; }
-        if (n == "AMotionEvent_getX") { ret_f(::AMotionEvent_getX(e, i)); return true; }
-        if (n == "AMotionEvent_getY") { ret_f(::AMotionEvent_getY(e, i)); return true; }
-        if (n == "AMotionEvent_getPressure") { ret_f(::AMotionEvent_getPressure(e, i)); return true; }
-        if (n == "AMotionEvent_getSize") { ret_f(::AMotionEvent_getSize(e, i)); return true; }
-        if (n == "AMotionEvent_getToolMajor") { ret_f(::AMotionEvent_getToolMajor(e, i)); return true; }
-        if (n == "AMotionEvent_getToolMinor") { ret_f(::AMotionEvent_getToolMinor(e, i)); return true; }
-        if (n == "AMotionEvent_getTouchMajor") { ret_f(::AMotionEvent_getTouchMajor(e, i)); return true; }
-        if (n == "AMotionEvent_getTouchMinor") { ret_f(::AMotionEvent_getTouchMinor(e, i)); return true; }
-        if (n == "AMotionEvent_getOrientation") { ret_f(::AMotionEvent_getOrientation(e, i)); return true; }
-        if (n == "AMotionEvent_getHistoricalX") { ret_f(::AMotionEvent_getHistoricalX(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalY") { ret_f(::AMotionEvent_getHistoricalY(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalPressure") { ret_f(::AMotionEvent_getHistoricalPressure(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalSize") { ret_f(::AMotionEvent_getHistoricalSize(e, i, h)); return true; }
-        if (n == "AMotionEvent_getRawX") { ret_f(::AMotionEvent_getRawX(e, i)); return true; }
-        if (n == "AMotionEvent_getRawY") { ret_f(::AMotionEvent_getRawY(e, i)); return true; }
-        if (n == "AMotionEvent_getHistoricalRawX") { ret_f(::AMotionEvent_getHistoricalRawX(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalRawY") { ret_f(::AMotionEvent_getHistoricalRawY(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalTouchMajor") { ret_f(::AMotionEvent_getHistoricalTouchMajor(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalTouchMinor") { ret_f(::AMotionEvent_getHistoricalTouchMinor(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalToolMajor") { ret_f(::AMotionEvent_getHistoricalToolMajor(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalToolMinor") { ret_f(::AMotionEvent_getHistoricalToolMinor(e, i, h)); return true; }
-        if (n == "AMotionEvent_getHistoricalOrientation") { ret_f(::AMotionEvent_getHistoricalOrientation(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getAction_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getAction(e))); return true; }
+        if (id == I::AMotionEvent_getFlags_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getFlags(e))); return true; }
+        if (id == I::AMotionEvent_getMetaState_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getMetaState(e))); return true; }
+        if (id == I::AMotionEvent_getEdgeFlags_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getEdgeFlags(e))); return true; }
+        if (id == I::AMotionEvent_getPointerCount_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerCount(e))); return true; }
+        if (id == I::AMotionEvent_getPointerId_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getPointerId(e, i))); return true; }
+        if (id == I::AMotionEvent_getHistorySize_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getHistorySize(e))); return true; }
+        if (id == I::AMotionEvent_getDownTime_) { ret_64(::AMotionEvent_getDownTime(e)); return true; }
+        if (id == I::AMotionEvent_getEventTime_) { ret_64(::AMotionEvent_getEventTime(e)); return true; }
+        if (id == I::AMotionEvent_getHistoricalEventTime_) { ret_64(::AMotionEvent_getHistoricalEventTime(e, i)); return true; }
+        if (id == I::AMotionEvent_getXPrecision_) { ret_f(::AMotionEvent_getXPrecision(e)); return true; }
+        if (id == I::AMotionEvent_getYPrecision_) { ret_f(::AMotionEvent_getYPrecision(e)); return true; }
+        if (id == I::AMotionEvent_getX_) { ret_f(::AMotionEvent_getX(e, i)); return true; }
+        if (id == I::AMotionEvent_getY_) { ret_f(::AMotionEvent_getY(e, i)); return true; }
+        if (id == I::AMotionEvent_getPressure_) { ret_f(::AMotionEvent_getPressure(e, i)); return true; }
+        if (id == I::AMotionEvent_getSize_) { ret_f(::AMotionEvent_getSize(e, i)); return true; }
+        if (id == I::AMotionEvent_getToolMajor_) { ret_f(::AMotionEvent_getToolMajor(e, i)); return true; }
+        if (id == I::AMotionEvent_getToolMinor_) { ret_f(::AMotionEvent_getToolMinor(e, i)); return true; }
+        if (id == I::AMotionEvent_getTouchMajor_) { ret_f(::AMotionEvent_getTouchMajor(e, i)); return true; }
+        if (id == I::AMotionEvent_getTouchMinor_) { ret_f(::AMotionEvent_getTouchMinor(e, i)); return true; }
+        if (id == I::AMotionEvent_getOrientation_) { ret_f(::AMotionEvent_getOrientation(e, i)); return true; }
+        if (id == I::AMotionEvent_getHistoricalX_) { ret_f(::AMotionEvent_getHistoricalX(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalY_) { ret_f(::AMotionEvent_getHistoricalY(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalPressure_) { ret_f(::AMotionEvent_getHistoricalPressure(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalSize_) { ret_f(::AMotionEvent_getHistoricalSize(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getRawX_) { ret_f(::AMotionEvent_getRawX(e, i)); return true; }
+        if (id == I::AMotionEvent_getRawY_) { ret_f(::AMotionEvent_getRawY(e, i)); return true; }
+        if (id == I::AMotionEvent_getHistoricalRawX_) { ret_f(::AMotionEvent_getHistoricalRawX(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalRawY_) { ret_f(::AMotionEvent_getHistoricalRawY(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalTouchMajor_) { ret_f(::AMotionEvent_getHistoricalTouchMajor(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalTouchMinor_) { ret_f(::AMotionEvent_getHistoricalTouchMinor(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalToolMajor_) { ret_f(::AMotionEvent_getHistoricalToolMajor(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalToolMinor_) { ret_f(::AMotionEvent_getHistoricalToolMinor(e, i, h)); return true; }
+        if (id == I::AMotionEvent_getHistoricalOrientation_) { ret_f(::AMotionEvent_getHistoricalOrientation(e, i, h)); return true; }
     }
     // --- configuration
-    if (n == "AConfiguration_new") {
+    if (id == I::AConfiguration_new_) {
         Ret(regs, PtrHandle(::AConfiguration_new()));
         return true;
     }
-    if (n == "AConfiguration_delete") {
+    if (id == I::AConfiguration_delete_) {
         if (auto* c = static_cast<AConfiguration*>(PtrOf(a0))) {
             ::AConfiguration_delete(c);
         }
@@ -11362,7 +11377,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         RetVoid(regs);
         return true;
     }
-    if (n == "AConfiguration_fromAssetManager") {
+    if (id == I::AConfiguration_fromAssetManager_) {
         auto* c = static_cast<AConfiguration*>(PtrOf(a0));
         void* mgr = nullptr;
         {
@@ -11377,7 +11392,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     }
     // --- native window
-    if (n == "ANativeWindow_fromSurface") {
+    if (id == I::ANativeWindow_fromSurface_) {
         // (JNIEnv*, jobject surface): the real env of this thread, the real
         // Surface behind the guest's handle.
         JNIEnv* re = GuestCallbacks::g_real_env_hook
@@ -11388,9 +11403,9 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, PtrHandle(w));
         return true;
     }
-    if (n == "ANativeWindow_acquire" || n == "ANativeWindow_release") {
+    if (id == I::ANativeWindow_acquire_ || id == I::ANativeWindow_release_) {
         if (auto* w = static_cast<ANativeWindow*>(PtrOf(a0))) {
-            if (n == "ANativeWindow_acquire") {
+            if (id == I::ANativeWindow_acquire_) {
                 ::ANativeWindow_acquire(w);
             } else {
                 ::ANativeWindow_release(w);  // the handle stays: the window may live on
@@ -11399,7 +11414,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         RetVoid(regs);
         return true;
     }
-    if (n == "ANativeWindow_setBuffersGeometry") {
+    if (id == I::ANativeWindow_setBuffersGeometry_) {
         auto* w = static_cast<ANativeWindow*>(PtrOf(a0));
         Ret(regs, static_cast<std::uint32_t>(
                       w ? ::ANativeWindow_setBuffersGeometry(w, static_cast<int32_t>(a1),
@@ -11415,16 +11430,16 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
             std::printf("[ndk] sensors: none offered to the guest\n");
         }
     }
-    if (n == "ASensorManager_getInstance") {
+    if (id == I::ASensorManager_getInstance_) {
         Ret(regs, PtrHandle(::ASensorManager_getInstance()));
         return true;
     }
-    if (n == "ASensorManager_getSensorList") {
+    if (id == I::ASensorManager_getSensorList_) {
         out32(a1, 0);
         Ret(regs, 0);
         return true;
     }
-    if (n == "ASensorManager_createEventQueue") {
+    if (id == I::ASensorManager_createEventQueue_) {
         // (manager, looper, ident, callback, data@[sp])
         std::uint32_t data = 0;
         if (CheckRange(regs[13], 4, false)) {
@@ -11439,7 +11454,7 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, PtrHandle(q));
         return true;
     }
-    if (n == "ASensorManager_destroyEventQueue") {
+    if (id == I::ASensorManager_destroyEventQueue_) {
         auto* m = static_cast<ASensorManager*>(PtrOf(a0));
         auto* q = static_cast<ASensorEventQueue*>(PtrOf(a1));
         const int r = (m && q) ? ::ASensorManager_destroyEventQueue(m, q) : -22;
@@ -11447,8 +11462,8 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "ASensorEventQueue_hasEvents" || n == "ASensorEventQueue_getEvents" ||
-        n == "ASensorManager_getDefaultSensor") {
+    if (id == I::ASensorEventQueue_hasEvents_ || id == I::ASensorEventQueue_getEvents_ ||
+        id == I::ASensorManager_getDefaultSensor_) {
         Ret(regs, 0);  // no sensor: no events
         return true;
     }
@@ -11459,7 +11474,8 @@ bool Runtime::NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
 #endif
 }
 
-bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs) {
+bool Runtime::EglCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs) {
+    using I = ImportId;
     if (n.compare(0, 3, "egl") != 0) {
         return false;
     }
@@ -11499,12 +11515,12 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         return true;
     };
     auto dpy = [&](std::uint32_t h) { return static_cast<EGLDisplay>(PtrOf(h)); };
-    if (n == "eglGetDisplay") {
+    if (id == I::eglGetDisplay_) {
         // Only the default display exists for an app.
         Ret(regs, PtrHandle(::eglGetDisplay(EGL_DEFAULT_DISPLAY)));
         return true;
     }
-    if (n == "eglInitialize") {
+    if (id == I::eglInitialize_) {
         EGLint major = 0, minor = 0;
         const EGLBoolean r = ::eglInitialize(dpy(a0), &major, &minor);
         if (!out32(a1, static_cast<std::uint32_t>(major)) || !out32(a2, static_cast<std::uint32_t>(minor))) {
@@ -11513,15 +11529,15 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglTerminate") {
+    if (id == I::eglTerminate_) {
         Ret(regs, ::eglTerminate(dpy(a0)));
         return true;
     }
-    if (n == "eglGetError") {
+    if (id == I::eglGetError_) {
         Ret(regs, static_cast<std::uint32_t>(::eglGetError()));
         return true;
     }
-    if (n == "eglChooseConfig") {
+    if (id == I::eglChooseConfig_) {
         // (dpy, attrib_list, EGLConfig* configs, config_size, EGLint* num@[sp])
         std::vector<EGLint> al;
         std::uint32_t num_ptr = 0;
@@ -11549,7 +11565,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglGetConfigAttrib") {
+    if (id == I::eglGetConfigAttrib_) {
         EGLint v = 0;
         const EGLBoolean r = ::eglGetConfigAttrib(dpy(a0), static_cast<EGLConfig>(PtrOf(a1)),
                                                   static_cast<EGLint>(a2), &v);
@@ -11559,7 +11575,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglCreateWindowSurface" || n == "eglCreateContext") {
+    if (id == I::eglCreateWindowSurface_ || id == I::eglCreateContext_) {
         // (dpy, config, window | share_context, attrib_list)
         std::vector<EGLint> al;
         if (!attribs(a3, al)) {
@@ -11567,7 +11583,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         }
         void* third = PtrOf(a2);
         void* r = nullptr;
-        if (n == "eglCreateWindowSurface") {
+        if (id == I::eglCreateWindowSurface_) {
             r = ::eglCreateWindowSurface(dpy(a0), static_cast<EGLConfig>(PtrOf(a1)),
                                          reinterpret_cast<EGLNativeWindowType>(third),
                                          al.empty() ? nullptr : al.data());
@@ -11579,9 +11595,9 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, PtrHandle(r));
         return true;
     }
-    if (n == "eglDestroySurface" || n == "eglDestroyContext") {
+    if (id == I::eglDestroySurface_ || id == I::eglDestroyContext_) {
         void* obj = PtrOf(a1);
-        const EGLBoolean r = n == "eglDestroySurface"
+        const EGLBoolean r = id == I::eglDestroySurface_
                                  ? ::eglDestroySurface(dpy(a0), static_cast<EGLSurface>(obj))
                                  : ::eglDestroyContext(dpy(a0), static_cast<EGLContext>(obj));
         if (r) {
@@ -11590,7 +11606,7 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglMakeCurrent") {
+    if (id == I::eglMakeCurrent_) {
         ForgetGlBindings();
         const EGLBoolean r =
             ::eglMakeCurrent(dpy(a0), static_cast<EGLSurface>(PtrOf(a1)), static_cast<EGLSurface>(PtrOf(a2)),
@@ -11599,12 +11615,12 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglSwapBuffers") {
+    if (id == I::eglSwapBuffers_) {
         egl_swaps_.fetch_add(1, std::memory_order_relaxed);
         Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
         return true;
     }
-    if (n == "eglGetConfigs") {
+    if (id == I::eglGetConfigs_) {
         // (dpy, EGLConfig* configs, config_size, EGLint* num)
         const EGLint size = static_cast<EGLint>(a2);
         if (a1 && (size < 0 || size > 4096 || !CheckRange(a1, static_cast<std::uint32_t>(size) * 4u, true))) {
@@ -11625,23 +11641,23 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglGetCurrentDisplay") {
+    if (id == I::eglGetCurrentDisplay_) {
         Ret(regs, PtrHandle(::eglGetCurrentDisplay()));
         return true;
     }
-    if (n == "eglGetCurrentContext") {
+    if (id == I::eglGetCurrentContext_) {
         Ret(regs, PtrHandle(::eglGetCurrentContext()));
         return true;
     }
-    if (n == "eglGetCurrentSurface") {
+    if (id == I::eglGetCurrentSurface_) {
         Ret(regs, PtrHandle(::eglGetCurrentSurface(static_cast<EGLint>(a0))));
         return true;
     }
-    if (n == "eglQuerySurface" || n == "eglQueryContext") {
+    if (id == I::eglQuerySurface_ || id == I::eglQueryContext_) {
         // (dpy, surface | context, attribute, EGLint* value)
         EGLint v = 0;
         const EGLBoolean r =
-            n == "eglQuerySurface"
+            id == I::eglQuerySurface_
                 ? ::eglQuerySurface(dpy(a0), static_cast<EGLSurface>(PtrOf(a1)), static_cast<EGLint>(a2), &v)
                 : ::eglQueryContext(dpy(a0), static_cast<EGLContext>(PtrOf(a1)), static_cast<EGLint>(a2), &v);
         if (!out32(a3, static_cast<std::uint32_t>(v))) {
@@ -11650,19 +11666,19 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, r);
         return true;
     }
-    if (n == "eglSwapInterval") {
+    if (id == I::eglSwapInterval_) {
         Ret(regs, ::eglSwapInterval(dpy(a0), static_cast<EGLint>(a1)));
         return true;
     }
-    if (n == "eglWaitGL" || n == "eglWaitNative" || n == "eglReleaseThread") {
-        if (n == "eglReleaseThread") {
+    if (id == I::eglWaitGL_ || id == I::eglWaitNative_ || id == I::eglReleaseThread_) {
+        if (id == I::eglReleaseThread_) {
             ForgetGlBindings();
         }
-        Ret(regs, n == "eglWaitGL" ? ::eglWaitGL() : n == "eglWaitNative" ? ::eglWaitNative(static_cast<EGLint>(a0))
+        Ret(regs, id == I::eglWaitGL_ ? ::eglWaitGL() : id == I::eglWaitNative_ ? ::eglWaitNative(static_cast<EGLint>(a0))
                                                                          : ::eglReleaseThread());
         return true;
     }
-    if (n == "eglQueryString") {
+    if (id == I::eglQueryString_) {
         // (dpy, name): one stable guest copy per name, as the driver's
         // strings do not change for a display.
         static std::map<std::uint32_t, std::uint32_t> copies;
@@ -11684,13 +11700,13 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
         Ret(regs, out);
         return true;
     }
-    if (n == "eglBindAPI") {
+    if (id == I::eglBindAPI_) {
         // (api): the host's contexts are OpenGL ES ones; any other API fails
         // as on a device without it (EGL_OPENGL_ES_API = 0x30A0).
         Ret(regs, a0 == 0x30A0 ? 1u : 0u);
         return true;
     }
-    if (n == "eglGetProcAddress") {
+    if (id == I::eglGetProcAddress_) {
         // Extension entry points are not offered: NULL, as for an extension
         // the driver lacks. Named once each, so a port sees what was wanted.
         static std::set<std::string> asked;
@@ -11716,15 +11732,16 @@ bool Runtime::EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs)
 // while guest signals are in use it waits in slices and runs its handlers
 // in between, with guard_mu_ released (a GC may stop the constructing
 // thread and needs this one's ack).
-std::uint32_t Runtime::CxaGuard(const std::string& n, std::uint32_t guard) {
+std::uint32_t Runtime::CxaGuard(ImportId id, const std::string& n, std::uint32_t guard) {
+    using I = ImportId;
     constexpr std::uint32_t kDone = 1, kUnderway = 0x100;
     if (!CheckRange(guard, 4, true) || (guard & 3u)) {
         return kSemBadPtr;
     }
     std::uint32_t* const g = H<std::uint32_t>(guard);
     std::unique_lock<std::mutex> l(guard_mu_);
-    if (n == "__cxa_guard_release" || n == "__cxa_guard_abort") {
-        __atomic_store_n(g, n == "__cxa_guard_release" ? kDone : 0u, __ATOMIC_RELEASE);
+    if (id == I::__cxa_guard_release_ || id == I::__cxa_guard_abort_) {
+        __atomic_store_n(g, id == I::__cxa_guard_release_ ? kDone : 0u, __ATOMIC_RELEASE);
         guard_cv_.notify_all();
         return 0;
     }
@@ -12643,6 +12660,43 @@ void Runtime::DumpDiagCounters() {
             }
         }
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ns > b.ns; });
+        {
+            // Host time of the imports that do not wait (no sem_wait, sleeps,
+            // swaps): host CPU work, to set against the process CPU time.
+            std::uint64_t work_ns = 0, work_calls = 0;
+            for (const Row& r : rows) {
+                if (!mod_.imports[r.idx].blocking) {
+                    work_ns += r.ns;
+                    work_calls += r.calls;
+                }
+            }
+            std::printf("[counters] non-waiting imports: %llu calls, %llu ms host time\n",
+                        (unsigned long long)work_calls, (unsigned long long)(work_ns / 1000000));
+        }
+        {
+            // The busiest imports that still walk CallImport's name chain (no
+            // GL id, fast-math id or hot id).
+            std::vector<Row> chain;
+            for (const Row& r : rows) {
+                const Import& im = mod_.imports[r.idx];
+                if (im.gl_id == GlId::None && im.fast_math == 0 && im.hot == HotImport::None) {
+                    chain.push_back(r);
+                }
+            }
+            std::sort(chain.begin(), chain.end(),
+                      [](const Row& a, const Row& b) { return a.calls > b.calls; });
+            std::uint64_t cc = 0;
+            for (const Row& r : chain) {
+                cc += r.calls;
+            }
+            std::printf("[counters] name-chain imports: %llu calls; busiest:\n", (unsigned long long)cc);
+            for (std::size_t k = 0; k < chain.size() && k < 20; k++) {
+                std::printf("[counters]   chain %-26s %10llu calls %6llu ns/call\n",
+                            mod_.imports[chain[k].idx].name.c_str(),
+                            (unsigned long long)chain[k].calls,
+                            (unsigned long long)(chain[k].ns / chain[k].calls));
+            }
+        }
         std::printf("[counters] imports: %llu calls, %llu ms host time since the last dump\n",
                     (unsigned long long)all_calls, (unsigned long long)(all_ns / 1000000));
         static std::uint64_t last_w[3], last_wn[3], last_g;
@@ -16998,29 +17052,30 @@ std::string Runtime::SvcName(std::uint32_t swi) const {
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:
 // CallImport's gotos to bad_ptr cannot cross automatic inits, so this lives
 // here (same convention as TimeWarp). All paths Ret()+return (handled).
-void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
+void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                         std::uint32_t a2, std::uint32_t a3) {
+    using I = ImportId;
     // TEMP-DIAG (ntop failures): log args, capped (ntop has its own cap;
     // pton spam must not eat it).
     if (DiagOn()) {  // PLAN.md A: diagnostic layer
         static int ilog = 0, olog = 0;
-        if (n == "inet_ntop" && olog < 12) {
+        if (id == I::inet_ntop_ && olog < 12) {
             olog++;
             std::printf("[netsock] %s(%u %08x %08x %08x)%s\n", n.c_str(), a0, a1, a2, a3,
                         olog == 12 ? " (quiet henceforth)" : "");
-        } else if (n == "inet_pton" && ilog < 4) {
+        } else if (id == I::inet_pton_ && ilog < 4) {
             ilog++;
             std::printf("[netsock] %s(%u %08x %08x %08x)\n", n.c_str(), a0, a1, a2, a3);
         }
     }
-    if (n == "inet_ntoa" || n == "inet_ntop") {
+    if (id == I::inet_ntoa_ || id == I::inet_ntop_) {
         // inet_ntoa(struct in_addr): addr comes BY VALUE in r0 (NOT a
         // pointer). inet_ntop(af, src, dst, size): dst=a2, size=a3.
         struct in_addr ia {};
         const void* src = nullptr;
         std::uint32_t dst = 0;
         std::uint32_t dstsize = 16;
-        if (n == "inet_ntoa") {
+        if (id == I::inet_ntoa_) {
             std::uint32_t v = a0;
             std::memcpy(&ia, &v, 4);
             src = &ia;
@@ -17054,7 +17109,7 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
             Ret(regs, 0);
             return;
         }
-        if (n == "inet_ntoa") {
+        if (id == I::inet_ntoa_) {
             // Fresh 16B guest buffer per call (16B leak, bring-up):
             // avoids thread_local (goto-crossing) and shared-slot
             // races. ntoa is logging-path rare.
@@ -17077,17 +17132,17 @@ void Runtime::InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std:
     // inet_pton(af, src, dst): the string is a1 (NOT a0).
     // NOTE: plain pointer (GuestStr scratch), never std::string here:
     // later `goto bad_ptr` sites cannot jump over non-trivial inits.
-    const std::uint32_t sptr = (n == "inet_pton") ? a1 : a0;
+    const std::uint32_t sptr = (id == I::inet_pton_) ? a1 : a0;
     if (!CheckRange(sptr, 1, false)) {
-        Ret(regs, (n == "inet_addr") ? 0xFFFFFFFFu : 0u);
+        Ret(regs, (id == I::inet_addr_) ? 0xFFFFFFFFu : 0u);
         return;
     }
     const char* s = GuestStr(sptr);
-    if (n == "inet_addr") {
+    if (id == I::inet_addr_) {
         Ret(regs, static_cast<std::uint32_t>(::inet_addr(s)));
         return;
     }
-    if (n == "inet_aton") {
+    if (id == I::inet_aton_) {
         // inet_aton(cp, struct in_addr* inp) -> 1 valid, 0 not; inp may be
         // NULL (validation only).
         struct in_addr ia {};

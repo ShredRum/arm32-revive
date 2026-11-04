@@ -31,6 +31,7 @@
 #include "appid.h"
 #include "arm_hwcap.h"
 #include "diag_counters.h"
+#include "import_ids.h"
 #include "elf_loader.h"
 #include "guest_memory.h"
 #include "layout.h"
@@ -329,13 +330,13 @@ public:
     static constexpr long kSigSliceNs = 2000000;
     // This thread's guest stack (pthread_getattr_np); default: the main stack.
     static void SetThreadStack(std::uint32_t lo, std::uint32_t size);
-    std::uint32_t PthreadAttr(const std::string& n, std::uint32_t a0, std::uint32_t a1,
+    std::uint32_t PthreadAttr(ImportId id, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                               std::uint32_t a2);
     // C++ static-local guards (__cxa_guard_acquire/release/abort, ARM C++
     // ABI: a 32-bit guard, bit 0 set once the object is constructed).
     // Returns acquire's result (1 = the caller constructs), 0 for release and
     // abort, or kSemBadPtr for a wild guard pointer.
-    std::uint32_t CxaGuard(const std::string& n, std::uint32_t guard);
+    std::uint32_t CxaGuard(ImportId id, const std::string& n, std::uint32_t guard);
     bool EnsureApkIndex();
     // NDK objects the guest only holds opaquely (ALooper*, AInputQueue*,
     // AInputEvent*, AConfiguration*, ANativeWindow*, sensor objects): a
@@ -358,7 +359,7 @@ public:
     // The NDK imports of a NativeActivity title (ALooper_*, AInputQueue_*,
     // AInputEvent_*, AMotionEvent_*, AKeyEvent_*, AConfiguration_*,
     // ANativeWindow_*, ASensor*); false if `n` is not one of them.
-    bool NdkCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool NdkCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     // True for an NDK function NdkCall serves (dlsym of a system library).
     static bool NdkServes(const std::string& n);
     // A trampoline for a host import made at run time (dlsym of a function a
@@ -369,7 +370,7 @@ public:
     // EGL for a guest that drives its own context (Unity): forwarded to the
     // real EGL with handles for displays, configs, contexts and surfaces.
     // False when `n` is not an EGL import; a wild pointer halts inside.
-    bool EglCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool EglCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     std::atomic<std::uint64_t> egl_swaps_{0};  // frames a guest presented
     // A guest AAssetManager over our APK (what AAssetManager_fromJava gives),
     // for a host that hands one to the guest itself (ANativeActivity); 0 when
@@ -378,19 +379,19 @@ public:
     // zlib (inflate*/deflate*/crc32) over guest z_streams and bionic's
     // SHA1Init/Update/Final over a guest SHA1_CTX. False: a wild guest
     // pointer (the caller halts).
-    bool ZlibCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
-    bool Sha1Call(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool ZlibCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool Sha1Call(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     // Wide characters (bionic 7: UTF-8 in every locale, wchar_t 32 bits,
     // mbstate_t 4 bytes): mbrtowc wcrtomb wcscoll wcsxfrm wcsftime getwc
     // putwc ungetwc. False: a wild guest pointer.
-    bool WideCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool WideCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     // Name resolution in the guest's LP32 structs (getaddrinfo, freeaddrinfo,
     // gai_strerror, gethostbyname, gethostbyaddr, __get_h_errno), with
     // bionic's EAI_/AI_/h_errno numbers. Offline titles resolve only NULL,
     // numeric hosts and localhost; any other name gets EAI_NODATA /
     // HOST_NOT_FOUND, as a phone without network answers. False: a wild
     // guest pointer.
-    bool NetDbCall(const std::string& n, std::array<std::uint32_t, 16>& regs);
+    bool NetDbCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     std::unordered_map<int, std::uint32_t> gai_msgs_;  // bionic EAI code -> guest text
     std::uint8_t mbrtowc_state_[4] = {0, 0, 0, 0};  // for ps == NULL, as bionic's static
     std::mutex zlib_mu_;
@@ -400,7 +401,7 @@ public:
     std::condition_variable guard_cv_;
     // Guest semaphores; kSemBadPtr asks the caller to halt on a wild pointer.
     static constexpr std::uint32_t kSemBadPtr = 0xFFFFFFFEu;
-    std::uint32_t GuestSem(const std::string& n, std::uint32_t sem, std::uint32_t a1,
+    std::uint32_t GuestSem(ImportId id, const std::string& n, std::uint32_t sem, std::uint32_t a1,
                            std::uint32_t a2);
 
     // Host pointer from guest address (no checks; callbacks validate first).
@@ -483,10 +484,10 @@ public:
     // "#jni:N" for JNI) — no per-call overhead added here.
     void SvcHistDump();
 
-    std::uint32_t PthreadMutex(const std::string& n, std::uint32_t obj, std::uint32_t attr = 0);
+    std::uint32_t PthreadMutex(ImportId id, const std::string& n, std::uint32_t obj, std::uint32_t attr = 0);
     // Real rwlock map (MCSM-compare gap: guest imports 5 rwlock symbols).
-    std::uint32_t PthreadRwlock(const std::string& n, std::uint32_t obj);
-    std::uint32_t PthreadCond(const std::string& n, std::uint32_t cond, std::uint32_t arg1,
+    std::uint32_t PthreadRwlock(ImportId id, const std::string& n, std::uint32_t obj);
+    std::uint32_t PthreadCond(ImportId id, const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                               std::uint32_t arg2, bool monotonic = false);
     std::uint32_t PthreadKeyCreate(std::uint32_t key_ptr, std::uint32_t destr);
     std::uint32_t PthreadKeyDelete(std::uint32_t key);
@@ -846,13 +847,13 @@ private:
     void Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1 = 0);
   private:
     void RetVoid(Regs& regs) { Ret(regs, regs[0], regs[1]); }
-    void GuestMemCopy(Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
+    void GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
                       std::uint32_t len);
-    void GuestMemSet(Regs& regs, const std::string& n, std::uint32_t dst, int fill,
+    void GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, int fill,
                      std::uint32_t len);
     // inet_* helpers live here (not inside CallImport): gotos to bad_ptr
     // cannot cross their automatic inits (2026-10-10).
-    void InetThunk(Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
+    void InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                    std::uint32_t a2, std::uint32_t a3);
     GuestMemory& mem_;
     LoadedModule& mod_;

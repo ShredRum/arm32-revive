@@ -5,6 +5,7 @@
 
 #include "fast_math.h"
 #include "gl_ids.h"
+#include "import_ids.h"
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -96,6 +97,7 @@ struct Import {
                                   // unless the import runs guest-side VFP code)
     std::uint8_t fast_math = 0;  // kFastMath index + 1 (0 = not a fast-math import)
     GlId gl_id = GlId::None;     // GlIdForName: the id RealGL::Handle switches on
+    ImportId import_id = ImportId::None;  // ImportIdForName: CallImport's handler id
     bool blocking = false;       // BlockingImportName
     HotImport hot = HotImport::None;  // HotImportForName
 };

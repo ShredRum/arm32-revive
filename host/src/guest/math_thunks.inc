@@ -26,168 +26,168 @@
     float x = f32(a0), y = f32(a1);
     double xd = f64(a0, a1), yd = f64(a2, a3);
     // float -> float
-    if (n == "acosf") {
+    if (id == I::acosf_) {
         Ret(regs, b32(acosf(x)));
         return;
     }
-    if (n == "asinf") {
+    if (id == I::asinf_) {
         Ret(regs, b32(asinf(x)));
         return;
     }
-    if (n == "atanf") {
+    if (id == I::atanf_) {
         Ret(regs, b32(atanf(x)));
         return;
     }
-    if (n == "cbrtf") {
+    if (id == I::cbrtf_) {
         Ret(regs, b32(cbrtf(x)));
         return;
     }
-    if (n == "ceilf") {
+    if (id == I::ceilf_) {
         Ret(regs, b32(ceilf(x)));
         return;
     }
-    if (n == "cosf") {
+    if (id == I::cosf_) {
         Ret(regs, b32(cosf(x)));
         return;
     }
-    if (n == "coshf") {
+    if (id == I::coshf_) {
         Ret(regs, b32(coshf(x)));
         return;
     }
-    if (n == "erff") {
+    if (id == I::erff_) {
         Ret(regs, b32(erff(x)));
         return;
     }
-    if (n == "erfcf") {
+    if (id == I::erfcf_) {
         Ret(regs, b32(erfcf(x)));
         return;
     }
-    if (n == "expf") {
+    if (id == I::expf_) {
         Ret(regs, b32(expf(x)));
         return;
     }
-    if (n == "exp2f") {
+    if (id == I::exp2f_) {
         Ret(regs, b32(exp2f(x)));
         return;
     }
-    if (n == "expm1f") {
+    if (id == I::expm1f_) {
         Ret(regs, b32(expm1f(x)));
         return;
     }
-    if (n == "floorf") {
+    if (id == I::floorf_) {
         Ret(regs, b32(floorf(x)));
         return;
     }
-    if (n == "logf") {
+    if (id == I::logf_) {
         Ret(regs, b32(logf(x)));
         return;
     }
-    if (n == "log10f") {
+    if (id == I::log10f_) {
         Ret(regs, b32(log10f(x)));
         return;
     }
-    if (n == "log2f") {
+    if (id == I::log2f_) {
         Ret(regs, b32(log2f(x)));
         return;
     }
-    if (n == "rintf" || n == "nearbyintf" || n == "roundf" || n == "truncf") {
-        float r = (n == "rintf" || n == "nearbyintf")
+    if (id == I::rintf_ || id == I::nearbyintf_ || id == I::roundf_ || id == I::truncf_) {
+        float r = (id == I::rintf_ || id == I::nearbyintf_)
                       ? rintf(x)
-                      : (n == "roundf" ? roundf(x) : truncf(x));
+                      : (id == I::roundf_ ? roundf(x) : truncf(x));
         Ret(regs, b32(r));
         return;
     }
-    if (n == "sinf") {
+    if (id == I::sinf_) {
         Ret(regs, b32(sinf(x)));
         return;
     }
-    if (n == "sinhf") {
+    if (id == I::sinhf_) {
         Ret(regs, b32(sinhf(x)));
         return;
     }
-    if (n == "sqrtf") {
+    if (id == I::sqrtf_) {
         Ret(regs, b32(sqrtf(x)));
         return;
     }
-    if (n == "tanf") {
+    if (id == I::tanf_) {
         Ret(regs, b32(tanf(x)));
         return;
     }
-    if (n == "tanhf") {
+    if (id == I::tanhf_) {
         Ret(regs, b32(tanhf(x)));
         return;
     }
-    if (n == "tgammaf" || n == "lgammaf") {
-        Ret(regs, b32(n == "tgammaf" ? tgammaf(x) : lgammaf(x)));
+    if (id == I::tgammaf_ || id == I::lgammaf_) {
+        Ret(regs, b32(id == I::tgammaf_ ? tgammaf(x) : lgammaf(x)));
         return;
     }
     // double -> double
-    if (n == "acos" || n == "asin" || n == "atan" || n == "cbrt" || n == "ceil" || n == "cos" ||
-        n == "cosh" || n == "erf" || n == "erfc" || n == "exp" || n == "exp2" || n == "expm1" ||
-        n == "floor" || n == "log" || n == "log10" || n == "log2" || n == "log1p" || n == "rint" ||
-        n == "nearbyint" || n == "round" || n == "trunc" || n == "sin" || n == "sinh" ||
-        n == "sqrt" || n == "tan" || n == "tanh" || n == "tgamma" || n == "lgamma" ||
-        n == "acosh" || n == "asinh" || n == "atanh") {
+    if (id == I::acos_ || id == I::asin_ || id == I::atan_ || id == I::cbrt_ || id == I::ceil_ || id == I::cos_ ||
+        id == I::cosh_ || id == I::erf_ || id == I::erfc_ || id == I::exp_ || id == I::exp2_ || id == I::expm1_ ||
+        id == I::floor_ || id == I::log_ || id == I::log10_ || id == I::log2_ || id == I::log1p_ || id == I::rint_ ||
+        id == I::nearbyint_ || id == I::round_ || id == I::trunc_ || id == I::sin_ || id == I::sinh_ ||
+        id == I::sqrt_ || id == I::tan_ || id == I::tanh_ || id == I::tgamma_ || id == I::lgamma_ ||
+        id == I::acosh_ || id == I::asinh_ || id == I::atanh_) {
         double r = 0;
-        if (n == "acos") {
+        if (id == I::acos_) {
             r = acos(xd);
-        } else if (n == "asin") {
+        } else if (id == I::asin_) {
             r = asin(xd);
-        } else if (n == "atan") {
+        } else if (id == I::atan_) {
             r = atan(xd);
-        } else if (n == "cbrt") {
+        } else if (id == I::cbrt_) {
             r = cbrt(xd);
-        } else if (n == "ceil") {
+        } else if (id == I::ceil_) {
             r = ceil(xd);
-        } else if (n == "cos") {
+        } else if (id == I::cos_) {
             r = cos(xd);
-        } else if (n == "cosh") {
+        } else if (id == I::cosh_) {
             r = cosh(xd);
-        } else if (n == "erf") {
+        } else if (id == I::erf_) {
             r = erf(xd);
-        } else if (n == "erfc") {
+        } else if (id == I::erfc_) {
             r = erfc(xd);
-        } else if (n == "exp") {
+        } else if (id == I::exp_) {
             r = exp(xd);
-        } else if (n == "exp2") {
+        } else if (id == I::exp2_) {
             r = exp2(xd);
-        } else if (n == "expm1") {
+        } else if (id == I::expm1_) {
             r = expm1(xd);
-        } else if (n == "floor") {
+        } else if (id == I::floor_) {
             r = floor(xd);
-        } else if (n == "log") {
+        } else if (id == I::log_) {
             r = log(xd);
-        } else if (n == "log10") {
+        } else if (id == I::log10_) {
             r = log10(xd);
-        } else if (n == "log2") {
+        } else if (id == I::log2_) {
             r = log2(xd);
-        } else if (n == "log1p") {
+        } else if (id == I::log1p_) {
             // Was missing: the import fell through to the generic tail and
             // silently returned 0.0 instead of log(1+x) (Rio imports it).
             r = log1p(xd);
-        } else if (n == "rint" || n == "nearbyint") {
+        } else if (id == I::rint_ || id == I::nearbyint_) {
             r = rint(xd);
-        } else if (n == "round") {
+        } else if (id == I::round_) {
             r = round(xd);
-        } else if (n == "trunc") {
+        } else if (id == I::trunc_) {
             r = trunc(xd);
-        } else if (n == "sin") {
+        } else if (id == I::sin_) {
             r = sin(xd);
-        } else if (n == "sinh") {
+        } else if (id == I::sinh_) {
             r = sinh(xd);
-        } else if (n == "sqrt") {
+        } else if (id == I::sqrt_) {
             r = sqrt(xd);
-        } else if (n == "tan") {
+        } else if (id == I::tan_) {
             r = tan(xd);
-        } else if (n == "tanh") {
+        } else if (id == I::tanh_) {
             r = tanh(xd);
-        } else if (n == "tgamma") {
+        } else if (id == I::tgamma_) {
             r = tgamma(xd);
-        } else if (n == "lgamma") {
+        } else if (id == I::lgamma_) {
             r = lgamma(xd);
-        } else if (n == "acosh") {
+        } else if (id == I::acosh_) {
             r = acosh(xd);
-        } else if (n == "asinh") {
+        } else if (id == I::asinh_) {
             r = asinh(xd);
         } else {
             r = atanh(xd);
@@ -196,26 +196,26 @@
         return;
     }
     // (float,float) -> float
-    if (n == "atan2f" || n == "powf" || n == "fmodf" || n == "hypotf" || n == "copysignf" ||
-        n == "fminf" || n == "fmaxf" || n == "fdimf" || n == "remainderf" || n == "fmaf") {
+    if (id == I::atan2f_ || id == I::powf_ || id == I::fmodf_ || id == I::hypotf_ || id == I::copysignf_ ||
+        id == I::fminf_ || id == I::fmaxf_ || id == I::fdimf_ || id == I::remainderf_ || id == I::fmaf_) {
         float r = 0;
-        if (n == "atan2f") {
+        if (id == I::atan2f_) {
             r = atan2f(x, y);
-        } else if (n == "powf") {
+        } else if (id == I::powf_) {
             r = powf(x, y);
-        } else if (n == "fmodf") {
+        } else if (id == I::fmodf_) {
             r = fmodf(x, y);
-        } else if (n == "hypotf") {
+        } else if (id == I::hypotf_) {
             r = hypotf(x, y);
-        } else if (n == "copysignf") {
+        } else if (id == I::copysignf_) {
             r = copysignf(x, y);
-        } else if (n == "fminf") {
+        } else if (id == I::fminf_) {
             r = fminf(x, y);
-        } else if (n == "fmaxf") {
+        } else if (id == I::fmaxf_) {
             r = fmaxf(x, y);
-        } else if (n == "fdimf") {
+        } else if (id == I::fdimf_) {
             r = fdimf(x, y);
-        } else if (n == "remainderf") {
+        } else if (id == I::remainderf_) {
             r = remainderf(x, y);
         } else {
             r = fmaf(x, y, f32(regs[2]));
@@ -224,26 +224,26 @@
         return;
     }
     // (double,double) -> double
-    if (n == "atan2" || n == "pow" || n == "fmod" || n == "hypot" || n == "copysign" ||
-        n == "fmin" || n == "fmax" || n == "fdim" || n == "remainder" || n == "fma") {
+    if (id == I::atan2_ || id == I::pow_ || id == I::fmod_ || id == I::hypot_ || id == I::copysign_ ||
+        id == I::fmin_ || id == I::fmax_ || id == I::fdim_ || id == I::remainder_ || id == I::fma_) {
         double r = 0;
-        if (n == "atan2") {
+        if (id == I::atan2_) {
             r = atan2(xd, yd);
-        } else if (n == "pow") {
+        } else if (id == I::pow_) {
             r = pow(xd, yd);
-        } else if (n == "fmod") {
+        } else if (id == I::fmod_) {
             r = fmod(xd, yd);
-        } else if (n == "hypot") {
+        } else if (id == I::hypot_) {
             r = hypot(xd, yd);
-        } else if (n == "copysign") {
+        } else if (id == I::copysign_) {
             r = copysign(xd, yd);
-        } else if (n == "fmin") {
+        } else if (id == I::fmin_) {
             r = fmin(xd, yd);
-        } else if (n == "fmax") {
+        } else if (id == I::fmax_) {
             r = fmax(xd, yd);
-        } else if (n == "fdim") {
+        } else if (id == I::fdim_) {
             r = fdim(xd, yd);
-        } else if (n == "remainder") {
+        } else if (id == I::remainder_) {
             r = remainder(xd, yd);
         } else {
             // AAPCS32: only r0-r3 carry arguments. x and y fill r0:r1 and
@@ -260,23 +260,23 @@
         return;
     }
     // int-returning classifiers
-    if (n == "__fpclassifyd" || n == "__fpclassifyf") {
-        int c = (n == "__fpclassifyd") ? std::fpclassify(xd) : std::fpclassify(x);
+    if (id == I::__fpclassifyd_ || id == I::__fpclassifyf_) {
+        int c = (id == I::__fpclassifyd_) ? std::fpclassify(xd) : std::fpclassify(x);
         Ret(regs, static_cast<std::uint32_t>(c));
         return;
     }
-    if (n == "__isfinite" || n == "__isfinitef" || n == "__isnan" || n == "isnan" || n == "__isnanf" ||
-        n == "__isnormal" || n == "__isnormalf") {
+    if (id == I::__isfinite_ || id == I::__isfinitef_ || id == I::__isnan_ || id == I::isnan_ || id == I::__isnanf_ ||
+        id == I::__isnormal_ || id == I::__isnormalf_) {
         int c = 0;
-        if (n == "__isfinite") {
+        if (id == I::__isfinite_) {
             c = std::isfinite(xd);
-        } else if (n == "__isfinitef") {
+        } else if (id == I::__isfinitef_) {
             c = std::isfinite(x);
-        } else if (n == "__isnan" || n == "isnan") {  // bionic exports both (double)
+        } else if (id == I::__isnan_ || id == I::isnan_) {  // bionic exports both (double)
             c = std::isnan(xd);
-        } else if (n == "__isnanf") {
+        } else if (id == I::__isnanf_) {
             c = std::isnan(x);
-        } else if (n == "__isnormal") {
+        } else if (id == I::__isnormal_) {
             c = std::isnormal(xd);
         } else {
             c = std::isnormal(x);
@@ -284,16 +284,16 @@
         Ret(regs, static_cast<std::uint32_t>(c));
         return;
     }
-    if (n == "__signbit" || n == "__signbitf" || n == "__signbitl") {
-        int c = (n == "__signbit") ? std::signbit(xd) : std::signbit(x);
+    if (id == I::__signbit_ || id == I::__signbitf_ || id == I::__signbitl_) {
+        int c = (id == I::__signbit_) ? std::signbit(xd) : std::signbit(x);
         Ret(regs, static_cast<std::uint32_t>(c));
         return;
     }
-    if (n == "lrint" || n == "llrint" || n == "lrintf" || n == "llrintf" || n == "lround" ||
-        n == "llround" || n == "lroundf" || n == "llroundf") {
-        bool use_x = (n == "lrintf" || n == "llrintf" || n == "lroundf" || n == "llroundf");
-        bool is_ll = (n == "llrint" || n == "llrintf" || n == "llround" || n == "llroundf");
-        bool is_round = (n == "lround" || n == "llround" || n == "lroundf" || n == "llroundf");
+    if (id == I::lrint_ || id == I::llrint_ || id == I::lrintf_ || id == I::llrintf_ || id == I::lround_ ||
+        id == I::llround_ || id == I::lroundf_ || id == I::llroundf_) {
+        bool use_x = (id == I::lrintf_ || id == I::llrintf_ || id == I::lroundf_ || id == I::llroundf_);
+        bool is_ll = (id == I::llrint_ || id == I::llrintf_ || id == I::llround_ || id == I::llroundf_);
+        bool is_round = (id == I::lround_ || id == I::llround_ || id == I::lroundf_ || id == I::llroundf_);
         long long v = 0;
         if (use_x) {
             v = is_round ? (is_ll ? llroundf(x) : lroundf(x)) : (is_ll ? llrintf(x) : lrintf(x));
@@ -304,11 +304,11 @@
             static_cast<std::uint32_t>((std::uint64_t(v) >> 32) & 0xFFFFFFFFu));
         return;
     }
-    if (n == "ilogb" || n == "ilogbf" || n == "logb" || n == "logbf") {
-        if (n == "ilogb" || n == "ilogbf") {
-            int v = (n == "ilogb") ? ilogb(xd) : ilogbf(x);
+    if (id == I::ilogb_ || id == I::ilogbf_ || id == I::logb_ || id == I::logbf_) {
+        if (id == I::ilogb_ || id == I::ilogbf_) {
+            int v = (id == I::ilogb_) ? ilogb(xd) : ilogbf(x);
             Ret(regs, static_cast<std::uint32_t>(v));
-        } else if (n == "logb") {
+        } else if (id == I::logb_) {
             ret64(logb(xd));
         } else {
             Ret(regs, b32(logbf(x)));
@@ -316,19 +316,19 @@
         return;
     }
     // double,int -> double
-    if (n == "ldexp" || n == "scalbn" || n == "scalbln" || n == "scalbnl") {
+    if (id == I::ldexp_ || id == I::scalbn_ || id == I::scalbln_ || id == I::scalbnl_) {
         // scalbnl (long double variant) is the same on ARM32: long double ==
         // double. It was missing and silently returned 0.0 (Rio imports it).
         ret64(ldexp(xd, static_cast<int>(a2)));
         return;
     }
-    if (n == "ldexpf" || n == "scalbnf" || n == "scalblnf") {
+    if (id == I::ldexpf_ || id == I::scalbnf_ || id == I::scalblnf_) {
         Ret(regs, b32(ldexpf(x, static_cast<int>(a1))));
         return;
     }
     // modf/frexp with out-pointers
-    if (n == "modf" || n == "modff") {
-        if (n == "modf") {
+    if (id == I::modf_ || id == I::modff_) {
+        if (id == I::modf_) {
             if (!CheckRange(a2, 8, true)) {
                 goto bad_ptr;
             }
@@ -349,8 +349,8 @@
         }
         return;
     }
-    if (n == "frexp" || n == "frexpf") {
-        if (n == "frexp") {
+    if (id == I::frexp_ || id == I::frexpf_) {
+        if (id == I::frexp_) {
             if (!CheckRange(a2, 4, true)) {
                 goto bad_ptr;
             }
@@ -371,38 +371,38 @@
         }
         return;
     }
-    if (n == "nan" || n == "nanf" || n == "nanl") {
-        if (n == "nanf" || n == "nanl") {
+    if (id == I::nan_ || id == I::nanf_ || id == I::nanl_) {
+        if (id == I::nanf_ || id == I::nanl_) {
             Ret(regs, b32(nanf(GuestStr(a0))));
         } else {
             ret64(nan(GuestStr(a0)));
         }
         return;
     }
-    if (n == "nextafter" || n == "nextafterf" || n == "nexttoward" || n == "nexttowardf") {
-        if (n == "nextafter") {
+    if (id == I::nextafter_ || id == I::nextafterf_ || id == I::nexttoward_ || id == I::nexttowardf_) {
+        if (id == I::nextafter_) {
             ret64(nextafter(xd, yd));
-        } else if (n == "nextafterf") {
+        } else if (id == I::nextafterf_) {
             Ret(regs, b32(nextafterf(x, y)));
-        } else if (n == "nexttoward") {
+        } else if (id == I::nexttoward_) {
             ret64(nexttoward(xd, yd));
         } else {
             Ret(regs, b32(nexttowardf(x, yd)));
         }
         return;
     }
-    if (n == "remquo" || n == "remquof") {
+    if (id == I::remquo_ || id == I::remquof_) {
         // AAPCS32: remquo(double, double, int*) fills r0-r3 with the doubles,
         // so quo is on the stack at [sp]; remquof(float, float, int*) passes
         // quo in r2.
         std::uint32_t qp = a2;
-        if (n == "remquo") {
+        if (id == I::remquo_) {
             if (!CheckRange(regs[13], 4, false)) {
                 goto bad_ptr;
             }
             std::memcpy(&qp, H(regs[13]), 4);
         }
-        if (n == "remquo") {
+        if (id == I::remquo_) {
             if (!CheckRange(qp, 4, true)) {
                 goto bad_ptr;
             }
