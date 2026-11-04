@@ -63,6 +63,37 @@ NOFASTDISPATCH, NOOPT), HARNESS_REALGL/PAGESIZE/HEAPBASE where tests use them.
 - Offline network policy, guest sha256 checks.
 - The per-thread GL binding cache resets (correct by construction).
 
+## E. Speed work done (2026-11-04, MCSM episode scene, sandbox)
+
+Each one its own commit with a measurement; numbers are per call unless
+said otherwise. Whole effect: 47 -> 100 fps at 120 Hz (new game, episode 1,
+first 60 s, back to back), before the direct jump.
+
+| what | before | after |
+|---|---|---|
+| fast-math table for every pure libm import (fast_math.h) | sinf 2.5 us | table jump |
+| GL by load-time id, no per-call string/snprintf (gl_ids.h) | glUniform4fv 4.3 us | 3.1 us |
+| EGL context check once per thread | 3.1 us | 2.16 us = bare driver |
+| per-thread GL buffer-binding copy, dropped at every context change | glVertexAttribPointer 3.5 us | off the top list |
+| mutex: trylock before the sliced wait; own map lock; holder book in the object | lock 5.7 us | ~1 us |
+| semaphores: own map lock | under mutex_ | own lock (sem_post's ~20 us is the scheduler) |
+| quarantine ring, then quarantine off (A5) | free 3.3 us under the lock | ~1 us |
+| signals: sliced waits only after a signal is sent (A8) | 144 k wakeups/s | ~15.5 k/s |
+| every import by ImportId (import_ids.h), then switch (id) | chain 1-5 us | pthread_self 99 ns, frexpf 544 ns |
+
+## F. Speed work not done yet (known, each needs its measurement first)
+
+| # | what | evidence | note |
+|---|---|---|---|
+| F1 | malloc/memalign/free ~2 us a call: runtime-wide mutex_ + live index (A7) + dlmalloc | MCSM ~250 k calls each per 30 s | the busiest import left; own heap lock, then A7 |
+| F2 | direct jump inside the big nested blocks of CallImport (file bridge ~2200 lines, APK assets, string block) | inner chains of integer compares | a nested switch after each block's declarations |
+| F3 | RealGL's own mutex on every GL call | one render thread mostly; ~0.3-0.6 us over the driver left | check what it guards (active_tex_, glstr slots) |
+| F4 | GL on a thread of its own (queue + flush on sync calls) | driver ~1-2 us x ~150 k calls/s on the render thread | does not cut heat (same work, more threads); only if a phone measurement shows the render thread is the limit |
+| F5 | the JIT itself (Dynarmic code quality, block linking, dispatch) | ~half of the process CPU is guest code | biggest reserve, biggest job; needs a profiler that works on the device |
+| F6 | gettimeofday 2.8 us vs 440 ns bare on the sandbox | syscall + a loaded box | on the phone vDSO; nothing of ours, recheck there |
+| F7 | sem_post ~20 us wall | the poster yields to the woken worker | scheduler, as natively: leave |
+| F8 | phone measurements (fps, heat) with MCSM | sandbox only so far | needs MCSM data on a non-root phone first |
+
 ## Order
 
 1. A1, A6 (certain, tiny). 2. A2-A4 + B3/B4 (one change, measured).
