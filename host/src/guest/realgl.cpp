@@ -133,6 +133,15 @@ bool RealGL::Ensure() {
 // no current context goes to the driver too, which ignores it as it would
 // for the original library (never seen on the five titles).
 bool RealGL::Ensure() {
+    // Only a diagnostic: the answer is true either way (the driver ignores a
+    // call without a context). eglGetCurrentContext costs ~1 us on the
+    // sandbox, as much as the GL call itself, so it is asked on a thread's
+    // first GL call only (every call under HARNESS_DIAG).
+    static thread_local bool checked = false;
+    if (checked && !DiagOn()) {
+        return true;
+    }
+    checked = true;
     if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
         static std::atomic<int> nolog{0};
         if (nolog.fetch_add(1) < 3) {
