@@ -861,6 +861,7 @@ private:
     Dynarmic::ExclusiveMonitor monitor_{kMaxGuestCpus};
     std::mutex cpu_ids_mu_;
     std::bitset<kMaxGuestCpus> cpu_ids_used_;
+    std::shared_mutex sem_map_mu_;  // guards sem_map_ (readers: post/wait)
     std::unordered_map<std::uint32_t, std::shared_ptr<sem_t>> sem_map_;  // GuestSem
     std::vector<std::uint32_t> lib_handles_;  // GuestLibraryHandle, per library
     std::uint32_t global_dl_handle_ = 0;      // dlopen(NULL)

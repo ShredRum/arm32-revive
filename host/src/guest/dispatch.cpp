@@ -1358,8 +1358,19 @@ std::uint32_t Runtime::GuestSem(const std::string& n, std::uint32_t sem, std::ui
         return kSemBadPtr;
     }
     std::shared_ptr<sem_t> s;
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (n == "sem_post" || n == "sem_wait" || n == "sem_trywait" || n == "sem_timedwait" ||
+        n == "sem_getvalue") {
+        // The hot path only reads the map: its own reader lock, never the
+        // runtime's mutex_ (as the guest mutex map).
+        std::shared_lock<std::shared_mutex> map_lock(sem_map_mu_);
+        const auto it = sem_map_.find(sem);
+        if (it == sem_map_.end()) {
+            SetGuestErrno(EINVAL);
+            return 0xFFFFFFFFu;
+        }
+        s = it->second;
+    } else {
+        std::unique_lock<std::shared_mutex> map_lock(sem_map_mu_);
         if (n == "sem_init") {  // (sem, pshared, value)
             auto ns = std::shared_ptr<sem_t>(new sem_t, [](sem_t* p) {
                 ::sem_destroy(p);

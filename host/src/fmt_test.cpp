@@ -410,6 +410,12 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_key_delete", true, 0, 0, 0});   // 111
     mod.imports.push_back(abr::Import{"pthread_attr_init", true, 0, 0, 0});        // 112
     mod.imports.push_back(abr::Import{"pthread_attr_setstacksize", true, 0, 0, 0});  // 113
+    mod.imports.push_back(abr::Import{"sem_init", true, 0, 0, 0});      // 114
+    mod.imports.push_back(abr::Import{"sem_post", true, 0, 0, 0});      // 115
+    mod.imports.push_back(abr::Import{"sem_wait", true, 0, 0, 0});      // 116
+    mod.imports.push_back(abr::Import{"sem_trywait", true, 0, 0, 0});   // 117
+    mod.imports.push_back(abr::Import{"sem_getvalue", true, 0, 0, 0});  // 118
+    mod.imports.push_back(abr::Import{"sem_destroy", true, 0, 0, 0});   // 119
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -429,6 +435,39 @@ int main() {
     };
     put(kScratch, "hello");
     put(kScratch + 0x40, "world");
+
+    // --- semaphores: count, try, value, a waiter woken by a post from another
+    //     thread, destroy; an unknown semaphore is EINVAL (-1).
+    {
+        const std::uint32_t kSem = 0x10008C00, kVal = 0x10008C10;
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t args[4] = {x, y, z, 0};
+            return abr::RuntimeTestAccess::Call(rt, idx, args);
+        };
+        Expect("sem_init(1)", std::to_string(call(114, kSem, 0, 1)), "0");
+        Expect("sem_trywait takes the one", std::to_string(call(117, kSem)), "0");
+        Expect("sem_trywait on zero = -1", std::to_string((std::int32_t)call(117, kSem)), "-1");
+        call(115, kSem);
+        call(115, kSem);
+        call(118, kSem, kVal);
+        Expect("sem_getvalue after two posts", std::to_string(*rt.H<std::int32_t>(kVal)), "2");
+        call(117, kSem);
+        call(117, kSem);
+        std::atomic<int> woke{0};
+        std::thread w([&] {
+            rt.ThreadEnter(nullptr, 79);
+            woke = call(116, kSem) == 0 ? 1 : 2;
+            rt.ThreadEnter(nullptr, 0);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        const int before_post = woke.load();
+        call(115, kSem);
+        w.join();
+        Expect("sem_wait sleeps until a post, then returns 0",
+               std::to_string(before_post) + "," + std::to_string(woke.load()), "0,1");
+        Expect("sem_destroy", std::to_string(call(119, kSem)), "0");
+        Expect("sem_post on a destroyed sem = -1", std::to_string((std::int32_t)call(115, kSem)), "-1");
+    }
 
     // --- fast-math table: bit-identical to the name chain for every entry
     //     (r0 and r1 compared: a double result is r0:r1).
