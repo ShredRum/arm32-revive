@@ -179,6 +179,29 @@ beyond the run-to-run spread (~5 %). Per call the jump is a large cut
 were ~13 % of one core spread over worker threads: it saves CPU (heat), the
 frame is set by the render thread and the GPU.
 
+## State 2026-11-04 late (before a context compaction)
+
+Branch mcsm, everything committed. Core today: class loader fix (audio),
+R-012, fast math, GL ids, EGL check once, GL binding cache, mutex rework
+(trylock, own map lock, holder book in the object, destroy as bionic, no
+witness), semaphores own lock, signals sliced only after a send, heap own
+lock, quarantine removed (R-013, owner: never back), every import by
+ImportId + switch, RealGL lock off the call path. Lists with numbers:
+docs/minimum.md (E done, F not done, B/C pending), docs/jit-dispatch.md.
+MCSM sandbox: 47 -> ~90-100 fps at 120 Hz (spread ~5 %).
+Measuring rules: only the game under test running (devgate stops the
+others), builds back to back both orders, SurfaceFlinger counter, new game
+episode 1 first 60 s.
+Not done yet: a gate of all titles on this core (only rio, 99 Bricks, mcsm
+booted after the last changes; 99 Bricks hit R-010 once in ~10 boots
+today); the owner's phone still has the midday APKs. MCSM is not on the
+phone (its data needs a place a non-root phone can fill).
+Next, in order: gate all titles + send APKs to the phone; F8 (MCSM on the
+phone, data outside the private dir) and phone measurements; then F4 (GL
+thread) or F5 (JIT) by what the phone shows. Later: B1/B5/B6 policy, C
+cleanup, R-010 (Mono metadata assert, possibly a use-after-free: fix at
+the source).
+
 ## Plan
 
 1. Profile + tree: host as which lib name, the other four guest libs.
