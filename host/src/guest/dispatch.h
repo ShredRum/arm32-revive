@@ -250,9 +250,10 @@ public:
     int GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot);
 
     // --- Guest signals (arm32 numbering; sigset_t = 32 bits, signals 1-32).
-    // Off until a guest installs a handler for a non-fault signal or sends
-    // one (tkill/pthread_kill/kill): the Rovio titles never do, so their
-    // waits, host calls and run loops are unchanged.
+    // Off until a guest sends one (tkill/pthread_kill/kill): the Rovio
+    // titles never do, so their waits, host calls and run loops are
+    // unchanged; a thread already blocked when the first one comes is served
+    // by a proxy (below).
     // sigaction/sigprocmask keep the guest's dispositions and masks; a sent
     // signal is pending on the target thread. A thread executing guest code
     // stops at its next block boundary (kSignalHalt) and runs the handler; a

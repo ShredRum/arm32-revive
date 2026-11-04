@@ -11872,19 +11872,13 @@ std::uint32_t Runtime::GuestSigaction(std::uint32_t sig, std::uint32_t act, std:
         std::uint32_t a[4];
         std::memcpy(a, H(act), 16);
         sig_acts_[sig] = GuestSigAct{a[0], a[1] & ~kUnblockable, a[2]};
-        // A handler for a signal other threads send (Boehm's suspend and
-        // restart signals, not a crash handler for a fault signal) turns
-        // interruptible waits on now, before any thread can block in a plain
-        // wait that a later signal would never reach. Fault-signal handlers
-        // (breakpad in the Rovio titles) leave the waits as they are.
-        constexpr std::uint32_t kFaultSignals = (1u << (4 - 1)) | (1u << (5 - 1)) |
-                                                (1u << (6 - 1)) | (1u << (7 - 1)) |
-                                                (1u << (8 - 1)) | (1u << (11 - 1)) |
-                                                (1u << (31 - 1));
-        if (a[0] > 1 && !(kFaultSignals & (1u << (sig - 1))) &&
-            !signals_in_use_.exchange(true, std::memory_order_acq_rel)) {
-            std::printf("[signal] guest handler for signal %u: interruptible waits on\n", sig);
-        }
+        // Interruptible (sliced) waits start with the first signal SENT
+        // (GuestSendSignal), not here. 906d206 had turned them on at the
+        // first non-fault handler install because Mono's finalizer, blocked
+        // in a plain sem_wait, never saw Boehm's suspend signal; the proxy
+        // delivery (81bdbc3) has run the handler for such a thread since. A
+        // handler installed and never used (MCSM's SIGINT) left ~45 idle
+        // workers waking every 2 ms (~1500 times a second each).
     }
     return 0;
 }
@@ -11946,7 +11940,9 @@ std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
     if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
         return 0;  // discarded at generation, as the kernel does
     }
-    signals_in_use_.store(true, std::memory_order_release);
+    if (!signals_in_use_.exchange(true, std::memory_order_acq_rel)) {
+        std::printf("[signal] first signal sent (%u to tid %u): interruptible waits on\n", sig, tid);
+    }
     const std::shared_ptr<SigThread> st = it->second;
     st->pending.fetch_or(kSigBit(sig), std::memory_order_acq_rel);
     if (Dynarmic::A32::Jit* j = st->jit.load(std::memory_order_acquire)) {

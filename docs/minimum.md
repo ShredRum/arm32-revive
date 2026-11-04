@@ -25,6 +25,8 @@ destroy race).
 | A5 | heap quarantine | GuestFree | 53edf4f, hunt | R-013: off by default, six titles clean | delete the ring once confirmed |
 | A6 DONE | `EnvOn("HARNESS_...")` on hot paths: each call scans the cached table (~50 keys): GLDRAWLOG x24 in realgl (draws, uploads, attrib pointers), MALLOCLOG x2 + NORELEASE + QUARANTINE per free | realgl.cpp, GuestFree | debug knobs | the knobs are off in shipping | read each knob once (static const) or drop the knob (C) |
 | A7 | live block index next to dlmalloc (~0.4 us per malloc+free in MCSM) | LiveIdx*, GuestFree/Memalign | D2 | dlmalloc knows chunk sizes; but the index also gives "free of an unknown address is ignored" and interior lookups for sscanf/JNI bounds | investigate before touching |
+| A8 DONE | interruptible (2 ms sliced) waits from the first non-fault handler install: MCSM's never-used SIGINT handler kept ~45 idle workers waking ~1500 times a second each | GuestSigaction | 906d206 (Mono finalizer hang); the proxy delivery 81bdbc3, two commits later, solves it generally | slicing starts at the first signal sent; MCSM menu workers ~1450 -> ~330 wakeups/s; 99 Bricks 5/5 boots to the menu |
+
 
 ## B. Survive-instead-of-crash paths (no cost unless they fire)
 
