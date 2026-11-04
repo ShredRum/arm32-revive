@@ -657,6 +657,15 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0,
 
 // align == 0: plain malloc. Otherwise a power of two (memalign semantics);
 // the block is a normal heap block for free/realloc/usable_size.
+// The heap's debug knobs, read once (EnvOn scans its table on every call,
+// and malloc/free are hot). The environment is final before guest code runs.
+enum HeapKnobId { kMallocLog, kNoRelease, kQuarantineOn };
+static bool HeapKnob(HeapKnobId k) {
+    static const bool on[3] = {EnvOn("HARNESS_MALLOCLOG"), EnvOn("HARNESS_NORELEASE"),
+                               EnvOn("HARNESS_QUARANTINE")};
+    return on[k];
+}
+
 std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
     RtLock lock(*this, 1);
     // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
@@ -757,7 +766,7 @@ std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
     }
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
-    if (EnvOn("HARNESS_MALLOCLOG")) {
+    if (HeapKnob(kMallocLog)) {
         // ActiveJit (thread-local): worker mallocs get the worker lr.
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
@@ -955,7 +964,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
 #endif
     if (!size) {
         ++hx_free_unknown_;
-        if (EnvOn("HARNESS_MALLOCLOG")) {
+        if (HeapKnob(kMallocLog)) {
             std::uint32_t lr = 0;
             Dynarmic::A32::Jit* aj = ActiveJit();
             if (aj) {
@@ -982,7 +991,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
         std::printf("[heap] LOUD free with bad range %08x size=%u -- skipped poison\\n", addr,
                     size);
     }
-    if (EnvOn("HARNESS_MALLOCLOG")) {
+    if (HeapKnob(kMallocLog)) {
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
@@ -996,7 +1005,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // bump, keep dlmalloc layout). Triage switch: if the silent death at
     // fclose/free vanishes with it, the killer is mspace_free detonating
     // pre-smashed headers (writer hunt continues, game runs meanwhile).
-    if (EnvOn("HARNESS_NORELEASE")) {
+    if (HeapKnob(kNoRelease)) {
         norelease_held_.push_back({addr, size});
         norelease_set_.insert(addr);
         return;
@@ -1010,7 +1019,7 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // of it is then an unknown address, ignored as before).
     // HARNESS_QUARANTINE=1 brings the 64-free delay back.
     QEnt q0{};
-    if (!EnvOn("HARNESS_QUARANTINE")) {
+    if (!HeapKnob(kQuarantineOn)) {
         q0 = {addr, size};
     } else if (q_count_ < kQuarantine) {
         q_ring_[(q_head_ + q_count_) % kQuarantine] = {addr, size};
@@ -1623,8 +1632,16 @@ void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what)
     }
 }
 
+static thread_local std::uint64_t t_svc_count = 0;
+std::uint64_t Runtime::ThreadSvcCount() { return t_svc_count; }
+
 void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
+    t_svc_count++;
+#ifdef ABR_DIAG_COUNTERS
+    // Read only by the [counters] line; in a shipping build this shared
+    // counter would be one contended cache line on every guest->host call.
     svc_count.fetch_add(1, std::memory_order_relaxed);
+#endif
     if (swi == kSwiOnce) {
         // The pthread_once init routine returned via ITS OWN trampoline (only
         // PthreadOnce() ever puts once_va in LR). Unambiguous by construction:

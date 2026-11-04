@@ -3336,9 +3336,9 @@ int main() {
         abr::RuntimeTestAccess::SetTls(rt, 5, 22);
         rt.ThreadEnter(ja.get(), 801);
         auto host_calls = [&](auto fn) {
-            const std::uint64_t n0 = rt.svc_count.load();
+            const std::uint64_t n0 = abr::Runtime::ThreadSvcCount();
             fn();
-            return std::to_string(rt.svc_count.load() - n0);
+            return std::to_string(abr::Runtime::ThreadSvcCount() - n0);
         };
         // Each run ends in one svc: the halt.
         Expect("first read goes to the host and binds",

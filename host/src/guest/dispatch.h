@@ -741,7 +741,9 @@ public:
 
     // G1.2: monotonic diag counter; only ever read in diag/harness dumps, so
     // relaxed is enough (never an ordering dependency).
-    std::atomic<std::uint64_t> svc_count{0};
+    std::atomic<std::uint64_t> svc_count{0};  // all threads; diag builds only
+    // Guest->host calls made by the calling thread (no shared cache line).
+    static std::uint64_t ThreadSvcCount();
     // Kuser entries 0..4 (barrier/cmpxchg/cmpxchg64/get_tls/bad). Relaxed:
     // only used to print the first hit of each entry under DiagOn().
     std::atomic<std::uint64_t> kuser_hits_[5] = {};

@@ -297,6 +297,13 @@ thread_local GlBindings t_bindings;
 
 void ForgetGlBindings() { t_bindings = GlBindings{}; }
 
+// HARNESS_GLDRAWLOG (draw/upload tracing), read once: EnvOn scans its table
+// on every call, and this is asked on every draw, upload and attrib pointer.
+static bool GlDrawLog() {
+    static const bool on = EnvOn("HARNESS_GLDRAWLOG");
+    return on;
+}
+
 // The buffer bound to `binding` (GL_ARRAY_BUFFER_BINDING or
 // GL_ELEMENT_ARRAY_BUFFER_BINDING) in the current context.
 static GLuint BoundBuffer(GLenum binding) {
@@ -560,13 +567,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     // 2014 Mali/Adreno accepted them, strict compilers need newlines) ---
     if (id == G::glCreateShader) {
         GLuint s = glCreateShader((GLenum)a0);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x) -> %u\n", name, a0, s);
+        if (GlDrawLog()) std::printf("[realgl] %s(%04x) -> %u\n", name, a0, s);
         r->Ret(regs, s);
         return true;
     }
     if (id == G::glCreateProgram) {
         GLuint p = glCreateProgram();
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s -> %u\n", name, p);
+        if (GlDrawLog()) std::printf("[realgl] %s -> %u\n", name, p);
         r->Ret(regs, p);
         return true;
     }
@@ -689,7 +696,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             glGetProgramInfoLog((GLuint)a0, sizeof(log), nullptr, log);
             std::printf("[realgl] %s(%u) FAIL: %s\n", name, a0, log);
         } else {
-            if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) ok\n", name, a0);
+            if (GlDrawLog()) std::printf("[realgl] %s(%u) ok\n", name, a0);
         }
         r->Ret(regs, 0);
         return true;
@@ -720,7 +727,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             std::uint32_t w = (std::uint32_t)v;
             std::memcpy(r->H(a2), &w, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,%04x) -> %d\n", name, a0, a1, v);
+        if (GlDrawLog()) std::printf("[realgl] %s(%u,%04x) -> %d\n", name, a0, a1, v);
         r->Ret(regs, 0);
         return true;
     }
@@ -737,21 +744,21 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
             std::memcpy(r->H(a2), &lenptr, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) len=%u\n", name, a0, lenptr);
+        if (GlDrawLog()) std::printf("[realgl] %s(%u) len=%u\n", name, a0, lenptr);
         r->Ret(regs, 0);
         return true;
     }
     if (id == G::glGetAttribLocation) {
         std::string s = GStr(r, a1);
         GLint loc = glGetAttribLocation((GLuint)a0, s.c_str());
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
+        if (GlDrawLog()) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
     if (id == G::glGetUniformLocation) {
         std::string s = GStr(r, a1);
         GLint loc = glGetUniformLocation((GLuint)a0, s.c_str());
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
+        if (GlDrawLog()) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
@@ -777,7 +784,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         if (typep && r->CheckRange(typep, 4, true)) {
             std::memcpy(r->H(typep), &type, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,%u) -> \"%s\"\n", name, a0, a1, nm ? nm : "?");
+        if (GlDrawLog()) std::printf("[realgl] %s(%u,%u) -> \"%s\"\n", name, a0, a1, nm ? nm : "?");
         r->Ret(regs, 0);
         return true;
     }
@@ -823,7 +830,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) ok\n", name, a0);
+        if (GlDrawLog()) std::printf("[realgl] %s(%u) ok\n", name, a0);
         r->Ret(regs, 0);
         return true;
     }
@@ -837,14 +844,14 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         } else {
             glBindRenderbuffer((GLenum)a0, (GLuint)a1);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%u) ok\n", name, a0, a1);
+        if (GlDrawLog()) std::printf("[realgl] %s(%04x,%u) ok\n", name, a0, a1);
         r->Ret(regs, 0);
         return true;
     }
     if (id == G::glFramebufferRenderbuffer) {
         // (target, attachment, renderbuffertarget, renderbuffer)
         glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%04x,%04x,%u) ok\n", name, a0, a1, a2, a3);
+        if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%04x,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
     }
@@ -853,7 +860,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // the first stack word.
         const std::uint32_t level = Stk(r, sp, 0);
         glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             std::printf("[realgl] %s(%04x,%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3, level);
         }
         r->Ret(regs, 0);
@@ -862,7 +869,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     if (id == G::glRenderbufferStorage) {
         // (target, internalformat, width, height)
         glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3);
+        if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
     }
@@ -911,7 +918,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         GLfloat vals[16] = {};  // the largest GLES2 uniform value: mat4
         glGetUniformfv((GLuint)a0, (GLint)a1, vals);
         std::memcpy(r->H(a2), vals, comps * 4);
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             std::printf("[realgl] %s(%u,%d) type=%04x comps=%zu ok\n", name, a0, (int)a1, found_type, comps);
         }
         r->Ret(regs, 0);
@@ -962,7 +969,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // Don't consume the driver's error queue on the fast path: the game
         // polls glGetError itself for the ETC->soft-decode fallback, and an
         // intermediate query eats its signal. Query only for diag.
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             const GLenum e = glGetError();
             // TEMP-DIAG: track size by bound texture of active unit (read only
             // by the GLDRAWLOG block at :819, so write under the same gate).
@@ -997,10 +1004,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         glTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w, (GLsizei)h,
                         (GLenum)fmt, (GLenum)typ, p);
         // Same error-queue reasoning as TexImage2D (game-owned signal).
-        GLenum e = EnvOn("HARNESS_GLDRAWLOG") ? glGetError() : (GLenum)0;
+        GLenum e = GlDrawLog() ? glGetError() : (GLenum)0;
         // TEMP-DIAG (black frame): checksum the whole upload (capped).
         // Gated default-off: per-upload CPU loop + printfs, zero guest effect.
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             std::uint64_t sum = 0, total = 0;
             if (p && w && h && w < 4096 && h < 4096) {
                 std::uint32_t bpp = (typ == 0x1401u) ? 4 : 2;
@@ -1017,7 +1024,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                         typ, p ? "data" : "NULL", e, (unsigned long long)sum,
                         (unsigned long long)total);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             std::printf("[realgl] %s %ux%u fmt=%04x %s err=%04x\n", name, w, h, fmt, p ? "data" : "NULL",
                         e);
         }
@@ -1037,7 +1044,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             glCompressedTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLsizei)a3, (GLsizei)h, 0,
                                    (GLsizei)size, p);
             // Game-owned error signal (ETC fallback); query + print for diag only.
-            if (EnvOn("HARNESS_GLDRAWLOG")) {
+            if (GlDrawLog()) {
                 GLenum e = glGetError();
                 std::printf("[realgl] %s ifmt=%04x %ux%u %uB %s err=%04x\n", name, a2, a3, h, size,
                             p ? "data" : "NULL", e);
@@ -1051,7 +1058,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             glCompressedTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w,
                                       (GLsizei)h, (GLenum)fmt, (GLsizei)size, p);
             // Same game-owned-signal reasoning as the Tex branch.
-            if (EnvOn("HARNESS_GLDRAWLOG")) {
+            if (GlDrawLog()) {
                 GLenum e = glGetError();
                 std::printf("[realgl] %s %ux%u fmt=%04x %uB %s err=%04x\n", name, w, h, fmt, size,
                             p ? "data" : "NULL", e);
@@ -1117,7 +1124,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         } else {
             glBufferSubData((GLenum)a0, (GLintptr)a1, (GLsizeiptr)size, p);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             std::printf("[realgl] %s tgt=%04x %uB %s\n", name, a0, size, p ? "data" : "NULL");
         }
         r->Ret(regs, 0);
@@ -1138,7 +1145,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                               p);
         // TEMP-DIAG (black frame): dump first vertex for float attribs.
         // Gated default-off (was per-attrib-setup printf).
-        if (!vbo && a2 == 0x1406u && p && EnvOn("HARNESS_GLDRAWLOG") &&
+        if (!vbo && a2 == 0x1406u && p && GlDrawLog() &&
             r->CheckRange(gp, 16, false)) {
             const float* f = (const float*)p;
             std::printf("[realgl] %s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", name, a0, a1,
@@ -1155,7 +1162,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     if (id == G::glDrawArrays || id == G::glDrawElements) {
         // TEMP-DIAG (black frame): dump real draw state. ~10 GL round-trips
         // + 4 printfs PER DRAW — gated default-off (old investigation).
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             GLint prog = 0, tex = 0, vp[4] = {0}, blend = 0, scissor = 0, ab0 = 0;
             glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
             glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
@@ -1217,7 +1224,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
         }
         // Per-draw glGetError stalls the GPU pipeline every draw; diag only.
-        if (EnvOn("HARNESS_GLDRAWLOG")) {
+        if (GlDrawLog()) {
             GLenum e = glGetError();
             std::printf("[realgl] %s err=%04x\n", name, e);
         }
