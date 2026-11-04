@@ -143,8 +143,9 @@ Frames: 40-49 -> 56-60 per second (60 = display cap). Bare ANGLE on the
 sandbox: glUniform4fv 2.16 us, glDisableVertexAttribArray/glBindBuffer/
 glGetIntegerv ~1.04 us, eglGetCurrentContext 0.97 us (a native test).
 Left on purpose: BoundBuffer asks the driver (glGetIntegerv) per
-glVertexAttribPointer/glDrawElements, ~17 ms/s; a cached binding goes stale
-when Java recreates a Rovio context behind the host (E-03).
+glVertexAttribPointer/glDrawElements, ~17 ms/s; a cached binding could go
+stale when Java recreates a Rovio context behind the host (REVIEW E-03, a
+suspected defect, never seen failing). Safe form: docs/jit-dispatch.md.
 Open: free ~10 us per call inside the runtime (not the lock wait); the
 numbers are wall time with ~45 threads on 8 cores, so descheduling is in
 them. Not measured on the phone (its driver and syscalls are cheaper).

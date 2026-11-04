@@ -131,6 +131,27 @@ jumps into the old block. That is a third suspect for stale translations under
 a shared cache. Any per-thread table has the same trap: an entry must not
 survive an invalidation, which is why it needs the generation check.
 
+## Host import overhead (2026-11-04, branch `mcsm`)
+
+Measured with the diag per-import timing (MCSM episode scene, numbers in
+games/mcsm/JOURNAL.md): fast math table, GL by load-time id, one EGL context
+check per thread, trylock before the sliced mutex wait, own lock for the
+guest mutex map. 40-49 -> 56-60 fps on the sandbox.
+
+Ideas kept for later, each only with a measurement that shows the need:
+- Cached buffer bindings in realgl. Today BoundBuffer asks the driver
+  (glGetIntegerv, ~1 us on the sandbox) at every glVertexAttribPointer and
+  glDrawElements: ~17 ms/s in MCSM, ~0.35 ms a frame. A host copy was REVIEW
+  E-03 (suspected, never seen failing): bindings belong to the GL context,
+  and for the Rovio titles Java's GLSurfaceView creates contexts behind the
+  host, so a stale "bound" would hand a buffer offset to the driver as a host
+  pointer. Safe form if ever needed: cache only where the host sees every
+  eglMakeCurrent (titles whose guest drives EGL, like MCSM), reset it there
+  and in glDeleteBuffers; keep asking the driver for the others.
+- free(): ~10 us a call inside the runtime besides the lock wait (MCSM),
+  cause not found; the numbers are wall time with ~45 threads on 8 cores.
+- malloc/free still take the runtime-wide mutex_.
+
 ## State
 
 See `git log master..jit-dispatch`.
