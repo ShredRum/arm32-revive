@@ -290,6 +290,9 @@ void JniArgsProbe::Raw(void*, void* thiz, ...) {
 }
 
 int main() {
+    // The quarantine is off by default (REVIEW R-013); its test at the end
+    // needs it on. Set before the first free: EnvOn caches its answer.
+    setenv("HARNESS_QUARANTINE", "1", 1);
     abr::GuestMemory mem;
     abr::LoadedModule mod;
     // Imports so the dispatcher can be reached for the libc calls below.

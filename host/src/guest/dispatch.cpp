@@ -1005,11 +1005,12 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // fired in any session, while poisoned stale reads proved fatal). A full
     // ring hands its oldest block back to dlmalloc as the new one comes in
     // (the set held is the same: the last kQuarantine frees).
-    // HARNESS_NOQUARANTINE=1 (REVIEW R-013): no delay, the block goes back
-    // to dlmalloc at once (a second free of it is then an unknown address,
-    // ignored as before).
+    // Off by default since 2026-11-04 (REVIEW R-013, under test on the
+    // owner's phone): the block goes back to dlmalloc at once (a second free
+    // of it is then an unknown address, ignored as before).
+    // HARNESS_QUARANTINE=1 brings the 64-free delay back.
     QEnt q0{};
-    if (EnvOn("HARNESS_NOQUARANTINE")) {
+    if (!EnvOn("HARNESS_QUARANTINE")) {
         q0 = {addr, size};
     } else if (q_count_ < kQuarantine) {
         q_ring_[(q_head_ + q_count_) % kQuarantine] = {addr, size};

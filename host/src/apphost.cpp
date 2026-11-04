@@ -1771,7 +1771,7 @@ static bool Boot(JavaVM* vm) {
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
         std::getenv("HARNESS_NORELEASE") ? "on" : "off",
-        std::getenv("HARNESS_NOQUARANTINE") ? "off" : "on",
+        std::getenv("HARNESS_QUARANTINE") ? "on" : "off",
         ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
