@@ -664,10 +664,9 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0,
 // the block is a normal heap block for free/realloc/usable_size.
 // The heap's debug knobs, read once (EnvOn scans its table on every call,
 // and malloc/free are hot). The environment is final before guest code runs.
-enum HeapKnobId { kMallocLog, kNoRelease, kQuarantineOn };
+enum HeapKnobId { kMallocLog, kNoRelease };
 static bool HeapKnob(HeapKnobId k) {
-    static const bool on[3] = {EnvOn("HARNESS_MALLOCLOG"), EnvOn("HARNESS_NORELEASE"),
-                               EnvOn("HARNESS_QUARANTINE")};
+    static const bool on[2] = {EnvOn("HARNESS_MALLOCLOG"), EnvOn("HARNESS_NORELEASE")};
     return on[k];
 }
 
@@ -932,10 +931,10 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
 }
 
 void Runtime::GuestFree(std::uint32_t addr) {
-    // Real free with quarantine (UAF oracle): the block is poisoned and held
-    // out of reuse for kQuarantine frees; on release the poison is
-    // verified -- a clobbered block names a live use-after-free LOUD.
-    // Double-free of a quarantined block is LOUD, not fatal.
+    // The block goes straight back to dlmalloc. No quarantine (REVIEW R-013:
+    // a delay before reuse only hides a use-after-free; the owner ruled it
+    // out). A free of an address the heap never handed out (or freed twice)
+    // is ignored and counted, as before.
     if (!addr) {
         return;
     }
@@ -947,19 +946,12 @@ void Runtime::GuestFree(std::uint32_t addr) {
         ~InLock() { acc.fetch_add(DiagTicks() - t0, std::memory_order_relaxed); }
     } in_lock{diag_.free_in_lock};
 #endif
-    if (QuarantineHas(addr) || (!norelease_set_.empty() && norelease_set_.count(addr))) {
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::printf("[heap] LOUD double free of quarantined %08x lr=%08x\n", addr, lr);
-            return;
+    if (!norelease_set_.empty() && norelease_set_.count(addr)) {
+        std::printf("[heap] LOUD double free of a held block %08x (NORELEASE)\n", addr);
+        return;
     }
-    // D2: one hash lookup both yields the size and removes the entry (the old
-    // map needed find + erase + a host node free). 0 = "we never handed this
-    // out" -> the legacy lenient no-op, counted so a session can show whether
-    // that path ever actually fires.
+    // One hash lookup yields the size and removes the entry. 0 = "never
+    // handed out" (or already freed) -> ignored, counted.
 #ifdef ABR_DIAG_COUNTERS
     const std::uint64_t le0 = DiagTicks();
 #endif
@@ -967,20 +959,21 @@ void Runtime::GuestFree(std::uint32_t addr) {
 #ifdef ABR_DIAG_COUNTERS
     diag_.free_live.fetch_add(DiagTicks() - le0, std::memory_order_relaxed);
 #endif
+    const auto log_free = [&](std::uint32_t sz) {
+        std::uint32_t lr = 0;
+        if (Dynarmic::A32::Jit* aj = ActiveJit()) {
+            lr = aj->Regs()[14];
+        }
+        char tmp[64];
+        std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, sz, lr);
+        RingPush(tmp);
+    };
     if (!size) {
         ++hx_free_unknown_;
         if (HeapKnob(kMallocLog)) {
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            char tmp[64];
-            std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, 0xFFFFFFFFu,
-                          lr);
-            RingPush(tmp);
+            log_free(0xFFFFFFFFu);
         }
-        return;  // free of unknown: ignore (legacy semantics)
+        return;
     }
     // Drop any audio-pool reference (stale reuse would alias).
     for (auto pit = array_pool_.begin(); pit != array_pool_.end(); ++pit) {
@@ -989,115 +982,27 @@ void Runtime::GuestFree(std::uint32_t addr) {
             break;
         }
     }
-    // Poison only a validated range: a wild (but map-hit, e.g. post-move
-    // stale) addr must never take a host memset/SIGSEGV with it.
-    const bool range_ok = size > 0 && size < 0x10000000u && CheckRange(addr, size, true);
-    if (!range_ok && size > 0) {
-        std::printf("[heap] LOUD free with bad range %08x size=%u -- skipped poison\\n", addr,
-                    size);
-    }
     if (HeapKnob(kMallocLog)) {
-        std::uint32_t lr = 0;
-        Dynarmic::A32::Jit* aj = ActiveJit();
-        if (aj) {
-            lr = aj->Regs()[14];
-        }
-        char tmp[64];
-        std::snprintf(tmp, sizeof(tmp), "[mfree] %08x size=%u lr=%08x", addr, size, lr);
-        RingPush(tmp);
+        log_free(size);
     }
-    // HARNESS_NORELEASE=1: hold everything in quarantine forever (leak like
-    // bump, keep dlmalloc layout). Triage switch: if the silent death at
-    // fclose/free vanishes with it, the killer is mspace_free detonating
-    // pre-smashed headers (writer hunt continues, game runs meanwhile).
+    // HARNESS_NORELEASE=1 (triage): hold every freed block for good.
     if (HeapKnob(kNoRelease)) {
         norelease_held_.push_back({addr, size});
         norelease_set_.insert(addr);
         return;
     }
-    // Delay-only quarantine (no poison, no verify: the tripwire never
-    // fired in any session, while poisoned stale reads proved fatal). A full
-    // ring hands its oldest block back to dlmalloc as the new one comes in
-    // (the set held is the same: the last kQuarantine frees).
-    // Off by default since 2026-11-04 (REVIEW R-013, under test on the
-    // owner's phone): the block goes back to dlmalloc at once (a second free
-    // of it is then an unknown address, ignored as before).
-    // HARNESS_QUARANTINE=1 brings the 64-free delay back.
-    QEnt q0{};
-    if (!HeapKnob(kQuarantineOn)) {
-        q0 = {addr, size};
-    } else if (q_count_ < kQuarantine) {
-        q_ring_[(q_head_ + q_count_) % kQuarantine] = {addr, size};
-        q_count_++;
-        return;
-    } else {
-        q0 = q_ring_[q_head_];
-        q_ring_[q_head_] = {addr, size};
-        q_head_ = (q_head_ + 1) % kQuarantine;
-    }
-    {
-        g_last_free_addr = q0.addr;
-        g_last_free_size = q0.size;
-        bool skip = false;
-        // HUNT (2026-10-17): verify the chunk head before handing a
-        // quarantined block back to dlmalloc. mspace_free aborted at
-        // dlmalloc.c:5720 (`erroraction: USAGE_ERROR_ACTION` -- ok_inuse /
-        // ok_next failed) on exactly this path. Dump the zone (the smear
-        // content names the writer) and LEAK the block instead of aborting.
-        // FIX (2026-10-17, PLAN.md D0): the old test `(head & 3) != 3` was a
-        // FALSE POSITIVE for any in-use chunk whose PREDECESSOR is free --
-        // set_inuse (dlmalloc.c:3066) ORs CINUSE but PRESERVES PINUSE
-        // (PINUSE_BIT=1, CINUSE_BIT=2, dlmalloc.c:2261), so `head & 3 == 2` is
-        // perfectly legal. All 12 dumps of the A+B soak had exactly that shape
-        // (csize == sz + 8, csize % 8 == 0) => the mitigation was leaking
-        // HEALTHY blocks and CHUNKD was useless as a canary. A chunk is suspect
-        // only when CINUSE is CLEAR (free / never-allocated -- cannot be a live
-        // quarantined block) or the size field is nonsense. Note dlmalloc's
-        // chunksize() masks FLAG_BITS (=7), not 3.
-        if (heap_ms_ && q0.addr >= 64) {
-            const std::uint64_t head = *H<std::uint64_t>(q0.addr - 8);
-            const std::uint64_t csize = head & ~std::uint64_t(7);
-            if ((head & 0x2) == 0 || csize < 24 || csize > (std::uint64_t)(1u << 24)) {
-                skip = true;
-                static int dvn = 0;
-                if (dvn < 12) {
-                    dvn++;
-                    std::printf("[heap] CHUNKD addr=%08x sz=%u head=%016llx csize=%llu\n", q0.addr,
-                                q0.size, (unsigned long long)head, (unsigned long long)csize);
-                    const std::uint8_t* pv = H<const std::uint8_t>(q0.addr - 48);
-                    std::printf("[heap] CHUNKD pre:");
-                    for (int i = 0; i < 48; i++) {
-                        std::printf(" %02x", pv[i]);
-                    }
-                    const std::uint8_t* pa = H<const std::uint8_t>(q0.addr - 16);
-                    std::printf("\n[heap] CHUNKD at :");
-                    for (int i = 0; i < 96; i++) {
-                        std::printf(" %02x", pa[i]);
-                    }
-                    std::printf("\n[heap] CHUNKD asc:");
-                    for (int i = 0; i < 96; i++) {
-                        const unsigned char c = pa[i];
-                        std::printf("%c", (c >= 32 && c < 127) ? (char)c : '.');
-                    }
-                    std::printf("\n");
-                }
-            }
-        }
-        if (heap_ms_ && !skip) {
+    g_last_free_addr = addr;
+    g_last_free_size = size;
+    if (heap_ms_) {
 #ifdef ABR_DIAG_COUNTERS
-            const std::uint64_t mf0 = DiagTicks();
+        const std::uint64_t mf0 = DiagTicks();
 #endif
-            mspace_free(heap_ms_, H(q0.addr));
+        mspace_free(heap_ms_, H(addr));
 #ifdef ABR_DIAG_COUNTERS
-            diag_.free_mspace.fetch_add(DiagTicks() - mf0, std::memory_order_relaxed);
+        diag_.free_mspace.fetch_add(DiagTicks() - mf0, std::memory_order_relaxed);
 #endif
-        }
-        if (heap_used_ >= q0.size) {
-            heap_used_ -= q0.size;
-        } else {
-            heap_used_ = 0;
-        }
     }
+    heap_used_ = heap_used_ >= size ? heap_used_ - size : 0;
 }
 
 // Host side of guest arena pages [addr, addr+len): `anon` gives fresh zero
@@ -10410,11 +10315,7 @@ bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
         return false;  // fully inside a live allocation
     }
     // Quarantined (freed, held)? Distinct verdict: UAF write.
-    std::vector<QEnt> held(norelease_held_);
-    for (std::uint32_t i = 0; i < q_count_; i++) {
-        held.push_back(q_ring_[(q_head_ + i) % kQuarantine]);
-    }
-    for (const auto& q : held) {
+    for (const auto& q : norelease_held_) {
         if (a >= q.addr && a + size <= (std::uint64_t)q.addr + q.size) {
             static int qn = 0;
             if (qn < 30) {

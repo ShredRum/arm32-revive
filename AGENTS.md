@@ -94,9 +94,9 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on mallocpad=0 zerofill=off heapwatch=off norelease=off
-quarantine=off clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on
-tlsthunk=on fastdispatch=on`. The heap quarantine is off by default (REVIEW
-R-013, under test); `HARNESS_QUARANTINE=1` brings the 64-free delay back.
+clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on tlsthunk=on
+fastdispatch=on`. There is no heap quarantine (REVIEW R-013: a delay before
+reuse only hides a use-after-free).
 
 - `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
   `patches/dynarmic/README.md`); `HARNESS_NOJITSHARE=1` restores per-thread

@@ -903,20 +903,6 @@ private:
         std::uint32_t addr = 0;
         std::uint32_t size = 0;
     };
-    // The last kQuarantine frees, oldest first, in a fixed ring: no host
-    // allocation per free (the set and vector cost ~2 us a free in MCSM), and
-    // the double-free check scans at most 64 words.
-    static constexpr std::uint32_t kQuarantine = 64;
-    std::array<QEnt, kQuarantine> q_ring_{};
-    std::uint32_t q_head_ = 0, q_count_ = 0;
-    bool QuarantineHas(std::uint32_t addr) const {
-        for (std::uint32_t i = 0; i < q_count_; i++) {
-            if (q_ring_[(q_head_ + i) % kQuarantine].addr == addr) {
-                return true;
-            }
-        }
-        return false;
-    }
     // HARNESS_NORELEASE=1 (triage): every freed block is held for good, so
     // this list grows without bound and needs the set for its check.
     std::vector<QEnt> norelease_held_;

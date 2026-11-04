@@ -290,9 +290,6 @@ void JniArgsProbe::Raw(void*, void* thiz, ...) {
 }
 
 int main() {
-    // The quarantine is off by default (REVIEW R-013); its test at the end
-    // needs it on. Set before the first free: EnvOn caches its answer.
-    setenv("HARNESS_QUARANTINE", "1", 1);
     abr::GuestMemory mem;
     abr::LoadedModule mod;
     // Imports so the dispatcher can be reached for the libc calls below.
@@ -3406,36 +3403,18 @@ int main() {
         rt.ReleaseCpuId(id);
     }
 
-    // --- quarantine: the last 64 freed blocks stay out of reuse; a double
-    //     free of one of them is refused (LOUD) and the heap goes on. LAST on
-    //     purpose: the heap starts below the fixed scratch addresses the
-    //     tests above write (kScratch 0x10001000...), and ~9 KB of blocks
-    //     reach them.
+    // --- no quarantine: a freed block is handed out again (dlmalloc's LIFO
+    //     reuse), and a second free of it is ignored, the heap goes on.
     {
-        std::vector<std::uint32_t> blocks;
-        for (int i = 0; i < 100; i++) {
-            blocks.push_back(rt.GuestMalloc(48));
-        }
-        for (const std::uint32_t b : blocks) {
-            rt.GuestFree(b);
-        }
-        std::set<std::uint32_t> held(blocks.end() - 64, blocks.end());
-        int reused = 0;
-        std::vector<std::uint32_t> again;
-        for (int i = 0; i < 64; i++) {
-            const std::uint32_t b = rt.GuestMalloc(48);
-            again.push_back(b);
-            reused += held.count(b) ? 1 : 0;
-        }
-        Expect("quarantine: the last 64 frees are not handed out again", std::to_string(reused), "0");
-        rt.GuestFree(blocks.back());  // still quarantined: a double free
-        const std::uint32_t after = rt.GuestMalloc(48);
-        Expect("quarantine: malloc works after a refused double free",
-               std::to_string(after != 0 && !held.count(after)), "1");
-        rt.GuestFree(after);
-        for (const std::uint32_t b : again) {
-            rt.GuestFree(b);
-        }
+        const std::uint32_t b1 = rt.GuestMalloc(48);
+        rt.GuestFree(b1);
+        const std::uint32_t b2 = rt.GuestMalloc(48);
+        Expect("heap: a freed block is reused at once (no quarantine)", std::to_string(b2 == b1), "1");
+        rt.GuestFree(b2);
+        rt.GuestFree(b2);  // double free: an unknown address now, ignored
+        const std::uint32_t b3 = rt.GuestMalloc(48);
+        Expect("heap: works after an ignored double free", std::to_string(b3 != 0), "1");
+        rt.GuestFree(b3);
     }
 
     // --- heap under four threads at once (its own lock since 2026-11-04):
