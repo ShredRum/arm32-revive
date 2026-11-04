@@ -2205,7 +2205,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // the runtime's mutex_ (RealGL has its own lock). Unhandled names and
     // threads without a GL context fall through to the fake shim.
     if (n.size() > 2 && n[0] == 'g' && n[1] == 'l' &&
-        RealGLBackend()->Handle(n.c_str(), regs, a0, a1, a2, a3)) {
+        RealGLBackend()->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
         return;
     }
     // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
@@ -11070,6 +11070,7 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     imp.blocking = BlockingImportName(name);
     imp.hot = HotImportForName(name);
     imp.fast_math = FastMathForName(name.c_str());
+    imp.gl_id = GlIdForName(name.c_str());
     const std::uint32_t swi = static_cast<std::uint32_t>(mod_.imports.size()) + 1;  // swi = idx + 1
     const std::uint32_t insn = 0xEF000000u | swi;
     mod_.imports.push_back(imp);  // before the address is handed out

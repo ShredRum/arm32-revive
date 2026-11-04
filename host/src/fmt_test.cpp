@@ -416,6 +416,7 @@ int main() {
     }
     for (abr::Import& imp : mod.imports) {
         imp.hot = abr::HotImportForName(imp.name);  // as the loader does
+        imp.gl_id = abr::GlIdForName(imp.name.c_str());
     }
     abr::Runtime rt(mem, mod);
 

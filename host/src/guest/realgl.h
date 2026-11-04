@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "dispatch.h"
+#include "gl_ids.h"
 
 namespace abr {
 
@@ -25,7 +26,8 @@ class RealGL {
     bool active() const { return ok_; }
     // Handles one gl* import. Returns true if fully handled (caller Rets).
     // a0..a3 are regs r0..r3; stack args read from guest sp internally.
-    bool Handle(const char* name, Regs& regs, std::uint32_t a0, std::uint32_t a1,
+    // id is the import's load-time GlId (gl_ids.h); name is for logs.
+    bool Handle(GlId id, const char* name, Regs& regs, std::uint32_t a0, std::uint32_t a1,
                 std::uint32_t a2, std::uint32_t a3);
     // Captures the current drawable to a binary PPM file (screenshot debug).
     bool Screenshot(const char* path, int w, int h);

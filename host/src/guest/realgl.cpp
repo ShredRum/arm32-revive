@@ -323,7 +323,7 @@ static const char* Gles2Extensions(const char* driver) {
     return kept.c_str();
 }
 
-bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std::uint32_t a1,
+bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t a0, std::uint32_t a1,
                     std::uint32_t a2, std::uint32_t a3) {
     if (!Ensure()) {
         return false;
@@ -335,28 +335,26 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     std::lock_guard<std::mutex> gl_lock(mu_);
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
-    std::string n(name);
-    char tag[128];
-    std::snprintf(tag, sizeof(tag), "[realgl] %s", name);
+    using G = GlId;  // the import's load-time id (gl_ids.h); name is for logs only
 
     // --- state (direct forward, scalar args only) ---
-    if (n == "glEnable" || n == "glDisable") {
-        (n == "glEnable" ? glEnable : glDisable)((GLenum)a0);
+    if (id == G::glEnable || id == G::glDisable) {
+        (id == G::glEnable ? glEnable : glDisable)((GLenum)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBlendFunc") {
+    if (id == G::glBlendFunc) {
         glBlendFunc((GLenum)a0, (GLenum)a1);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBlendEquation" || n == "glDepthFunc" || n == "glCullFace" ||
-        n == "glFrontFace") {
-        if (n == "glBlendEquation") {
+    if (id == G::glBlendEquation || id == G::glDepthFunc || id == G::glCullFace ||
+        id == G::glFrontFace) {
+        if (id == G::glBlendEquation) {
             glBlendEquation((GLenum)a0);
-        } else if (n == "glDepthFunc") {
+        } else if (id == G::glDepthFunc) {
             glDepthFunc((GLenum)a0);
-        } else if (n == "glCullFace") {
+        } else if (id == G::glCullFace) {
             glCullFace((GLenum)a0);
         } else {
             glFrontFace((GLenum)a0);
@@ -366,28 +364,28 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     }
     // --- blend, stencil, masks, depth/polygon state (scalar args; floats
     //     arrive as their bits in core registers, softfp) ---
-    if (n == "glBlendEquationSeparate") {
+    if (id == G::glBlendEquationSeparate) {
         glBlendEquationSeparate((GLenum)a0, (GLenum)a1);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBlendFuncSeparate") {
+    if (id == G::glBlendFuncSeparate) {
         glBlendFuncSeparate((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLenum)a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glColorMask") {
+    if (id == G::glColorMask) {
         glColorMask((GLboolean)a0, (GLboolean)a1, (GLboolean)a2, (GLboolean)a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glClearDepthf" || n == "glPolygonOffset" || n == "glDepthRangef") {
+    if (id == G::glClearDepthf || id == G::glPolygonOffset || id == G::glDepthRangef) {
         float f0 = 0, f1 = 0;
         std::memcpy(&f0, &a0, 4);
         std::memcpy(&f1, &a1, 4);
-        if (n == "glClearDepthf") {
+        if (id == G::glClearDepthf) {
             glClearDepthf(f0);
-        } else if (n == "glDepthRangef") {
+        } else if (id == G::glDepthRangef) {
             glDepthRangef(f0, f1);
         } else {
             glPolygonOffset(f0, f1);
@@ -395,8 +393,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glClearStencil" || n == "glStencilMask") {
-        if (n == "glClearStencil") {
+    if (id == G::glClearStencil || id == G::glStencilMask) {
+        if (id == G::glClearStencil) {
             glClearStencil((GLint)a0);
         } else {
             glStencilMask((GLuint)a0);
@@ -404,8 +402,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glStencilFunc" || n == "glStencilOp") {
-        if (n == "glStencilFunc") {
+    if (id == G::glStencilFunc || id == G::glStencilOp) {
+        if (id == G::glStencilFunc) {
             glStencilFunc((GLenum)a0, (GLint)a1, (GLuint)a2);
         } else {
             glStencilOp((GLenum)a0, (GLenum)a1, (GLenum)a2);
@@ -413,8 +411,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glStencilFuncSeparate" || n == "glStencilOpSeparate") {
-        if (n == "glStencilFuncSeparate") {
+    if (id == G::glStencilFuncSeparate || id == G::glStencilOpSeparate) {
+        if (id == G::glStencilFuncSeparate) {
             glStencilFuncSeparate((GLenum)a0, (GLenum)a1, (GLint)a2, (GLuint)a3);
         } else {
             glStencilOpSeparate((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLenum)a3);
@@ -422,19 +420,19 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGenerateMipmap") {
+    if (id == G::glGenerateMipmap) {
         glGenerateMipmap((GLenum)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glCheckFramebufferStatus") {
+    if (id == G::glCheckFramebufferStatus) {
         r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
         return true;
     }
-    if (n == "glGetFramebufferAttachmentParameteriv" || n == "glGetVertexAttribiv") {
+    if (id == G::glGetFramebufferAttachmentParameteriv || id == G::glGetVertexAttribiv) {
         // (target, attachment, pname, params*) / (index, pname, params*).
         // GL_CURRENT_VERTEX_ATTRIB answers four values, every other pname one.
-        const bool fb = (n == "glGetFramebufferAttachmentParameteriv");
+        const bool fb = (id == G::glGetFramebufferAttachmentParameteriv);
         const std::uint32_t out = fb ? a3 : a2;
         const std::uint32_t count = (!fb && a1 == GL_CURRENT_VERTEX_ATTRIB) ? 4u : 1u;
         if (!r->CheckRange(out, count * 4u, true)) {
@@ -451,7 +449,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetVertexAttribPointerv") {
+    if (id == G::glGetVertexAttribPointerv) {
         // (index, pname, void** pointer): a client array was passed to the
         // driver as a host address inside guest memory -- hand back the guest
         // address; a buffer offset is returned as it was given.
@@ -470,22 +468,22 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glDepthMask") {
+    if (id == G::glDepthMask) {
         glDepthMask((GLboolean)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glViewport") {
+    if (id == G::glViewport) {
         glViewport((GLint)a0, (GLint)a1, (GLsizei)a2, (GLsizei)a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glScissor") {
+    if (id == G::glScissor) {
         glScissor((GLint)a0, (GLint)a1, (GLsizei)a2, (GLsizei)a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glClearColor") {
+    if (id == G::glClearColor) {
         float f[4] = {0, 0, 0, 0};
         std::memcpy(&f[0], &a0, 4);
         std::memcpy(&f[1], &a1, 4);
@@ -495,50 +493,50 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glClear") {
+    if (id == G::glClear) {
         glClear((GLbitfield)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glPixelStorei") {
+    if (id == G::glPixelStorei) {
         glPixelStorei((GLenum)a0, (GLint)a1);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glActiveTexture") {
+    if (id == G::glActiveTexture) {
         active_tex_ = a0 - 0x84C0u;
         glActiveTexture((GLenum)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glFlush" || n == "glFinish") {
-        (n == "glFlush" ? glFlush : glFinish)();
+    if (id == G::glFlush || id == G::glFinish) {
+        (id == G::glFlush ? glFlush : glFinish)();
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetError") {
+    if (id == G::glGetError) {
         GLenum e = glGetError();
         if (e) {
-            std::printf("%s -> %04x\n", tag, e);
+            std::printf("[realgl] %s -> %04x\n", name, e);
         }
         r->Ret(regs, (std::uint32_t)e);
         return true;
     }
     // --- shaders/programs (real compile; \\x01 header separators sanitized:
     // 2014 Mali/Adreno accepted them, strict compilers need newlines) ---
-    if (n == "glCreateShader") {
+    if (id == G::glCreateShader) {
         GLuint s = glCreateShader((GLenum)a0);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x) -> %u\n", tag, a0, s);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x) -> %u\n", name, a0, s);
         r->Ret(regs, s);
         return true;
     }
-    if (n == "glCreateProgram") {
+    if (id == G::glCreateProgram) {
         GLuint p = glCreateProgram();
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s -> %u\n", tag, p);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s -> %u\n", name, p);
         r->Ret(regs, p);
         return true;
     }
-    if (n == "glShaderSource") {
+    if (id == G::glShaderSource) {
         // (shader, count, const char** strings, const GLint* lengths): the
         // driver gets every part in one call, as the guest gave them (a
         // Telltale shader is a #define header plus the body, 3-5 parts).
@@ -582,7 +580,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             parts.push_back(std::move(src));
         }
         if (!ok) {  // a wild guest pointer: LOUD + halt (AGENTS §6, E-07)
-            std::printf("%s LOUD BAD-PTR shader=%u parts=%u -- halting\n", tag, s, cnt);
+            std::printf("[realgl] %s LOUD BAD-PTR shader=%u parts=%u -- halting\n", name, s, cnt);
             r->HaltGuest();
             r->Ret(regs, 0);
             return true;
@@ -596,16 +594,16 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // The driver copies the strings before returning.
         glShaderSource(s, (GLsizei)parts.size(), ptrs.data(), lens.data());
         if (DiagOn()) {
-            std::printf("%s shader=%u parts=%u ok\n", tag, s, cnt);
+            std::printf("[realgl] %s shader=%u parts=%u ok\n", name, s, cnt);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetShaderSource") {
+    if (id == G::glGetShaderSource) {
         // (shader, bufSize, GLsizei* length, char* source)
         const GLsizei size = (GLsizei)a1;
         if (size < 0 || (a2 && !r->CheckRange(a2, 4, true)) || (size > 0 && !r->CheckRange(a3, (std::uint32_t)size, true))) {
-            std::printf("%s LOUD BAD-PTR -- halting\n", tag);
+            std::printf("[realgl] %s LOUD BAD-PTR -- halting\n", name);
             r->HaltGuest();
             r->Ret(regs, 0);
             return true;
@@ -622,20 +620,20 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glCompileShader") {
+    if (id == G::glCompileShader) {
         glCompileShader((GLuint)a0);
         GLint ok = 0;
         glGetShaderiv((GLuint)a0, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[1024];
             glGetShaderInfoLog((GLuint)a0, sizeof(log), nullptr, log);
-            std::printf("%s(%u) FAIL: %s\n", tag, a0, log);
+            std::printf("[realgl] %s(%u) FAIL: %s\n", name, a0, log);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glAttachShader" || n == "glDetachShader") {
-        if (n == "glAttachShader") {
+    if (id == G::glAttachShader || id == G::glDetachShader) {
+        if (id == G::glAttachShader) {
             glAttachShader((GLuint)a0, (GLuint)a1);
         } else {
             glDetachShader((GLuint)a0, (GLuint)a1);
@@ -643,32 +641,32 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glLinkProgram" || n == "glValidateProgram") {
-        if (n == "glLinkProgram") {
+    if (id == G::glLinkProgram || id == G::glValidateProgram) {
+        if (id == G::glLinkProgram) {
             glLinkProgram((GLuint)a0);
         } else {
             glValidateProgram((GLuint)a0);
         }
         GLint ok = 0;
-        glGetProgramiv((GLuint)a0, n == "glLinkProgram" ? GL_LINK_STATUS : GL_VALIDATE_STATUS,
+        glGetProgramiv((GLuint)a0, id == G::glLinkProgram ? GL_LINK_STATUS : GL_VALIDATE_STATUS,
                        &ok);
         if (!ok) {
             char log[1024];
             glGetProgramInfoLog((GLuint)a0, sizeof(log), nullptr, log);
-            std::printf("%s(%u) FAIL: %s\n", tag, a0, log);
+            std::printf("[realgl] %s(%u) FAIL: %s\n", name, a0, log);
         } else {
-            if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) ok\n", tag, a0);
+            if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) ok\n", name, a0);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glUseProgram") {
+    if (id == G::glUseProgram) {
         glUseProgram((GLuint)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glDeleteShader" || n == "glDeleteProgram") {
-        if (n == "glDeleteShader") {
+    if (id == G::glDeleteShader || id == G::glDeleteProgram) {
+        if (id == G::glDeleteShader) {
             glDeleteShader((GLuint)a0);
         } else {
             glDeleteProgram((GLuint)a0);
@@ -676,10 +674,10 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetShaderiv" || n == "glGetProgramiv") {
+    if (id == G::glGetShaderiv || id == G::glGetProgramiv) {
         // (obj, pname, params): forward REAL status.
         GLint v = 0;
-        if (n == "glGetShaderiv") {
+        if (id == G::glGetShaderiv) {
             glGetShaderiv((GLuint)a0, (GLenum)a1, &v);
         } else {
             glGetProgramiv((GLuint)a0, (GLenum)a1, &v);
@@ -688,15 +686,15 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             std::uint32_t w = (std::uint32_t)v;
             std::memcpy(r->H(a2), &w, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,%04x) -> %d\n", tag, a0, a1, v);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,%04x) -> %d\n", name, a0, a1, v);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetShaderInfoLog" || n == "glGetProgramInfoLog") {
+    if (id == G::glGetShaderInfoLog || id == G::glGetProgramInfoLog) {
         // (obj, bufSize, length*, infoLog*): forward REAL log.
         std::uint32_t lenptr = 0;
         if (a2 && r->CheckRange(a2, 4, true)) {
-            if (n == "glGetShaderInfoLog") {
+            if (id == G::glGetShaderInfoLog) {
                 glGetShaderInfoLog((GLuint)a0, (GLsizei)a1, (GLsizei*)&lenptr,
                                    a3 && r->CheckRange(a3, a1, true) ? (char*)r->H(a3) : nullptr);
             } else {
@@ -705,25 +703,25 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             }
             std::memcpy(r->H(a2), &lenptr, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) len=%u\n", tag, a0, lenptr);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) len=%u\n", name, a0, lenptr);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetAttribLocation") {
+    if (id == G::glGetAttribLocation) {
         std::string s = GStr(r, a1);
         GLint loc = glGetAttribLocation((GLuint)a0, s.c_str());
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
-    if (n == "glGetUniformLocation") {
+    if (id == G::glGetUniformLocation) {
         std::string s = GStr(r, a1);
         GLint loc = glGetUniformLocation((GLuint)a0, s.c_str());
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,\"%s\") -> %d\n", tag, a0, s.c_str(), loc);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,\"%s\") -> %d\n", name, a0, s.c_str(), loc);
         r->Ret(regs, (std::uint32_t)(std::int32_t)loc);
         return true;
     }
-    if (n == "glGetActiveUniform" || n == "glGetActiveAttrib") {
+    if (id == G::glGetActiveUniform || id == G::glGetActiveAttrib) {
         // regs: (prog,index,bufSize,length); stack: size,type,name.
         std::uint32_t blen = a2, lenp = a3, sizep = Stk(r, sp, 0), typep = Stk(r, sp, 1),
                       namep = Stk(r, sp, 2);
@@ -731,7 +729,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         GLint size = 0;
         GLenum type = 0;
         char* nm = (namep && blen && r->CheckRange(namep, blen, true)) ? (char*)r->H(namep) : nullptr;
-        if (n == "glGetActiveUniform") {
+        if (id == G::glGetActiveUniform) {
             glGetActiveUniform((GLuint)a0, (GLuint)a1, (GLsizei)blen, &len, &size, &type, nm);
         } else {
             glGetActiveAttrib((GLuint)a0, (GLuint)a1, (GLsizei)blen, &len, &size, &type, nm);
@@ -745,92 +743,93 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         if (typep && r->CheckRange(typep, 4, true)) {
             std::memcpy(r->H(typep), &type, 4);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u,%u) -> \"%s\"\n", tag, a0, a1, nm ? nm : "?");
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u,%u) -> \"%s\"\n", name, a0, a1, nm ? nm : "?");
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBindAttribLocation") {
+    if (id == G::glBindAttribLocation) {
         glBindAttribLocation((GLuint)a0, (GLuint)a1, GStr(r, a2).c_str());
         r->Ret(regs, 0);
         return true;
     }
     // --- textures: real objects + real RGBA data (game decodes .pvr itself;
     // observed uploads are RGBA4444/8888, host-native) ---
-    if (n == "glGenTextures" || n == "glGenBuffers" || n == "glGenFramebuffers" ||
-        n == "glGenRenderbuffers" || n == "glDeleteTextures" || n == "glDeleteBuffers" ||
-        n == "glDeleteFramebuffers" || n == "glDeleteRenderbuffers") {
+    if (id == G::glGenTextures || id == G::glGenBuffers || id == G::glGenFramebuffers ||
+        id == G::glGenRenderbuffers || id == G::glDeleteTextures || id == G::glDeleteBuffers ||
+        id == G::glDeleteFramebuffers || id == G::glDeleteRenderbuffers) {
         // All eight names are "gl<Gen|Delete>...": the G/D switch is at index 2
         // (index 3 is 'e' in both, so n[3] was always false -> every delete ran
         // as a gen: leaked objects + the stale-buffer purge below never ran).
-        const bool is_del = n[2] == 'D';
+        const bool is_del = id == G::glDeleteTextures || id == G::glDeleteBuffers ||
+                            id == G::glDeleteFramebuffers || id == G::glDeleteRenderbuffers;
         // 64-bit multiply (was 32-bit 4*a0: wraps at n~0x40000000 -> 0-byte
         // check passes -> driver writes past the guest buffer). Cap 1M (game
         // gens handfuls; wrap/garbage caught) + LOUD instead of smash.
         const std::uint64_t bytes64 = (std::uint64_t)a0 * 4;
         if (a0 >= 0x100000u || !r->CheckRange(a1, (std::size_t)bytes64, !is_del)) {
             if (a0 >= 0x100000u) {
-                std::printf("%s LOUD n=%u rejected\n", tag, a0);
+                std::printf("[realgl] %s LOUD n=%u rejected\n", name, a0);
             }
             r->Ret(regs, 0);
             return true;
         }
-        if (n == "glGenTextures" || n == "glDeleteTextures") {
+        if (id == G::glGenTextures || id == G::glDeleteTextures) {
             is_del ? glDeleteTextures((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenTextures((GLsizei)a0, (GLuint*)r->H(a1));
-        } else if (n == "glGenBuffers" || n == "glDeleteBuffers") {
+        } else if (id == G::glGenBuffers || id == G::glDeleteBuffers) {
             is_del ? glDeleteBuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
-        } else if (n == "glGenFramebuffers" || n == "glDeleteFramebuffers") {
+        } else if (id == G::glGenFramebuffers || id == G::glDeleteFramebuffers) {
             is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else {
             is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%u) ok\n", tag, a0);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%u) ok\n", name, a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBindFramebuffer" || n == "glBindRenderbuffer") {
+    if (id == G::glBindFramebuffer || id == G::glBindRenderbuffer) {
         // The guests DO use framebuffers (measured: glBindFramebuffer x3,
         // glBindRenderbuffer x2 per guest); before this the calls fell into
         // the generic tail, which answered "success" without doing
         // anything, so the game rendered into nothing.
-        if (n == "glBindFramebuffer") {
+        if (id == G::glBindFramebuffer) {
             glBindFramebuffer((GLenum)a0, (GLuint)a1);
         } else {
             glBindRenderbuffer((GLenum)a0, (GLuint)a1);
         }
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%u) ok\n", tag, a0, a1);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%u) ok\n", name, a0, a1);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glFramebufferRenderbuffer") {
+    if (id == G::glFramebufferRenderbuffer) {
         // (target, attachment, renderbuffertarget, renderbuffer)
         glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%04x,%04x,%u) ok\n", tag, a0, a1, a2, a3);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%04x,%04x,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glFramebufferTexture2D") {
+    if (id == G::glFramebufferTexture2D) {
         // (target, attachment, textarget, texture, level) -- the level is
         // the first stack word.
         const std::uint32_t level = Stk(r, sp, 0);
         glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
         if (EnvOn("HARNESS_GLDRAWLOG")) {
-            std::printf("%s(%04x,%04x,%04x,%u,%u) ok\n", tag, a0, a1, a2, a3, level);
+            std::printf("[realgl] %s(%04x,%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3, level);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glRenderbufferStorage") {
+    if (id == G::glRenderbufferStorage) {
         // (target, internalformat, width, height)
         glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
-        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("%s(%04x,%04x,%u,%u) ok\n", tag, a0, a1, a2, a3);
+        if (EnvOn("HARNESS_GLDRAWLOG")) std::printf("[realgl] %s(%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetUniformfv") {
+    if (id == G::glGetUniformfv) {
         // glGetUniformfv(program, location, params) writes ONE value of the
         // uniform's type (a mat4 = 16 floats). GLES2 gives no count, so find
         // the active uniform that owns this location (glGetActiveUniform
@@ -862,13 +861,13 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             default: comps = 0; break;
         }
         if (comps == 0) {
-            std::printf("%s LOUD no active uniform at program %u location %d (type %04x)\n", tag,
+            std::printf("[realgl] %s LOUD no active uniform at program %u location %d (type %04x)\n", name,
                         a0, (int)a1, found_type);
             r->Ret(regs, 0);
             return true;
         }
         if (!r->CheckRange(a2, comps * 4, true)) {
-            std::printf("%s LOUD params %08x out of range\n", tag, a2);
+            std::printf("[realgl] %s LOUD params %08x out of range\n", name, a2);
             r->Ret(regs, 0);
             return true;
         }
@@ -876,12 +875,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         glGetUniformfv((GLuint)a0, (GLint)a1, vals);
         std::memcpy(r->H(a2), vals, comps * 4);
         if (EnvOn("HARNESS_GLDRAWLOG")) {
-            std::printf("%s(%u,%d) type=%04x comps=%zu ok\n", tag, a0, (int)a1, found_type, comps);
+            std::printf("[realgl] %s(%u,%d) type=%04x comps=%zu ok\n", name, a0, (int)a1, found_type, comps);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBindTexture") {
+    if (id == G::glBindTexture) {
         if (a0 == 0x0DE1u && active_tex_ < 8) {
             bound_tex2d_[active_tex_] = a1;
         }
@@ -889,8 +888,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glTexParameteri" || n == "glTexParameterf") {
-        if (n == "glTexParameteri") {
+    if (id == G::glTexParameteri || id == G::glTexParameterf) {
+        if (id == G::glTexParameteri) {
             glTexParameteri((GLenum)a0, (GLenum)a1, (GLint)a2);
         } else {
             float f = 0;
@@ -900,7 +899,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glTexImage2D") {
+    if (id == G::glTexImage2D) {
         // regs: target,level,intfmt,width; stack: height,border,format,type,data.
         // Bulk range check (was 1 byte: driver reads w*h*bpp past short
         // buffers -> host SIGSEGV, not a clean guest halt). Short/invalid ->
@@ -915,7 +914,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
             p = (const void*)r->H(dat);  // unknown fmt/typ: legacy probe
         } else if (dat) {
-            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+            std::printf("[realgl] %s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", name,
                         a3, h, fmt, typ, (unsigned long long)need);
             r->HaltGuest();
             r->Ret(regs, 0);
@@ -933,13 +932,13 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
                 tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
             }
-            std::printf("%s %ux%u fmt=%04x typ=%04x %s err=%04x\n", tag, a3, h, fmt, typ,
+            std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x\n", name, a3, h, fmt, typ,
                         p ? "data" : "NULL", e);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glTexSubImage2D") {
+    if (id == G::glTexSubImage2D) {
         // regs: target,level,xoff,yoff; stack: w,h,format,type,data.
         // Same bulk-check reasoning as TexImage2D.
         std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2), typ = Stk(r, sp, 3),
@@ -952,7 +951,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, false)) {
             p = (const void*)r->H(dat);
         } else if (dat) {
-            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+            std::printf("[realgl] %s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", name,
                         w, h, fmt, typ, (unsigned long long)need);
             r->HaltGuest();
             r->Ret(regs, 0);
@@ -977,23 +976,23 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                     }
                 }
             }
-            std::printf("%s %ux%u fmt=%04x typ=%04x %s err=%04x sum=%llu/%llu\n", tag, w, h, fmt,
+            std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x sum=%llu/%llu\n", name, w, h, fmt,
                         typ, p ? "data" : "NULL", e, (unsigned long long)sum,
                         (unsigned long long)total);
         }
         if (EnvOn("HARNESS_GLDRAWLOG")) {
-            std::printf("%s %ux%u fmt=%04x %s err=%04x\n", tag, w, h, fmt, p ? "data" : "NULL",
+            std::printf("[realgl] %s %ux%u fmt=%04x %s err=%04x\n", name, w, h, fmt, p ? "data" : "NULL",
                         e);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glCompressedTexImage2D" || n == "glCompressedTexSubImage2D") {
+    if (id == G::glCompressedTexImage2D || id == G::glCompressedTexSubImage2D) {
         // Real forwarding (llvmpipe accepts ETC1; NVIDIA errors -> game falls
         // back to software decode). Args: regs(target,level,intfmt,w,h,border)
         // + stack(imageSize,data) for Tex; (target,level,x,y,w,h,format,
         // imageSize,data) for Sub (regs target,level,x,y + stack w,h,fmt,size,data).
-        if (n == "glCompressedTexImage2D") {
+        if (id == G::glCompressedTexImage2D) {
             // regs: target,level,intfmt,width; stack: height,border,imageSize,data.
             std::uint32_t h = Stk(r, sp, 0), size = Stk(r, sp, 2), dat = Stk(r, sp, 3);
             const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
@@ -1003,7 +1002,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             // Game-owned error signal (ETC fallback); query + print for diag only.
             if (EnvOn("HARNESS_GLDRAWLOG")) {
                 GLenum e = glGetError();
-                std::printf("%s ifmt=%04x %ux%u %uB %s err=%04x\n", tag, a2, a3, h, size,
+                std::printf("[realgl] %s ifmt=%04x %ux%u %uB %s err=%04x\n", name, a2, a3, h, size,
                             p ? "data" : "NULL", e);
             }
         } else {
@@ -1017,25 +1016,25 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             // Same game-owned-signal reasoning as the Tex branch.
             if (EnvOn("HARNESS_GLDRAWLOG")) {
                 GLenum e = glGetError();
-                std::printf("%s %ux%u fmt=%04x %uB %s err=%04x\n", tag, w, h, fmt, size,
+                std::printf("[realgl] %s %ux%u fmt=%04x %uB %s err=%04x\n", name, w, h, fmt, size,
                             p ? "data" : "NULL", e);
             }
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glCopyTexImage2D" || n == "glCopyTexSubImage2D") {
+    if (id == G::glCopyTexImage2D || id == G::glCopyTexSubImage2D) {
         // Eight scalar args: four in r0-r3, four on the stack (gl2.h).
         //   CopyTexImage2D(target, level, internalformat, x | y, w, h, border)
         //   CopyTexSubImage2D(target, level, xoff, yoff | x, y, w, h)
         std::uint32_t st[4] = {0, 0, 0, 0};
         if (!r->CheckRange(sp, sizeof(st), false)) {
-            std::printf("%s LOUD stack args unreadable\n", tag);
+            std::printf("[realgl] %s LOUD stack args unreadable\n", name);
             r->Ret(regs, 0);
             return true;
         }
         std::memcpy(st, r->H(sp), sizeof(st));
-        if (n == "glCopyTexImage2D") {
+        if (id == G::glCopyTexImage2D) {
             glCopyTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLint)a3, (GLint)st[0],
                              (GLsizei)st[1], (GLsizei)st[2], (GLint)st[3]);
         } else {
@@ -1050,15 +1049,15 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
     // driver at the point of use: bindings are per-context state (GLES2 2.9),
     // and Android recreates the context when the app is paused, so a copy
     // kept here could go stale (E-03).
-    if (n == "glBindBuffer") {
+    if (id == G::glBindBuffer) {
         glBindBuffer((GLenum)a0, (GLuint)a1);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glBufferData" || n == "glBufferSubData") {
+    if (id == G::glBufferData || id == G::glBufferSubData) {
         // (target,size,data,usage) / (target,offset,size,data).
         std::uint32_t size = 0, dat = 0;
-        if (n == "glBufferData") {
+        if (id == G::glBufferData) {
             size = a1;
             dat = a2;
         } else {
@@ -1068,18 +1067,18 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         }
         const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
                                                                          : nullptr;
-        if (n == "glBufferData") {
+        if (id == G::glBufferData) {
             glBufferData((GLenum)a0, (GLsizeiptr)size, p, (GLenum)a3);
         } else {
             glBufferSubData((GLenum)a0, (GLintptr)a1, (GLsizeiptr)size, p);
         }
         if (EnvOn("HARNESS_GLDRAWLOG")) {
-            std::printf("%s tgt=%04x %uB %s\n", tag, a0, size, p ? "data" : "NULL");
+            std::printf("[realgl] %s tgt=%04x %uB %s\n", name, a0, size, p ? "data" : "NULL");
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glVertexAttribPointer") {
+    if (id == G::glVertexAttribPointer) {
         // regs: (index,size,type,normalized); stack: stride,pointer.
         // pointer is guest VA unless an array buffer is bound (raw offset).
         std::uint32_t stride = Stk(r, sp, 0), gp = Stk(r, sp, 1);
@@ -1097,18 +1096,18 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         if (!vbo && a2 == 0x1406u && p && EnvOn("HARNESS_GLDRAWLOG") &&
             r->CheckRange(gp, 16, false)) {
             const float* f = (const float*)p;
-            std::printf("%s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", tag, a0, a1,
+            std::printf("[realgl] %s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", name, a0, a1,
                         stride, f[0], f[1], f[2], f[3]);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glEnableVertexAttribArray" || n == "glDisableVertexAttribArray") {
-        (n[2] == 'E' ? glEnableVertexAttribArray : glDisableVertexAttribArray)((GLuint)a0);
+    if (id == G::glEnableVertexAttribArray || id == G::glDisableVertexAttribArray) {
+        (id == G::glEnableVertexAttribArray ? glEnableVertexAttribArray : glDisableVertexAttribArray)((GLuint)a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glDrawArrays" || n == "glDrawElements") {
+    if (id == G::glDrawArrays || id == G::glDrawElements) {
         // TEMP-DIAG (black frame): dump real draw state. ~10 GL round-trips
         // + 4 printfs PER DRAW — gated default-off (old investigation).
         if (EnvOn("HARNESS_GLDRAWLOG")) {
@@ -1119,14 +1118,14 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             blend = glIsEnabled(GL_BLEND);
             scissor = glIsEnabled(GL_SCISSOR_TEST);
             glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &ab0);
-            std::printf("%s prog=%d tex=%d vp=%d,%d,%d,%d blend=%d scissor=%d ab0=%d\n", tag,
+            std::printf("[realgl] %s prog=%d tex=%d vp=%d,%d,%d,%d blend=%d scissor=%d ab0=%d\n", name,
                         prog, tex, vp[0], vp[1], vp[2], vp[3], blend, scissor, ab0);
             // MVP at location 2 + first texel of the bound texture.
             {
                 float m[16] = {0};
                 glGetUniformfv((GLuint)prog, 2, m);
-                std::printf("%s mvp=[%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f]\n",
-                            tag, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
+                std::printf("[realgl] %s mvp=[%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f]\n",
+                            name, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
                             m[11], m[12], m[13], m[14], m[15]);
             }
             {
@@ -1140,10 +1139,10 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                 GLint minf = 0, magf = 0;
                 glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minf);
                 glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &magf);
-                std::printf("%s texsize=%ux%u min=%04x mag=%04x\n", tag, tw, th, minf, magf);
+                std::printf("[realgl] %s texsize=%ux%u min=%04x mag=%04x\n", name, tw, th, minf, magf);
             }
         }
-        if (n == "glDrawArrays") {
+        if (id == G::glDrawArrays) {
             glDrawArrays((GLenum)a0, (GLint)a1, (GLsizei)a2);
         } else {
             // (mode,count,type,indices): all in regs; offset if an element
@@ -1163,7 +1162,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                 } else if (isz == 0 && r->CheckRange(a3, 1, false)) {
                     p = (const void*)r->H(a3);  // unknown type: legacy probe
                 } else {
-                    std::printf("%s LOUD SHORTIDX count=%d type=%04x need=%llu -- halting\n", tag,
+                    std::printf("[realgl] %s LOUD SHORTIDX count=%d type=%04x need=%llu -- halting\n", name,
                                 (GLsizei)a1, a2, (unsigned long long)need);
                     r->HaltGuest();
                 }
@@ -1175,12 +1174,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         // Per-draw glGetError stalls the GPU pipeline every draw; diag only.
         if (EnvOn("HARNESS_GLDRAWLOG")) {
             GLenum e = glGetError();
-            std::printf("%s err=%04x\n", tag, e);
+            std::printf("[realgl] %s err=%04x\n", name, e);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glReadPixels") {
+    if (id == G::glReadPixels) {
         // (x,y,w,h,format,type,pixels) — x,y,w,h in regs; rest on stack.
         // Bulk write check (was 1 byte: driver writes w*h*bpp into the guest
         // buffer -> heap smash past short buffers). Short -> skip (existing
@@ -1198,7 +1197,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         } else if (dat && need == 0 && r->CheckRange(dat, 1, true)) {
             p = (void*)r->H(dat);  // unknown fmt/typ: legacy probe
         } else if (dat) {
-            std::printf("%s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", tag,
+            std::printf("[realgl] %s LOUD SHORTBUF %ux%u fmt=%04x typ=%04x need=%llu -- halting\n", name,
                         a2, a3, fmt, typ, (unsigned long long)need);
             r->HaltGuest();
         }
@@ -1210,7 +1209,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         return true;
     }
     // --- queries: REAL driver answers in real mode ---
-    if (n == "glGetString") {
+    if (id == G::glGetString) {
         // HARNESS_GLVENDOR / HARNESS_GLRENDERER override the driver's
         // strings. The guest has renderer-keyed logic (its texture quirk
         // tables), so the era-correct name matters: without the override the
@@ -1255,12 +1254,12 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             }
         }
         if (DiagOn()) {
-            std::printf("%s(%04x) -> \"%s\"\n", tag, a0, s ? s : "(null)");
+            std::printf("[realgl] %s(%04x) -> \"%s\"\n", name, a0, s ? s : "(null)");
         }
         r->Ret(regs, out);
         return true;
     }
-    if (n == "glGetBufferParameteriv") {
+    if (id == G::glGetBufferParameteriv) {
         // (target, pname, params): one GLint for every GLES2 pname.
         GLint v = 0;
         glGetBufferParameteriv((GLenum)a0, (GLenum)a1, &v);
@@ -1270,7 +1269,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
         r->Ret(regs, 0);
         return true;
     }
-    if (n == "glGetIntegerv" || n == "glGetFloatv" || n == "glGetBooleanv") {
+    if (id == G::glGetIntegerv || id == G::glGetFloatv || id == G::glGetBooleanv) {
         // (pname, params): forward with the SPEC count per pname (a 24B-dirent
         // lesson: the guest passes exact-size buffers; the old always-16B
         // write smashed neighbors, e.g. the 0x26219C canary slot via a 4B
@@ -1288,7 +1287,7 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             case 0x8005: cnt = 4; break;  // BLEND_COLOR
             default: break;               // scalars
         }
-        if (n == "glGetIntegerv") {
+        if (id == G::glGetIntegerv) {
             // The two variable-length lists: as many values as the driver
             // reports (COMPRESSED_TEXTURE_FORMATS can exceed 64 on modern
             // drivers, so the buffer is sized from the count, E-06).
@@ -1305,25 +1304,25 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                     std::memcpy(r->H(a1 + (std::uint32_t)(i * 4)), &w, 4);
                 }
             } else if (cnt > 0) {
-                std::printf("%s(%04x) LOUD SMALLBUF need=%d -- halting\n", tag, a0, cnt * 4);
+                std::printf("[realgl] %s(%04x) LOUD SMALLBUF need=%d -- halting\n", name, a0, cnt * 4);
                 r->HaltGuest();
             }
             if (DiagOn()) {
-                std::printf("%s(%04x) -> %d,%d,%d,%d\n", tag, a0, v[0], v[1], v[2], v[3]);
+                std::printf("[realgl] %s(%04x) -> %d,%d,%d,%d\n", name, a0, v[0], v[1], v[2], v[3]);
             }
         } else {
-            std::printf("%s UNHANDLED -> fake\n", tag);
+            std::printf("[realgl] %s UNHANDLED -> fake\n", name);
             return false;
         }
         r->Ret(regs, 0);
         return true;
     }
     // --- uniforms (forward when observed; log LOUD otherwise) ---
-    if (n.compare(0, 9, "glUniform") == 0) {
+    if (std::strncmp(name, "glUniform", 9) == 0) {
         // (location, v0, ...): scalar-first forms in regs, rest on stack.
         // Only matrix/few forms need pointers; handle the common ones.
-        if (n == "glUniform1f" || n == "glUniform1i") {
-            if (n == "glUniform1f") {
+        if (id == G::glUniform1f || id == G::glUniform1i) {
+            if (id == G::glUniform1f) {
                 float f = 0;
                 std::memcpy(&f, &a1, 4);
                 glUniform1f((GLint)a0, f);
@@ -1333,8 +1332,8 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             r->Ret(regs, 0);
             return true;
         }
-        if (n == "glUniform2f" || n == "glUniform2i" || n == "glUniform3f" ||
-            n == "glUniform3i" || n == "glUniform4f" || n == "glUniform4i") {
+        if (id == G::glUniform2f || id == G::glUniform2i || id == G::glUniform3f ||
+            id == G::glUniform3i || id == G::glUniform4f || id == G::glUniform4i) {
             float f[4] = {0};
             std::uint32_t w3 = Stk(r, sp, 0);
             std::memcpy(&f[0], &a1, 4);
@@ -1342,15 +1341,15 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             std::memcpy(&f[2], &a3, 4);
             std::memcpy(&f[3], &w3, 4);
             const std::int32_t* ii = (const std::int32_t*)f;
-            if (n == "glUniform2f") {
+            if (id == G::glUniform2f) {
                 glUniform2f((GLint)a0, f[0], f[1]);
-            } else if (n == "glUniform2i") {
+            } else if (id == G::glUniform2i) {
                 glUniform2i((GLint)a0, ii[0], ii[1]);
-            } else if (n == "glUniform3f") {
+            } else if (id == G::glUniform3f) {
                 glUniform3f((GLint)a0, f[0], f[1], f[2]);
-            } else if (n == "glUniform3i") {
+            } else if (id == G::glUniform3i) {
                 glUniform3i((GLint)a0, ii[0], ii[1], ii[2]);
-            } else if (n == "glUniform4f") {
+            } else if (id == G::glUniform4f) {
                 glUniform4f((GLint)a0, f[0], f[1], f[2], f[3]);
             } else {
                 glUniform4i((GLint)a0, ii[0], ii[1], ii[2], ii[3]);
@@ -1358,25 +1357,26 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
             r->Ret(regs, 0);
             return true;
         }
-        if (n == "glUniformMatrix4fv" || n == "glUniformMatrix3fv" || n == "glUniformMatrix2fv" ||
-            n == "glUniform1fv" || n == "glUniform1iv" || n == "glUniform2fv" ||
-            n == "glUniform2iv" || n == "glUniform3fv" || n == "glUniform3iv" ||
-            n == "glUniform4fv" || n == "glUniform4iv") {
+        if (id == G::glUniformMatrix4fv || id == G::glUniformMatrix3fv || id == G::glUniformMatrix2fv ||
+            id == G::glUniform1fv || id == G::glUniform1iv || id == G::glUniform2fv ||
+            id == G::glUniform2iv || id == G::glUniform3fv || id == G::glUniform3iv ||
+            id == G::glUniform4fv || id == G::glUniform4iv) {
             // glUniformMatrix*: (location, count, transpose, value*);
             // glUniform{1-4}{f,i}v: (location, count, value*) -- no transpose,
             // the pointer is the THIRD argument (r2).
-            const bool matrix = n.find("Matrix") != std::string::npos;
+            const bool matrix = id == G::glUniformMatrix4fv || id == G::glUniformMatrix3fv ||
+                                id == G::glUniformMatrix2fv;
             std::uint32_t cnt = a1, vp = matrix ? a3 : a2;
             std::uint32_t per = 1;
-            if (n.find("Matrix4") != std::string::npos) {
+            if (id == G::glUniformMatrix4fv) {
                 per = 16;
-            } else if (n.find("Matrix3") != std::string::npos) {
+            } else if (id == G::glUniformMatrix3fv) {
                 per = 9;
-            } else if (n.find("Matrix2") != std::string::npos) {
+            } else if (id == G::glUniformMatrix2fv) {
                 per = 4;
             } else {
                 // "glUniform<1|2|3|4>{f,i}v": the digit is index 9 ('f'/'i' is 10).
-                per = (n[9] == '1') ? 1 : (n[9] == '2') ? 2 : (n[9] == '3') ? 3 : 4;
+                per = (name[9] == '1') ? 1 : (name[9] == '2') ? 2 : (name[9] == '3') ? 3 : 4;
             }
             std::size_t nb = (std::size_t)cnt * per * 4;
             const void* p =
@@ -1384,40 +1384,40 @@ bool RealGL::Handle(const char* name, RealGL::Regs& regs, std::uint32_t a0, std:
                                                                          : nullptr;
             if (p) {
                 GLboolean tr = (GLboolean)(a2 & 1u);
-                if (n == "glUniformMatrix4fv") {
+                if (id == G::glUniformMatrix4fv) {
                     glUniformMatrix4fv((GLint)a0, (GLsizei)cnt, tr, (const GLfloat*)p);
-                } else if (n == "glUniformMatrix3fv") {
+                } else if (id == G::glUniformMatrix3fv) {
                     glUniformMatrix3fv((GLint)a0, (GLsizei)cnt, tr, (const GLfloat*)p);
-                } else if (n == "glUniformMatrix2fv") {
+                } else if (id == G::glUniformMatrix2fv) {
                     glUniformMatrix2fv((GLint)a0, (GLsizei)cnt, tr, (const GLfloat*)p);
-                } else if (n == "glUniform1fv") {
+                } else if (id == G::glUniform1fv) {
                     glUniform1fv((GLint)a0, (GLsizei)cnt, (const GLfloat*)p);
-                } else if (n == "glUniform1iv") {
+                } else if (id == G::glUniform1iv) {
                     glUniform1iv((GLint)a0, (GLsizei)cnt, (const GLint*)p);
-                } else if (n == "glUniform2fv") {
+                } else if (id == G::glUniform2fv) {
                     glUniform2fv((GLint)a0, (GLsizei)cnt, (const GLfloat*)p);
-                } else if (n == "glUniform2iv") {
+                } else if (id == G::glUniform2iv) {
                     glUniform2iv((GLint)a0, (GLsizei)cnt, (const GLint*)p);
-                } else if (n == "glUniform3fv") {
+                } else if (id == G::glUniform3fv) {
                     glUniform3fv((GLint)a0, (GLsizei)cnt, (const GLfloat*)p);
-                } else if (n == "glUniform3iv") {
+                } else if (id == G::glUniform3iv) {
                     glUniform3iv((GLint)a0, (GLsizei)cnt, (const GLint*)p);
-                } else if (n == "glUniform4fv") {
+                } else if (id == G::glUniform4fv) {
                     glUniform4fv((GLint)a0, (GLsizei)cnt, (const GLfloat*)p);
                 } else {
                     glUniform4iv((GLint)a0, (GLsizei)cnt, (const GLint*)p);
                 }
             } else {
-                std::printf("%s LOUD BAD-PTR loc=%u cnt=%u -- halting\n", tag, a0, cnt);
+                std::printf("[realgl] %s LOUD BAD-PTR loc=%u cnt=%u -- halting\n", name, a0, cnt);
                 r->HaltGuest();
             }
             r->Ret(regs, 0);
             return true;
         }
-        std::printf("%s UNHANDLED-uniform -> fake\n", tag);
+        std::printf("[realgl] %s UNHANDLED-uniform -> fake\n", name);
         return false;
     }
-    std::printf("%s UNHANDLED -> fake shim\n", tag);
+    std::printf("[realgl] %s UNHANDLED -> fake shim\n", name);
     return false;
 }
 
