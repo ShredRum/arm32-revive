@@ -225,3 +225,27 @@ the copy at every return to Java loses no repeats. Repeats are now not
 sent (realgl.cpp, the comment above UniformRepeat lists why it is exact).
 Ship A/B, back to back, 60 s each: C 98, A 96, C 98 avg; the steady half
 ~107 vs ~100. Picture normal, markers 0.
+
+## 2026-11-05: packed files, split APK set for phones without root (F8)
+
+The data cannot reach a non-root phone's private dir, and Android 11+ closes
+Android/obb and Android/data to file managers. Core: packed files
+(host/src/guest/apk_vfs.h, 0abb119): assets/abport/<root>/ of base.apk and
+its split_*.apk read in place as ordinary files (overlay: real files win,
+copy-up on write, persistent deletion marks, case-insensitive). Packaging:
+scripts/pack_apks.py mcsm ([packed] in profile.toml): base.apk 807 MB (the
+program, main/patch OBB, shared .mft) + split_episode_02..08 (by the episode
+number in the path), every entry stored and 16 KiB aligned, mcsm.apks 5.59 GB
+for SAI. Launcher is GoogleActivity now (manifest edit in smali.patch: the
+expansion downloader only checked for an OBB file, its servers are dead).
+Sandbox: uninstall, install the 8 APKs in one pm session, clean data: boot
+log "packed files: 323 files from 8 apk(s), 0 deflated", the app's data dir
+25 MB, the menu intro renders, markers 0.
+Data check: every episode archive against the Telltale .mft (size + md5):
+303/304 good; MCSM_android_JesseMale105_dlog.ttarch2 (episode 5 dialogue)
+was 1156387 bytes, the .mft says 1324719, md5 74a31d7b...; replaced in the
+owner's data tree by the copy inside phys-winner's split_episode_05 (matches
+the .mft exactly); the bad one kept in work/*.bad-original. (His
+split_episode_05 also carries all of episode 4: a packing slip of his.)
+Sent to the phone: Minecraft_Story_Mode_arm64_2026-11-05.apks (lib 9aa65b17).
+Not yet run: any episode from a split (2-8), on the sandbox or the phone.
