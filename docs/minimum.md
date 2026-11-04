@@ -80,6 +80,7 @@ first 60 s, back to back), before the direct jump.
 | quarantine ring, then quarantine off (A5) | free 3.3 us under the lock | ~1 us |
 | signals: sliced waits only after a signal is sent (A8) | 144 k wakeups/s | ~15.5 k/s |
 | every import by ImportId (import_ids.h), then switch (id) | chain 1-5 us | pthread_self 99 ns, frexpf 544 ns |
+| F9: GL state calls that repeat the set state are not sent: attrib enable/disable (97 % repeats), glBindBuffer (32 %), single-value uniforms (~70 %); proof of exactness in realgl.cpp (per-thread copy dropped at every context change or return to Java, one uniform thread, link/delete generation) | 84 fps (diag) | ship A/B C-A-C: 98 / 96 / 98 avg, steady half ~107 vs ~100 |
 
 ## F. Speed work not done yet (known, each needs its measurement first)
 
@@ -92,6 +93,7 @@ first 60 s, back to back), before the direct jump.
 | F5 | the JIT itself (Dynarmic code quality, block linking, dispatch) | ~half of the process CPU is guest code | biggest reserve, biggest job; needs a profiler that works on the device |
 | F6 | gettimeofday 2.8 us vs 440 ns bare on the sandbox | syscall + a loaded box | on the phone vDSO; nothing of ours, recheck there |
 | F7 | sem_post ~20 us wall | the poster yields to the woken worker | scheduler, as natively: leave |
+| F9 DONE | redundant GL state calls (see E) | MCSM: 2.9 M attrib, 2 M uniform calls / 30 s, mostly repeats | sandbox render thread spent ~2/3 of its time in GL (ANGLE); the phone driver is cheaper, so less gain there |
 | F8 | phone measurements (fps, heat) with MCSM | sandbox only so far | needs MCSM data on a non-root phone first |
 
 ## Order

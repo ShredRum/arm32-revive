@@ -208,3 +208,20 @@ the source).
 2. Boot on the sandbox, fill missing imports/JNI.
 3. Data placement and path redirect.
 4. Measure both ports on the sandbox (same scene, system frame stats).
+
+## 2026-11-05: GL or JIT? sandbox split, redundant GL state calls (F9)
+
+Diag build, episode scene, per 30 s: process ~2.5 cores; host imports
+(non-waiting) ~0.9 core, of it GL ~0.7 core, all on the render thread:
+~20 s of its 30 s in GL, so on the sandbox the frame waits on GL. ANGLE
+inflates GL (glClear 119 us, glDrawArrays 134 us, glUniform4fv 1.6 us),
+so the phone decides GL vs JIT. Per-thread CPU cannot be read on the
+sandbox: its kernel reports process totals in every task's stat.
+
+The engine repeats state: attrib enable/disable 2.9 M calls, 97 % set the
+value already set; uniforms 2 M, ~70 % (74 % of single-value calls);
+glBindBuffer 32 %; glUseProgram 4 %. One thread sets uniforms; dropping
+the copy at every return to Java loses no repeats. Repeats are now not
+sent (realgl.cpp, the comment above UniformRepeat lists why it is exact).
+Ship A/B, back to back, 60 s each: C 98, A 96, C 98 avg; the steady half
+~107 vs ~100. Picture normal, markers 0.

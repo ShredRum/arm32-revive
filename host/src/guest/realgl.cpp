@@ -291,8 +291,137 @@ namespace {
 struct GlBindings {
     bool array_known = false, element_known = false;
     GLuint array = 0, element = 0;
+    // Vertex attrib array enable flags: -1 unknown, 0 off, 1 on. Context
+    // state like the bindings (GLES2 2.8), changed only by the guest's own
+    // glEnable/DisableVertexAttribArray (no VAOs are offered), so the same
+    // drops keep it exact. An unknown flag is learnt from the call itself.
+    std::int8_t attr[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 };
 thread_local GlBindings t_bindings;
+}  // namespace
+
+// Uniform values the current program already holds (minimum F9): a call
+// that sets a location to the value it has is not sent (MCSM: ~70 % of
+// ~65 k uniform calls a second). Uniform values are program state (GLES2
+// 2.10.4), so this copy is kept exact by:
+// - one thread only: the first thread to set a uniform owns the copy; a
+//   uniform call from any other thread turns the elision off for good
+//   (programs can be shared between contexts of several threads);
+// - dropped with the bindings at every possible context change or return
+//   to Java (ForgetGlBindings): measured on MCSM, this loses no repeats;
+// - dropped by every glLinkProgram/glDeleteProgram on any thread (a link
+//   resets values, a deleted name can come back), via a generation count;
+// - the current program asked from the driver after each glUseProgram (a
+//   glUseProgram of a program that failed to link changes nothing);
+// - only single-value calls are kept, compared bit for bit: a call with
+//   count > 1 also sets array elements whose locations are not known here,
+//   so it is sent and the program's copy dropped; no program (0) is never
+//   kept. The one difference to the driver: an invalid call repeated with
+//   the same arguments raises its GL error once, not every time; the state
+//   is the same either way.
+namespace {
+struct UniVal {
+    GlId id;
+    std::uint32_t n;      // words in v
+    std::uint32_t v[17];  // up to a 4x4 matrix + its transpose flag
+};
+struct UniCache {
+    std::uint64_t gen = 0;
+    bool prog_known = false;
+    GLuint prog = 0;
+    std::unordered_map<GLint, UniVal>* cur = nullptr;  // prog's map
+    std::unordered_map<GLuint, std::unordered_map<GLint, UniVal>> by_prog;
+};
+thread_local UniCache t_uni;
+thread_local char t_uni_token;
+std::atomic<const void*> g_uni_owner{nullptr};
+std::atomic<bool> g_uni_shared{false};
+std::atomic<std::uint64_t> g_prog_gen{1};
+
+void ForgetUniforms() {
+    UniCache& c = t_uni;
+    c.by_prog.clear();
+    c.cur = nullptr;
+    c.prog_known = false;
+}
+
+// True when this uniform call repeats the value its location holds and need
+// not be sent; otherwise the copy takes the new value (or is dropped).
+bool UniformRepeat(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                   std::uint32_t a3, std::uint32_t sp) {
+    using G = GlId;
+    int comps = 0;
+    bool vec = false, mat = false;
+    switch (id) {
+        case G::glUniform1f: case G::glUniform1i: comps = 1; break;
+        case G::glUniform2f: case G::glUniform2i: comps = 2; break;
+        case G::glUniform3f: case G::glUniform3i: comps = 3; break;
+        case G::glUniform4f: case G::glUniform4i: comps = 4; break;
+        case G::glUniform1fv: case G::glUniform1iv: comps = 1; vec = true; break;
+        case G::glUniform2fv: case G::glUniform2iv: comps = 2; vec = true; break;
+        case G::glUniform3fv: case G::glUniform3iv: comps = 3; vec = true; break;
+        case G::glUniform4fv: case G::glUniform4iv: comps = 4; vec = true; break;
+        case G::glUniformMatrix2fv: comps = 4; mat = true; break;
+        case G::glUniformMatrix3fv: comps = 9; mat = true; break;
+        case G::glUniformMatrix4fv: comps = 16; mat = true; break;
+        default: return false;
+    }
+    if (g_uni_shared.load(std::memory_order_relaxed)) return false;
+    const void* me = &t_uni_token;
+    const void* owner = g_uni_owner.load(std::memory_order_relaxed);
+    if (owner != me) {
+        if (owner != nullptr || !g_uni_owner.compare_exchange_strong(owner, me)) {
+            g_uni_shared.store(true, std::memory_order_relaxed);
+            return false;
+        }
+    }
+    UniCache& c = t_uni;
+    const std::uint64_t gen = g_prog_gen.load(std::memory_order_acquire);
+    if (c.gen != gen) {
+        c.by_prog.clear();
+        c.cur = nullptr;
+        c.gen = gen;
+    }
+    if (!c.cur) {
+        if (!c.prog_known) {
+            GLint v = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &v);
+            c.prog = static_cast<GLuint>(v);
+            c.prog_known = true;
+        }
+        if (c.prog == 0) return false;
+        c.cur = &c.by_prog[c.prog];
+    }
+    UniVal x;
+    x.id = id;
+    x.n = static_cast<std::uint32_t>(comps);
+    if (vec || mat) {
+        if (a1 != 1) {  // arrays: other elements too, at unknown locations
+            c.cur->clear();
+            return false;
+        }
+        const std::uint32_t vp = mat ? a3 : a2;
+        if (!vp || !r->CheckRange(vp, comps * 4u, false)) return false;  // the handler halts
+        std::memcpy(x.v, r->H(vp), comps * 4u);
+        if (mat) x.v[x.n++] = a2 & 1u;
+    } else {
+        const std::uint32_t w[4] = {a1, a2, a3, comps == 4 ? Stk(r, sp, 0) : 0u};
+        std::memcpy(x.v, w, comps * 4u);
+    }
+    auto [it, fresh] = c.cur->try_emplace(static_cast<GLint>(a0), x);
+    if (!fresh) {
+        const UniVal& o = it->second;
+        if (o.id == x.id && o.n == x.n && std::memcmp(o.v, x.v, x.n * 4u) == 0) return true;
+        it->second = x;
+    }
+    return false;
+}
+
+// glUseProgram: the program is asked again before the next uniform.
+void UniformProgramChanged() {
+    t_uni.prog_known = false;
+    t_uni.cur = nullptr;
+}
 }  // namespace
 
 #ifdef ABR_DIAG_COUNTERS
@@ -300,6 +429,7 @@ static void DiagGlForget();
 #endif
 void ForgetGlBindings() {
     t_bindings = GlBindings{};
+    ForgetUniforms();
 #ifdef ABR_DIAG_COUNTERS
     DiagGlForget();
 #endif
@@ -334,7 +464,10 @@ static GLuint BoundBuffer(GLenum binding) {
 // on the first use after a drop. Uniform values belong to the program and
 // survive context-local drops; they are dropped at link/delete. Counts only.
 namespace {
-enum { kRedAttr, kRedBuf, kRedProg, kRedUni, kRedMat, kRedN };
+enum { kRedAttr, kRedBuf, kRedProg, kRedUni, kRedMat, kRedUni1, kRedUniLocal, kRedN };
+std::atomic<std::uint32_t> g_uni_threads{0};
+thread_local bool t_uni_seen = false;
+thread_local std::unordered_map<std::uint64_t, std::uint64_t> t_uni_local;  // dropped at every ForgetGlBindings
 std::atomic<std::uint64_t> g_red_calls[kRedN], g_red_same[kRedN];
 struct GlShadow {
     std::int8_t attr[16];  // -1 unknown, 0 off, 1 on
@@ -343,7 +476,7 @@ struct GlShadow {
     GlShadow() { std::memset(attr, -1, sizeof attr); }
 };
 thread_local GlShadow t_shadow;
-thread_local std::unordered_map<std::uint64_t, std::uint64_t> t_uni;  // (prog,loc) -> value hash
+thread_local std::unordered_map<std::uint64_t, std::uint64_t> t_diag_uni;  // (prog,loc) -> value hash
 std::uint64_t Fnv(const void* p, std::size_t n, std::uint64_t h) {
     const auto* b = static_cast<const unsigned char*>(p);
     for (std::size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
@@ -391,8 +524,8 @@ void DiagGlRedundant(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, st
         return;
     }
     if (id == G::glLinkProgram || id == G::glDeleteProgram) {
-        for (auto it = t_uni.begin(); it != t_uni.end();) {
-            it = (it->first >> 32) == a0 ? t_uni.erase(it) : std::next(it);
+        for (auto it = t_diag_uni.begin(); it != t_diag_uni.end();) {
+            it = (it->first >> 32) == a0 ? t_diag_uni.erase(it) : std::next(it);
         }
         return;
     }
@@ -426,18 +559,34 @@ void DiagGlRedundant(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, st
         h = Fnv(w, comps * 4u, h);
     }
     const std::uint64_t key = (std::uint64_t)ShadowProg() << 32 | a0;
-    auto [it, fresh] = t_uni.try_emplace(key, h);
-    RedCount(mat ? kRedMat : kRedUni, !fresh && it->second == h);
+    auto [it, fresh] = t_diag_uni.try_emplace(key, h);
+    const bool same = !fresh && it->second == h;
+    RedCount(mat ? kRedMat : kRedUni, same);
+    // count 1 only: a call with count > 1 also sets elements whose
+    // locations are not known here, so it could not be elided safely.
+    if (!((vec || mat) && a1 > 1)) RedCount(kRedUni1, same);
     it->second = h;
+    auto [jt, jfresh] = t_uni_local.try_emplace(key, h);
+    RedCount(kRedUniLocal, !jfresh && jt->second == h);
+    jt->second = h;
+    if (!t_uni_seen) {
+        t_uni_seen = true;
+        g_uni_threads.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 }  // namespace
 
-static void DiagGlForget() { t_shadow = GlShadow{}; }
+static void DiagGlForget() {
+    t_shadow = GlShadow{};
+    t_uni_local.clear();
+}
 
 void RealGlDiagDump() {
     static const char* const kName[kRedN] = {"attrib enable/disable", "glBindBuffer",
                                              "glUseProgram", "uniform (vec/scalar)",
-                                             "uniform matrix"};
+                                             "uniform matrix", "uniform, count 1 only",
+                                             "uniform, drop at Java"};
+    std::printf("[counters]   gl uniform threads so far: %u\n", g_uni_threads.load());
     for (int k = 0; k < kRedN; k++) {
         const std::uint64_t c = g_red_calls[k].exchange(0, std::memory_order_relaxed);
         const std::uint64_t s = g_red_same[k].exchange(0, std::memory_order_relaxed);
@@ -819,6 +968,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     if (id == G::glLinkProgram || id == G::glValidateProgram) {
         if (id == G::glLinkProgram) {
             glLinkProgram((GLuint)a0);
+            g_prog_gen.fetch_add(1, std::memory_order_release);  // values reset
         } else {
             glValidateProgram((GLuint)a0);
         }
@@ -837,6 +987,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glUseProgram) {
         glUseProgram((GLuint)a0);
+        UniformProgramChanged();
         r->Ret(regs, 0);
         return true;
     }
@@ -845,6 +996,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             glDeleteShader((GLuint)a0);
         } else {
             glDeleteProgram((GLuint)a0);
+            g_prog_gen.fetch_add(1, std::memory_order_release);  // the name may come back
         }
         r->Ret(regs, 0);
         return true;
@@ -1235,6 +1387,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     // kept here could go stale (E-03): the per-thread copy above is dropped
     // wherever the context can change.
     if (id == G::glBindBuffer) {
+        // A bind of the buffer already bound changes nothing (GLES2 2.9) and
+        // cannot fail for these two targets: it is not sent (MCSM: ~32 %).
+        if ((a0 == GL_ARRAY_BUFFER && t_bindings.array_known && t_bindings.array == a1) ||
+            (a0 == GL_ELEMENT_ARRAY_BUFFER && t_bindings.element_known && t_bindings.element == a1)) {
+            r->Ret(regs, 0);
+            return true;
+        }
         glBindBuffer((GLenum)a0, (GLuint)a1);
         if (a0 == GL_ARRAY_BUFFER) {
             t_bindings.array = (GLuint)a1;
@@ -1295,7 +1454,23 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glEnableVertexAttribArray || id == G::glDisableVertexAttribArray) {
-        (id == G::glEnableVertexAttribArray ? glEnableVertexAttribArray : glDisableVertexAttribArray)((GLuint)a0);
+        // Setting a flag to the value it has changes nothing; it is not sent
+        // (MCSM disables every array after each draw: ~97 % repeats). Only
+        // indices below GL_MAX_VERTEX_ATTRIBS are kept, so a call that must
+        // raise GL_INVALID_VALUE always reaches the driver.
+        static const GLuint max_attr = [] {
+            GLint v = 0;
+            glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &v);
+            return static_cast<GLuint>(v);
+        }();
+        const std::int8_t want = id == G::glEnableVertexAttribArray ? 1 : 0;
+        const bool kept = a0 < 16 && a0 < max_attr;
+        if (kept && t_bindings.attr[a0] == want) {
+            r->Ret(regs, 0);
+            return true;
+        }
+        (want ? glEnableVertexAttribArray : glDisableVertexAttribArray)((GLuint)a0);
+        if (kept) t_bindings.attr[a0] = want;
         r->Ret(regs, 0);
         return true;
     }
@@ -1513,6 +1688,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     // --- uniforms (forward when observed; log LOUD otherwise) ---
     if (std::strncmp(name, "glUniform", 9) == 0) {
+        if (UniformRepeat(r, id, a0, a1, a2, a3, sp)) {  // the location holds this value
+            r->Ret(regs, 0);
+            return true;
+        }
         // (location, v0, ...): scalar-first forms in regs, rest on stack.
         // Only matrix/few forms need pointers; handle the common ones.
         if (id == G::glUniform1f || id == G::glUniform1i) {
