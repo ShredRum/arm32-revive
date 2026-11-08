@@ -1,0 +1,27 @@
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -158,7 +158,12 @@
+ 
+ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::CheckHalt terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
+     oaknut::Label fail;
+-    code.LDAR(Wscratch0, Xhalt);
++    // A plain load (ab-port): this poll only has to see a halt eventually
++    // (another thread's) or in program order (one requested by a callback of
++    // this thread, e.g. during the SVC this terminal follows). Nothing read
++    // after it depends on what the halting thread wrote: the exit path reads
++    // and clears the flag again with LDAXR/STLXR.
++    code.LDR(Wscratch0, Xhalt);
+     code.CBNZ(Wscratch0, fail);
+     EmitA32Terminal(code, ctx, terminal.else_, initial_location, is_single_step);
+     code.l(fail);
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -384,7 +384,7 @@
+     {
+         oaknut::Label l_this, l_addr, l_generation, l_hash_mul, fast_dispatch_found, fast_dispatch_miss;
+ 
+-        code.LDAR(Wscratch0, Xhalt);
++        code.LDR(Wscratch0, Xhalt);  // a plain load: see the CheckHalt terminal (emit_arm64_a32.cpp)
+         code.CBNZ(Wscratch0, return_from_run_code);
+ 
+         if (conf.enable_cycle_counting) {

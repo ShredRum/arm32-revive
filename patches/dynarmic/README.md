@@ -247,3 +247,14 @@ its thread_local path there.
 Measured (`FMT_BENCH=1 fmt_test`, a guest loop calling getpid through the
 real dispatch path, sandbox, API 26 build): 28.6-33.4 ns per call with it,
 61.5-71.2 ns with `HARNESS_NOJITCALLBACKS=1`.
+
+## 0019-relaxed-halt-poll-after-svc.patch
+
+The two halt polls left with LDAR on hot paths are plain loads now: the
+CheckHalt terminal (after every SVC, i.e. every guest-to-host call) and the
+dispatcher entry. Same reasoning as 0012: a poll only has to see another
+thread's halt eventually, and one requested by a callback of this thread in
+program order; the exit path reads and clears the flag with LDAXR/STLXR.
+Run entry keeps LDAR (once per Run). Sandbox FMT_BENCH: 30.0-30.2 -> 29.9-30.0
+ns per call (noise); the phone profile of MCSM had ~0.8 % of JIT samples just
+after an LDAR, to be checked there.
