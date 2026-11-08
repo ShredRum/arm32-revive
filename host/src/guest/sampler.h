@@ -18,7 +18,9 @@
 // other), the hottest guest blocks as <library>+<offset> (offsets as in the
 // library file, for llvm-objdump), and the hottest host places as
 // <library>+<offset> or <library>:<symbol> (libabhost offsets: llvm-addr2line
-// on the unstripped build). Lines go to stdout (apphost.log) and, on
+// on the unstripped build); for samples in the dynamic linker (the TLS
+// descriptor resolver behind a thread_local of a dlopen'ed library) also the
+// caller in our library, from the link register ("linker from"). Lines go to stdout (apphost.log) and, on
 // Android, to logcat with the tag abhost, so a phone without root reads them.
 //
 // A CPU-time timer fires only while its thread runs, but a signal can still

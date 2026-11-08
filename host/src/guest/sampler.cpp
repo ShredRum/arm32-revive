@@ -43,6 +43,7 @@ struct Slot {
     std::atomic<bool> gone{false};       // the thread has exited
     timer_t timer{};
     std::uintptr_t pcs[kRing] = {};
+    std::uintptr_t lrs[kRing] = {};  // the link register: the caller of a leaf
 };
 
 bool g_on = false;
@@ -79,13 +80,17 @@ void OnProf(int, siginfo_t*, void* ctx) {
     const auto* uc = static_cast<const ucontext_t*>(ctx);
 #if defined(__aarch64__)
     const std::uintptr_t pc = static_cast<std::uintptr_t>(uc->uc_mcontext.pc);
+    const std::uintptr_t lr = static_cast<std::uintptr_t>(uc->uc_mcontext.regs[30]);
 #elif defined(__x86_64__)
     const std::uintptr_t pc = static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
+    const std::uintptr_t lr = 0;
 #else
     const std::uintptr_t pc = 0;
+    const std::uintptr_t lr = 0;
 #endif
     const std::uint64_t h = s->head.load(std::memory_order_relaxed);
     s->pcs[h % kRing] = pc;
+    s->lrs[h % kRing] = lr;
     s->head.store(h + 1, std::memory_order_release);
 }
 
@@ -145,6 +150,10 @@ struct Tally {
     std::uint64_t total = 0;
     std::uint64_t cls[kClasses] = {};
     std::unordered_map<std::string, std::uint64_t> guest, host, at, before;
+    // Samples in the dynamic linker (on Android the TLS descriptor resolver
+    // of a dlopen'ed library's thread_local, a leaf), by the caller in our
+    // library: which thread_local access costs.
+    std::unordered_map<std::string, std::uint64_t> linker_from;
 };
 std::map<std::string, Tally> g_cum;  // per thread name, the whole session
 int g_reports = 0;
@@ -153,7 +162,7 @@ void Merge(Tally& into, const Tally& t) {
     into.total += t.total;
     for (int c = 0; c < kClasses; c++) into.cls[c] += t.cls[c];
     using Map = std::unordered_map<std::string, std::uint64_t> Tally::*;
-    for (Map pr : {&Tally::guest, &Tally::host, &Tally::at, &Tally::before}) {
+    for (Map pr : {&Tally::guest, &Tally::host, &Tally::at, &Tally::before, &Tally::linker_from}) {
         for (const auto& kv : t.*pr) (into.*pr)[kv.first] += kv.second;
     }
 }
@@ -173,6 +182,7 @@ void Report() {
         Tally& t = per[s->tid];
         for (std::uint64_t i = from; i < head; i++) {
             const std::uintptr_t pc = s->pcs[i % kRing];
+            const std::uintptr_t lr = s->lrs[i % kRing];
             t.total++;
             const std::int64_t g = g_resolver ? g_resolver->GuestPcForHostPc(reinterpret_cast<void*>(pc)) : -1;
             if (g >= 0) {
@@ -215,6 +225,17 @@ void Report() {
                 } else if (!std::strcmp(lib, "libc.so") || !std::strcmp(lib, "libm.so") ||
                            !std::strcmp(lib, "libc.so.6") || !std::strcmp(lib, "libm.so.6")) {
                     c = kLibc;
+                }
+                if (lr && !std::strncmp(lib, "linker", 6)) {
+                    Dl_info dl{};
+                    char from[64];
+                    if (dladdr(reinterpret_cast<void*>(lr), &dl) && dl.dli_fbase == self.dli_fbase) {
+                        std::snprintf(from, sizeof from, "%s+0x%zx", Base(dl.dli_fname),
+                                      static_cast<std::size_t>(lr - reinterpret_cast<std::uintptr_t>(dl.dli_fbase)));
+                    } else {
+                        std::snprintf(from, sizeof from, "elsewhere");
+                    }
+                    t.linker_from[from]++;
                 }
                 if (di.dli_sname && c != kOurs) {
                     std::snprintf(key, sizeof key, "%s:%s", lib, di.dli_sname);
@@ -293,6 +314,7 @@ void Report() {
             }
             top(t.guest, t.total, 25, "guest");
             top(t.host, t.total, 60, "host ");
+            top(t.linker_from, t.total, 20, "linker from");
         }
     }
     for (std::size_t k = 0; k < order.size() && k < 6; k++) {
