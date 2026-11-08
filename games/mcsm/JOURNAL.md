@@ -266,3 +266,18 @@ host's libOpenSLES (opensl.cpp). Sandbox with the feature: past
 and 99 Bricks gates clean. Google Play Games sign-in fails on both (our
 signature is not Telltale's): harmless, the game goes on.
 Sent: Minecraft_Story_Mode_arm64_2026-11-08.apks (lib a0b50ad5).
+
+## 2026-11-08: phone measurements (Galaxy A56, Exynos 1580, Xclipse 540, 120 Hz)
+
+Phone build a0b50ad5, episode 1. [frames] counter: 118-120 fps nearly all
+the time (the 120 Hz cap), one smooth dip to ~80 in a heavy scene (owner,
+on-screen fps overlay); a short freeze the first time a choice dialog
+appears, none after (first use: new guest code to translate and shaders to
+compile). top -H, 15 s windows: main SDLThread ~83 %, second SDLThread
+~60 %, Thread-3 ~12 %, AudioTrack ~5 %; whole game ~1.75 cores (sandbox
+~2.5). GL on the phone also goes through ANGLE (Samsung's GLES driver).
+Decision: no thread is at 100 % and the frame is at the display cap, so a
+GL thread (F4) would buy nothing; heat is the remaining goal: a 60 fps cap
+(the game's 2017 target) halves the work, JIT (F5) trims it.
+Note: dumpsys SurfaceFlinger --latency needs the exact BLAST layer name on
+Android 15; the host's [frames] logcat line is the simpler fps source.
