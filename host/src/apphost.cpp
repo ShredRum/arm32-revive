@@ -39,6 +39,7 @@
 #include "appid.h"
 #include "jni_call_words.h"
 #include "guest/dispatch.h"
+#include "guest/sampler.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
 #include "guest/prof.h"
@@ -1650,6 +1651,11 @@ static bool Boot(JavaVM* vm) {
             Log("FATAL: load failed: %s", err.c_str());
             return false;
         }
+        {  // one library, at its linked addresses: offsets are its own
+            const std::size_t sl = guest_path.find_last_of('/');
+            abr::sampler::AddModule(sl == std::string::npos ? guest_path : guest_path.substr(sl + 1), 0,
+                                    g_mod->span_hi);
+        }
     } else {
         // Each library at its own 16 MiB-aligned bias above the NULL guard,
         // dependencies first (the listed order).
@@ -1661,6 +1667,7 @@ static bool Boot(JavaVM* vm) {
             }
             const std::uint32_t hi = g_mod->more.empty() ? g_mod->span_hi : g_mod->more.back().span_hi;
             Log("guest %s at %08x", gl.name.c_str(), at);
+            abr::sampler::AddModule(gl.name, at, hi);
             at = (hi + 0xFFFFFFu) & ~0xFFFFFFu;
         }
     }
@@ -1772,6 +1779,12 @@ static bool Boot(JavaVM* vm) {
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off");
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
+    // Sampling profiler (HARNESS_SAMPLE or debug.abport.sample): its
+    // resolver is a Jit on the shared code cache that never runs.
+    abr::sampler::Init();
+    if (abr::sampler::On()) {
+        abr::sampler::SetResolver(NewThreadJit(0));
+    }
     // Host callbacks into guest code (OpenSL ES buffer queues and the like).
     abr::Runtime::g_call_guest_hook = CallGuestFromHost;
     g_rt->set_callbacks(&callbacks);

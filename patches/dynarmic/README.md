@@ -153,3 +153,13 @@ blocks contains such a link, so a spinning loop still stops (fmt_test halts
 one from another thread), and straight code soon reaches the dispatcher or an
 SVC, which check too. dispatch_bench: branchy loop 2.50 -> 2.40 ns, call and
 return 2.88 -> 2.78 ns.
+
+## 0013-guest-pc-for-host-pc.patch
+
+For the host's sampling profiler (host/src/guest/sampler.h):
+`Jit::GuestPcForHostPc(host_pc)` answers which guest block's code holds a
+host address, searching the Jit's (shared) code cache and its private
+overflow cache: the guest PC with bit 0 for Thumb, -2 for the cache's
+shared stubs (dispatcher), -1 when outside both. It takes the cache's lock
+(shared), so the profiler calls it from its reporter thread, never from
+the signal handler. The x64 backend answers -1.

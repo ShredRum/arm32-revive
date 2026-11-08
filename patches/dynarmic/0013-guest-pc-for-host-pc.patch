@@ -1,0 +1,122 @@
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+index 6c9cae7..0765f34 100644
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -172,6 +172,26 @@ struct Jit::Impl final {
+         return cache;
+     }
+ 
++    std::int64_t GuestPcForHostPc(const void* host_pc) const {
++        for (A32AddressSpace* space : {&current_address_space, overflow.get()}) {
++            if (!space) {
++                continue;
++            }
++            IR::LocationDescriptor loc{0};
++            switch (space->LocateHostPc(host_pc, &loc)) {
++            case AddressSpace::HostPcKind::Block: {
++                const A32::LocationDescriptor a32{loc};
++                return static_cast<std::int64_t>(a32.PC() | (a32.TFlag() ? 1u : 0u));
++            }
++            case AddressSpace::HostPcKind::Stub:
++                return -2;
++            case AddressSpace::HostPcKind::Outside:
++                break;
++            }
++        }
++        return -1;
++    }
++
+ private:
+     void PerformRequestedCacheInvalidation(HaltReason hr) {
+         if (Has(hr, HaltReason::CacheInvalidation)) {
+@@ -225,6 +245,10 @@ std::shared_ptr<SharedCodeCache> Jit::GetSharedCodeCache() const {
+     return impl->GetSharedCodeCache();
+ }
+ 
++std::int64_t Jit::GuestPcForHostPc(const void* host_pc) const {
++    return impl->GuestPcForHostPc(host_pc);
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 55fbcff..244b379 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -51,6 +51,21 @@ std::optional<IR::LocationDescriptor> AddressSpace::ReverseGetLocation(CodePtr h
+     return std::nullopt;
+ }
+ 
++AddressSpace::HostPcKind AddressSpace::LocateHostPc(const void* host_pc, IR::LocationDescriptor* loc) {
++    const auto* p = static_cast<const std::byte*>(host_pc);
++    const auto* base = reinterpret_cast<const std::byte*>(mem.ptr());
++    if (p < base || p >= base + code_cache_size) {
++        return HostPcKind::Outside;
++    }
++    std::shared_lock lock{cache_mutex};
++    const auto location = ReverseGetLocation(const_cast<CodePtr>(p));
++    if (!location) {
++        return HostPcKind::Stub;
++    }
++    *loc = *location;
++    return HostPcKind::Block;
++}
++
+ CodePtr AddressSpace::ReverseGetEntryPoint(CodePtr host_pc) {
+     if (auto iter = reverse_block_entries.upper_bound(host_pc); iter != reverse_block_entries.begin()) {
+         // upper_bound locates the first value greater than host_pc, so we need to decrement
+diff --git a/src/dynarmic/backend/arm64/address_space.h b/src/dynarmic/backend/arm64/address_space.h
+index 9a74fa8..d02660e 100644
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -47,6 +47,13 @@ public:
+     // Returns "most likely" entry_point associated with the emitted code at that location
+     CodePtr ReverseGetEntryPoint(CodePtr host_pc);
+ 
++    // ab-port (sampling profiler): where host_pc lies in this space's code
++    // cache: outside it, in the shared stubs emitted before every block (the
++    // dispatcher and its kin), or in a block, whose guest location goes to
++    // *loc. Takes cache_mutex (shared): never from a signal handler.
++    enum class HostPcKind { Outside, Stub, Block };
++    HostPcKind LocateHostPc(const void* host_pc, IR::LocationDescriptor* loc);
++
+     // Locks. Returns nullptr only when the cache is shared and too full to
+     // emit into (a shared cache is never cleared: other threads may be
+     // running its code); the caller then uses a private overflow cache.
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+index e10995f..dbe5e18 100644
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -281,6 +281,11 @@ std::shared_ptr<SharedCodeCache> Jit::GetSharedCodeCache() const {
+     return nullptr;
+ }
+ 
++// The x64 backend (PC tools) keeps no host-to-guest map for the profiler.
++std::int64_t Jit::GuestPcForHostPc(const void*) const {
++    return -1;
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index e5d8a91..44a7915 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -38,6 +38,15 @@ public:
+     /// This Jit's code cache, for sharing; nullptr if the backend cannot share.
+     std::shared_ptr<SharedCodeCache> GetSharedCodeCache() const;
+ 
++    /**
++     * Sampling profiler support (ab-port): the guest PC, with bit 0 set for
++     * Thumb, of the compiled block whose host code holds host_pc, searching
++     * this Jit's code cache and its private overflow cache. -2: host_pc is in
++     * a cache's shared stubs (dispatcher); -1: in neither cache. Takes the
++     * cache's lock: call it from an ordinary thread, never a signal handler.
++     */
++    std::int64_t GuestPcForHostPc(const void* host_pc) const;
++
+     /**
+      * Sets the value `mrc p15, 0, Rt, c13, c0, 3` (TPIDRURO) reads on this Jit.
+      * It is state of the Jit, not of the compiled code, so it stays per thread

@@ -1,4 +1,5 @@
 #include "dispatch.h"
+#include "sampler.h"
 
 #ifdef __ANDROID__
 #include <jni.h>  // real-Java delegation (product host only)
@@ -10749,6 +10750,7 @@ void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
     if (jit) {
         jit->SetTpidruro(0);  // BindTls
         RegisterSigThread(tid, jit);
+        sampler::ThreadUses();  // the profiler's timer for this thread, when on
     } else if (t_sig) {
         std::lock_guard<std::mutex> l(sig_mu_);  // see GuestSendSignal
         t_sig->jit.store(nullptr, std::memory_order_release);  // its Jit is going away
