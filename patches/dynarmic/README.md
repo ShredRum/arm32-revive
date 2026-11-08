@@ -190,3 +190,22 @@ import restores the caller's Thumb state from LR bit 0; doing it with
 `Cpsr()` and `SetCpsr()` built the whole CPSR from five fields and parsed it
 back (~1.5 % of Rio's game thread in a phone profile). The x64 backend does
 it through Cpsr/SetCpsr.
+
+## 0016-fast-dispatch-two-way.patch
+
+The fast dispatch table of 0005 missed far more than it should: in Rio on
+the sandbox ~8 % of host calls' worth of indirect branches still went to
+the C++ dispatcher, 98 % of them because their entry held another target
+(diagnostic counters `fast_evict` / `fast_stale`, added here). The index
+was `(pc >> 1) ^ upper` masked: for ARM code (PC bits 0-1 zero) only half
+the entries were ever used, and targets 8 KiB apart shared one.
+
+Now: Fibonacci hashing (`descriptor * 2^64/phi`, top bits; every bit of the
+descriptor counts) and two-way sets of one 64-byte cache line (way 0 the
+latest target, way 1 the one before), same 4096 entries, same 128 KiB per
+Jit, table 64-byte aligned. Measured, Rio on the sandbox, C++ dispatches
+per host call: 7.9 % before, 5.6 % with a better shift-xor hash, 3.5 %
+Fibonacci one-way, 0.27 % Fibonacci two-way (0.24 % of those were
+first-time lookups and memo misses). The stub's hit path adds an LDR of the
+constant and a MUL in place of LSR/EOR/AND; a hit in way 1 costs one more
+LDP from the same line.

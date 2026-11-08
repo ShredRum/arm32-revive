@@ -11,9 +11,13 @@ BT=tools/android-sdk/build-tools/35.0.0
 KS="${KS:-keys/debug.keystore}"
 KS_ALIAS="${KS_ALIAS:-dbg}"
 KS_PASS="${KS_PASS:-android}"
-LIB_SRC=host/build-android/libabhost.so
 # SANDBOX=1: the API 26 build for the sandbox (build-lib.sh --sandbox).
-[ "${SANDBOX:-0}" = 1 ] && LIB_SRC=host/build-android-sandbox/libabhost.so
+# DIAG=1: the counter-enabled build (build-lib.sh --diag); a measurement only,
+# swap the shipping lib back afterwards.
+LIB_DIR=host/build-android
+[ "${DIAG:-0}" = 1 ] && LIB_DIR+=-diag
+[ "${SANDBOX:-0}" = 1 ] && LIB_DIR+=-sandbox
+LIB_SRC=$LIB_DIR/libabhost.so
 [ -f "$LIB_SRC" ] || { echo "swap-lib: $LIB_SRC missing (run scripts/build-lib.sh)" >&2; exit 1; }
 for G in "$@"; do
     APK="games/$G/work/apk_signed.apk"

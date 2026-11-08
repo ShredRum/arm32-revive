@@ -1,0 +1,166 @@
+--- a/src/dynarmic/backend/arm64/a32_jitstate.h
++++ b/src/dynarmic/backend/arm64/a32_jitstate.h
+@@ -23,7 +23,19 @@
+     u64 generation;
+     u64 unused;
+ };
+-constexpr size_t FastDispatchEntries = 4096;  // MUST be a power of 2.
++// Two-way sets of 64 bytes (one cache line; the table is 64-byte aligned):
++// way 0 holds the latest target, way 1 the one before it.
++constexpr size_t FastDispatchWays = 2;
++constexpr size_t FastDispatchSetBits = 11;
++constexpr size_t FastDispatchEntries = FastDispatchWays << FastDispatchSetBits;
++// Fibonacci hashing: the top bits of descriptor * 2^64/phi depend on every
++// bit of the descriptor (a plain shift-and-mask left half the sets unused
++// for ARM code, whose PCs have two zero low bits). The dispatcher stub
++// computes the same.
++constexpr u64 FastDispatchHashMul = 0x9E3779B97F4A7C15;
++constexpr u64 FastDispatchSet(u64 descriptor) {
++    return (descriptor * FastDispatchHashMul) >> (64 - FastDispatchSetBits);
++}
+ 
+ struct A32JitState {
+     u32 cpsr_nzcv = 0;
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -197,8 +197,21 @@
+     }
+     if (state.fast_dispatch_table) {
+         const u64 value = descriptor.Value();
+-        const u64 index = ((value >> 32) ^ (value >> 1)) & (FastDispatchEntries - 1);
+-        state.fast_dispatch_table[index] = {value, mcl::bit_cast<u64>(entry), gen, 0};
++        FastDispatchEntry* set = state.fast_dispatch_table + FastDispatchSet(value) * FastDispatchWays;
++        // The new target goes to way 0; way 0 moves to way 1 unless it is this
++        // target gone stale (then way 1 keeps its own).
++        if (set[0].descriptor != value) {
++#ifdef DYNARMIC_DISPATCH_COUNTERS
++            const FastDispatchEntry& old = set[1];
++            if (old.code_ptr && old.generation == gen && old.descriptor != value) {
++                dispatch_evict_count.fetch_add(1, std::memory_order_relaxed);
++            } else if (old.code_ptr && old.generation != gen) {
++                dispatch_stale_count.fetch_add(1, std::memory_order_relaxed);
++            }
++#endif
++            set[1] = set[0];
++        }
++        set[0] = {value, mcl::bit_cast<u64>(entry), gen, 0};
+     }
+     return entry;
+ }
+@@ -360,7 +373,7 @@
+ 
+     prelude_info.return_to_dispatcher = code.xptr<void*>();
+     {
+-        oaknut::Label l_this, l_addr, l_generation, fast_dispatch_miss;
++        oaknut::Label l_this, l_addr, l_generation, l_hash_mul, fast_dispatch_found, fast_dispatch_miss;
+ 
+         code.LDAR(Wscratch0, Xhalt);
+         code.CBNZ(Wscratch0, return_from_run_code);
+@@ -376,13 +389,19 @@
+             static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
+             code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
+             code.LDR(X3, Xstate, offsetof(A32JitState, fast_dispatch_table));
+-            code.LSR(X1, X0, 32);
+-            code.EOR(X1, X1, X0, LSR, 1);
+-            code.AND(X1, X1, FastDispatchEntries - 1);
+-            code.ADD(X3, X3, X1, LSL, 5);
++            code.LDR(X1, l_hash_mul);
++            code.MUL(X1, X0, X1);
++            code.LSR(X1, X1, 64 - FastDispatchSetBits);
++            static_assert(sizeof(FastDispatchEntry) == 32 && FastDispatchWays == 2);
++            code.ADD(X3, X3, X1, LSL, 6);
++            code.LDP(X1, X2, X3);
++            code.CMP(X1, X0);
++            code.B(EQ, fast_dispatch_found);
++            code.ADD(X3, X3, sizeof(FastDispatchEntry));
+             code.LDP(X1, X2, X3);
+             code.CMP(X1, X0);
+             code.B(NE, fast_dispatch_miss);
++            code.l(fast_dispatch_found);
+             code.LDR(X1, X3, offsetof(FastDispatchEntry, generation));
+             code.LDR(Xscratch0, l_generation);
+             code.LDR(Xscratch0, Xscratch0);
+@@ -412,6 +431,8 @@
+         code.dx(mcl::bit_cast<u64>(Common::FptrCast(fn)));
+         code.l(l_generation);
+         code.dx(mcl::bit_cast<u64>(&generation));
++        code.l(l_hash_mul);
++        code.dx(FastDispatchHashMul);
+     }
+ 
+     prelude_info.return_from_run_code = code.xptr<void*>();
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <cstdlib>
++#include <cstring>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -37,8 +38,14 @@
+             , core(conf) {
+         current_address_space.AddSharer();
+         if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
+-            fast_dispatch_table.reset(static_cast<FastDispatchEntry*>(std::calloc(FastDispatchEntries, sizeof(FastDispatchEntry))));
+-            ASSERT(fast_dispatch_table);
++            // A set is one cache line.
++            constexpr size_t bytes = FastDispatchEntries * sizeof(FastDispatchEntry);
++            static_assert(bytes % 64 == 0);
++            void* table = nullptr;
++            const int rc = posix_memalign(&table, 64, bytes);  // aligned_alloc: API 28+
++            ASSERT(rc == 0);
++            fast_dispatch_table.reset(static_cast<FastDispatchEntry*>(table));
++            std::memset(fast_dispatch_table.get(), 0, bytes);
+             current_state.fast_dispatch_table = fast_dispatch_table.get();
+         }
+     }
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -26,6 +26,8 @@
+ 
+ #ifdef DYNARMIC_DISPATCH_COUNTERS
+ void CountDispatch();
++extern std::atomic<u64> dispatch_evict_count;
++extern std::atomic<u64> dispatch_stale_count;
+ #endif
+ 
+ class AddressSpace {
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -93,6 +93,8 @@
+ std::atomic<u64> dispatch_count{0};
+ std::atomic<u64> dispatch_memo_miss_count{0};
+ }  // namespace
++std::atomic<u64> dispatch_evict_count{0};
++std::atomic<u64> dispatch_stale_count{0};
+ 
+ void CountDispatch() {
+     dispatch_count.fetch_add(1, std::memory_order_relaxed);
+@@ -458,5 +460,11 @@
+ std::uint64_t DispatchMemoMissCount() {
+     return Backend::Arm64::dispatch_memo_miss_count.load(std::memory_order_relaxed);
+ }
++std::uint64_t DispatchEvictCount() {
++    return Backend::Arm64::dispatch_evict_count.load(std::memory_order_relaxed);
++}
++std::uint64_t DispatchStaleCount() {
++    return Backend::Arm64::dispatch_stale_count.load(std::memory_order_relaxed);
++}
+ }  // namespace Dynarmic::A32
+ #endif
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -160,6 +160,11 @@
+ /// their target, and how many of those also missed the thread's memo.
+ std::uint64_t DispatchCount();
+ std::uint64_t DispatchMemoMissCount();
++/// Of those that filled the fast dispatch table, how many pushed a live target
++/// of the same generation out of its set (evict) or one of an older
++/// generation (stale).
++std::uint64_t DispatchEvictCount();
++std::uint64_t DispatchStaleCount();
+ #endif
+ 
+ }  // namespace A32

@@ -13662,9 +13662,11 @@ void Runtime::DumpDiagCounters() {
     }
     RealGlDiagDump();
 #ifdef DYNARMIC_DISPATCH_COUNTERS
-    std::printf("[counters] dispatch=%llu memo_miss=%llu\n",
+    std::printf("[counters] dispatch=%llu memo_miss=%llu fast_evict=%llu fast_stale=%llu\n",
                 (unsigned long long)Dynarmic::A32::DispatchCount(),
-                (unsigned long long)Dynarmic::A32::DispatchMemoMissCount());
+                (unsigned long long)Dynarmic::A32::DispatchMemoMissCount(),
+                (unsigned long long)Dynarmic::A32::DispatchEvictCount(),
+                (unsigned long long)Dynarmic::A32::DispatchStaleCount());
 #endif
     std::printf(
         "[counters] heap=%llu/%llu jni_str=%u/%u,heap=%llu jni_obj=%u/%u "
