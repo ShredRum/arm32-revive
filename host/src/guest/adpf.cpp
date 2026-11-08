@@ -25,7 +25,8 @@ namespace {
 
 std::atomic<std::uint64_t> g_frames{0};
 std::atomic<std::uint64_t> g_cpu_ns{0};
-std::atomic<std::uint64_t> g_target_ns{1000000000ull / 60};
+// Until the display answers: 120 Hz, the short side (see RefreshRate).
+std::atomic<std::uint64_t> g_target_ns{1000000000ull / 120};
 std::atomic<bool> g_session_live{false};
 
 std::uint64_t ThreadCpuNs() {
@@ -90,40 +91,81 @@ bool Cleared(JNIEnv* env) {
     return false;
 }
 
-// The default display's refresh rate through Java (DisplayManager), from an
-// attached thread; 0 if it cannot be read.
-float RefreshRate() {
+// The default display's refresh rate through Java, from an attached thread:
+// the current mode's rate, else Display.getRefreshRate(), else the highest
+// rate a mode supports (when unsure, a shorter target is the safe side: the
+// system may then run the cores faster than needed, never slower). 0 if
+// none can be read; `how` says which one answered or where it failed.
+float RefreshRate(const char** how) {
+    *how = "no JNIEnv on this thread";
     JNIEnv* env = nullptr;
     if (!g_vm || g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) {
         return 0.f;
     }
-    float hz = 0.f;
-    if (env->PushLocalFrame(16) != 0) {
+    if (env->PushLocalFrame(32) != 0) {
         Cleared(env);
+        *how = "PushLocalFrame";
         return 0.f;
     }
-    jclass at = env->FindClass("android/app/ActivityThread");
-    jmethodID cur = at ? env->GetStaticMethodID(at, "currentApplication", "()Landroid/app/Application;") : nullptr;
-    jobject app = cur ? env->CallStaticObjectMethod(at, cur) : nullptr;
-    if (!Cleared(env) && app) {
+    float hz = 0.f;
+    do {
+        *how = "ActivityThread.currentApplication";
+        jclass at = env->FindClass("android/app/ActivityThread");
+        jmethodID cur = at ? env->GetStaticMethodID(at, "currentApplication", "()Landroid/app/Application;") : nullptr;
+        jobject app = cur ? env->CallStaticObjectMethod(at, cur) : nullptr;
+        if (Cleared(env) || !app) break;
+        *how = "getSystemService(display)";
         jclass ctx = env->FindClass("android/content/Context");
         jmethodID gss = ctx ? env->GetMethodID(ctx, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : nullptr;
         jstring name = env->NewStringUTF("display");
         jobject dm = (gss && name) ? env->CallObjectMethod(app, gss, name) : nullptr;
-        if (!Cleared(env) && dm) {
-            jclass dmc = env->FindClass("android/hardware/display/DisplayManager");
-            jmethodID gd = dmc ? env->GetMethodID(dmc, "getDisplay", "(I)Landroid/view/Display;") : nullptr;
-            jobject disp = gd ? env->CallObjectMethod(dm, gd, 0) : nullptr;  // DEFAULT_DISPLAY
-            if (!Cleared(env) && disp) {
-                jclass dc = env->FindClass("android/view/Display");
-                jmethodID rr = dc ? env->GetMethodID(dc, "getRefreshRate", "()F") : nullptr;
-                const float v = rr ? env->CallFloatMethod(disp, rr) : 0.f;
-                if (!Cleared(env)) {
-                    hz = v;
-                }
+        if (Cleared(env) || !dm) break;
+        *how = "DisplayManager.getDisplay(0)";
+        jclass dmc = env->FindClass("android/hardware/display/DisplayManager");
+        jmethodID gd = dmc ? env->GetMethodID(dmc, "getDisplay", "(I)Landroid/view/Display;") : nullptr;
+        jobject disp = gd ? env->CallObjectMethod(dm, gd, 0) : nullptr;  // DEFAULT_DISPLAY
+        if (Cleared(env) || !disp) break;
+        jclass dc = env->FindClass("android/view/Display");
+        jclass mc = env->FindClass("android/view/Display$Mode");
+        if (Cleared(env) || !dc || !mc) {
+            *how = "Display classes";
+            break;
+        }
+        jmethodID mrate = env->GetMethodID(mc, "getRefreshRate", "()F");
+        // 1. The current mode (API 23+).
+        jmethodID gm = env->GetMethodID(dc, "getMode", "()Landroid/view/Display$Mode;");
+        jobject mode = (gm && !Cleared(env)) ? env->CallObjectMethod(disp, gm) : nullptr;
+        if (!Cleared(env) && mode && mrate) {
+            const float v = env->CallFloatMethod(mode, mrate);
+            if (!Cleared(env) && v >= 20.f) {
+                hz = v;
+                *how = "Display.getMode()";
+                break;
             }
         }
-    }
+        // 2. Display.getRefreshRate().
+        jmethodID rr = env->GetMethodID(dc, "getRefreshRate", "()F");
+        if (rr && !Cleared(env)) {
+            const float v = env->CallFloatMethod(disp, rr);
+            if (!Cleared(env) && v >= 20.f) {
+                hz = v;
+                *how = "Display.getRefreshRate()";
+                break;
+            }
+        }
+        // 3. The highest supported mode.
+        *how = "Display.getSupportedModes()";
+        jmethodID sm = env->GetMethodID(dc, "getSupportedModes", "()[Landroid/view/Display$Mode;");
+        auto modes = (sm && !Cleared(env)) ? static_cast<jobjectArray>(env->CallObjectMethod(disp, sm)) : nullptr;
+        if (Cleared(env) || !modes || !mrate) break;
+        const jsize n = env->GetArrayLength(modes);
+        for (jsize i = 0; i < n; i++) {
+            jobject m = env->GetObjectArrayElement(modes, i);
+            const float v = m ? env->CallFloatMethod(m, mrate) : 0.f;
+            if (!Cleared(env) && v > hz) hz = v;
+            env->DeleteLocalRef(m);
+        }
+    } while (false);
     Cleared(env);
     env->PopLocalFrame(nullptr);
     return hz;
@@ -150,9 +192,15 @@ void OpenSessionHere(pid_t tid) {
         g_on = false;
         return;
     }
-    if (const std::uint64_t p = PeriodFromRate(RefreshRate())) {
+    const char* how = nullptr;
+    const float hz = RefreshRate(&how);
+    if (const std::uint64_t p = PeriodFromRate(hz)) {
         g_target_ns.store(p, std::memory_order_relaxed);
     }
+    char rline[128];
+    std::snprintf(rline, sizeof rline, "refresh rate %.1f Hz (%s)%s", hz, how,
+                  PeriodFromRate(hz) ? "" : ": target stays at the default");
+    Note(rline);
     const std::int32_t tids[1] = {static_cast<std::int32_t>(tid)};
     const std::int64_t target = static_cast<std::int64_t>(g_target_ns.load(std::memory_order_relaxed));
     g_session = g_create(manager, tids, 1, target);
@@ -232,7 +280,8 @@ void FrameDone() {
     std::uint64_t period = 0;
     if (wall >= t.next_check) {
         t.next_check = wall + 2000000000ull;
-        period = PeriodFromRate(RefreshRate());
+        const char* how = nullptr;
+        period = PeriodFromRate(RefreshRate(&how));
     }
     std::lock_guard<std::mutex> l(g_mu);  // once a frame, uncontended
     if (!g_on) {
