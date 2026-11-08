@@ -56,6 +56,7 @@ add_library(guest STATIC
     src/guest/dispatch.cpp
     src/guest/realgl.cpp
     src/guest/apk_vfs.cpp
+    src/guest/opensl.cpp
     src/guest/dlmalloc.c
 )
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
@@ -90,7 +91,7 @@ target_link_libraries(guest PUBLIC dynarmic z)
 if(NOT ANDROID)
     target_link_libraries(guest PUBLIC EGL GLESv2 X11)
 else()
-    target_link_libraries(guest PUBLIC EGL GLESv2 android)
+    target_link_libraries(guest PUBLIC EGL GLESv2 android OpenSLES)
 endif()
 # Private frontend header (a32_ir_emitter.h) for the HARNESS_PROBE IR emitter.
 target_include_directories(guest PRIVATE

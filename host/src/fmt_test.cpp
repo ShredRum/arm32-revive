@@ -502,6 +502,7 @@ int main() {
     mod.imports.push_back(abr::Import{"pread", true, 0, 0, 0});         // 124
     mod.imports.push_back(abr::Import{"rename", true, 0, 0, 0});        // 125
     mod.imports.push_back(abr::Import{"rmdir", true, 0, 0, 0});         // 126
+    mod.imports.push_back(abr::Import{"slCreateEngine", true, 0, 0, 0});  // 127
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -515,6 +516,10 @@ int main() {
         imp.gl_id = abr::GlIdForName(imp.name.c_str());
         imp.import_id = abr::ImportIdForName(imp.name.c_str());
     }
+    // The trampoline page the loader would make: run-time imports (dlsym,
+    // the OpenSL ES method tables) write their svc trampolines there.
+    mem.Map(abr::kTrampBase, abr::kTrampSize, PROT_READ | PROT_EXEC);
+    mod.next_tramp = abr::kTrampBase;
     abr::Runtime rt(mem, mod);
 
     auto put = [&](std::uint32_t addr, const std::string& s) {
@@ -3641,6 +3646,113 @@ int main() {
         }
         const std::uint32_t sr = call(29, kP, kSt);
         Expect("vfs: recreated as a real file", std::to_string(sr) + "/" + st_size(), "0/3");
+    }
+
+    // --- OpenSL ES bridge (opensl.cpp): engine -> output mix -> buffer
+    //     queue player; a queued buffer comes back through the guest
+    //     callback, called by the host's audio thread through the hook.
+    {
+        static std::atomic<int> sl_calls{0};
+        static std::uint32_t sl_caller = 0, sl_ctx = 0;
+        abr::Runtime::g_call_guest_hook = [](const char*, std::uint32_t va,
+                                             const std::vector<std::uint32_t>& w) -> std::uint64_t {
+            if (va == 0x0BADF00Du && w.size() == 2) {
+                sl_caller = w[0];
+                sl_ctx = w[1];
+                sl_calls.fetch_add(1);
+            }
+            return 0;
+        };
+        const std::uint32_t kOut = 0x1000F000, kSrc = 0x1000F040, kLoc = 0x1000F060,
+                            kFmt = 0x1000F080, kSnk = 0x1000F0C0, kMixLoc = 0x1000F0E0,
+                            kIds = 0x1000F100, kReq = 0x1000F120, kPcm = 0x1000F200;
+        auto w32 = [&](std::uint32_t at, std::uint32_t v) { std::memcpy(rt.H<std::uint8_t>(at), &v, 4); };
+        auto r32 = [&](std::uint32_t at) {
+            std::uint32_t v = 0;
+            std::memcpy(&v, rt.H<std::uint8_t>(at), 4);
+            return v;
+        };
+        // A method: its trampoline's svc number is the import index + 1.
+        auto method = [&](std::uint32_t itf, int slot, std::uint32_t a1 = 0, std::uint32_t a2 = 0,
+                          std::uint32_t a3 = 0, std::vector<std::uint32_t> stack = {}) {
+            const std::uint32_t va = r32(r32(itf) + static_cast<std::uint32_t>(slot) * 4);
+            const std::uint32_t idx = (r32(va) & 0xFFFFFFu) - 1;
+            abr::RuntimeTestAccess::RegsView in{};
+            in[0] = itf;
+            in[1] = a1;
+            in[2] = a2;
+            in[3] = a3;
+            in[13] = 0x1000F800;
+            for (std::size_t i = 0; i < stack.size(); i++) w32(0x1000F800 + static_cast<std::uint32_t>(i) * 4, stack[i]);
+            const std::uint32_t args[4] = {in[0], in[1], in[2], in[3]};
+            return abr::RuntimeTestAccess::Call(rt, idx, args, in, nullptr);
+        };
+        const std::uint32_t eargs[4] = {kOut, 0, 0, 0};
+        const std::uint32_t r = abr::RuntimeTestAccess::Call(rt, 127, eargs);
+#if defined(__ANDROID__)
+        Expect("sles: slCreateEngine", std::to_string(r), "0");
+        const std::uint32_t engine_obj = r32(kOut);
+        Expect("sles: Object.Realize", std::to_string(method(engine_obj, 0, 0)), "0");
+        Expect("sles: GetInterface(SL_IID_ENGINE)",
+               std::to_string(method(engine_obj, 3, r32(rt.OpenSlIid("SL_IID_ENGINE")), kOut)), "0");
+        const std::uint32_t engine = r32(kOut);
+        Expect("sles: Engine.CreateOutputMix", std::to_string(method(engine, 7, kOut, 0, 0, {0})), "0");
+        const std::uint32_t mix = r32(kOut);
+        Expect("sles: mix Realize", std::to_string(method(mix, 0, 0)), "0");
+        // Source: Android simple buffer queue, 2 buffers, PCM 48 kHz s16 stereo.
+        w32(kLoc, 0x800007BDu);
+        w32(kLoc + 4, 2);
+        const std::uint32_t pcm[7] = {2, 2, 48000000, 16, 16, 3, 2};  // SL_DATAFORMAT_PCM, little endian
+        std::memcpy(rt.H<std::uint8_t>(kFmt), pcm, sizeof pcm);
+        w32(kSrc, kLoc);
+        w32(kSrc + 4, kFmt);
+        w32(kMixLoc, 4);  // SL_DATALOCATOR_OUTPUTMIX
+        w32(kMixLoc + 4, mix);
+        w32(kSnk, kMixLoc);
+        w32(kSnk + 4, 0);
+        w32(kIds, r32(rt.OpenSlIid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE")));
+        w32(kReq, 1);
+        Expect("sles: Engine.CreateAudioPlayer",
+               std::to_string(method(engine, 2, kOut, kSrc, kSnk, {1, kIds, kReq})), "0");
+        const std::uint32_t player = r32(kOut);
+        Expect("sles: player Realize", std::to_string(method(player, 0, 0)), "0");
+        Expect("sles: GetInterface(SL_IID_PLAY)",
+               std::to_string(method(player, 3, r32(rt.OpenSlIid("SL_IID_PLAY")), kOut)), "0");
+        const std::uint32_t play = r32(kOut);
+        Expect("sles: GetInterface(SL_IID_ANDROIDSIMPLEBUFFERQUEUE)",
+               std::to_string(method(player, 3, r32(rt.OpenSlIid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE")), kOut)), "0");
+        const std::uint32_t bq = r32(kOut);
+        Expect("sles: the same interface twice is the same handle",
+               std::to_string(method(player, 3, r32(rt.OpenSlIid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE")), kOut) == 0 &&
+                              r32(kOut) == bq),
+               "1");
+        Expect("sles: unserved interface", std::to_string(method(player, 3, r32(rt.OpenSlIid("SL_IID_EQUALIZER")), kOut)),
+               "12");
+        Expect("sles: BufferQueue.RegisterCallback", std::to_string(method(bq, 3, 0x0BADF00Du, 0x1234)), "0");
+        Expect("sles: Play.SetPlayState(PLAYING)", std::to_string(method(play, 0, 3)), "0");
+        std::memset(rt.H<std::uint8_t>(kPcm), 0, 4096);
+        Expect("sles: BufferQueue.Enqueue", std::to_string(method(bq, 0, kPcm, 4096)), "0");
+        for (int i = 0; i < 200 && sl_calls.load() == 0; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        Expect("sles: the buffer came back through the guest callback",
+               std::to_string(sl_calls.load() > 0) + "/" + std::to_string(sl_caller == bq) + "/" +
+                   std::to_string(sl_ctx == 0x1234),
+               "1/1/1");
+        std::memset(rt.H<std::uint8_t>(kOut), 0, 8);
+        Expect("sles: BufferQueue.GetState", std::to_string(method(bq, 2, kOut)), "0");
+        Expect("sles: player Destroy", std::to_string(method(player, 6)), "0");
+        Expect("sles: mix Destroy", std::to_string(method(mix, 6)), "0");
+        Expect("sles: engine Destroy", std::to_string(method(engine_obj, 6)), "0");
+        Expect("sles: a destroyed handle is refused", std::to_string(method(engine, 7, kOut, 0, 0, {0})), "2");
+#else
+        Expect("sles: no OpenSL ES on the PC", std::to_string(r), "12");
+        Expect("sles: SL_IID_ENGINE variable points at its 16-byte ID",
+               std::to_string(rt.OpenSlIid("SL_IID_ENGINE") != 0 &&
+                              r32(rt.OpenSlIid("SL_IID_ENGINE")) + 16 == rt.OpenSlIid("SL_IID_ENGINE")),
+               "1");
+#endif
+        abr::Runtime::g_call_guest_hook = nullptr;
     }
 
     // --- no quarantine: a freed block is handed out again (dlmalloc's LIFO

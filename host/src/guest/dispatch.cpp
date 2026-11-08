@@ -2181,6 +2181,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         RealGLBackend()->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
         return;
     }
+    // OpenSL ES (opensl.cpp): slCreateEngine and the "SL:" interface methods,
+    // names outside the import id table.
+    if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
+        return;
+    }
     // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
     // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
     // DIAG off this also stops paying the ~17 string compares per call.
@@ -4240,8 +4245,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 const std::string sym = GuestStr(a1);
                 // EGL: one host handler answers every egl* name (the ones it
                 // does not offer return 0, LOUD); SDL loads EGL this way.
-                if (NdkServes(sym) || sym.compare(0, 3, "egl") == 0) {
+                if (NdkServes(sym) || OpenSlServes(sym) || sym.compare(0, 3, "egl") == 0) {
                     v = RuntimeImport(sym);
+                } else if (sym.compare(0, 7, "SL_IID_") == 0) {
+                    v = OpenSlIid(sym);  // a data symbol: the variable's address
                 }
             }
             if (!v) {
@@ -10276,6 +10283,24 @@ void Runtime::InitDataImports() {
         }
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);
         covered.push_back(idx);
+    }
+    // OpenSL ES interface IDs (SL_IID_<X>) imported directly: the variables
+    // the OpenSL bridge keeps (opensl.cpp).
+    {
+        std::vector<std::uint32_t> sl;
+        for (std::uint32_t i = 0; i < mod_.imports.size(); i++) {
+            if (!mod_.imports[i].is_function && mod_.imports[i].name.compare(0, 7, "SL_IID_") == 0) {
+                sl.push_back(i);
+            }
+        }
+        for (const std::uint32_t i : sl) {
+            const std::string name = mod_.imports[i].name;
+            const std::uint32_t var = OpenSlIid(name);
+            if (var && bind_data_import(i, var)) {
+                std::printf("[data] %s -> %08x (OpenSL ES)\n", name.c_str(), var);
+                covered.push_back(i);
+            }
+        }
     }
     // Coverage guard: a data import that is NOT one of the slots above would
     // keep the address of its TRAMPOLINE (a code address in the trampoline

@@ -1772,6 +1772,8 @@ static bool Boot(JavaVM* vm) {
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off");
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
+    // Host callbacks into guest code (OpenSL ES buffer queues and the like).
+    abr::Runtime::g_call_guest_hook = CallGuestFromHost;
     g_rt->set_callbacks(&callbacks);
     auto st = Enter();  // OnLoad thread state (+ real attach)
     if (!st) {

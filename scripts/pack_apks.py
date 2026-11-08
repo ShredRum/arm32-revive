@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Build a split-APK set whose game data is read in place by the host.
 
-    scripts/pack_apks.py <game-id>
+    scripts/pack_apks.py <game-id> [--only <name>[,<name>...]]
+
+--only rebuilds just those APKs ("base", or a split name) into work/apks/
+and leaves the others and <id>.apks as they are (a host-only change needs
+base.apk alone; `pm install-create -p <package>` installs it over the
+installed splits).
 
 Input: games/<id>/work/apk_signed.apk (scripts/build-apk.sh) and the data
 tree named by the profile's [packed] section. Output, in games/<id>/work/apks/:
@@ -92,10 +97,15 @@ def check(apk):
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    only = None
+    if len(args) == 3 and args[1] == "--only":
+        only = set(args[2].split(","))
+        args = args[:1]
+    if len(args) != 1:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    game = sys.argv[1]
+    game = args[0]
     gdir = ROOT / "games" / game
     prof = tomllib.load(open(gdir / "profile.toml", "rb"))
     if "packed" not in prof:
@@ -138,19 +148,26 @@ def main():
             die(f"split {name} claims no file")
 
     out = gdir / "work/apks"
-    shutil.rmtree(out, ignore_errors=True)
-    out.mkdir(parents=True)
+    if only is None:
+        shutil.rmtree(out, ignore_errors=True)
+    else:
+        unknown = only - set(groups)
+        if unknown:
+            die(f"--only: no such APK: {', '.join(sorted(unknown))}")
+    out.mkdir(parents=True, exist_ok=True)
+    wanted = lambda name: only is None or name in only
 
     # base.apk: the program with its old signature dropped, plus base data.
-    tmp = out / "base.unsigned.apk"
-    shutil.copyfile(base_in, tmp)
-    run("zip", "-q", "-d", tmp, "META-INF/*")
-    add_stored(tmp, groups["base"])
-    align_and_sign(tmp, out / "base.apk", ks)
+    if wanted("base"):
+        tmp = out / "base.unsigned.apk"
+        shutil.copyfile(base_in, tmp)
+        run("zip", "-q", "-d", tmp, "META-INF/*")
+        add_stored(tmp, groups["base"])
+        align_and_sign(tmp, out / "base.apk", ks)
 
     # split_<name>.apk: a manifest-only APK (no code) plus its data.
     for name, files in groups.items():
-        if name == "base":
+        if name == "base" or not wanted(name):
             continue
         manifest = out / f"{name}.xml"
         manifest.write_text(
@@ -171,8 +188,13 @@ def main():
 
     apks = sorted(out.glob("*.apk"), key=lambda p: (p.name != "base.apk", p.name))
     for a in apks:
+        if only is not None and (a.stem if a.stem == "base" else a.stem[len("split_"):]) not in only:
+            continue
         n, size = check(a)
         print(f"  {a.name:<24} {size / 1e6:9.1f} MB, {n} packed files, stored and aligned, signed")
+    if only is not None:
+        print("apks    : not rebuilt (--only)")
+        return 0
     bundle = out / f"{game}.apks"
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as z:
         for a in apks:

@@ -195,7 +195,7 @@ struct JitDrop {
 class Runtime {
 public:
     Runtime(GuestMemory& mem, LoadedModule& mod);
-    ~Runtime() = default;
+    ~Runtime();  // opensl.cpp (sl_ is an incomplete type here)
 
     GuestMemory& mem() { return mem_; }
     LoadedModule& mod() { return mod_; }
@@ -370,6 +370,19 @@ public:
     // system library would export and the host serves); its guest address,
     // or 0 when the trampoline page or the reserved table is full.
     std::uint32_t RuntimeImport(const std::string& name);
+    // OpenSL ES for the guest (opensl.cpp): libOpenSLES as a guest sees it,
+    // served by the host's own. OpenSlServes: a function name it exports
+    // (dlsym makes a run-time import of it); OpenSlIid: the guest address
+    // of the SL_IID_<X> variable, 0 for an unknown name.
+    static bool OpenSlServes(const std::string& n);
+    std::uint32_t OpenSlIid(const std::string& name);
+    // Runs guest function va on the calling host thread (any thread: its
+    // guest state is made on first use) with words as its AAPCS32 arguments;
+    // r0 | r1 << 32, 0 when it cannot run. Set by the product host (apphost:
+    // CallGuestFromHost); null in PC tools. Host callbacks (OpenSL ES buffer
+    // queues) reach guest code through it.
+    static std::uint64_t (*g_call_guest_hook)(const char* name, std::uint32_t va,
+                                              const std::vector<std::uint32_t>& words);
     std::uint32_t sys_dl_handle_ = 0;  // dlopen of a system library
     // EGL for a guest that drives its own context (Unity): forwarded to the
     // real EGL with handles for displays, configs, contexts and surfaces.
@@ -839,6 +852,13 @@ private:
     // Test-only bridge to the private import dispatcher (host/src/fmt_test.cpp).
     friend struct RuntimeTestAccess;
     void CallImport(std::uint32_t idx, Regs& regs);
+    // OpenSL ES calls: "slCreateEngine" and the interface methods, run-time
+    // imports named "SL:<Interface>.<Method>" (opensl.cpp). True when served.
+    bool OpenSlCall(const std::string& n, Regs& regs);
+    struct OpenSl;  // opensl.cpp
+    OpenSl* sl_ = nullptr;  // owned; deleted in ~Runtime (opensl.cpp, where it is complete)
+    std::once_flag sl_once_;
+    OpenSl& Sl();
     // Fast path for the math imports the guest calls in tight loops; the id is
     // resolved at load time (Import::fast_math) so the per-call dispatch costs
     // one switch instead of the import-name chain.
