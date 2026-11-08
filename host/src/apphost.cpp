@@ -520,12 +520,20 @@ void Watchdog() {
         {
             // The frame thread's CPU time per frame and the ADPF target, also
             // when ADPF is off (adpf.h): the number to compare on a phone.
-            std::uint64_t frames = 0, cpu = 0, target = 0;
-            bool session = false;
-            if (abr::adpf::TakeStats(&frames, &cpu, &target, &session)) {
-                Log("[adpf] %llu frames in the last 10 s, frame thread CPU %.2f ms per frame, target %.2f ms, "
-                    "session %s",
-                    (unsigned long long)frames, cpu / 1e6 / frames, target / 1e6, session ? "on" : "off");
+            abr::adpf::Stats st;
+            if (abr::adpf::TakeStats(&st)) {
+                char clock[96] = "clock unreadable";
+                if (st.cycles && st.cycles_cpu_ns) {
+                    // cycles / CPU time = the time-weighted clock; per frame
+                    // scaled to the frames the cycles cover.
+                    const double mhz = st.cycles * 1e3 / st.cycles_cpu_ns;
+                    const double per_frame = st.cycles / 1e6 / st.frames * st.cpu_ns / st.cycles_cpu_ns;
+                    std::snprintf(clock, sizeof clock, "at %.0f MHz = %.2f Mcycles per frame", mhz, per_frame);
+                }
+                Log("[adpf] %llu frames in the last 10 s, frame thread CPU %.2f ms per frame %s, "
+                    "target %.2f ms, session %s",
+                    (unsigned long long)st.frames, st.cpu_ns / 1e6 / st.frames, clock, st.target_ns / 1e6,
+                    st.session ? "on" : "off");
             }
         }
         {

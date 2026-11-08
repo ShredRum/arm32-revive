@@ -21,13 +21,24 @@
 namespace abr::adpf {
 
 // Reads the switch and looks the functions up. `java_vm` (a JavaVM*) is used
-// to read the display's refresh rate; null: 60 Hz is assumed.
+// to read the display's refresh rate; null: 120 Hz is assumed (the short side).
 void Init(void* java_vm);
 // A frame ended on the calling thread.
 void FrameDone();
-// For the periodic log: frames since the last call, their total CPU time, the
-// current target and whether a session is live. False when nothing was
-// counted.
-bool TakeStats(std::uint64_t* frames, std::uint64_t* cpu_ns, std::uint64_t* target_ns, bool* session);
+// For the periodic log, since the last call. Cycles are each frame's CPU
+// time times the clock of the core its thread was on at the frame's end
+// (cpufreq, readable without root on most devices; 0 if not): with less work
+// the governor lowers the clock and the same thread stays about as busy, so
+// CPU time alone hides what ADPF saves.
+struct Stats {
+    std::uint64_t frames = 0;
+    std::uint64_t cpu_ns = 0;
+    std::uint64_t cycles = 0;          // 0: clocks unreadable
+    std::uint64_t cycles_cpu_ns = 0;   // the CPU time those cycles cover
+    std::uint64_t target_ns = 0;       // the current target
+    bool session = false;              // a session is live
+};
+// False when no frame was counted.
+bool TakeStats(Stats* s);
 
 }  // namespace abr::adpf

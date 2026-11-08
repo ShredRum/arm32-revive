@@ -93,7 +93,7 @@ target_link_libraries(guest PUBLIC dynarmic z)
 if(NOT ANDROID)
     target_link_libraries(guest PUBLIC EGL GLESv2 X11)
 else()
-    target_link_libraries(guest PUBLIC EGL GLESv2 android OpenSLES)
+    target_link_libraries(guest PUBLIC EGL GLESv2 android OpenSLES log)
 endif()
 # Private frontend header (a32_ir_emitter.h) for the HARNESS_PROBE IR emitter.
 target_include_directories(guest PRIVATE

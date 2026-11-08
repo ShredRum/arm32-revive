@@ -12,6 +12,8 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <sys/system_properties.h>
+#include <fcntl.h>
+#include <sched.h>
 #include <unistd.h>
 #endif
 
@@ -25,6 +27,8 @@ namespace {
 
 std::atomic<std::uint64_t> g_frames{0};
 std::atomic<std::uint64_t> g_cpu_ns{0};
+std::atomic<std::uint64_t> g_cycles{0};
+std::atomic<std::uint64_t> g_cycles_cpu_ns{0};
 // Until the display answers: 120 Hz, the short side (see RefreshRate).
 std::atomic<std::uint64_t> g_target_ns{1000000000ull / 120};
 std::atomic<bool> g_session_live{false};
@@ -48,6 +52,38 @@ void Note(const char* line) {
     __android_log_print(ANDROID_LOG_INFO, "abhost", "[adpf] %s", line);
 #endif
 }
+
+#if defined(__ANDROID__)
+// The current clock of a core in kHz (cpufreq), 0 if unknown. One open file
+// per core, read again with pread (sysfs gives the fresh value at offset 0).
+constexpr int kMaxCores = 32;
+std::atomic<int> g_freq_fd[kMaxCores];  // 0: not opened yet; -1: unreadable
+std::uint64_t CoreKhz(int cpu) {
+    if (cpu < 0 || cpu >= kMaxCores) {
+        return 0;
+    }
+    int fd = g_freq_fd[cpu].load(std::memory_order_relaxed);
+    if (fd == 0) {
+        char path[80];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+        int opened = open(path, O_RDONLY | O_CLOEXEC);
+        if (opened <= 0) {
+            opened = -1;  // (0 is never ours here: stdin)
+        }
+        int expected = 0;
+        if (!g_freq_fd[cpu].compare_exchange_strong(expected, opened, std::memory_order_relaxed)) {
+            if (opened > 0) close(opened);  // another thread opened it first
+        }
+        fd = g_freq_fd[cpu].load(std::memory_order_relaxed);
+    }
+    if (fd < 0) {
+        return 0;
+    }
+    char buf[24] = {};
+    const ssize_t n = pread(fd, buf, sizeof buf - 1, 0);
+    return n > 0 ? std::strtoull(buf, nullptr, 10) : 0;
+}
+#endif
 
 // The frame thread's own state (one thread makes the frames at a time; a new
 // one, e.g. after the GL thread was recreated, takes the session over).
@@ -268,6 +304,12 @@ void FrameDone() {
     g_frames.fetch_add(1, std::memory_order_relaxed);
     g_cpu_ns.fetch_add(work, std::memory_order_relaxed);
 #if defined(__ANDROID__)
+    if (const std::uint64_t khz = CoreKhz(sched_getcpu())) {
+        g_cycles.fetch_add(work * khz / 1000000u, std::memory_order_relaxed);  // ns * kHz / 1e6
+        g_cycles_cpu_ns.fetch_add(work, std::memory_order_relaxed);
+    }
+#endif
+#if defined(__ANDROID__)
     if (!g_on) {
         return;
     }
@@ -315,12 +357,14 @@ void FrameDone() {
 #endif
 }
 
-bool TakeStats(std::uint64_t* frames, std::uint64_t* cpu_ns, std::uint64_t* target_ns, bool* session) {
-    *frames = g_frames.exchange(0, std::memory_order_relaxed);
-    *cpu_ns = g_cpu_ns.exchange(0, std::memory_order_relaxed);
-    *target_ns = g_target_ns.load(std::memory_order_relaxed);
-    *session = g_session_live.load(std::memory_order_relaxed);
-    return *frames != 0;
+bool TakeStats(Stats* s) {
+    s->frames = g_frames.exchange(0, std::memory_order_relaxed);
+    s->cpu_ns = g_cpu_ns.exchange(0, std::memory_order_relaxed);
+    s->cycles = g_cycles.exchange(0, std::memory_order_relaxed);
+    s->cycles_cpu_ns = g_cycles_cpu_ns.exchange(0, std::memory_order_relaxed);
+    s->target_ns = g_target_ns.load(std::memory_order_relaxed);
+    s->session = g_session_live.load(std::memory_order_relaxed);
+    return s->frames != 0;
 }
 
 }  // namespace abr::adpf
