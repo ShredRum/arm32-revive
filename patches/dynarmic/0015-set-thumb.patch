@@ -1,0 +1,60 @@
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+index 6763113..d7fbccc 100644
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -152,6 +152,11 @@ struct Jit::Impl final {
+         current_state.SetCpsr(value);
+     }
+ 
++    void SetThumb(bool thumb) {
++        current_state.upper_location_descriptor =
++            (current_state.upper_location_descriptor & ~std::uint32_t(1)) | (thumb ? 1u : 0u);
++    }
++
+     // Unsafe_HostFpsr: while this Jit runs (a callback on its own thread asks),
+     // the live exception flags are in the host FPSR, not in the state.
+     bool HostFpsrLive() const {
+@@ -265,6 +270,10 @@ std::int64_t Jit::GuestPcForHostPc(const void* host_pc) const {
+     return impl->GuestPcForHostPc(host_pc);
+ }
+ 
++void Jit::SetThumb(bool thumb) {
++    impl->SetThumb(thumb);
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+index dbe5e18..bf70125 100644
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -286,6 +286,10 @@ std::int64_t Jit::GuestPcForHostPc(const void*) const {
+     return -1;
+ }
+ 
++void Jit::SetThumb(bool thumb) {
++    SetCpsr((Cpsr() & ~std::uint32_t(0x20)) | (thumb ? 0x20u : 0u));
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index 44a7915..0fbad1f 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -47,6 +47,13 @@ public:
+      */
+     std::int64_t GuestPcForHostPc(const void* host_pc) const;
+ 
++    /**
++     * Sets only the T (Thumb) bit of the CPSR (ab-port): what a return from a
++     * host-served call needs, without building the whole CPSR and parsing it
++     * back as Cpsr()/SetCpsr() do.
++     */
++    void SetThumb(bool thumb);
++
+     /**
+      * Sets the value `mrc p15, 0, Rt, c13, c0, 3` (TPIDRURO) reads on this Jit.
+      * It is state of the Jit, not of the compiled code, so it stays per thread

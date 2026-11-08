@@ -182,3 +182,11 @@ guest library: only VMRS APSR_nzcv). Host switch: HARNESS_NOHOSTFPSR=1.
 fmt_test (arm64): the guest's divide-by-zero seen by VMRS, live in a host
 call's Fpscr(), cleared by its SetFpscr(), and the host FPSR untouched.
 Idea from MrEmpathy's absw2 bridge (no licence: own code).
+
+## 0015-set-thumb.patch
+
+`Jit::SetThumb(bool)`: sets only the T bit. Every return from a host-served
+import restores the caller's Thumb state from LR bit 0; doing it with
+`Cpsr()` and `SetCpsr()` built the whole CPSR from five fields and parsed it
+back (~1.5 % of Rio's game thread in a phone profile). The x64 backend does
+it through Cpsr/SetCpsr.

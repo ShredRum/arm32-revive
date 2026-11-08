@@ -616,26 +616,29 @@ bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool
     // Last-hit cache (perf): string/scan loops probe per byte. The cached
     // extent is valid while the table's epoch is unchanged (it moves when an
     // entry's protection changes, e.g. munmap).
-    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_epoch = 0;
-    thread_local int hit_p = 0;
+    // One thread_local (one TLS lookup), not four.
+    thread_local struct {
+        std::uint32_t s = 1, e = 0, epoch = 0;
+        int p = 0;
+    } hit;
     const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit_epoch || !(addr >= hit_s && end <= hit_e)) {
+    if (ep != hit.epoch || !(addr >= hit.s && end <= hit.e)) {
         const MappingTable::Hit h = mappings_.Find(addr, size);
         if (h.end == 0) {
             return false;
         }
-        hit_s = h.start;
-        hit_e = h.end;
-        hit_p = h.prot;
-        hit_epoch = ep;
+        hit.s = h.start;
+        hit.e = h.end;
+        hit.p = h.prot;
+        hit.epoch = ep;
     }
     if (exec) {
-        return (hit_p & PROT_EXEC) != 0;
+        return (hit.p & PROT_EXEC) != 0;
     }
     if (write) {
-        return (hit_p & PROT_WRITE) != 0;
+        return (hit.p & PROT_WRITE) != 0;
     }
-    return (hit_p & PROT_READ) != 0;
+    return (hit.p & PROT_READ) != 0;
 }
 
 static std::uint32_t PadGlobal() {
@@ -1496,30 +1499,34 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
         return false;
     }
     // Same epoch-checked last-hit cache as CheckAccess.
-    thread_local std::uint32_t hit_s = 1, hit_e = 0, hit_epoch = 0;
-    thread_local int hit_p = 0;
+    // One thread_local (one TLS lookup), not four.
+    thread_local struct {
+        std::uint32_t s = 1, e = 0, epoch = 0;
+        int p = 0;
+    } hit;
     const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit_epoch || !(guest >= hit_s && end <= hit_e)) {
+    if (ep != hit.epoch || !(guest >= hit.s && end <= hit.e)) {
         const MappingTable::Hit h = mappings_.Find(guest, size);
         if (h.end == 0) {
             return false;
         }
-        hit_s = h.start;
-        hit_e = h.end;
-        hit_p = h.prot;
-        hit_epoch = ep;
+        hit.s = h.start;
+        hit.e = h.end;
+        hit.p = h.prot;
+        hit.epoch = ep;
     }
-    return write ? ((hit_p & PROT_WRITE) != 0) : ((hit_p & PROT_READ) != 0);
+    return write ? ((hit.p & PROT_WRITE) != 0) : ((hit.p & PROT_READ) != 0);
 }
 
 void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
     regs[0] = r0;
     regs[1] = r1;
-    // A guest SVC is an exception boundary: Dynarmic enters ARM state for the
-    // handler, so the caller's Thumb state must be restored explicitly here.
-    // Rebuild CPSR as: caller's T-bit from LR bit 0, always USER mode
-    // (our guest is unprivileged), NZCV/GE preserved from handler time
-    // (thunks never intentionally set flags).
+    // A guest SVC is an exception boundary: the import trampoline is ARM
+    // code, so the caller's Thumb state must be restored here from LR bit 0.
+    // Only the T bit changes (Jit::SetThumb, patches/dynarmic 0015: building
+    // the whole CPSR and parsing it back cost ~1.5 % of a game thread on a
+    // phone). The mode stays user: guest code starts in it (CallGuest) and
+    // nothing changes it; NZCV/GE stay as the handler left them.
     const std::uint32_t lr = regs[14];
     Dynarmic::A32::Jit* jit = ActiveJit();
     if (jit == nullptr) {
@@ -1528,10 +1535,7 @@ void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
         regs[15] = lr & ~std::uint32_t(1);
         return;
     }
-    std::uint32_t cpsr = jit->Cpsr();
-    cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10) |
-           ((lr & 1u) ? std::uint32_t(0x20) : std::uint32_t(0));
-    jit->SetCpsr(cpsr);
+    jit->SetThumb((lr & 1u) != 0);
     regs[15] = lr & ~std::uint32_t(1);
 }
 
@@ -17974,7 +17978,9 @@ void GuestCallbacks::CallSVC(std::uint32_t swi) {
     // has no guest frames when the first signal comes (a proxy would run the
     // handler over its live stack).
     const bool blocking = rt_->SvcBlocks(swi);
-    rt_->SigEnterHostCall(regs, jit->Cpsr(), blocking);
+    // The CPSR only matters to a blocking call (a proxy may deliver signals
+    // from its snapshot); building it for every call cost ~0.7 %.
+    rt_->SigEnterHostCall(regs, blocking ? jit->Cpsr() : 0u, blocking);
     {
         const prof::CallTimer timer(swi);  // HARNESS_PROF only (a thread_local test otherwise)
         rt_->OnSvc(swi, regs);
