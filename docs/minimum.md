@@ -98,6 +98,21 @@ first 60 s, back to back), before the direct jump.
 | F8 DONE | phone measurements (fps, heat) with MCSM | 2026-11-08: split APKs (packed files), 118-120 fps at 120 Hz, slightly warm; main thread ~83 %, no thread at 100 % | GL thread (F4) not needed |
 | F10 PART DONE | profiler data (phone, Rio game thread) | sampler.h, 2026-11-08 | done: Host FPSR (dynarmic 0014, 7344b32): MSR/MRS FPSR before JIT samples ~2-5 % -> 0; Ret sets only the T bit (0015) and CallSVC builds the CPSR only for blocking calls; CheckRange/CheckAccess caches one thread_local (f7b3c8e); TLS resolver 1.8 -> 1.1 %. Game-thread CPU per 5 s across the session: 1003 (start) -> 966 (API 29) -> 958 (one TLS per call) -> 946 ms (FPSR, CPSR) = -5.7 %, each run a different level (+-2 %). Block lookups in the C++ dispatcher (~0.6 %): measured, 98 % were fast-table conflicts; dynarmic 0016 (Fibonacci hash, two-way sets) cuts C++ dispatches per host call 7.9 % -> 0.27 % (Rio, sandbox). Handlers' thread_locals: the sampler names the caller of linker64 (TLS resolver) and libc syscall() samples (`leaf` lines). MCSM phone profiles (2026-11-08, 120 fps both): main SDLThread guest JIT ~72 %, host ours ~11.6 %, libc ~8.7 %. syscall 5.6 % = sem_post 4.3 % + pthread_cond_signal 0.6 %: bionic's sem_post enters the kernel only when a thread waits, so these are the engine's own wakeups of its workers, the same natively. Guest atomics (LDREX/STREX through the one exclusive monitor): ~3.5 % (spin lock page ~2 %, shown as `anon 0x...40xx` and counted as guest (private cache); CheckAndClear 0.6 %; CAS 0.4 %); dynarmic 0017 (scan only used ids) changed nothing measurable: the cost is the lock line bouncing between the two game threads. t_java_copies init wrapper gone (a71d6cf). Remaining TLS resolver ~1 %, spread over CallSVC, CheckAccess, the exclusive trampolines (tls_a32_binding). |
 
+### F-ext. Taken from other ports and the 2026-11-08 audit, not done yet
+
+Ideas only (MrEmpathy's ports have no license: no code copied).
+
+| ID | What | Source, expected gain | Status |
+|---|---|---|---|
+| X1 | ADPF (Android 13+ PerformanceHintManager): report each frame's work time and target, the system picks core clocks to fit | MrEmpathy, -7 % cycles at the same 120 fps; heat, all titles, low risk | not done |
+| X2 | Read constants at translation time from read-only code/.rodata/GOT of loaded guest libraries (`IsReadOnlyMemory`), narrow to what the loader keeps read-only | MrEmpathy; gain unmeasured by him and us; rejected 11-03 for the broad form only | not done, measure first |
+| X3 | LTO for libabhost | audit 11-08; cheap experiment, gain unknown | not done |
+| X4 | Callback owner from the Jit state (dynarmic patch), so CallSVC needs no thread_local | MrEmpathy's per-thread callbacks; TLS now ~1 % after A/B | far plan, low value now |
+| X5 | MCSM manifest: drop storage, billing, license permissions (data lives in splits now) | phys-winner's mod; tidiness | not done |
+| X6 | WebP through the system decoder (SW2 start) | MrEmpathy, -250 ms start only | check whether our SW2 decodes WebP at all |
+| X7 | Display cutout: `windowLayoutInDisplayCutoutMode=shortEdges` in the activity theme, all titles (prepare-tree) | MrEmpathy's games fill the camera cutout area | owner deciding |
+| X8 | Language from Android 13+ per-app settings (MCSM) | phys-winner's mod | later |
+
 ## Order
 
 1. A1, A6 (certain, tiny). 2. A2-A4 + B3/B4 (one change, measured).
