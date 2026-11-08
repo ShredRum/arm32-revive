@@ -96,7 +96,7 @@ first 60 s, back to back), before the direct jump.
 | F7 | sem_post ~20 us wall | the poster yields to the woken worker | scheduler, as natively: leave |
 | F9 DONE | redundant GL state calls (see E) | MCSM: 2.9 M attrib, 2 M uniform calls / 30 s, mostly repeats | sandbox render thread spent ~2/3 of its time in GL (ANGLE); the phone driver is cheaper, so less gain there |
 | F8 DONE | phone measurements (fps, heat) with MCSM | 2026-11-08: split APKs (packed files), 118-120 fps at 120 Hz, slightly warm; main thread ~83 %, no thread at 100 % | GL thread (F4) not needed |
-| F10 | profiler data (phone, Rio game thread) | sampler.h, 2026-11-08 | left after the TLS work: FPSR writes ~2.5 % (Host FPSR, lite design: setjmp/longjmp read FPSCR through the Jit API), Cpsr get/set ~1.5 %, block lookups ~0.6 %, CheckRange ~0.5 %, TLS resolver 1.8 % (handlers' own thread_locals) |
+| F10 PART DONE | profiler data (phone, Rio game thread) | sampler.h, 2026-11-08 | done: Host FPSR (dynarmic 0014, 7344b32): MSR/MRS FPSR before JIT samples ~2-5 % -> 0; Ret sets only the T bit (0015) and CallSVC builds the CPSR only for blocking calls; CheckRange/CheckAccess caches one thread_local (f7b3c8e); TLS resolver 1.8 -> 1.1 %. Game-thread CPU per 5 s across the session: 1003 (start) -> 966 (API 29) -> 958 (one TLS per call) -> 946 ms (FPSR, CPSR) = -5.7 %, each run a different level (+-2 %). Left: block lookups in the C++ dispatcher ~0.6 % (measure misses first), handlers' own thread_locals ~1 % |
 
 ## Order
 

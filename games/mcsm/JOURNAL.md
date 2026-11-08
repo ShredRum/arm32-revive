@@ -281,3 +281,16 @@ GL thread (F4) would buy nothing; heat is the remaining goal: a 60 fps cap
 (the game's 2017 target) halves the work, JIT (F5) trims it.
 Note: dumpsys SurfaceFlinger --latency needs the exact BLAST layer name on
 Android 15; the host's [frames] logcat line is the simpler fps source.
+
+## State 2026-11-08 evening (before a context compaction)
+
+Branch perf (master = mcsm merged, c264da2). Done today on perf: phone
+sampling profiler (sampler.h, dynarmic 0013; setprop debug.abport.sample 1,
+logcat [sample]); phone builds API 29 / sandbox builds --sandbox + SANDBOX=1
+(f33e610); one TLS per call (d1d4752); Host FPSR (0014, 7344b32); SetThumb
+(0015) + range cache (f7b3c8e). Rio game thread on the phone -5.7 % CPU in
+all (docs/minimum.md E, F10). Sandbox cannot profile (its kernel: per-thread
+CPU clocks report process totals, timer signals ~20/s). Next: maybe a
+profile of MCSM on the phone (base.apk only via pm install-create -p);
+send the owner fresh APKs of all titles (phone build) when he asks; R-014
+(one SW2 black screen) open; sandbox has the low_latency feature file on.
