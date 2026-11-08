@@ -294,3 +294,14 @@ CPU clocks report process totals, timer signals ~20/s). Next: maybe a
 profile of MCSM on the phone (base.apk only via pm install-create -p);
 send the owner fresh APKs of all titles (phone build) when he asks; R-014
 (one SW2 black screen) open; sandbox has the low_latency feature file on.
+
+## 2026-11-08 night: two phone profiles of MCSM
+
+Phone, episode 1, 120 fps both runs. Main SDLThread: guest JIT ~72 %, JIT
+stubs ~4.7 %, host ours ~11.6 %, libc ~8.7 %. Kernel time of sem_post
+(4.3 %, the engine waking its workers; bionic only enters the kernel when a
+thread waits) and the guest-atomics path (~3.5 %: dynarmic's exclusive
+monitor spin lock, contended by the two SDL threads) are the biggest host
+items. dynarmic 0016 (fast dispatch) leaves C++ dispatch at 0.3 %. 0017
+(monitor scans used ids) and the t_java_copies counter: correct, no
+measurable change on the main thread. Details: docs/minimum.md F10.
