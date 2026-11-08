@@ -1526,22 +1526,34 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
 void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
     regs[0] = r0;
     regs[1] = r1;
-    // A guest SVC is an exception boundary: the import trampoline is ARM
-    // code, so the caller's Thumb state must be restored here from LR bit 0.
-    // Only the T bit changes (Jit::SetThumb, patches/dynarmic 0015: building
-    // the whole CPSR and parsing it back cost ~1.5 % of a game thread on a
-    // phone). The mode stays user: guest code starts in it (CallGuest) and
-    // nothing changes it; NZCV/GE stay as the handler left them.
-    const std::uint32_t lr = regs[14];
-    Dynarmic::A32::Jit* jit = ActiveJit();
-    if (jit == nullptr) {
-        // No JIT attached: the unit test drives the dispatcher directly and
-        // there is no CPSR to restore. (In every real run a JIT is set.)
+    if (!jit_callbacks_on_.load(std::memory_order_relaxed)) {
+        // HARNESS_NOJITCALLBACKS: the T bit here, through the thread's Jit.
+        const std::uint32_t lr = regs[14];
+        if (Dynarmic::A32::Jit* jit = ActiveJit()) {
+            jit->SetThumb((lr & 1u) != 0);
+        }
         regs[15] = lr & ~std::uint32_t(1);
         return;
     }
-    jit->SetThumb((lr & 1u) != 0);
-    regs[15] = lr & ~std::uint32_t(1);
+    // BX LR. A guest SVC is an exception boundary: the import trampoline is
+    // ARM code, so the caller's Thumb state comes back from LR bit 0. PC keeps
+    // that bit here; GuestCallbacks::CallSVC, the one way into a handler,
+    // moves it into the T bit when the handler returns (FinishSvc). Ret then
+    // needs no Jit (ActiveJit() was a thread_local lookup on every call).
+    regs[15] = regs[14];
+}
+
+void Runtime::FinishSvc(Dynarmic::A32::Jit* jit, Regs& regs) {
+    // An odd PC is an interworking address: what Ret leaves for a Thumb
+    // caller. The handler ran in ARM state (the trampolines are ARM; a guest
+    // `svc` in Thumb code goes to OnGuestSyscall, which keeps PC), so only
+    // the switch to Thumb is ever needed. A handler that sets the T bit
+    // itself (pthread_once, callbacks) leaves an even PC: nothing to do.
+    // The mode stays user and NZCV/GE stay as the handler left them.
+    if (regs[15] & 1u) {
+        jit->SetThumb(true);
+        regs[15] &= ~std::uint32_t(1);
+    }
 }
 
 bool Runtime::IsCodeAddress(std::uint32_t va) {
@@ -1580,7 +1592,16 @@ void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what)
     }
 }
 
-std::uint64_t Runtime::ThreadSvcCount() { return t_hot.svc_count; }
+std::uint64_t Runtime::JitSvcCount(Dynarmic::A32::Jit* jit) {
+    {
+        std::lock_guard<std::mutex> l(live_jits_mu_);
+        const auto it = jit_callbacks_.find(jit);
+        if (it != jit_callbacks_.end()) {
+            return it->second->svc_count();
+        }
+    }
+    return t_hot.svc_count;
+}
 
 void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
 #ifdef ABR_DIAG_COUNTERS
@@ -12777,7 +12798,14 @@ bool Runtime::DeliverPendingSignals() {
         for (int i = 0; i < 16; i++) {
             std::memcpy(H(uc + 32 + 4 * i), &regs[i], 4);
         }
-        const std::uint32_t cpsr = proxy_regs ? t_proxy_cpsr : cur->Cpsr();
+        std::uint32_t cpsr = proxy_regs ? t_proxy_cpsr : cur->Cpsr();
+        if (regs[15] & 1u) {
+            // Inside a handler after Ret: the Thumb return is still in PC bit
+            // 0 (FinishSvc applies it). The frame shows it as the CPU would.
+            const std::uint32_t pc = regs[15] & ~std::uint32_t(1);
+            std::memcpy(H(uc + 32 + 4 * 15), &pc, 4);
+            cpsr |= 0x20u;
+        }
         std::memcpy(H(uc + 96), &cpsr, 4);
         std::memcpy(H(uc + 104), &old_blocked, 4);  // uc_sigmask
         std::uint32_t during = old_blocked | act.mask;
@@ -13150,8 +13178,22 @@ Runtime::JitPtr Runtime::NewJit(const Dynarmic::A32::UserConfig& cfg) {
             }
         }
     }
+    // Its own callbacks object (patches/dynarmic 0018), when the backend can.
+    GuestCallbacks* own = nullptr;
+    const bool per_jit = JitCallbacksOn();
+    jit_callbacks_on_.store(per_jit, std::memory_order_relaxed);
+    if (per_jit && dynamic_cast<GuestCallbacks*>(cfg.callbacks) != nullptr) {
+        own = new GuestCallbacks(this, jit.get());
+        if (!jit->SetCallbacks(own)) {  // x64: code embeds the shared object
+            delete own;
+            own = nullptr;
+        }
+    }
     std::lock_guard<std::mutex> l(live_jits_mu_);
     live_jits_.insert(jit.get());
+    if (own) {
+        jit_callbacks_[jit.get()] = own;
+    }
     return jit;
 }
 
@@ -13187,11 +13229,18 @@ void Runtime::ReleaseJit(Dynarmic::A32::Jit* j) {
     if (!j) {
         return;
     }
+    GuestCallbacks* own = nullptr;
     {
         std::lock_guard<std::mutex> l(live_jits_mu_);
         live_jits_.erase(j);
+        const auto it = jit_callbacks_.find(j);
+        if (it != jit_callbacks_.end()) {
+            own = it->second;
+            jit_callbacks_.erase(it);
+        }
     }
     delete j;
+    delete own;  // after its Jit: nothing calls it any more
 }
 
 void Runtime::ReleaseCpuId(std::size_t id) {
@@ -17982,9 +18031,16 @@ void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
 }
 
 void GuestCallbacks::CallSVC(std::uint32_t swi) {
-    HotThread& hot = t_hot;  // the one TLS lookup of a plain call
-    hot.svc_count++;
-    Dynarmic::A32::Jit* jit = hot.active_jit ? hot.active_jit : rt_->main_jit();
+    // A Jit's own callbacks know it: no thread_local on a plain call. The
+    // shared object (x64 PC builds) asks the thread.
+    Dynarmic::A32::Jit* jit = jit_;
+    if (jit) {
+        svc_count_++;
+    } else {
+        HotThread& hot = t_hot;
+        hot.svc_count++;
+        jit = hot.active_jit ? hot.active_jit : rt_->main_jit();
+    }
     auto& regs = jit->Regs();
     // Where the thread is must be known before signals are ever used: a
     // thread that went to sleep in a host call earlier must not look like it
@@ -17998,6 +18054,7 @@ void GuestCallbacks::CallSVC(std::uint32_t swi) {
         const prof::CallTimer timer(swi);  // HARNESS_PROF only (a thread_local test otherwise)
         rt_->OnSvc(swi, regs);
     }
+    rt_->FinishSvc(jit, regs);  // before any signal delivery sees the registers
     rt_->SigLeaveHostCall(blocking);
 }
 

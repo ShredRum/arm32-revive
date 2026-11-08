@@ -74,6 +74,7 @@ struct RuntimeTestAccess {
         regs[2] = args[2];
         regs[3] = args[3];
         rt.CallImport(idx, regs);
+        regs[15] &= ~std::uint32_t(1);  // as GuestCallbacks::CallSVC -> FinishSvc (no Jit here)
         return regs[0];
     }
     // The raw EABI syscall path (svc #0, the number in r7): what the guest's
@@ -101,6 +102,7 @@ struct RuntimeTestAccess {
         regs[2] = args[2];
         regs[3] = args[3];
         rt.CallImport(idx, regs);
+        regs[15] &= ~std::uint32_t(1);  // as GuestCallbacks::CallSVC -> FinishSvc (no Jit here)
         if (out) {
             *out = regs;
         }
@@ -3537,9 +3539,9 @@ int main() {
         abr::RuntimeTestAccess::SetTls(rt, 5, 22);
         rt.ThreadEnter(ja.get(), 801);
         auto host_calls = [&](auto fn) {
-            const std::uint64_t n0 = abr::Runtime::ThreadSvcCount();
+            const std::uint64_t n0 = rt.JitSvcCount(ja.get());
             fn();
-            return std::to_string(abr::Runtime::ThreadSvcCount() - n0);
+            return std::to_string(rt.JitSvcCount(ja.get()) - n0);
         };
         // Each run ends in one svc: the halt.
         Expect("first read goes to the host and binds",
@@ -3567,6 +3569,66 @@ int main() {
                std::to_string(*rt.H<std::uint32_t>(abr::RuntimeTestAccess::TlsBlock(rt, 803) + 5 * 4)),
                "0");
         rt.ReapHostThread(803);
+        rt.ReleaseCpuId(id);
+    }
+
+    // --- FMT_BENCH=1 only: cost of one guest->host call (getpid, whose
+    //     handler is a Ret of a cached value) through the real dispatch path:
+    //     trampoline svc, CallSVC, OnSvc, the handler, FinishSvc, back to the
+    //     guest loop. Prints ns per call; HARNESS_NOJITCALLBACKS=1 for the
+    //     thread_local path (patches/dynarmic 0018). Not a pass/fail test.
+    if (std::getenv("FMT_BENCH")) {
+        const std::uint32_t kCode = 0x60005000u, kTramp = kCode + 0x40, kHalt = kCode + 0x100;
+        const std::uint32_t idx = abr::RuntimeTestAccess::ImportIndex(rt, "getpid");
+        abr::RuntimeTestAccess::MapRwx(rt, kCode, 0x1000);
+        auto branch = [](std::uint32_t cond_op, std::uint32_t at, std::uint32_t to) {
+            return cond_op | (((to - (at + 8)) >> 2) & 0xFFFFFFu);
+        };
+        const std::uint32_t code[] = {
+            0xE3004000u,                                  // movw r4, #0
+            0xE3404010u,                                  // movt r4, #0x10 (1048576 calls)
+            0xE3A00005u,                                  // loop: mov r0, #5
+            branch(0xEB000000u, kCode + 12, kTramp),      // bl tramp
+            0xE2544001u,                                  // subs r4, r4, #1
+            branch(0x1A000000u, kCode + 20, kCode + 8),   // bne loop
+            branch(0xEA000000u, kCode + 24, kHalt),       // b halt
+        };
+        std::memcpy(rt.H(kCode), code, sizeof(code));
+        const std::uint32_t svc_call = 0xEF000000u | (idx + 1), svc_halt = 0xEF000000u;
+        std::memcpy(rt.H(kTramp), &svc_call, 4);
+        std::memcpy(rt.H(kHalt), &svc_halt, 4);
+        abr::GuestCallbacks cb(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb;
+        cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.H(0));
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        cfg.optimizations = abr::JitOptimizations();
+        cfg.unsafe_optimizations = abr::JitUnsafeOptimizations();
+        cfg.enable_cycle_counting = false;  // as the product (kJitCycleCounting)
+        const auto jit = rt.NewJit(cfg);
+        rt.ThreadEnter(jit.get(), 950);
+        double best = 1e30;
+        for (int round = 0; round < 6; round++) {
+            jit->ClearHalt(Dynarmic::HaltReason::UserDefined1);
+            jit->Regs()[15] = kCode;
+            jit->SetCpsr(0x10);
+            const auto t0 = std::chrono::steady_clock::now();
+            jit->Run();
+            const auto t1 = std::chrono::steady_clock::now();
+            const double ns = std::chrono::duration<double, std::nano>(t1 - t0).count() / 1048576.0;
+            if (round > 0 && ns < best) {
+                best = ns;  // round 0 compiles
+            }
+        }
+        std::printf("bench getpid call: %.1f ns per guest->host call (jitcallbacks=%s, best of 5)\n",
+                    best, abr::JitCallbacksOn() ? "on" : "off");
+        Expect("bench loop ended with getpid's value", std::to_string(jit->Regs()[0]),
+               std::to_string(static_cast<std::uint32_t>(::getpid())));
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReapHostThread(950);
         rt.ReleaseCpuId(id);
     }
 

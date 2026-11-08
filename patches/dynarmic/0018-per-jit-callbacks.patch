@@ -1,0 +1,190 @@
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -55,6 +55,20 @@
+     void SetThumb(bool thumb);
+ 
+     /**
++     * Per-Jit callbacks (ab-port): calls that this Jit's generated code makes
++     * to the UserCallbacks (memory, CallSVC, ExceptionRaised, ...) go to
++     * `callbacks` instead of UserConfig::callbacks, so a host knows which Jit
++     * (and thread) calls without a thread_local, also on Jits that share one
++     * code cache. `callbacks` must have the same dynamic type as
++     * UserConfig::callbacks (the code calls that type's functions) and live
++     * as long as this Jit. Calls made outside generated code (translation:
++     * MemoryReadCode, PreCodeTranslationHook; exclusive accesses through the
++     * global monitor) still use UserConfig::callbacks. Returns false, and
++     * changes nothing, on a backend without it (x64).
++     */
++    bool SetCallbacks(UserCallbacks* callbacks);
++
++    /**
+      * Sets the value `mrc p15, 0, Rt, c13, c0, 3` (TPIDRURO) reads on this Jit.
+      * It is state of the Jit, not of the compiled code, so it stays per thread
+      * on Jits that share a code cache, and it takes no coprocessor. May be
+--- a/src/dynarmic/backend/arm64/a32_jitstate.h
++++ b/src/dynarmic/backend/arm64/a32_jitstate.h
+@@ -59,6 +59,10 @@
+     // Lives with the Jit, not the code: code may be shared between threads.
+     FastDispatchEntry* fast_dispatch_table = nullptr;
+ 
++    // The UserCallbacks object the call trampolines pass as `this`: per Jit
++    // (Jit::SetCallbacks), so shared code reaches its own Jit's callbacks.
++    void* callbacks = nullptr;
++
+     u32 Cpsr() const;
+     void SetCpsr(u32 cpsr);
+ 
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -48,6 +48,7 @@
+             std::memset(fast_dispatch_table.get(), 0, bytes);
+             current_state.fast_dispatch_table = fast_dispatch_table.get();
+         }
++        current_state.callbacks = callbacks;
+     }
+ 
+     ~Impl() {
+@@ -119,6 +120,18 @@
+     void Reset() {
+         current_state = {};
+         current_state.fast_dispatch_table = fast_dispatch_table.get();
++        current_state.callbacks = callbacks;
++    }
++
++    bool SetCallbacks(A32::UserCallbacks* cb) {
++        ASSERT(cb);
++        // The trampolines call the functions of conf.callbacks's dynamic type
++        // (Devirtualize at emission): the same vtable is required (Itanium ABI:
++        // the vtable pointer is the object's first word).
++        ASSERT(*reinterpret_cast<void* const*>(cb) == *reinterpret_cast<void* const*>(conf.callbacks));
++        callbacks = cb;
++        current_state.callbacks = cb;
++        return true;
+     }
+ 
+     void HaltExecution(HaltReason hr) {
+@@ -251,6 +264,7 @@
+         void operator()(FastDispatchEntry* table) const { std::free(table); }
+     };
+     std::unique_ptr<FastDispatchEntry, FreeTable> fast_dispatch_table;
++    A32::UserCallbacks* callbacks = conf.callbacks;  // SetCallbacks; after conf
+     std::shared_ptr<SharedCodeCache> cache;
+     A32AddressSpace& current_address_space;
+     std::unique_ptr<A32AddressSpace> overflow;  // see A32AddressSpace::GetOrEmitForThread
+@@ -281,6 +295,10 @@
+     impl->SetThumb(thumb);
+ }
+ 
++bool Jit::SetCallbacks(UserCallbacks* callbacks) {
++    return impl->SetCallbacks(callbacks);
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -26,22 +26,35 @@
+ 
+ thread_local A32ThreadBinding tls_a32_binding;
+ 
++// `this` for a callback, from the running Jit's state (Jit::SetCallbacks):
++// generated code, and so these trampolines, may be shared by Jits whose
++// callbacks differ. Xstate holds the state whenever generated code calls out.
++// Devirtualize's this adjustment (0 for single inheritance) is applied to it.
++template<typename T>
++static void LoadCallbacksThis(oaknut::CodeGenerator& code, oaknut::XReg dst, const DevirtualizedCall& info, T* this_) {
++    using namespace oaknut::util;
++    code.LDR(dst, Xstate, offsetof(A32JitState, callbacks));
++    const u64 adjust = info.this_ptr - mcl::bit_cast<u64>(this_);
++    if (adjust != 0) {
++        ASSERT(adjust < 4096);
++        code.ADD(dst, dst, adjust);
++    }
++}
++
+ template<auto mfp, typename T>
+ static void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
+     using namespace oaknut::util;
+ 
+     const auto info = Devirtualize<mfp>(this_);
+ 
+-    oaknut::Label l_addr, l_this;
++    oaknut::Label l_addr;
+ 
+     void* target = code.xptr<void*>();
+-    code.LDR(X0, l_this);
++    LoadCallbacksThis(code, X0, info, this_);
+     code.LDR(Xscratch0, l_addr);
+     code.BR(Xscratch0);
+ 
+     code.align(8);
+-    code.l(l_this);
+-    code.dx(info.this_ptr);
+     code.l(l_addr);
+     code.dx(info.fn_ptr);
+ 
+@@ -54,13 +67,13 @@
+ 
+     const auto info = Devirtualize<mfp>(this_);
+ 
+-    oaknut::Label l_addr, l_this;
++    oaknut::Label l_addr;
+ 
+     constexpr u64 save_regs = ABI_CALLER_SAVE & ~ToRegList(Xscratch0);
+ 
+     void* target = code.xptr<void*>();
+     ABI_PushRegisters(code, save_regs, 0);
+-    code.LDR(X0, l_this);
++    LoadCallbacksThis(code, X0, info, this_);
+     code.MOV(X1, Xscratch0);
+     code.LDR(Xscratch0, l_addr);
+     code.BLR(Xscratch0);
+@@ -69,8 +82,6 @@
+     code.RET();
+ 
+     code.align(8);
+-    code.l(l_this);
+-    code.dx(info.this_ptr);
+     code.l(l_addr);
+     code.dx(info.fn_ptr);
+ 
+@@ -109,13 +120,13 @@
+ 
+     const auto info = Devirtualize<mfp>(this_);
+ 
+-    oaknut::Label l_addr, l_this;
++    oaknut::Label l_addr;
+ 
+     constexpr u64 save_regs = ABI_CALLER_SAVE;
+ 
+     void* target = code.xptr<void*>();
+     ABI_PushRegisters(code, save_regs, 0);
+-    code.LDR(X0, l_this);
++    LoadCallbacksThis(code, X0, info, this_);
+     code.MOV(X1, Xscratch0);
+     code.MOV(X2, Xscratch1);
+     code.LDR(Xscratch0, l_addr);
+@@ -124,8 +135,6 @@
+     code.RET();
+ 
+     code.align(8);
+-    code.l(l_this);
+-    code.dx(info.this_ptr);
+     code.l(l_addr);
+     code.dx(info.fn_ptr);
+ 
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -290,6 +290,11 @@
+     SetCpsr((Cpsr() & ~std::uint32_t(0x20)) | (thumb ? 0x20u : 0u));
+ }
+ 
++// The x64 backend's code embeds UserConfig::callbacks: not per Jit.
++bool Jit::SetCallbacks(UserCallbacks*) {
++    return false;
++}
++
+ Jit::~Jit() = default;
+ 
+ HaltReason Jit::Run() {

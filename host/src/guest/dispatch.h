@@ -75,6 +75,10 @@ inline bool FastDispatchOn() { return !EnvOn("HARNESS_NOFASTDISPATCH"); }
 // flags, VMRS APSR_nzcv), and setjmp/longjmp read them through Jit::Fpscr,
 // which sees the live register.
 inline bool HostFpsrOn() { return !EnvOn("HARNESS_NOHOSTFPSR"); }
+// HARNESS_NOJITCALLBACKS=1: every Jit's code calls the one shared callbacks
+// object and a call finds its Jit through the thread (t_hot), Ret included.
+// On (patches/dynarmic 0018): each Jit from NewJit has its own callbacks.
+inline bool JitCallbacksOn() { return !EnvOn("HARNESS_NOJITCALLBACKS"); }
 inline Dynarmic::OptimizationFlag JitOptimizations() {
     if (!JitSafeOpts()) {
         return Dynarmic::no_optimizations;
@@ -198,6 +202,7 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
 
 class Runtime;
+class GuestCallbacks;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
 struct JitDrop {
     JitDrop() noexcept = default;
@@ -788,8 +793,10 @@ public:
     // G1.2: monotonic diag counter; only ever read in diag/harness dumps, so
     // relaxed is enough (never an ordering dependency).
     std::atomic<std::uint64_t> svc_count{0};  // all threads; diag builds only
-    // Guest->host calls made by the calling thread (no shared cache line).
-    static std::uint64_t ThreadSvcCount();
+    // Guest->host calls made through `jit`: counted by its own callbacks
+    // (NewJit), else by the calling thread (a backend without per-Jit
+    // callbacks). No shared cache line either way.
+    std::uint64_t JitSvcCount(Dynarmic::A32::Jit* jit);
     // Kuser entries 0..4 (barrier/cmpxchg/cmpxchg64/get_tls/bad). Relaxed:
     // only used to print the first hit of each entry under DiagOn().
     std::atomic<std::uint64_t> kuser_hits_[5] = {};
@@ -887,7 +894,11 @@ private:
     void OnGuestSyscall(Regs& regs);
   public:
     // Public for the RealGL backend (same-module forwarding).
+    // A handler's return: r0/r1 and PC = LR, Thumb bit still in PC bit 0.
     void Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1 = 0);
+    // After a handler (GuestCallbacks::CallSVC): an odd PC switches `jit` to
+    // Thumb and loses the bit.
+    void FinishSvc(Dynarmic::A32::Jit* jit, Regs& regs);
   private:
     void RetVoid(Regs& regs) { Ret(regs, regs[0], regs[1]); }
     void GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
@@ -932,6 +943,12 @@ private:
     std::mutex code_cache_mu_;
     std::mutex live_jits_mu_;
     std::unordered_set<Dynarmic::A32::Jit*> live_jits_;
+    // Each NewJit Jit's own GuestCallbacks (Jit::SetCallbacks), deleted with
+    // the Jit; guarded by live_jits_mu_.
+    std::unordered_map<Dynarmic::A32::Jit*, GuestCallbacks*> jit_callbacks_;
+    // JitCallbacksOn(), stored at each NewJit (flags are final by then; the
+    // value never changes, relaxed is enough).
+    std::atomic<bool> jit_callbacks_on_{true};
     std::vector<CodeCacheEntry> code_caches_;
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
     std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
@@ -1341,6 +1358,12 @@ public:
     using VAddr = Dynarmic::A32::VAddr;
     using Exception = Dynarmic::A32::Exception;
     explicit GuestCallbacks(Runtime* rt) : rt_(rt) {}
+    // One Jit's own callbacks (Runtime::NewJit, Jit::SetCallbacks): its
+    // generated code calls this object, so the callbacks know their Jit
+    // without a thread_local. The shared object (no Jit) asks the thread.
+    GuestCallbacks(Runtime* rt, Dynarmic::A32::Jit* jit) : rt_(rt), jit_(jit) {}
+    Dynarmic::A32::Jit* jit() const { return jit_; }
+    std::uint64_t svc_count() const { return svc_count_; }
     // Product host (apphost): real-Java delegation hook. Returns the calling
     // host thread's real JNIEnv*, or null (harness: always null -> mocks).
     // Set once by apphost at OnLoad; never in harness builds.
@@ -1424,6 +1447,8 @@ private:
                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     }
     Runtime* rt_;
+    Dynarmic::A32::Jit* jit_ = nullptr;  // per-Jit callbacks only
+    std::uint64_t svc_count_ = 0;        // per-Jit callbacks only (one thread runs a Jit at a time)
 };
 
 }  // namespace abr

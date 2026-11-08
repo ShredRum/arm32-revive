@@ -222,3 +222,28 @@ profile of Minecraft: Story Mode the monitor was ~3-4 % of the game thread
 (CheckAndClear 0.7 %, the spin lock ~2 % as two game threads contend). The
 x64 backend's inline exclusives write the table without ReadAndMark, so its
 CheckAndClear is unchanged.
+
+## 0018-per-jit-callbacks.patch
+
+`Jit::SetCallbacks(UserCallbacks*)`: the call trampolines of the arm64
+backend (memory, CallSVC, ExceptionRaised, ticks) load `this` from the
+running Jit's state (`A32JitState::callbacks`, through Xstate) instead of a
+literal of `UserConfig::callbacks`. Code is shared between Jits (0001), so
+before this every Jit's code called one object, and the host found the
+calling Jit and thread through a thread_local on every call. On Android a
+thread_local of a dlopen'ed library is a call into the linker (API 29+) or
+emutls (older), on the path of every guest-to-host call. Now
+`Runtime::NewJit` gives each Jit its own `GuestCallbacks` that knows its
+Jit; `CallSVC` needs no thread_local, and `Ret` none either (it leaves the
+Thumb bit in PC bit 0, `FinishSvc` applies it once the handler returns).
+
+Requirements: the per-Jit object has the dynamic type of
+`UserConfig::callbacks` (the trampolines call that type's functions,
+devirtualized at emission; asserted by comparing vtable pointers) and lives
+as long as its Jit. Translation (`MemoryReadCode`, the pre-translation hook)
+and exclusive accesses through the global monitor still use
+`UserConfig::callbacks`. The x64 backend returns false and the host keeps
+its thread_local path there.
+Measured (`FMT_BENCH=1 fmt_test`, a guest loop calling getpid through the
+real dispatch path, sandbox, API 26 build): 28.6-33.4 ns per call with it,
+61.5-71.2 ns with `HARNESS_NOJITCALLBACKS=1`.
