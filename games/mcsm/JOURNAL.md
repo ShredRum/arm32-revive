@@ -249,3 +249,20 @@ the .mft exactly); the bad one kept in work/*.bad-original. (His
 split_episode_05 also carries all of episode 4: a packing slip of his.)
 Sent to the phone: Minecraft_Story_Mode_arm64_2026-11-05.apks (lib 9aa65b17).
 Not yet run: any episode from a split (2-8), on the sandbox or the phone.
+
+## 2026-11-08: the phone hangs on "Подключение": OpenSL ES
+
+Phone logcat (no root): all 8 APKs found, frames presented, no FMOD output
+ever made. org.fmod.FMOD.supportsLowLatency() picks OpenSL ES when the
+device reports android.hardware.audio.low_latency (the phone does, the
+sandbox did not); the core let the guest dlopen libOpenSLES but served no
+symbol, so the sound thread never answered and the engine waited forever.
+Reproduced on the sandbox by adding the feature
+(/system/etc/permissions/android.hardware.audio.low_latency.xml, kept:
+the sandbox now matches phones here). Fix f892088: OpenSL ES served by the
+host's libOpenSLES (opensl.cpp). Sandbox with the feature: past
+"Подключение", sound plays through libOpenSLES, markers 0. 99 Bricks
+(Unity, also links OpenSL) did not take the OpenSL path on this run; Rio
+and 99 Bricks gates clean. Google Play Games sign-in fails on both (our
+signature is not Telltale's): harmless, the game goes on.
+Sent: Minecraft_Story_Mode_arm64_2026-11-08.apks (lib a0b50ad5).
