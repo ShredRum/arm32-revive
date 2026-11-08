@@ -209,3 +209,16 @@ Fibonacci one-way, 0.27 % Fibonacci two-way (0.24 % of those were
 first-time lookups and memo misses). The stub's hit path adds an LDR of the
 constant and a MUL in place of LSR/EOR/AND; a hit in way 1 costs one more
 LDP from the same line.
+
+## 0017-monitor-scan-used-ids.patch
+
+Every STREX ran `CheckAndClear`, which cleared the address in all
+`processor_count` slots under the monitor's spin lock: 64 for us, about ten
+in use. Now `ReadAndMark` (under the same lock) keeps `processors_marked`,
+one past the highest id it ever marked, and the arm64 `CheckAndClear` scans
+only that far; ids above it never held a reservation, so the result is the
+same. Shorter hold of the one lock every guest atomic takes: in a phone
+profile of Minecraft: Story Mode the monitor was ~3-4 % of the game thread
+(CheckAndClear 0.7 %, the spin lock ~2 % as two game threads contend). The
+x64 backend's inline exclusives write the table without ReadAndMark, so its
+CheckAndClear is unchanged.
