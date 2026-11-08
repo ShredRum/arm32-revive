@@ -20,9 +20,12 @@
 
 namespace abr::adpf {
 
-// Reads the switch and looks the functions up. `java_vm` (a JavaVM*) is used
-// to read the display's refresh rate; null: 120 Hz is assumed (the short side).
-void Init(void* java_vm);
+// Reads the switch and looks the functions up. The display's refresh rate is
+// read through Java with the JNIEnv `env_for_thread` gives the calling
+// thread (a JNIEnv*; the host attaches a guest-created thread, such as SDL's
+// game thread, and detaches it when it exits); null: 120 Hz is assumed (the
+// short side).
+void Init(void* (*env_for_thread)());
 // A frame ended on the calling thread.
 void FrameDone();
 // For the periodic log, since the last call. Cycles are each frame's CPU

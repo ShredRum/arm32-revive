@@ -106,7 +106,7 @@ using CloseFn = void (*)(Session*);
 using PreferEfficiencyFn = int (*)(Session*, bool);
 
 bool g_on = false;
-JavaVM* g_vm = nullptr;
+void* (*g_env_for_thread)() = nullptr;
 GetManagerFn g_get_manager = nullptr;
 CreateSessionFn g_create = nullptr;
 UpdateTargetFn g_update_target = nullptr;
@@ -134,8 +134,8 @@ bool Cleared(JNIEnv* env) {
 // none can be read; `how` says which one answered or where it failed.
 float RefreshRate(const char** how) {
     *how = "no JNIEnv on this thread";
-    JNIEnv* env = nullptr;
-    if (!g_vm || g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || !env) {
+    JNIEnv* env = g_env_for_thread ? static_cast<JNIEnv*>(g_env_for_thread()) : nullptr;
+    if (!env) {
         return 0.f;
     }
     if (env->PushLocalFrame(32) != 0) {
@@ -257,9 +257,9 @@ void OpenSessionHere(pid_t tid) {
 
 }  // namespace
 
-void Init(void* java_vm) {
+void Init(void* (*env_for_thread)()) {
 #if defined(__ANDROID__)
-    g_vm = static_cast<JavaVM*>(java_vm);
+    g_env_for_thread = env_for_thread;
     if (EnvOn("HARNESS_NOADPF")) {
         Note("off (HARNESS_NOADPF)");
         return;
@@ -288,7 +288,7 @@ void Init(void* java_vm) {
     g_on = true;
     Note("on");
 #else
-    (void)java_vm;
+    (void)env_for_thread;
 #endif
 }
 

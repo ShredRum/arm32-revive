@@ -1808,7 +1808,7 @@ static bool Boot(JavaVM* vm) {
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off",
         JitUnsafeOptimizations() ? "on" : "off", JitCallbacksOn() ? "on" : "off");
-    abr::adpf::Init(g_vm);  // after abflags: HARNESS_NOADPF
+    abr::adpf::Init(RealEnvForThread);  // after abflags: HARNESS_NOADPF
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
     // Sampling profiler (HARNESS_SAMPLE or debug.abport.sample): its
