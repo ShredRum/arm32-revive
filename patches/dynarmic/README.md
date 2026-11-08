@@ -163,3 +163,22 @@ overflow cache: the guest PC with bit 0 for Thumb, -2 for the cache's
 shared stubs (dispatcher), -1 when outside both. It takes the cache's lock
 (shared), so the profiler calls it from its reporter thread, never from
 the signal handler. The x64 backend answers -1.
+
+## 0014-host-fpsr.patch
+
+`OptimizationFlag::Unsafe_HostFpsr` (arm64, A32). Upstream cleared the host
+FPSR before the first FP operation of each block and merged it into the state
+at the block's end and before every host call; each FPSR write serialises
+the pipeline (phone profile, Rio: an MSR/MRS FPSR before ~5 % of JIT samples).
+With the flag, Run/Step save the host's FPSR on the stack and load the
+guest's flags into it, the exit ORs the register into the state and restores
+the host's; FpsrManager emits nothing; VMRS/VMSR FPSCR read and write the
+register too; and `Jit::Fpscr()`/`SetFpscr()` called while the Jit runs (a
+host call on its thread: our setjmp/longjmp) read and write the register.
+Inexact, as the flag says: flags raised by host code during a run (callbacks,
+the fastmem fallback: fmt_test sees IXC) and the QC of packed saturating ops
+reach the guest's flags. No guest of ours reads them (llvm-objdump of every
+guest library: only VMRS APSR_nzcv). Host switch: HARNESS_NOHOSTFPSR=1.
+fmt_test (arm64): the guest's divide-by-zero seen by VMRS, live in a host
+call's Fpscr(), cleared by its SetFpscr(), and the host FPSR untouched.
+Idea from MrEmpathy's absw2 bridge (no licence: own code).

@@ -675,6 +675,7 @@ Dynarmic::A32::Jit* NewThreadJit(std::size_t cpu_id) {
     cfg.callbacks = g_cb;
     cfg.optimizations =
         JitOptimizations();
+    cfg.unsafe_optimizations = JitUnsafeOptimizations();
     cfg.enable_cycle_counting = kJitCycleCounting;
     if (JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(g_mem->base());
@@ -1767,7 +1768,7 @@ static bool Boot(JavaVM* vm) {
     abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s "
-        "clampwrite=%s diag=%s jitopt=%s jitshare=%s tlsthunk=%s fastdispatch=%s",
+        "clampwrite=%s diag=%s jitopt=%s jitshare=%s tlsthunk=%s fastdispatch=%s hostfpsr=%s",
         JitFastmemOn() ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
@@ -1776,7 +1777,8 @@ static bool Boot(JavaVM* vm) {
         ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
-        TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off");
+        TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off",
+        JitUnsafeOptimizations() ? "on" : "off");
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
     // Sampling profiler (HARNESS_SAMPLE or debug.abport.sample): its

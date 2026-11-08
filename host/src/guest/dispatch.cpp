@@ -10813,6 +10813,7 @@ bool Runtime::RunNested(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb
             cfg.callbacks = cb_;
             cfg.optimizations =
                 JitOptimizations();
+            cfg.unsafe_optimizations = JitUnsafeOptimizations();
             cfg.enable_cycle_counting = kJitCycleCounting;
             if (JitFastmemOn()) {
                 cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());
@@ -13250,6 +13251,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         cfg.callbacks = cb_;
         cfg.optimizations =
             JitOptimizations();
+        cfg.unsafe_optimizations = JitUnsafeOptimizations();
         cfg.enable_cycle_counting = kJitCycleCounting;
         if (JitFastmemOn()) {
             cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(mem().base());

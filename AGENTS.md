@@ -104,7 +104,7 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on mallocpad=0 zerofill=off heapwatch=off norelease=off
 clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on tlsthunk=on
-fastdispatch=on`. There is no heap quarantine (REVIEW R-013: a delay before
+fastdispatch=on hostfpsr=on`. There is no heap quarantine (REVIEW R-013: a delay before
 reuse only hides a use-after-free).
 
 - `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
@@ -120,6 +120,10 @@ reuse only hides a use-after-free).
 - `fastdispatch=on`: indirect branches stay in generated code through a table
   per Jit (`patches/dynarmic/README.md` 0005); `HARNESS_NOFASTDISPATCH=1` sends
   each one through the C++ dispatcher.
+
+- `hostfpsr=on`: the guest's FP exception flags live in the host FPSR for a
+  whole run (`patches/dynarmic/README.md` 0014); `HARNESS_NOHOSTFPSR=1` goes
+  back to clearing and merging them per block.
 
 - One diagnostics switch: `HARNESS_DIAG` (env or `files/abflags.txt`, a
   KEY=VALUE override file read at boot). Never leave `abflags.txt` on a device.

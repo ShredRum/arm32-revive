@@ -1,0 +1,225 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index 27dc8e9..99260da 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -294,6 +294,13 @@ void A32AddressSpace::EmitPrelude() {
+         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
+         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
+         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        if (conf.HasOptimization(OptimizationFlag::Unsafe_HostFpsr)) {
++            // The guest's flags go into the host FPSR for the run; the host's wait on the stack.
++            code.MRS(Xscratch1, oaknut::SystemReg::FPSR);
++            code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpsr));
++            code.LDR(Wscratch1, Xstate, offsetof(A32JitState, fpsr));
++            code.MSR(oaknut::SystemReg::FPSR, Xscratch1);
++        }
+ 
+         code.LDAR(Wscratch0, Xhalt);
+         code.CBNZ(Wscratch0, return_from_run_code);
+@@ -332,6 +339,13 @@ void A32AddressSpace::EmitPrelude() {
+         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
+         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
+         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        if (conf.HasOptimization(OptimizationFlag::Unsafe_HostFpsr)) {
++            // The guest's flags go into the host FPSR for the run; the host's wait on the stack.
++            code.MRS(Xscratch1, oaknut::SystemReg::FPSR);
++            code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpsr));
++            code.LDR(Wscratch1, Xstate, offsetof(A32JitState, fpsr));
++            code.MSR(oaknut::SystemReg::FPSR, Xscratch1);
++        }
+ 
+         oaknut::Label step_hr_loop;
+         code.l(step_hr_loop);
+@@ -412,6 +426,17 @@ void A32AddressSpace::EmitPrelude() {
+ 
+         code.LDR(Wscratch0, SP, offsetof(StackLayout, save_host_fpcr));
+         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        if (conf.HasOptimization(OptimizationFlag::Unsafe_HostFpsr)) {
++            // The run's flags into the state (with any a fallback stored there), then the host's back.
++            code.LDR(Wscratch0, Xstate, offsetof(A32JitState, fpsr));
++            code.MRS(Xscratch1, oaknut::SystemReg::FPSR);
++            code.ORR(Wscratch0, Wscratch0, Wscratch1);
++            code.MOV(Wscratch1, 0x0800'009f);
++            code.AND(Wscratch0, Wscratch0, Wscratch1);
++            code.STR(Wscratch0, Xstate, offsetof(A32JitState, fpsr));
++            code.LDR(Wscratch0, SP, offsetof(StackLayout, save_host_fpsr));
++            code.MSR(oaknut::SystemReg::FPSR, Xscratch0);
++        }
+ 
+         oaknut::Label exit_hr_loop;
+         code.l(exit_hr_loop);
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+index 0765f34..6763113 100644
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -152,12 +152,28 @@ struct Jit::Impl final {
+         current_state.SetCpsr(value);
+     }
+ 
++    // Unsafe_HostFpsr: while this Jit runs (a callback on its own thread asks),
++    // the live exception flags are in the host FPSR, not in the state.
++    bool HostFpsrLive() const {
++        return jit_interface->is_executing && conf.HasOptimization(OptimizationFlag::Unsafe_HostFpsr);
++    }
++
+     std::uint32_t Fpscr() const {
+-        return current_state.Fpscr();
++        std::uint32_t v = current_state.Fpscr();
++        if (HostFpsrLive()) {
++            std::uint64_t fpsr = 0;
++            __asm__ volatile("mrs %0, fpsr" : "=r"(fpsr));
++            v |= static_cast<std::uint32_t>(fpsr) & 0x0800'009fu;
++        }
++        return v;
+     }
+ 
+     void SetFpscr(std::uint32_t value) {
+         current_state.SetFpscr(value);
++        if (HostFpsrLive()) {
++            const std::uint64_t fpsr = value & 0x0800'009fu;
++            __asm__ volatile("msr fpsr, %0" : : "r"(fpsr));
++        }
+     }
+ 
+     void ClearExclusiveState() {
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.cpp b/src/dynarmic/backend/arm64/emit_arm64.cpp
+index 3d0c109..5c92eab 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64.cpp
+@@ -208,7 +208,7 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
+ 
+     EmittedBlockInfo ebi;
+ 
+-    FpsrManager fpsr_manager{code, conf.state_fpsr_offset};
++    FpsrManager fpsr_manager{code, conf.state_fpsr_offset, conf.HasOptimization(OptimizationFlag::Unsafe_HostFpsr)};
+     RegAlloc reg_alloc{code, fpsr_manager, GPR_ORDER, FPR_ORDER};
+     EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
+ 
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+index 4c28a09..fa565b5 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -679,6 +679,13 @@ void EmitIR<IR::Opcode::A32GetFpscr>(oaknut::CodeGenerator& code, EmitContext& c
+     code.AND(Wfpscr, Wfpscr, 0xffff'0000);
+     code.ORR(Wscratch0, Wscratch0, Wscratch1);
+     code.ORR(Wfpscr, Wfpscr, Wscratch0);
++    if (ctx.fpsr.HostFpsr()) {
++        // Unsafe_HostFpsr: the live flags are in the host register.
++        code.MRS(Xscratch0, oaknut::SystemReg::FPSR);
++        code.MOV(Wscratch1, 0x0800'009f);
++        code.AND(Wscratch0, Wscratch0, Wscratch1);
++        code.ORR(Wfpscr, Wfpscr, Wscratch0);
++    }
+ }
+ 
+ template<>
+@@ -701,6 +708,9 @@ void EmitIR<IR::Opcode::A32SetFpscr>(oaknut::CodeGenerator& code, EmitContext& c
+     code.AND(Wscratch0, Wfpscr, Wscratch0);
+     code.AND(Wscratch1, Wfpscr, 0xf000'0000);
+     code.STP(Wscratch0, Wscratch1, Xstate, offsetof(A32JitState, fpsr));
++    if (ctx.fpsr.HostFpsr()) {
++        code.MSR(oaknut::SystemReg::FPSR, Xscratch0);  // Unsafe_HostFpsr: the live flags
++    }
+ }
+ 
+ template<>
+diff --git a/src/dynarmic/backend/arm64/fpsr_manager.cpp b/src/dynarmic/backend/arm64/fpsr_manager.cpp
+index 1c61474..7cd1b29 100644
+--- a/src/dynarmic/backend/arm64/fpsr_manager.cpp
++++ b/src/dynarmic/backend/arm64/fpsr_manager.cpp
+@@ -13,11 +13,11 @@ namespace Dynarmic::Backend::Arm64 {
+ 
+ using namespace oaknut::util;
+ 
+-FpsrManager::FpsrManager(oaknut::CodeGenerator& code, size_t state_fpsr_offset)
+-        : code{code}, state_fpsr_offset{state_fpsr_offset} {}
++FpsrManager::FpsrManager(oaknut::CodeGenerator& code, size_t state_fpsr_offset, bool host_fpsr)
++        : code{code}, state_fpsr_offset{state_fpsr_offset}, host_fpsr{host_fpsr} {}
+ 
+ void FpsrManager::Spill() {
+-    if (!fpsr_loaded)
++    if (host_fpsr || !fpsr_loaded)
+         return;
+ 
+     code.LDR(Wscratch0, Xstate, state_fpsr_offset);
+@@ -29,7 +29,7 @@ void FpsrManager::Spill() {
+ }
+ 
+ void FpsrManager::Load() {
+-    if (fpsr_loaded)
++    if (host_fpsr || fpsr_loaded)
+         return;
+ 
+     code.MSR(oaknut::SystemReg::FPSR, XZR);
+@@ -40,7 +40,7 @@ void FpsrManager::Load() {
+ void FpsrManager::GetFpsr(oaknut::WReg dest) {
+     code.LDR(dest, Xstate, state_fpsr_offset);
+ 
+-    if (fpsr_loaded) {
++    if (host_fpsr || fpsr_loaded) {
+         code.MRS(Xscratch1, oaknut::SystemReg::FPSR);
+         code.ORR(dest, dest, Wscratch1);
+     }
+diff --git a/src/dynarmic/backend/arm64/fpsr_manager.h b/src/dynarmic/backend/arm64/fpsr_manager.h
+index bfb40df..16fa990 100644
+--- a/src/dynarmic/backend/arm64/fpsr_manager.h
++++ b/src/dynarmic/backend/arm64/fpsr_manager.h
+@@ -16,19 +16,24 @@ namespace Dynarmic::Backend::Arm64 {
+ 
+ class FpsrManager {
+ public:
+-    explicit FpsrManager(oaknut::CodeGenerator& code, size_t state_fpsr_offset);
++    // host_fpsr (Unsafe_HostFpsr): the host FPSR holds the guest's flags for
++    // the whole run, so Load/Spill emit nothing and GetFpsr reads the register.
++    explicit FpsrManager(oaknut::CodeGenerator& code, size_t state_fpsr_offset, bool host_fpsr = false);
+ 
+     void Spill();
+     void Load();
+     void Overwrite() { fpsr_loaded = false; }
+-    // Whether the host FPSR holds guest exception bits not yet in the state.
++    // Whether the host FPSR holds guest exception bits not yet in the state
++    // that a host call must not see (never in host_fpsr mode: there it always does).
+     bool IsLoaded() const { return fpsr_loaded; }
++    bool HostFpsr() const { return host_fpsr; }
+ 
+     void GetFpsr(oaknut::WReg);
+ 
+ private:
+     oaknut::CodeGenerator& code;
+     size_t state_fpsr_offset;
++    bool host_fpsr;
+     bool fpsr_loaded = false;
+ };
+ 
+diff --git a/src/dynarmic/backend/arm64/stack_layout.h b/src/dynarmic/backend/arm64/stack_layout.h
+index 0349df5..6a77878 100644
+--- a/src/dynarmic/backend/arm64/stack_layout.h
++++ b/src/dynarmic/backend/arm64/stack_layout.h
+@@ -40,6 +40,7 @@ struct alignas(16) StackLayout {
+     s64 cycles_to_run;
+ 
+     u32 save_host_fpcr;
++    u32 save_host_fpsr;  // Unsafe_HostFpsr: the host's own FPSR during a run
+ 
+     bool check_bit;
+ };
+diff --git a/src/dynarmic/interface/optimization_flags.h b/src/dynarmic/interface/optimization_flags.h
+index 2f65f0b..0a6bced 100644
+--- a/src/dynarmic/interface/optimization_flags.h
++++ b/src/dynarmic/interface/optimization_flags.h
+@@ -49,6 +49,15 @@ enum class OptimizationFlag : std::uint32_t {
+     /// result in unexpected behaviour in multithreaded scenarios, including but not limited
+     /// to data races and deadlocks.
+     Unsafe_IgnoreGlobalMonitor = 0x00100000,
++
++    /// This is an UNSAFE optimization (ab-port, arm64 A32). The guest's cumulative
++    /// floating-point exception flags (FPSCR IOC..IDC, QC) live in the host FPSR for
++    /// a whole Run/Step instead of being cleared before the first FP operation of each
++    /// block and merged into the state at its end and before every host call (each
++    /// FPSR write serialises the pipeline). Inexact: flags raised by host code that
++    /// guest code calls (callbacks, fallbacks), and the QC of A32 packed saturating
++    /// ops, also reach the guest's flags.
++    Unsafe_HostFpsr = 0x00200000,
+ };
+ 
+ constexpr OptimizationFlag no_optimizations = static_cast<OptimizationFlag>(0);

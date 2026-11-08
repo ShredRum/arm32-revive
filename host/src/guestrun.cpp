@@ -152,6 +152,7 @@ int main(int argc, char** argv) {
     cfg.callbacks = &callbacks;
     cfg.optimizations =
         abr::JitOptimizations();
+    cfg.unsafe_optimizations = abr::JitUnsafeOptimizations();
     cfg.enable_cycle_counting = abr::kJitCycleCounting;
     if (abr::JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());

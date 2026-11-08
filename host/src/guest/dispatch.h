@@ -69,13 +69,27 @@ bool DiagOn();
 inline bool JitSafeOpts() { return !EnvOn("HARNESS_NOOPT"); }
 // HARNESS_NOFASTDISPATCH=1: every indirect branch goes through the C++ dispatcher.
 inline bool FastDispatchOn() { return !EnvOn("HARNESS_NOFASTDISPATCH"); }
+// HARNESS_NOHOSTFPSR=1: the guest's FP exception flags are cleared and merged
+// per block again (upstream). On (patches/dynarmic 0014): they live in the
+// host FPSR for a whole run; no guest of ours reads them (only the compare
+// flags, VMRS APSR_nzcv), and setjmp/longjmp read them through Jit::Fpscr,
+// which sees the live register.
+inline bool HostFpsrOn() { return !EnvOn("HARNESS_NOHOSTFPSR"); }
 inline Dynarmic::OptimizationFlag JitOptimizations() {
     if (!JitSafeOpts()) {
         return Dynarmic::no_optimizations;
     }
-    return FastDispatchOn() ? Dynarmic::all_safe_optimizations
-                            : Dynarmic::all_safe_optimizations & ~Dynarmic::OptimizationFlag::FastDispatch;
+    Dynarmic::OptimizationFlag f = FastDispatchOn()
+                                       ? Dynarmic::all_safe_optimizations
+                                       : Dynarmic::all_safe_optimizations & ~Dynarmic::OptimizationFlag::FastDispatch;
+    if (HostFpsrOn()) {
+        f |= Dynarmic::OptimizationFlag::Unsafe_HostFpsr;
+    }
+    return f;
 }
+// UserConfig::unsafe_optimizations, which every site sets next to
+// JitOptimizations(): only the unsafe flags that returns are then used.
+inline bool JitUnsafeOptimizations() { return JitSafeOpts() && HostFpsrOn(); }
 // A guest signal is pending for the thread whose Jit stops with this reason.
 inline constexpr Dynarmic::HaltReason kSignalHalt = Dynarmic::HaltReason::UserDefined4;
 // Runs the guest handlers of this thread's pending, unblocked signals (no-op
