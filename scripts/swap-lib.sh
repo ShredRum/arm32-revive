@@ -17,7 +17,8 @@ KS_PASS="${KS_PASS:-android}"
 LIB_DIR=host/build-android
 [ "${DIAG:-0}" = 1 ] && LIB_DIR+=-diag
 [ "${SANDBOX:-0}" = 1 ] && LIB_DIR+=-sandbox
-LIB_SRC=$LIB_DIR/libabhost.so
+# LIB_SRC=<file>: that library instead (an experimental build elsewhere).
+LIB_SRC=${LIB_SRC:-$LIB_DIR/libabhost.so}
 [ -f "$LIB_SRC" ] || { echo "swap-lib: $LIB_SRC missing (run scripts/build-lib.sh)" >&2; exit 1; }
 for G in "$@"; do
     APK="games/$G/work/apk_signed.apk"
