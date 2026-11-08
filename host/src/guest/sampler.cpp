@@ -150,10 +150,11 @@ struct Tally {
     std::uint64_t total = 0;
     std::uint64_t cls[kClasses] = {};
     std::unordered_map<std::string, std::uint64_t> guest, host, at, before;
-    // Samples in the dynamic linker (on Android the TLS descriptor resolver
-    // of a dlopen'ed library's thread_local, a leaf), by the caller in our
-    // library: which thread_local access costs.
-    std::unordered_map<std::string, std::uint64_t> linker_from;
+    // Samples in a leaf function, by its caller (the link register): the
+    // dynamic linker (on Android the TLS descriptor resolver of a dlopen'ed
+    // library's thread_local: which thread_local access costs) and libc's
+    // syscall() (kernel time of futex and other raw calls lands there).
+    std::unordered_map<std::string, std::uint64_t> leaf_from;
 };
 std::map<std::string, Tally> g_cum;  // per thread name, the whole session
 int g_reports = 0;
@@ -162,7 +163,7 @@ void Merge(Tally& into, const Tally& t) {
     into.total += t.total;
     for (int c = 0; c < kClasses; c++) into.cls[c] += t.cls[c];
     using Map = std::unordered_map<std::string, std::uint64_t> Tally::*;
-    for (Map pr : {&Tally::guest, &Tally::host, &Tally::at, &Tally::before, &Tally::linker_from}) {
+    for (Map pr : {&Tally::guest, &Tally::host, &Tally::at, &Tally::before, &Tally::leaf_from}) {
         for (const auto& kv : t.*pr) (into.*pr)[kv.first] += kv.second;
     }
 }
@@ -226,16 +227,23 @@ void Report() {
                            !std::strcmp(lib, "libc.so.6") || !std::strcmp(lib, "libm.so.6")) {
                     c = kLibc;
                 }
-                if (lr && !std::strncmp(lib, "linker", 6)) {
+                const bool in_linker = !std::strncmp(lib, "linker", 6);
+                const bool in_syscall = c == kLibc && di.dli_sname && !std::strcmp(di.dli_sname, "syscall");
+                if (lr && (in_linker || in_syscall)) {
                     Dl_info dl{};
-                    char from[64];
-                    if (dladdr(reinterpret_cast<void*>(lr), &dl) && dl.dli_fbase == self.dli_fbase) {
-                        std::snprintf(from, sizeof from, "%s+0x%zx", Base(dl.dli_fname),
-                                      static_cast<std::size_t>(lr - reinterpret_cast<std::uintptr_t>(dl.dli_fbase)));
+                    char from[128];
+                    const char* leaf = in_linker ? "linker" : "syscall";
+                    if (dladdr(reinterpret_cast<void*>(lr), &dl) && dl.dli_fname) {
+                        if (dl.dli_sname && dl.dli_fbase != self.dli_fbase) {
+                            std::snprintf(from, sizeof from, "%s <- %s:%s", leaf, Base(dl.dli_fname), dl.dli_sname);
+                        } else {
+                            std::snprintf(from, sizeof from, "%s <- %s+0x%zx", leaf, Base(dl.dli_fname),
+                                          static_cast<std::size_t>(lr - reinterpret_cast<std::uintptr_t>(dl.dli_fbase)));
+                        }
                     } else {
-                        std::snprintf(from, sizeof from, "elsewhere");
+                        std::snprintf(from, sizeof from, "%s <- anon 0x%zx", leaf, static_cast<std::size_t>(lr));
                     }
-                    t.linker_from[from]++;
+                    t.leaf_from[from]++;
                 }
                 if (di.dli_sname && c != kOurs) {
                     std::snprintf(key, sizeof key, "%s:%s", lib, di.dli_sname);
@@ -314,7 +322,7 @@ void Report() {
             }
             top(t.guest, t.total, 25, "guest");
             top(t.host, t.total, 60, "host ");
-            top(t.linker_from, t.total, 20, "linker from");
+            top(t.leaf_from, t.total, 30, "leaf");
         }
     }
     for (std::size_t k = 0; k < order.size() && k < 6; k++) {
