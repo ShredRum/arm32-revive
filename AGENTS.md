@@ -131,6 +131,14 @@ reuse only hides a use-after-free).
   in PC bit 0 for `FinishSvc`; `HARNESS_NOJITCALLBACKS=1` goes back to the
   thread_local path. `FMT_BENCH=1 fmt_test` prints the cost of one call.
 
+- ADPF (`host/src/guest/adpf.h`, Android 13+): the frame thread reports
+  each frame's CPU time to a performance hint session whose target is the
+  display period (Android 15+: prefer power efficiency). Frames end at the
+  guest's eglSwapBuffers or, for the Rovio fusion engine, its per-frame
+  `nativeUpdate`. Off: `setprop debug.abport.adpf 0` or `HARNESS_NOADPF=1`.
+  The `[adpf]` line every 10 s (also when off) gives frames and frame-thread
+  CPU per frame for A/B on a phone.
+
 - One diagnostics switch: `HARNESS_DIAG` (env or `files/abflags.txt`, a
   KEY=VALUE override file read at boot). Never leave `abflags.txt` on a device.
 - `ABR_DIAG_COUNTERS` (CMake, default OFF; `build-lib.sh --diag`, `DIAG=1

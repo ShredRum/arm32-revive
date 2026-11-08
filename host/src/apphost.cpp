@@ -39,6 +39,7 @@
 #include "appid.h"
 #include "jni_call_words.h"
 #include "guest/dispatch.h"
+#include "guest/adpf.h"
 #include "guest/sampler.h"
 #include "guest/elf_loader.h"
 #include "guest/layout.h"
@@ -514,6 +515,17 @@ void Watchdog() {
                 Log("[frames] %llu presented in the last 10 s, %ld wrapped Java objects",
                     (unsigned long long)(sw - last_swaps), g_rt->WrappedObjectCount());
                 last_swaps = sw;
+            }
+        }
+        {
+            // The frame thread's CPU time per frame and the ADPF target, also
+            // when ADPF is off (adpf.h): the number to compare on a phone.
+            std::uint64_t frames = 0, cpu = 0, target = 0;
+            bool session = false;
+            if (abr::adpf::TakeStats(&frames, &cpu, &target, &session)) {
+                Log("[adpf] %llu frames in the last 10 s, frame thread CPU %.2f ms per frame, target %.2f ms, "
+                    "session %s",
+                    (unsigned long long)frames, cpu / 1e6 / frames, target / 1e6, session ? "on" : "off");
             }
         }
         {
@@ -1293,6 +1305,14 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
 #endif
     const std::uint64_t rv = AppHost_CallImpl(name, sig, thiz, ap);
     va_end(ap);
+    // The Rovio fusion engine renders from a Java GLSurfaceView: its
+    // SingleThreadWrapper.onFrame calls doUpdate -> nativeUpdate once per
+    // frame on the GL thread (update and render; nativeRender is declared
+    // but never called), which marks the frame (ADPF, adpf.h). Guests that
+    // present their own frames mark them at eglSwapBuffers.
+    if (std::strcmp(name, "Java_com_rovio_fusion_NativeApplication_nativeUpdate") == 0) {
+        abr::adpf::FrameDone();
+    }
     return rv;
 }
 
@@ -1780,6 +1800,7 @@ static bool Boot(JavaVM* vm) {
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off",
         JitUnsafeOptimizations() ? "on" : "off", JitCallbacksOn() ? "on" : "off");
+    abr::adpf::Init(g_vm);  // after abflags: HARNESS_NOADPF
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;
     // Sampling profiler (HARNESS_SAMPLE or debug.abport.sample): its

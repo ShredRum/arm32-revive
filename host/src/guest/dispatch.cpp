@@ -1,4 +1,5 @@
 #include "dispatch.h"
+#include "adpf.h"
 #include "sampler.h"
 
 #ifdef __ANDROID__
@@ -12563,6 +12564,7 @@ bool Runtime::EglCall(ImportId id, const std::string& n, std::array<std::uint32_
     if (id == I::eglSwapBuffers_) {
         egl_swaps_.fetch_add(1, std::memory_order_relaxed);
         Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
+        adpf::FrameDone();  // the guest presents its own frames
         return true;
     }
     if (id == I::eglGetConfigs_) {

@@ -58,6 +58,7 @@ add_library(guest STATIC
     src/guest/apk_vfs.cpp
     src/guest/opensl.cpp
     src/guest/sampler.cpp
+    src/guest/adpf.cpp
     src/guest/dlmalloc.c
 )
 # dlmalloc as a bounded mspace (no sbrk/mmap fallback, 8B alignment like
