@@ -63,6 +63,11 @@ if [ "$DIAG" = 1 ]; then
 else
     LIB_SRC=host/build-android/libabhost.so
 fi
+# SANDBOX=1: the API 26 build for the sandbox (build-lib.sh --sandbox [--diag]).
+if [ "${SANDBOX:-0}" = 1 ]; then
+    LIB_SRC="${LIB_SRC%/libabhost.so}-sandbox/libabhost.so"
+    [ -f "$LIB_SRC" ] || { echo "build-apk: SANDBOX=1 needs $LIB_SRC (build-lib.sh --sandbox)" >&2; exit 1; }
+fi
 LIB_DST="$TREE/lib/$HOST_ABI/$HOST_LIB"
 # OUT_NAME=apk_fill.apk writes the signed artifact under a distinct name
 # without touching the prod/diag defaults.

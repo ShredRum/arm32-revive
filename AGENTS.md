@@ -62,6 +62,15 @@ scripts/build-lib.sh && scripts/swap-lib.sh <id>...   # host-only change: ~1 s p
 scripts/devgate.sh <id> [seconds]      # sandbox install + boot gate (default 40 s) + screenshot
 ```
 
+Two Android builds of the host: `build-lib.sh` makes the phone one (API 29:
+`thread_local` is ELF TLS, one instruction; API < 29 calls
+`__emutls_get_address` on every access, ~8 % of Rio's game thread on a
+phone), `build-lib.sh --sandbox` the sandbox one (API 26: Android 7.1
+refuses a library with a TLS segment). They differ only in that. For the
+sandbox: `scripts/build-lib.sh --sandbox && SANDBOX=1 scripts/swap-lib.sh
+<id>` (also `SANDBOX=1 build-apk.sh`); `devgate.sh` refuses a phone build
+there. APKs for the phone always carry the phone build.
+
 Device gate policy: an ordinary change -> rio + seasons; a core-wide change
 (memory, threads, JNI, loader, network) -> all five live titles. Always look at the
 screenshots: a wrong game state (dialog, black screen) does not raise markers.
@@ -101,8 +110,8 @@ reuse only hides a use-after-free).
 - `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
   `patches/dynarmic/README.md`); `HARNESS_NOJITSHARE=1` restores per-thread
   caches. PC builds use dynarmic's x64 backend, which cannot share: run
-  `fmt_test` on the sandbox (`cmake --build host/build-android --target
-  fmt_test`, copy, run with Termux `TMPDIR`) to test the arm64 path.
+  `fmt_test` on the sandbox (`cmake --build host/build-android-sandbox
+  --target fmt_test`, copy, run with Termux `TMPDIR`) to test the arm64 path.
 
 - `tlsthunk=on`: `pthread_getspecific` is answered in guest code from the
   thread's block (`kTlsBase`, `Runtime::BindTls`, `patches/dynarmic/README.md`

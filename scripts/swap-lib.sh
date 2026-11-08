@@ -12,6 +12,8 @@ KS="${KS:-keys/debug.keystore}"
 KS_ALIAS="${KS_ALIAS:-dbg}"
 KS_PASS="${KS_PASS:-android}"
 LIB_SRC=host/build-android/libabhost.so
+# SANDBOX=1: the API 26 build for the sandbox (build-lib.sh --sandbox).
+[ "${SANDBOX:-0}" = 1 ] && LIB_SRC=host/build-android-sandbox/libabhost.so
 [ -f "$LIB_SRC" ] || { echo "swap-lib: $LIB_SRC missing (run scripts/build-lib.sh)" >&2; exit 1; }
 for G in "$@"; do
     APK="games/$G/work/apk_signed.apk"

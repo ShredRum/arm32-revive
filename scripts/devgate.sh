@@ -11,6 +11,21 @@ APK=games/$G/work/apk_signed.apk
 HOSTLIB=$(python3 scripts/profile.py $G host.lib)
 ACT=$(python3 scripts/profile.py $G apk.activity 2>/dev/null || echo com.rovio.fusion.App)
 WANT=$(unzip -p $APK lib/arm64-v8a/$HOSTLIB | md5sum | cut -c1-32)
+# A phone build (API 29, ELF TLS) does not load on Android 7-9: say so here
+# instead of a crash at the first start.
+READELF=$(ls tools/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf | head -1)
+TMPLIB=$(mktemp)
+unzip -p $APK lib/arm64-v8a/$HOSTLIB > "$TMPLIB"
+if "$READELF" -lW "$TMPLIB" | grep -q " TLS "; then
+    SDK=$(ssh -o BatchMode=yes -p $P $DEV getprop ro.build.version.sdk)
+    if [ "${SDK:-0}" -lt 29 ]; then
+        rm -f "$TMPLIB"
+        echo "devgate: $APK holds the phone build (ELF TLS, Android 10+); this device is API $SDK." >&2
+        echo "  build the sandbox one: scripts/build-lib.sh --sandbox && SANDBOX=1 scripts/swap-lib.sh $G" >&2
+        exit 1
+    fi
+fi
+rm -f "$TMPLIB"
 S="ssh -o BatchMode=yes -p $P $DEV"
 # One session at a time: every other title of the project is stopped first
 # (a game left running from an earlier gate skews markers and fps).
