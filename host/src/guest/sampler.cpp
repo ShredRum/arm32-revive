@@ -122,12 +122,43 @@ enum Class { kGuest, kGuestPrivate, kStubs, kOurs, kGl, kLibc, kOther, kClasses 
 const char* const kClassName[kClasses] = {"guest JIT", "guest (private cache)", "JIT stubs",
                                           "host ours", "GL/driver", "libc", "other"};
 
+// What the host instruction at a JIT sample (and the one before it: a slow
+// instruction's cost shows on the next one) is, to see code generation
+// costs (FPSR/FPCR writes serialise the pipeline; LDAR is a barrier).
+const char* InsnKind(std::uint32_t w) {
+    if ((w & 0xffffffe0u) == 0xd51b4420u) return "msr fpsr";
+    if ((w & 0xffffffe0u) == 0xd53b4420u) return "mrs fpsr";
+    if ((w & 0xffffffe0u) == 0xd51b4400u) return "msr fpcr";
+    if ((w & 0xffffffe0u) == 0xd53b4400u) return "mrs fpcr";
+    if ((w & 0xbffffc00u) == 0x88dffc00u) return "ldar";
+    if ((w & 0x7c000000u) == 0x14000000u || (w & 0xff000010u) == 0x54000000u ||
+        (w & 0x7e000000u) == 0x34000000u || (w & 0xfffffc1fu) == 0xd61f0000u ||
+        (w & 0xfffffc1fu) == 0xd63f0000u || (w & 0xfffffc1fu) == 0xd65f0000u) {
+        return "branch";
+    }
+    if ((w & 0x0a000000u) == 0x08000000u) return "load/store";
+    if ((w & 0x0e000000u) == 0x0e000000u) return "fp/simd";
+    return "alu/other";
+}
+
+struct Tally {
+    std::uint64_t total = 0;
+    std::uint64_t cls[kClasses] = {};
+    std::unordered_map<std::string, std::uint64_t> guest, host, at, before;
+};
+std::map<std::string, Tally> g_cum;  // per thread name, the whole session
+int g_reports = 0;
+
+void Merge(Tally& into, const Tally& t) {
+    into.total += t.total;
+    for (int c = 0; c < kClasses; c++) into.cls[c] += t.cls[c];
+    using Map = std::unordered_map<std::string, std::uint64_t> Tally::*;
+    for (Map pr : {&Tally::guest, &Tally::host, &Tally::at, &Tally::before}) {
+        for (const auto& kv : t.*pr) (into.*pr)[kv.first] += kv.second;
+    }
+}
+
 void Report() {
-    struct Tally {
-        std::uint64_t total = 0;
-        std::uint64_t cls[kClasses] = {};
-        std::unordered_map<std::string, std::uint64_t> guest, host;
-    };
     std::map<pid_t, Tally> per;
     Dl_info self{};
     dladdr(reinterpret_cast<void*>(&OnProf), &self);
@@ -159,6 +190,11 @@ void Report() {
                 }
                 t.cls[kGuest]++;
                 t.guest[key]++;
+                std::uint32_t w = 0, wb = 0;
+                std::memcpy(&w, reinterpret_cast<const void*>(pc), 4);
+                std::memcpy(&wb, reinterpret_cast<const void*>(pc - 4), 4);
+                t.at[InsnKind(w)]++;
+                t.before[InsnKind(wb)]++;
                 continue;
             }
             if (g == -2) {
@@ -225,6 +261,40 @@ void Report() {
             Emit(line);
         }
     };
+    auto split = [&](const char* head, const Tally& t, std::uint64_t of) {
+        int n = std::snprintf(line, sizeof line, "%s: %llu (%.0f%% of samples):", head,
+                              static_cast<unsigned long long>(t.total), of ? 100.0 * t.total / of : 0.0);
+        for (int c = 0; c < kClasses; c++) {
+            if (t.cls[c] && n < static_cast<int>(sizeof line) - 40) {
+                n += std::snprintf(line + n, sizeof line - n, " %s %.1f%%", kClassName[c],
+                                   100.0 * t.cls[c] / t.total);
+            }
+        }
+        Emit(line);
+    };
+    for (auto& kv : per) {
+        Merge(g_cum[ThreadName(kv.first)], kv.second);
+    }
+    if (++g_reports % 6 == 0) {
+        // Every 30 s: the session so far, per thread name, in more depth.
+        std::uint64_t cum_all = 0;
+        for (const auto& kv : g_cum) cum_all += kv.second.total;
+        std::snprintf(line, sizeof line, "=== session so far: %llu samples",
+                      static_cast<unsigned long long>(cum_all));
+        Emit(line);
+        for (const auto& kv : g_cum) {
+            const Tally& t = kv.second;
+            if (t.total < cum_all / 50) continue;  // threads under 2 %
+            split(("session " + kv.first).c_str(), t, cum_all);
+            const std::uint64_t g = t.cls[kGuest];
+            if (g) {
+                top(t.at, g, 9, "jit at    ");
+                top(t.before, g, 9, "jit before");
+            }
+            top(t.guest, t.total, 25, "guest");
+            top(t.host, t.total, 60, "host ");
+        }
+    }
     for (std::size_t k = 0; k < order.size() && k < 6; k++) {
         const Tally& t = *order[k].second;
         int n = std::snprintf(line, sizeof line, "t%d %s: %llu (%.0f%% of samples):",
