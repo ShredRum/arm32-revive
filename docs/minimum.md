@@ -81,6 +81,7 @@ first 60 s, back to back), before the direct jump.
 | signals: sliced waits only after a signal is sent (A8) | 144 k wakeups/s | ~15.5 k/s |
 | every import by ImportId (import_ids.h), then switch (id) | chain 1-5 us | pthread_self 99 ns, frexpf 544 ns |
 | F9: GL state calls that repeat the set state are not sent: attrib enable/disable (97 % repeats), glBindBuffer (32 %), single-value uniforms (~70 %); proof of exactness in realgl.cpp (per-thread copy dropped at every context change or return to Java, one uniform thread, link/delete generation) | 84 fps (diag) | ship A/B C-A-C: 98 / 96 / 98 avg, steady half ~107 vs ~100 |
+| thread_local cost (phone profiler, Rio game thread, 2 min of a level): API 29 phone build = ELF TLS (f33e610), then one TLS lookup per plain call + one for RealGL's state (d1d4752) | emutls + pthread_getspecific ~8.2 % of samples | linker64 TLS resolver 3.3 %, then 1.8 %; thread CPU per 5 s 1003 -> 966 -> 958 ms (-4.5 %, different levels each run) |
 
 ## F. Speed work not done yet (known, each needs its measurement first)
 
@@ -94,7 +95,8 @@ first 60 s, back to back), before the direct jump.
 | F6 | gettimeofday 2.8 us vs 440 ns bare on the sandbox | syscall + a loaded box | on the phone vDSO; nothing of ours, recheck there |
 | F7 | sem_post ~20 us wall | the poster yields to the woken worker | scheduler, as natively: leave |
 | F9 DONE | redundant GL state calls (see E) | MCSM: 2.9 M attrib, 2 M uniform calls / 30 s, mostly repeats | sandbox render thread spent ~2/3 of its time in GL (ANGLE); the phone driver is cheaper, so less gain there |
-| F8 | phone measurements (fps, heat) with MCSM | sandbox only so far | needs MCSM data on a non-root phone first |
+| F8 DONE | phone measurements (fps, heat) with MCSM | 2026-11-08: split APKs (packed files), 118-120 fps at 120 Hz, slightly warm; main thread ~83 %, no thread at 100 % | GL thread (F4) not needed |
+| F10 | profiler data (phone, Rio game thread) | sampler.h, 2026-11-08 | left after the TLS work: FPSR writes ~2.5 % (Host FPSR, lite design: setjmp/longjmp read FPSCR through the Jit API), Cpsr get/set ~1.5 %, block lookups ~0.6 %, CheckRange ~0.5 %, TLS resolver 1.8 % (handlers' own thread_locals) |
 
 ## Order
 
