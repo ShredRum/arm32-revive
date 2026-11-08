@@ -69,6 +69,22 @@ static void LibBaseAnchor() {}
 
 namespace abr {
 
+// The per-thread state every guest->host call reads, in one thread_local so
+// that a call reaches it with one TLS lookup (each thread_local is a call to
+// the TLS resolver in a dlopened library: profiled on a phone, 2026-11-08).
+// CallSVC takes a reference once; the rest read single fields as before.
+struct HotThread {
+    // The Jit running guest code on this thread (null on the main thread:
+    // jit_) and the guest thread id (0 there: 1).
+    Dynarmic::A32::Jit* active_jit = nullptr;
+    std::uint32_t tid = 0;
+    // Set while a proxy delivers signals for another thread (see t_sig).
+    bool is_proxy = false;
+    // Guest->host calls of this thread (Runtime::ThreadSvcCount).
+    std::uint64_t svc_count = 0;
+};
+thread_local HotThread t_hot;
+
 // This thread's pthread_cleanup list head (guest address) and guest stack.
 thread_local std::uint32_t t_cleanup_head = 0;
 // Direct buffers this thread handed to the guest during the current call.
@@ -77,7 +93,7 @@ thread_local std::vector<void*> t_direct_used;
 thread_local bool t_thread_exiting = false;
 thread_local std::uint32_t t_exit_value = 0;
 // A pthread_create worker's own Jit (null on every other thread). Unlike
-// t_active_jit it does not change while a callback Jit runs.
+// t_hot.active_jit it does not change while a callback Jit runs.
 thread_local Dynarmic::A32::Jit* t_worker_jit = nullptr;
 thread_local std::uint32_t t_stack_lo = 0;
 thread_local std::uint32_t t_stack_size = 0;
@@ -87,10 +103,9 @@ thread_local int t_jit_depth = 0;
 // stands in for (DeliverPendingSignals uses them instead of the active Jit's).
 // Only the proxy's first delivery uses them: once a handler runs, a nested
 // delivery (a signal taken inside the handler's own wait) goes below the
-// handler's frame, like on the thread itself. t_is_proxy marks the thread.
+// handler's frame, like on the thread itself. t_hot.is_proxy marks the thread.
 thread_local const std::array<std::uint32_t, 16>* t_proxy_regs = nullptr;
 thread_local std::uint32_t t_proxy_cpsr = 0x10;
-thread_local bool t_is_proxy = false;
 // Local frames of this thread (Runtime::PushLocalFrame): the real handles
 // made in each, released when it is popped; guest_frames = how many of them
 // the guest pushed (PushLocalFrame) on top of the host's.
@@ -1556,11 +1571,9 @@ void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what)
     }
 }
 
-static thread_local std::uint64_t t_svc_count = 0;
-std::uint64_t Runtime::ThreadSvcCount() { return t_svc_count; }
+std::uint64_t Runtime::ThreadSvcCount() { return t_hot.svc_count; }
 
 void Runtime::OnSvc(std::uint32_t swi, Regs& regs) {
-    t_svc_count++;
 #ifdef ABR_DIAG_COUNTERS
     // Read only by the [counters] line; in a shipping build this shared
     // counter would be one contended cache line on every guest->host call.
@@ -10565,11 +10578,7 @@ void Runtime::OnGuestSyscall(Regs& regs) {
 }
 
 // ---- real guest threads ----
-// Per-thread Dynarmic state. Main thread: t_active_jit == nullptr (uses jit_).
-namespace {
-thread_local Dynarmic::A32::Jit* t_active_jit = nullptr;
-thread_local std::uint32_t t_tid = 0;
-}  // namespace
+// Per-thread Dynarmic state. Main thread: t_hot.active_jit == nullptr (uses jit_).
 
 // Per-thread pthread_once hijack stack (see dispatch.h): shared state here
 // would let one thread's return pop another thread's in-progress entry.
@@ -10577,11 +10586,11 @@ thread_local std::array<Runtime::OnceHijack, Runtime::kOnceMaxDepth> Runtime::on
 thread_local int Runtime::once_depth_ = 0;
 
 Dynarmic::A32::Jit* Runtime::ActiveJit() {
-    return t_active_jit ? t_active_jit : jit_;
+    return t_hot.active_jit ? t_hot.active_jit : jit_;
 }
 
 std::uint32_t Runtime::GuestTid() {
-    return t_tid ? t_tid : 1;
+    return t_hot.tid ? t_hot.tid : 1;
 }
 
 // dlmalloc DEBUG assert reporter: expression + line, async-safe (literals
@@ -10625,7 +10634,7 @@ extern "C" __attribute__((noinline)) void AbrHeapCorruptionHook(void) {
         *p++ = *t++;
     }
     std::uint32_t pc = 0, r0 = 0, r1 = 0;
-    Dynarmic::A32::Jit* aj = t_active_jit ? t_active_jit : nullptr;
+    Dynarmic::A32::Jit* aj = t_hot.active_jit ? t_hot.active_jit : nullptr;
     if (aj) {
         pc = aj->Regs()[15];
         r0 = aj->Regs()[0];
@@ -10745,8 +10754,8 @@ std::uint32_t Runtime::HeapCorruptionPc() {
 }
 
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
-    t_active_jit = jit;
-    t_tid = tid;
+    t_hot.active_jit = jit;
+    t_hot.tid = tid;
     if (jit) {
         jit->SetTpidruro(0);  // BindTls
         RegisterSigThread(tid, jit);
@@ -10861,11 +10870,11 @@ bool Runtime::RunNested(std::uint32_t compar, std::uint32_t pa, std::uint32_t pb
     }
     // Swap ActiveJit so nested thunks route to THIS jit (regs/Ret/cpsr);
     // restore before returning to the outer Run.
-    Dynarmic::A32::Jit* outer = t_active_jit;
-    t_active_jit = jit;
+    Dynarmic::A32::Jit* outer = t_hot.active_jit;
+    t_hot.active_jit = jit;
     jit->SetTpidruro(0);  // slots serve any thread (BindTls)
     Dynarmic::HaltReason hr = RunJit(*jit);
-    t_active_jit = outer;
+    t_hot.active_jit = outer;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         slot->busy = false;
@@ -12727,7 +12736,7 @@ bool Runtime::DeliverPendingSignals() {
             HaltGuest();
             return false;
         }
-        Dynarmic::A32::Jit* cur = t_active_jit;
+        Dynarmic::A32::Jit* cur = t_hot.active_jit;
         if (!cur && !t_proxy_regs) {
             return true;
         }
@@ -12848,7 +12857,7 @@ std::uint32_t Runtime::GuestSigmask(std::uint32_t how, std::uint32_t set, std::u
     }
     t_sig->blocked.store(next & ~kUnblockable, std::memory_order_relaxed);
     if (SignalDeliverable()) {
-        if (Dynarmic::A32::Jit* j = t_active_jit) {
+        if (Dynarmic::A32::Jit* j = t_hot.active_jit) {
             j->HaltExecution(kSignalHalt);  // deliver once back in guest code
         }
     }
@@ -12895,12 +12904,12 @@ std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
     return 0;
 }
 
-// On a proxy (t_is_proxy) the thread's state stays as the proxy found
+// On a proxy (t_hot.is_proxy) the thread's state stays as the proxy found
 // it: the handler's own host calls and Run levels are the proxy's, not the
 // thread's.
 void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
                                bool blocking) {
-    if (!t_sig || t_is_proxy || !blocking) {
+    if (!blocking || !t_sig || t_hot.is_proxy) {
         return;  // a short call: the thread stops when it is back in guest code
     }
     const bool on = SignalsInUse();
@@ -12914,7 +12923,7 @@ void Runtime::SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::u
 }
 
 void Runtime::SigLeaveHostCall(bool blocking) {
-    if (!t_sig || t_is_proxy || !blocking) {
+    if (!blocking || !t_sig || t_hot.is_proxy) {
         return;
     }
     if (SignalsInUse()) {
@@ -12952,14 +12961,14 @@ void Runtime::ProxyDeliver(std::shared_ptr<SigThread> st, std::uint32_t tid) {
                 }
                 t_sig = st;
                 t_rt = this;
-                t_tid = tid;
+                t_hot.tid = tid;
                 t_proxy_regs = &regs;
                 t_proxy_cpsr = cpsr;
-                t_is_proxy = true;
+                t_hot.is_proxy = true;
                 DeliverPendingSignals();
-                t_is_proxy = false;
+                t_hot.is_proxy = false;
                 t_proxy_regs = nullptr;
-                t_tid = 0;
+                t_hot.tid = 0;
                 t_sig.reset();
             }
         }
@@ -12990,7 +12999,7 @@ thread_local std::vector<SnapSave> t_snap_stack;
 
 void GuestSigEnterJit() {
     t_jit_depth++;
-    if (t_jit_depth > 1 && t_sig && !t_is_proxy) {
+    if (t_jit_depth > 1 && t_sig && !t_hot.is_proxy) {
         t_snap_stack.push_back({t_sig->snap, t_sig->snap_cpsr, t_sig->snap_valid.load(),
                                 t_sig->outside.load()});
     }
@@ -12998,7 +13007,7 @@ void GuestSigEnterJit() {
 }
 
 void GuestSigResumeJit() {
-    if (!t_rt || !t_sig || t_is_proxy) {
+    if (!t_rt || !t_sig || t_hot.is_proxy) {
         return;
     }
     if (t_rt->SignalsInUse()) {
@@ -13013,7 +13022,7 @@ void GuestSigResumeJit() {
 
 void GuestSigLeaveJit() {
     t_jit_depth--;
-    if (!t_rt || !t_sig || t_is_proxy) {
+    if (!t_rt || !t_sig || t_hot.is_proxy) {
         return;
     }
     // Back in a host call (a callback Jit ended) or back in the host.
@@ -13235,7 +13244,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // thread; that must become EAGAIN for the guest, not std::terminate.
     try {
     st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
-        t_tid = tid;
+        t_hot.tid = tid;
         SetThreadStack(stack, kThreadStackSize);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
@@ -13249,7 +13258,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         cfg.processor_id = cpu_id;
         const JitPtr jit_owner = NewJit(cfg);
         Dynarmic::A32::Jit& jit = *jit_owner;
-        t_active_jit = &jit;
+        t_hot.active_jit = &jit;
         t_worker_jit = &jit;
         RegisterSigThread(tid, &jit);
         PushLocalFrame();  // real handles made here go with the thread, as on a JVM
@@ -13314,7 +13323,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         // Guest code has stopped, so its stack is dead: hand it back now (a
         // joiner only needs st->retval). Idempotent with join/detach.
         ReapThreadStack(tid);
-        t_active_jit = nullptr;
+        t_hot.active_jit = nullptr;
         t_worker_jit = nullptr;
         ForgetSigThreadJit(tid);
         ReleaseCpuId(cpu_id);  // the Jit no longer runs
@@ -17679,7 +17688,7 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
             std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
-                        t_tid, exec ? "exec" : "read", addr, sizeof(T),
+                        t_hot.tid, exec ? "exec" : "read", addr, sizeof(T),
                         rt_->ActiveJit()->Regs()[15], rt_->ActiveJit()->Regs()[14],
                         rt_->ActiveJit()->Regs()[4]);
             rt_->DumpEventRing();
@@ -17854,7 +17863,7 @@ void PcLogHit(std::uint64_t pc, std::uint64_t r01, std::uint64_t r23) {
     static std::unordered_map<std::uint64_t, int> seen;
     std::lock_guard<std::mutex> l(mu);
     if (seen[pc]++ < 200) {
-        std::printf("[pclog][t%u] %08llx r0=%08llx r1=%08llx r2=%08llx lr=%08llx\n", t_tid,
+        std::printf("[pclog][t%u] %08llx r0=%08llx r1=%08llx r2=%08llx lr=%08llx\n", t_hot.tid,
                     static_cast<unsigned long long>(pc),
                     static_cast<unsigned long long>(r01 & 0xFFFFFFFFu),
                     static_cast<unsigned long long>(r01 >> 32),
@@ -17954,7 +17963,9 @@ void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
 }
 
 void GuestCallbacks::CallSVC(std::uint32_t swi) {
-    Dynarmic::A32::Jit* jit = rt_->ActiveJit();
+    HotThread& hot = t_hot;  // the one TLS lookup of a plain call
+    hot.svc_count++;
+    Dynarmic::A32::Jit* jit = hot.active_jit ? hot.active_jit : rt_->main_jit();
     auto& regs = jit->Regs();
     // Where the thread is must be known before signals are ever used: a
     // thread that went to sleep in a host call earlier must not look like it

@@ -297,7 +297,6 @@ struct GlBindings {
     // drops keep it exact. An unknown flag is learnt from the call itself.
     std::int8_t attr[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 };
-thread_local GlBindings t_bindings;
 }  // namespace
 
 // Uniform values the current program already holds (minimum F9): a call
@@ -332,14 +331,21 @@ struct UniCache {
     std::unordered_map<GLint, UniVal>* cur = nullptr;  // prog's map
     std::unordered_map<GLuint, std::unordered_map<GLint, UniVal>> by_prog;
 };
-thread_local UniCache t_uni;
-thread_local char t_uni_token;
+// This thread's GL copies (bindings, uniform values, the uniform-owner
+// token) in one thread_local: a GL call reaches all of them with one TLS
+// lookup (each thread_local is a TLS-resolver call in a dlopened library).
+struct GlThread {
+    GlBindings bindings;
+    UniCache uni;
+    char token = 0;
+};
+thread_local GlThread t_gl;
 std::atomic<const void*> g_uni_owner{nullptr};
 std::atomic<bool> g_uni_shared{false};
 std::atomic<std::uint64_t> g_prog_gen{1};
 
 void ForgetUniforms() {
-    UniCache& c = t_uni;
+    UniCache& c = t_gl.uni;
     c.by_prog.clear();
     c.cur = nullptr;
     c.prog_known = false;
@@ -367,7 +373,7 @@ bool UniformRepeat(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, std:
         default: return false;
     }
     if (g_uni_shared.load(std::memory_order_relaxed)) return false;
-    const void* me = &t_uni_token;
+    const void* me = &t_gl.token;
     const void* owner = g_uni_owner.load(std::memory_order_relaxed);
     if (owner != me) {
         if (owner != nullptr || !g_uni_owner.compare_exchange_strong(owner, me)) {
@@ -375,7 +381,7 @@ bool UniformRepeat(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, std:
             return false;
         }
     }
-    UniCache& c = t_uni;
+    UniCache& c = t_gl.uni;
     const std::uint64_t gen = g_prog_gen.load(std::memory_order_acquire);
     if (c.gen != gen) {
         c.by_prog.clear();
@@ -419,8 +425,8 @@ bool UniformRepeat(Runtime* r, GlId id, std::uint32_t a0, std::uint32_t a1, std:
 
 // glUseProgram: the program is asked again before the next uniform.
 void UniformProgramChanged() {
-    t_uni.prog_known = false;
-    t_uni.cur = nullptr;
+    t_gl.uni.prog_known = false;
+    t_gl.uni.cur = nullptr;
 }
 }  // namespace
 
@@ -428,7 +434,7 @@ void UniformProgramChanged() {
 static void DiagGlForget();
 #endif
 void ForgetGlBindings() {
-    t_bindings = GlBindings{};
+    t_gl.bindings = GlBindings{};
     ForgetUniforms();
 #ifdef ABR_DIAG_COUNTERS
     DiagGlForget();
@@ -445,7 +451,7 @@ static bool GlDrawLog() {
 // The buffer bound to `binding` (GL_ARRAY_BUFFER_BINDING or
 // GL_ELEMENT_ARRAY_BUFFER_BINDING) in the current context.
 static GLuint BoundBuffer(GLenum binding) {
-    GlBindings& b = t_bindings;
+    GlBindings& b = t_gl.bindings;
     const bool array = binding == GL_ARRAY_BUFFER_BINDING;
     if (array ? b.array_known : b.element_known) {
         return array ? b.array : b.element;
@@ -1389,18 +1395,18 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     if (id == G::glBindBuffer) {
         // A bind of the buffer already bound changes nothing (GLES2 2.9) and
         // cannot fail for these two targets: it is not sent (MCSM: ~32 %).
-        if ((a0 == GL_ARRAY_BUFFER && t_bindings.array_known && t_bindings.array == a1) ||
-            (a0 == GL_ELEMENT_ARRAY_BUFFER && t_bindings.element_known && t_bindings.element == a1)) {
+        if ((a0 == GL_ARRAY_BUFFER && t_gl.bindings.array_known && t_gl.bindings.array == a1) ||
+            (a0 == GL_ELEMENT_ARRAY_BUFFER && t_gl.bindings.element_known && t_gl.bindings.element == a1)) {
             r->Ret(regs, 0);
             return true;
         }
         glBindBuffer((GLenum)a0, (GLuint)a1);
         if (a0 == GL_ARRAY_BUFFER) {
-            t_bindings.array = (GLuint)a1;
-            t_bindings.array_known = true;
+            t_gl.bindings.array = (GLuint)a1;
+            t_gl.bindings.array_known = true;
         } else if (a0 == GL_ELEMENT_ARRAY_BUFFER) {
-            t_bindings.element = (GLuint)a1;
-            t_bindings.element_known = true;
+            t_gl.bindings.element = (GLuint)a1;
+            t_gl.bindings.element_known = true;
         }
         r->Ret(regs, 0);
         return true;
@@ -1465,12 +1471,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         }();
         const std::int8_t want = id == G::glEnableVertexAttribArray ? 1 : 0;
         const bool kept = a0 < 16 && a0 < max_attr;
-        if (kept && t_bindings.attr[a0] == want) {
+        if (kept && t_gl.bindings.attr[a0] == want) {
             r->Ret(regs, 0);
             return true;
         }
         (want ? glEnableVertexAttribArray : glDisableVertexAttribArray)((GLuint)a0);
-        if (kept) t_bindings.attr[a0] = want;
+        if (kept) t_gl.bindings.attr[a0] = want;
         r->Ret(regs, 0);
         return true;
     }

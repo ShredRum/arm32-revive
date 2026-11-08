@@ -201,6 +201,7 @@ public:
     LoadedModule& mod() { return mod_; }
     Dynarmic::A32::Jit* jit() { return jit_; }
     void set_jit(Dynarmic::A32::Jit* jit) { jit_ = jit; }
+    Dynarmic::A32::Jit* main_jit() const { return jit_; }  // the main thread's (ActiveJit without TLS)
     std::uint32_t AllocTid() { return next_tid_.fetch_add(1, std::memory_order_relaxed); }
     // The process-wide exclusive monitor and its processor ids. Every Jit
     // factory acquires an id and passes Monitor() as global_monitor; the id is
