@@ -82,6 +82,11 @@ struct HotThread {
     bool is_proxy = false;
     // Guest->host calls of this thread (Runtime::ThreadSvcCount).
     std::uint64_t svc_count = 0;
+    // Entries in t_java_copies, and whether t_direct_used has any: a vector
+    // thread_local is reached through its init wrapper (a guard check and
+    // dynamic TLS lookups), so the common empty case asks these instead.
+    std::uint32_t java_copies = 0;
+    bool direct_used = false;
 };
 thread_local HotThread t_hot;
 
@@ -14040,9 +14045,10 @@ std::string Runtime::JniClassName(std::uint32_t handle) {
 }
 
 void Runtime::FlushDirectBuffers() {
-    if (t_direct_used.empty()) {
+    if (!t_hot.direct_used) {
         return;
     }
+    t_hot.direct_used = false;
     for (void* host : t_direct_used) {
         DirectBuf db;
         {
@@ -14289,15 +14295,18 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
 // and fill its local reference table.
 thread_local std::vector<void*> t_java_copies;
 
-Runtime::JavaCopies::JavaCopies() : from_(t_java_copies.size()) {}
+Runtime::JavaCopies::JavaCopies() : from_(t_hot.java_copies) {}
 
 Runtime::JavaCopies::~JavaCopies() {
-    if (t_java_copies.size() > from_) {
+    HotThread& hot = t_hot;
+    if (hot.java_copies > from_) {
         JNIEnv* re = RealEnv();
-        while (t_java_copies.size() > from_) {
-            re->DeleteLocalRef(static_cast<jobject>(t_java_copies.back()));
-            t_java_copies.pop_back();
+        std::vector<void*>& copies = t_java_copies;
+        while (copies.size() > from_) {
+            re->DeleteLocalRef(static_cast<jobject>(copies.back()));
+            copies.pop_back();
         }
+        hot.java_copies = from_;
     }
 }
 
@@ -14366,6 +14375,7 @@ void* Runtime::JavaObjectFor(std::uint32_t handle) {
         jstring copy = re->NewStringUTF(text.c_str());
         if (copy) {
             t_java_copies.push_back(copy);
+            t_hot.java_copies = static_cast<std::uint32_t>(t_java_copies.size());
         }
         return copy;
     }
@@ -15977,6 +15987,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 if (db.guest) {
                     std::memcpy(H(db.guest), host, db.size);
                     t_direct_used.push_back(host);
+                    t_hot.direct_used = true;
                     addr = db.guest;
                 }
             }

@@ -1396,7 +1396,6 @@ private:
     template <typename T>
     bool ExclusiveWrite(VAddr addr, T v, T expected) {
         const char* gwhat = nullptr;
-        Dynarmic::A32::Jit* self = rt_->ActiveJit();  // the thread doing the STREX
         if ((addr & (sizeof(T) - 1)) != 0) {
             // ARMv7: an unaligned exclusive access is an alignment fault.
             if (rt_->NoteBad()) {
@@ -1404,7 +1403,7 @@ private:
                             addr, sizeof(T));
             }
             rt_->stop_step_ = true;
-            if (self) {
+            if (Dynarmic::A32::Jit* self = rt_->ActiveJit()) {  // the thread doing the STREX
                 self->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             }
             return false;
@@ -1416,7 +1415,7 @@ private:
                             sizeof(T), gwhat ? " guard=" : "", gwhat ? gwhat : "");
             }
             rt_->stop_step_ = true;
-            if (self) {
+            if (Dynarmic::A32::Jit* self = rt_->ActiveJit()) {  // the thread doing the STREX
                 self->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             }
             return false;
