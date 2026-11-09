@@ -63,7 +63,9 @@ if [ "${SANDBOX:-0}" = 1 ]; then
     LIB_SRC="${LIB_SRC%/libabhost.so}-sandbox/libabhost.so"
 fi
 if [ ! -f "$LIB_SRC" ]; then
-    FLAGS="$([ "${SANDBOX:-0}" = 1 ] && echo " --sandbox")$([ "$DIAG" = 1 ] && echo " --diag")"
+    FLAGS=""
+    if [ "${SANDBOX:-0}" = 1 ]; then FLAGS="$FLAGS --sandbox"; fi
+    if [ "$DIAG" = 1 ]; then FLAGS="$FLAGS --diag"; fi
     echo "build-apk: needs $LIB_SRC" >&2
     echo "  run: scripts/build-lib.sh$FLAGS" >&2
     exit 1
