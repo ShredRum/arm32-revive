@@ -1148,7 +1148,10 @@ int Runtime::GuestMprotect(std::uint32_t addr, std::uint32_t size, int prot) {
         if (hp == 4096 || ((addr % hp) == 0 && (len % hp) == 0)) {
             ::mprotect(H(addr), static_cast<std::size_t>(len), hprot);
         }
-        // (Larger host pages: they stay read-write, the page map enforces.)
+        // (Larger host pages: they stay read-write. The page map then holds
+        // the guest's protection for the host's own checks (CheckRange), but
+        // guest code reaches memory through fastmem and is not stopped: a
+        // known limit of 4 KB guest pages on a 16 KB-page host.)
         mappings_.SetProt(addr, end, hprot);
         return 0;
     }
@@ -2515,6 +2518,16 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (moved == 0xFFFFFFFFu) {
             Ret(regs, moved);
             return;
+        }
+        // The old pages may be closed to reads (a PROT_NONE reservation, as
+        // GC and VM runtimes make) while their contents still move: open
+        // them to the host's read first (they are released right after).
+        // Larger host pages stay read-write (GuestMprotect).
+        if (!h.uniform || !(h.prot & PROT_READ)) {
+            const std::uint64_t hp = GuestMemory::HostPageSize();
+            if (hp == 4096 || ((a0 % hp) == 0 && (old_len % hp) == 0)) {
+                ::mprotect(H(a0), old_len, PROT_READ);
+            }
         }
         std::memcpy(H(moved), H(a0), old_len);
         GuestMprotect(moved, new_len, h.prot);

@@ -1623,6 +1623,15 @@ int main() {
                     (abr::RuntimeTestAccess::Writable(rt, pp + 4096, 4) ? "w" : "-");
         }
         Expect("mapping check over pages that differ is not cached for the span", mixed, "rw-");
+        // mremap moves a PROT_NONE reservation (no host fault on the copy).
+        const std::uint32_t pn = mmap_at(0, 4096, PROT_NONE, 0);
+        std::string none = "mmap-failed";
+        if (pn != 0xFFFFFFFFu) {
+            mmap_at(pn + 4096, 4096, PROT_READ, MAP_FIXED);  // forces a move
+            const std::uint32_t mv = call(105, pn, 4096, 2 * 4096, 1);
+            none = mv != 0xFFFFFFFFu && mv != pn ? "moved" : "failed";
+        }
+        Expect("mremap: a PROT_NONE mapping moves", none, "moved");
         // Boehm's GC_unmap shape: PROT_NONE MAP_FIXED over the middle page of
         // a three-page mapping, then a partial munmap of the first page.
         const std::uint32_t t = mmap_at(0, 3 * 4096, PROT_READ | PROT_WRITE, 0);
