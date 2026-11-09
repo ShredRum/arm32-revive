@@ -1445,12 +1445,27 @@ const char* Runtime::GuestStr(std::uint32_t guest) {
     // The bound was 511 bytes, which silently cut a long guest string -- the
     // printf family then rendered a truncated string AND reported the
     // truncated length. It is now a generous sanity limit.
+    constexpr std::size_t kMax = 1u << 16;
+    // Fast path: the mapping that holds the first byte, found once; if the
+    // terminator lies inside it (and within kMax), the string is returned in
+    // place: every byte up to the NUL is in one readable mapping. A string
+    // that runs to the mapping's end takes the byte-wise path below. (It
+    // checked every byte and copied: ~2.5 % of SW2's game thread on a phone.)
+    {
+        const MappingTable::Hit h = mappings_.Find(guest, 1);
+        if (h.end != 0 && (h.prot & PROT_READ) != 0) {
+            const std::size_t avail = std::min<std::size_t>(h.end - guest, kMax);
+            const char* p = H<const char>(guest);
+            if (std::memchr(p, 0, avail) != nullptr) {
+                return p;
+            }
+        }
+    }
     thread_local static std::string scratch;
     scratch.clear();
     if (!CheckAccess(guest, 1, false, false)) {
         return scratch.c_str();
     }
-    constexpr std::size_t kMax = 1u << 16;
     std::size_t n = 0;
     while (n < kMax) {
         if (!CheckAccess(guest + static_cast<std::uint32_t>(n), 1, false, false)) {

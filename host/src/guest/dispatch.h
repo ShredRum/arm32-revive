@@ -447,6 +447,10 @@ public:
         return reinterpret_cast<T*>(mem_.host(guest));
     }
 
+    // The guest C string at `guest` (empty if unreadable, cut at 64 KiB):
+    // usually a pointer into guest memory itself, else a thread-local copy.
+    // Use it at once (copy it to keep it): the guest may change the bytes,
+    // and the next call may reuse the copy.
     const char* GuestStr(std::uint32_t guest);
     // strnlen over guest memory without a size cap: scans mapping by mapping
     // with memchr. Returns false if a byte before the NUL (or before max) is
