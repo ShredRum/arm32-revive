@@ -109,9 +109,32 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
 | X3 | LTO for libabhost | audit 11-08; cheap experiment, gain unknown | UNDECIDED (2026-11-09): ThinLTO (CMAKE_INTERPROCEDURAL_OPTIMIZATION) passes fmt_test; one guest->host call 36 -> 31 ns (FMT_BENCH), SW2 menu CPU per frame 11.05 ms plain vs 11.3 ms LTO (3 alternating runs each, sandbox; within the +-6 % spread). The menu makes few calls; measure on MCSM (~5x the calls of Rio) before deciding |
 | X4 | Callback owner from the Jit state (dynarmic patch), so CallSVC needs no thread_local | MrEmpathy's per-thread callbacks | DONE (dynarmic 0018, jitcallbacks=on): one guest->host call 28.6-33.4 ns vs 61.5-71.2 ns with HARNESS_NOJITCALLBACKS (sandbox, API 26 build, FMT_BENCH getpid loop); Rio ~240 k calls/s = ~1 % of a core, MCSM ~5x that. Menu fps against MrEmpathy's SW2 on the sandbox could not show it (run-to-run spread +-6 %): his build ~8 % less CPU per frame there, cause not found (X2 is the main code-generation difference left) |
 | X5 | MCSM manifest: drop storage, billing, license permissions (data lives in splits now) | phys-winner's mod; tidiness | not done |
-| X6 | WebP through the system decoder (SW2 start) | MrEmpathy, -250 ms start only | check whether our SW2 decodes WebP at all |
+| X6 | WebP decoded on the host instead of the guest's ARM32 libwebp under the JIT | MrEmpathy (his first 7 images 112 vs ~460 ms, start -250 ms); the owner saw his SW2 switch screens faster on the phone | TO DO: all five Rovio titles export WebPDecode/WebPGetDecoderVersion/WebPInitDecoderConfigInternal (Rio 100 .webp, Seasons 107, SW2 76). Plan: redirect the export to a host arm64 libwebp of the same version (identical output), per known decoder version (WebPDecoderConfig layout differs between versions), unknown versions keep the guest code. Owner OK needed for an in-memory redirect of a guest export (the file is not changed). Try it on Stella too |
 | X7 | Display cutout: `windowLayoutInDisplayCutoutMode=shortEdges` in the activity theme, all titles (prepare-tree) | MrEmpathy's games fill the camera cutout area | owner deciding |
 | X8 | Language from Android 13+ per-app settings (MCSM) | phys-winner's mod | later |
+
+### Open as of 2026-11-09 (come back to these)
+
+- X6 WebP (above): next after Stella.
+- The ~8 % menu gap to MrEmpathy's SW2 (sandbox, menu, 3+3 alternating
+  runs: ours 11.06 ms per frame, his 10.24; ours very steady). Ruled out:
+  thread_locals (X4 done, call 31 vs 66 ns), X2, X3 in the menu, GuestStr
+  (fixed, 2.5 % of the game thread in a level, not in the menu), the
+  dispatcher stub (a his-like stub without the generation check: at most
+  0.1-0.3 ms of the 0.8). Next step: build his bridge (scratchpad/cmp) on
+  our dynarmic tree with all our patches; same menu runs. Gap gone = our
+  bridge, gap stays = code generation; then bisect that half.
+- X3 LTO: undecided; measure on MCSM (most calls) before deciding.
+- Code review of the range from the capital review (2026-10-25) to the MCSM
+  branch start (0d1c81b): jit-dispatch, R-007, jit-opts. Not run yet.
+- A fresh phone APK set (all titles + MCSM base) with c98c753 (review
+  fixes), 0019 and the ADPF fixes: the owner's phone has older builds.
+- X5 MCSM permissions, X7 display cutout (owner deciding), X8 language.
+- Old: R-014 (one SW2 black screen), R-010 (99 Bricks), section C cleanup.
+- MrEmpathy's SW2 build stays on the sandbox (package .ads, network blocked
+  by an iptables owner rule for its uid, lost on a sandbox restart) and in
+  the session scratchpad (cmp/: build.sh, absw2_assets.py stand-in with the
+  K_g key from games/star-wars-ii/JOURNAL.md); the owner wants it kept.
 
 ## Order
 
