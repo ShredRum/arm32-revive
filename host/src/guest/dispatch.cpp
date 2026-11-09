@@ -93,9 +93,16 @@ thread_local HotThread t_hot;
 
 // This thread's pthread_cleanup list head (guest address) and guest stack.
 thread_local std::uint32_t t_cleanup_head = 0;
-// Handles of the direct buffers this thread handed to the guest during the
-// current call (Runtime::direct_uses_).
-thread_local std::vector<std::uint32_t> t_direct_used;
+// Direct buffers this thread handed to the guest whose shadow has not gone
+// back yet: the buffer's memory, a global reference of ours that keeps the
+// buffer alive until then, and the local frame it was asked in
+// (t_local_frames.size() at the time; see Runtime::FlushDirectFrom).
+struct DirectUse {
+    void* host;
+    void* ref;
+    std::size_t depth;
+};
+thread_local std::vector<DirectUse> t_direct_used;
 // pthread_exit was called: the worker's Run stopped with kThreadExitHalt.
 thread_local bool t_thread_exiting = false;
 thread_local std::uint32_t t_exit_value = 0;
@@ -13985,12 +13992,6 @@ void Runtime::ReleaseHandleLocked(std::uint32_t h) {
     if (it == obj_rev_.end()) {
         return;
     }
-    // A direct buffer reached through this reference: its shadow goes back
-    // now, while the reference still keeps the buffer alive.
-    if (const auto du = direct_uses_.find(h); du != direct_uses_.end()) {
-        FlushDirectLocked(du->second);
-        direct_uses_.erase(du);
-    }
 #ifdef __ANDROID__
     if (JNIEnv* re = RealEnv()) {
         re->DeleteGlobalRef(static_cast<jobject>(it->second));
@@ -14023,6 +14024,8 @@ void Runtime::PopLocalFrame() {
     if (t_local_frames.empty()) {
         return;
     }
+    // The frame's direct buffers go back first, while they are alive.
+    FlushDirectFrom(t_local_frames.size());
     std::vector<std::uint32_t> frame = std::move(t_local_frames.back());
     t_local_frames.pop_back();
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -14101,30 +14104,46 @@ std::string Runtime::JniClassName(std::uint32_t handle) {
 #endif
 }
 
-void Runtime::FlushDirectLocked(void* host) {
-    const auto it = direct_bufs_.find(host);
-    if (it != direct_bufs_.end() && it->second.guest &&
-        CheckRange(it->second.guest, it->second.size, false)) {
-        std::memcpy(host, H(it->second.guest), it->second.size);
+void Runtime::FlushDirectOne(void* host, void* ref) {
+    DirectBuf db;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto it = direct_bufs_.find(host);
+        if (it != direct_bufs_.end()) {
+            db = it->second;
+        }
     }
+    // The copy runs outside mutex_ (other threads' JNI calls need it); the
+    // buffer is alive through `ref`, and its shadow stays while it is.
+    if (db.guest && CheckRange(db.guest, db.size, false)) {
+        std::memcpy(host, H(db.guest), db.size);
+    }
+#ifdef __ANDROID__
+    if (ref) {
+        if (JNIEnv* re = RealEnv()) {
+            re->DeleteGlobalRef(static_cast<jobject>(ref));
+        }
+    }
+#else
+    (void)ref;
+#endif
 }
 
-void Runtime::FlushDirectBuffers() {
+void Runtime::FlushDirectFrom(std::size_t depth) {
     if (!t_hot.direct_used) {
         return;
     }
-    t_hot.direct_used = false;
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (const std::uint32_t h : t_direct_used) {
-        // Gone from direct_uses_: the reference was released, and the shadow
-        // went back then.
-        const auto it = direct_uses_.find(h);
-        if (it != direct_uses_.end()) {
-            FlushDirectLocked(it->second);
-            direct_uses_.erase(it);
-        }
+    // Newest first, so the vector only shrinks from its end.
+    while (!t_direct_used.empty() && t_direct_used.back().depth >= depth) {
+        const DirectUse u = t_direct_used.back();
+        t_direct_used.pop_back();
+        FlushDirectOne(u.host, u.ref);
     }
-    t_direct_used.clear();
+    t_hot.direct_used = !t_direct_used.empty();
+}
+
+void Runtime::FlushDirectBuffers() {
+    FlushDirectFrom(t_local_frames.size());
 }
 
 void* Runtime::RealFieldId(std::uint32_t cookie, bool is_static) {
@@ -16045,14 +16064,44 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     std::lock_guard<std::recursive_mutex> lock(mutex_);
                     direct_bufs_[host] = db;
                 }
-                if (db.guest) {
-                    std::memcpy(H(db.guest), host, db.size);
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(mutex_);
-                        direct_uses_[a1] = host;
+                // Already handed over in this frame or an outer one: the
+                // shadow may hold the guest's writes, so it is not refilled.
+                bool pending = false;
+                for (const DirectUse& u : t_direct_used) {
+                    pending = pending || u.host == host;
+                }
+                const std::size_t depth = t_local_frames.size();
+                if (db.guest && !pending && depth > 0) {
+                    // Ours until the frame ends, however the guest's own
+                    // references to the buffer go (JNI: the address stays
+                    // valid while the buffer is alive).
+                    void* ref = re->NewGlobalRef(b);
+                    if (ref) {
+                        std::memcpy(H(db.guest), host, db.size);
+                        if (t_direct_used.size() >= kMaxDirectUses) {
+                            // A thread that never ends its frame (a guest
+                            // worker) and keeps asking for new buffers: the
+                            // oldest goes back now.
+                            static std::atomic<bool> told{false};
+                            if (!told.exchange(true)) {
+                                std::printf("[jni] direct buffers: more than %zu pending on one thread, "
+                                            "the oldest go back early\n", kMaxDirectUses);
+                            }
+                            const DirectUse u = t_direct_used.front();
+                            t_direct_used.erase(t_direct_used.begin());
+                            FlushDirectOne(u.host, u.ref);
+                        }
+                        t_direct_used.push_back(DirectUse{host, ref, depth});
+                        t_hot.direct_used = true;
+                        addr = db.guest;
                     }
-                    t_direct_used.push_back(a1);
-                    t_hot.direct_used = true;
+                } else if (db.guest && pending) {
+                    addr = db.guest;
+                } else if (db.guest) {
+                    // No local frame (not inside a Java -> native call nor a
+                    // guest thread): nothing would end it; the address is
+                    // the buffer's contents, with no copy-back.
+                    std::memcpy(H(db.guest), host, db.size);
                     addr = db.guest;
                 }
             }

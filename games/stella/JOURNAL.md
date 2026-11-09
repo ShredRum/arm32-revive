@@ -42,9 +42,11 @@ titles): the Google Play original, not rebuilt.
   direct buffers (GetDirectBufferAddress, then DeleteLocalRef). The host
   gave the guest a shadow copy and wrote it back only when nativeInit
   returned, seconds later: by then the collector had freed some of those
-  buffers, so the copy-back wrote over freed heap. Now the shadow goes back
-  when the guest releases the reference (still alive then), or at the end
-  of the call, whichever comes first.
+  buffers, so the copy-back wrote over freed heap. Now the host holds its
+  own global reference to each buffer it shadowed until the local frame it
+  was asked in ends (the call, a guest PushLocalFrame, a guest thread), and
+  copies back then: the buffer is alive, and writes made after the guest's
+  DeleteLocalRef still arrive (code review of the branch).
 - CheckJNI (DIAG=1 debuggable twin) reported nothing: the bad write was a
   plain memcpy, not a JNI call.
 - Result: boots to the island menu, 60 s alive, death.log empty. The five

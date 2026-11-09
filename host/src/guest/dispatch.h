@@ -613,24 +613,22 @@ public:
     std::unordered_map<std::uint32_t, void*> jni_string_monitors_;  // see StringMonitorObject
     // Direct ByteBuffers (GetDirectBufferAddress): their memory is the
     // host's, outside the guest. Each gets a guest shadow of its capacity,
-    // filled from the buffer when the guest asks for the address; whatever
-    // the guest wrote goes back while the buffer is still alive: when the
-    // guest lets go of the reference it asked through (DeleteLocalRef,
-    // DeleteGlobalRef, the end of the call's local frame), or when the
-    // Java -> native call returns (FlushDirectBuffers, called by the host
-    // then), whichever comes first. A copy-back after the reference is gone
-    // could land in memory the collector has already freed and reused (on
-    // Android 7 a direct buffer is a non-movable Java array).
-    void FlushDirectBuffers();
+    // filled from the buffer when the guest first asks for the address in a
+    // local frame (a Java -> native call, a guest PushLocalFrame, a guest
+    // thread's life). The host holds a global reference to the buffer until
+    // that frame ends, and then copies the shadow back: the buffer is alive
+    // for the copy however the guest's own references went, and writes made
+    // through the address after a DeleteLocalRef still arrive. (A copy-back
+    // after the buffer died wrote over memory the collector had reused; on
+    // Android 7 a direct buffer is a non-movable Java array.)
+    void FlushDirectBuffers();  // the current frame's, at a call's return
+    void FlushDirectFrom(std::size_t depth);  // frames >= depth, this thread
+    void FlushDirectOne(void* host, void* ref);
+    static constexpr std::size_t kMaxDirectUses = 256;  // pending per thread
     struct DirectBuf {
         std::uint32_t guest = 0, size = 0;
     };
-    std::unordered_map<void*, DirectBuf> direct_bufs_;
-    // Handles whose buffer address the guest got and whose shadow has not
-    // gone back yet -> the buffer's memory. Under mutex_.
-    std::unordered_map<std::uint32_t, void*> direct_uses_;
-    // Copies the shadow of `host` back into it. Under mutex_.
-    void FlushDirectLocked(void* host);
+    std::unordered_map<void*, DirectBuf> direct_bufs_;  // under mutex_
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.
