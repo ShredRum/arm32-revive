@@ -28,7 +28,8 @@ library `libabhost.so`:
 - The Java side of the original APK is unchanged except the loaded library name,
   and a title's `games/<id>/smali.patch` when it has one (applied by
   `prepare-tree.sh`; MCSM: the launcher activity, the expansion downloader
-  only checked for an OBB file whose servers are dead).
+  only checked for an OBB file whose servers are dead; Stella: the Zappar
+  scanner button shows "not available" instead of loading ARM32 libraries).
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
 space, star-wars, star-wars-ii, star-wars-ii-amz. One shared host core.

@@ -1,0 +1,105 @@
+diff --color -ruN a/smali/com/rovio/fusion/ZapparController$Unavailable.smali b/smali/com/rovio/fusion/ZapparController$Unavailable.smali
+--- a/smali/com/rovio/fusion/ZapparController$Unavailable.smali	1970-01-01 03:00:00.000000000 +0300
++++ b/smali/com/rovio/fusion/ZapparController$Unavailable.smali	2026-11-09 20:31:41.123073794 +0200
+@@ -0,0 +1,62 @@
++.class final Lcom/rovio/fusion/ZapparController$Unavailable;
++.super Ljava/lang/Object;
++.implements Ljava/lang/Runnable;
++
++# ab-port (Stella): "the scanner is not available" on the UI thread.
++
++# instance fields
++.field private final activity:Landroid/app/Activity;
++
++
++# direct methods
++.method constructor <init>(Landroid/app/Activity;)V
++    .locals 0
++
++    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
++
++    iput-object p1, p0, Lcom/rovio/fusion/ZapparController$Unavailable;->activity:Landroid/app/Activity;
++
++    return-void
++.end method
++
++
++# virtual methods
++.method public run()V
++    .locals 3
++
++    invoke-static {}, Ljava/util/Locale;->getDefault()Ljava/util/Locale;
++
++    move-result-object v0
++
++    invoke-virtual {v0}, Ljava/util/Locale;->getLanguage()Ljava/lang/String;
++
++    move-result-object v0
++
++    const-string v1, "ru"
++
++    invoke-virtual {v1, v0}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
++
++    move-result v0
++
++    if-eqz v0, :english
++
++    const-string v1, "\u0421\u043a\u0430\u043d\u0435\u0440 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0432 \u044d\u0442\u043e\u0439 \u0432\u0435\u0440\u0441\u0438\u0438"
++
++    goto :show
++
++    :english
++    const-string v1, "The scanner is not available in this version"
++
++    :show
++    iget-object v0, p0, Lcom/rovio/fusion/ZapparController$Unavailable;->activity:Landroid/app/Activity;
++
++    const/4 v2, 0x1
++
++    invoke-static {v0, v1, v2}, Landroid/widget/Toast;->makeText(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;
++
++    move-result-object v0
++
++    invoke-virtual {v0}, Landroid/widget/Toast;->show()V
++
++    return-void
++.end method
+diff --color -ruN a/smali/com/rovio/fusion/ZapparController.smali b/smali/com/rovio/fusion/ZapparController.smali
+--- a/smali/com/rovio/fusion/ZapparController.smali	2026-11-09 20:31:41.113318340 +0200
++++ b/smali/com/rovio/fusion/ZapparController.smali	2026-11-09 20:31:41.123047513 +0200
+@@ -32,25 +32,23 @@
+ .end method
+ 
+ .method public static startComponent()V
+-    .locals 3
+-
+-    new-instance v0, Landroid/content/Intent;
++    .locals 2
+ 
++    # ab-port (Stella): the Zappar scanner's ARM32 libraries cannot load on
++    # an arm64-only phone, and its content servers are gone; the button
++    # says so instead of crashing (games/stella/JOURNAL.md).
+     invoke-static {}, Lcom/rovio/fusion/Globals;->getActivity()Landroid/app/Activity;
+ 
+-    move-result-object v1
+-
+-    invoke-static {}, Lcom/zappar/ZapparEmbed;->getZapcodeClassForIntent()Ljava/lang/Class;
++    move-result-object v0
+ 
+-    move-result-object v2
++    if-eqz v0, :done
+ 
+-    invoke-direct {v0, v1, v2}, Landroid/content/Intent;-><init>(Landroid/content/Context;Ljava/lang/Class;)V
+-
+-    invoke-static {}, Lcom/rovio/fusion/Globals;->getActivity()Landroid/app/Activity;
++    new-instance v1, Lcom/rovio/fusion/ZapparController$Unavailable;
+ 
+-    move-result-object v1
++    invoke-direct {v1, v0}, Lcom/rovio/fusion/ZapparController$Unavailable;-><init>(Landroid/app/Activity;)V
+ 
+-    invoke-virtual {v1, v0}, Landroid/app/Activity;->startActivity(Landroid/content/Intent;)V
++    invoke-virtual {v0, v1}, Landroid/app/Activity;->runOnUiThread(Ljava/lang/Runnable;)V
+ 
++    :done
+     return-void
+ .end method

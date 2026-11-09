@@ -52,4 +52,25 @@ titles): the Google Play original, not rebuilt.
 - Not reproduced: one jitcallbacks=on DIAG log lacked the nested
   nativeMixData's ReleaseByteArrayElements line; the next run had it
   (lines from several threads interleave in apphost.log).
-- Next: play a level (touch, audio), then the Zappar scanner libraries.
+- Phone (owner, 2026-11-09): levels play, pause/resume works, sound on.
+
+## 2026-11-09: the eye button (Zappar scanner) says "not available"
+
+- Pressing the eye crashed: Java's System.loadLibrary("ers_cpu_check")
+  (com.extrareality.SceneGraph) threw UnsatisfiedLinkError; the scanner's
+  own ARM32 libraries cannot load in an arm64-only process.
+- Not worth porting: after a scan its libraries fetch the code's content
+  from pkginfo.zappar.com (403) and pkg.zprcdn1.com (no DNS any more); no
+  codes to test with; the game gives no reward of its own for it.
+- Script facts (work/KEYS.md: scripts are AES-256-CBC + 7z/LZMA; Lua 5.1
+  bytecode, 4-byte floats): ZapparHandler.launchZappar mutes and restores
+  audio only on iOS; on Android it calls native_launchZappar ->
+  ZapparController.startComponent() directly. The Telepods page is a
+  separate QR scanner whose codes are checked by a Rovio redeem service
+  (redeemCode -> "Validation Service unavailable" offline): 30 outfits in
+  telepod_configuration.dat, also unreachable in the original today.
+- smali.patch: startComponent() shows a toast ("Сканер недоступен в этой
+  версии" / "The scanner is not available in this version", by the system
+  language) on the UI thread instead of starting Zappar. Sandbox: the toast
+  shows, the game stays in the menu.
+- Next: the Telepods page (does it open and fail cleanly offline?).
