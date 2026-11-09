@@ -32,9 +32,9 @@ library `libabhost.so`:
   scanner button shows "not available" instead of loading ARM32 libraries).
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
-space, star-wars, star-wars-ii, star-wars-ii-amz. One shared host core.
+space, star-wars, star-wars-ii, star-wars-ii-amz, stella. One shared host core.
 Plain `star-wars-ii` is retired (its content servers are dead, R-004): not built,
-not gated; the folder stays. "All titles" below means the other five.
+not gated; the folder stays. "All titles" below means the other six.
 
 ## 2. Layout
 
@@ -76,7 +76,7 @@ sandbox: `scripts/build-lib.sh --sandbox && SANDBOX=1 scripts/swap-lib.sh
 there. APKs for the phone always carry the phone build.
 
 Device gate policy: an ordinary change -> rio + seasons; a core-wide change
-(memory, threads, JNI, loader, network) -> all five live titles. Always look at the
+(memory, threads, JNI, loader, network) -> all six live titles. Always look at the
 screenshots: a wrong game state (dialog, black screen) does not raise markers.
 
 Guest `.so` for the harness: `unzip -p <original apk> lib/armeabi-v7a/<lib>`, or
