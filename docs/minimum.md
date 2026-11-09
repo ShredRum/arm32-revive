@@ -133,7 +133,7 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
 - Old: R-014 (one SW2 black screen), R-010 (99 Bricks), section C cleanup.
 - MrEmpathy's SW2 build stays on the sandbox (package .ads, network blocked
   by an iptables owner rule for its uid, lost on a sandbox restart) and in
-  the session scratchpad (cmp/: build.sh, absw2_assets.py stand-in with the
+  ~/Рабочий стол/mrempathy-cmp (README.txt there: build.sh, package.sh, the absw2_assets.py stand-in with the
   K_g key from games/star-wars-ii/JOURNAL.md); the owner wants it kept.
 
 ## Order
