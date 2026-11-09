@@ -614,13 +614,23 @@ public:
     // Direct ByteBuffers (GetDirectBufferAddress): their memory is the
     // host's, outside the guest. Each gets a guest shadow of its capacity,
     // filled from the buffer when the guest asks for the address; whatever
-    // the guest wrote goes back when the Java -> native call that handed the
-    // buffer over returns (FlushDirectBuffers, called by the host then).
+    // the guest wrote goes back while the buffer is still alive: when the
+    // guest lets go of the reference it asked through (DeleteLocalRef,
+    // DeleteGlobalRef, the end of the call's local frame), or when the
+    // Java -> native call returns (FlushDirectBuffers, called by the host
+    // then), whichever comes first. A copy-back after the reference is gone
+    // could land in memory the collector has already freed and reused (on
+    // Android 7 a direct buffer is a non-movable Java array).
     void FlushDirectBuffers();
     struct DirectBuf {
         std::uint32_t guest = 0, size = 0;
     };
     std::unordered_map<void*, DirectBuf> direct_bufs_;
+    // Handles whose buffer address the guest got and whose shadow has not
+    // gone back yet -> the buffer's memory. Under mutex_.
+    std::unordered_map<std::uint32_t, void*> direct_uses_;
+    // Copies the shadow of `host` back into it. Under mutex_.
+    void FlushDirectLocked(void* host);
     // NewByteArray(len): guest-heap buffer (zeroed), opaque jbyteArray handle
     // (== buffer VA, same convention as strings). Used by harness tests and,
     // later, by Java-side array delivery for nativeMixData.

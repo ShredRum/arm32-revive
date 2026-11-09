@@ -93,8 +93,9 @@ thread_local HotThread t_hot;
 
 // This thread's pthread_cleanup list head (guest address) and guest stack.
 thread_local std::uint32_t t_cleanup_head = 0;
-// Direct buffers this thread handed to the guest during the current call.
-thread_local std::vector<void*> t_direct_used;
+// Handles of the direct buffers this thread handed to the guest during the
+// current call (Runtime::direct_uses_).
+thread_local std::vector<std::uint32_t> t_direct_used;
 // pthread_exit was called: the worker's Run stopped with kThreadExitHalt.
 thread_local bool t_thread_exiting = false;
 thread_local std::uint32_t t_exit_value = 0;
@@ -13984,6 +13985,12 @@ void Runtime::ReleaseHandleLocked(std::uint32_t h) {
     if (it == obj_rev_.end()) {
         return;
     }
+    // A direct buffer reached through this reference: its shadow goes back
+    // now, while the reference still keeps the buffer alive.
+    if (const auto du = direct_uses_.find(h); du != direct_uses_.end()) {
+        FlushDirectLocked(du->second);
+        direct_uses_.erase(du);
+    }
 #ifdef __ANDROID__
     if (JNIEnv* re = RealEnv()) {
         re->DeleteGlobalRef(static_cast<jobject>(it->second));
@@ -14094,23 +14101,27 @@ std::string Runtime::JniClassName(std::uint32_t handle) {
 #endif
 }
 
+void Runtime::FlushDirectLocked(void* host) {
+    const auto it = direct_bufs_.find(host);
+    if (it != direct_bufs_.end() && it->second.guest &&
+        CheckRange(it->second.guest, it->second.size, false)) {
+        std::memcpy(host, H(it->second.guest), it->second.size);
+    }
+}
+
 void Runtime::FlushDirectBuffers() {
     if (!t_hot.direct_used) {
         return;
     }
     t_hot.direct_used = false;
-    for (void* host : t_direct_used) {
-        DirectBuf db;
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            const auto it = direct_bufs_.find(host);
-            if (it == direct_bufs_.end()) {
-                continue;
-            }
-            db = it->second;
-        }
-        if (db.guest && CheckRange(db.guest, db.size, false)) {
-            std::memcpy(host, H(db.guest), db.size);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const std::uint32_t h : t_direct_used) {
+        // Gone from direct_uses_: the reference was released, and the shadow
+        // went back then.
+        const auto it = direct_uses_.find(h);
+        if (it != direct_uses_.end()) {
+            FlushDirectLocked(it->second);
+            direct_uses_.erase(it);
         }
     }
     t_direct_used.clear();
@@ -16036,7 +16047,11 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 }
                 if (db.guest) {
                     std::memcpy(H(db.guest), host, db.size);
-                    t_direct_used.push_back(host);
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(mutex_);
+                        direct_uses_[a1] = host;
+                    }
+                    t_direct_used.push_back(a1);
                     t_hot.direct_used = true;
                     addr = db.guest;
                 }
