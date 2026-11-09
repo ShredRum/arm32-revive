@@ -1318,7 +1318,13 @@ std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* t
     // frame on the GL thread (update and render; nativeRender is declared
     // but never called), which marks the frame (ADPF, adpf.h). Guests that
     // present their own frames mark them at eglSwapBuffers.
-    if (std::strcmp(name, "Java_com_rovio_fusion_NativeApplication_nativeUpdate") == 0) {
+    // The forwarders pass string literals: once the name is seen, a pointer
+    // compare finds it again (no strcmp on every other call of a fusion title).
+    static std::atomic<const char*> frame_native{nullptr};
+    const char* known = frame_native.load(std::memory_order_relaxed);
+    if (name == known ||
+        (known == nullptr && std::strcmp(name, "Java_com_rovio_fusion_NativeApplication_nativeUpdate") == 0 &&
+         (frame_native.store(name, std::memory_order_relaxed), true))) {
         abr::adpf::FrameDone();
     }
     return rv;

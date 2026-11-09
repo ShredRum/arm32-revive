@@ -288,3 +288,30 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | fixed dbcb76c: fastmem and RealGL hardwired on Android (JitFastmemOn), env only on the PC |
 | G-14 | S3 | fcntl | lock commands report success without doing anything | open |
 | G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | fixed 850c027..6f762fd (-4168 lines; shipping-path TEMP-DIAG/fake GL/nativeDeinit forensics remain) |
+
+## 2026-11-09: code review of the perf branch and of the MCSM work (0d1c81b..master)
+
+Two `/code-review high` runs, 20 findings, each checked against the code.
+Fixed (one commit, gate: five titles + 99 Bricks + MCSM on the sandbox,
+fmt_test ALL OK PC and arm64):
+- GuestStr returned guest memory in place: a racing guest write could make
+  host code read past the mapping (host SIGSEGV). Now GuestStrnlen, then a
+  bounded copy.
+- Packed files: a mmap's tail page past EOF showed the next APK entry (now
+  zeroed; a refused window falls back to a copy, e.g. 16 KiB host pages);
+  a copy-up under one spelling left the packed bytes reachable under another
+  (the entry is marked deleted once a real copy exists); concurrent copy-ups
+  shared one temp file and could replace a written copy (serialized,
+  re-checked, unique temp); index lookup before lstat; local headers read
+  only for assets/abport/; one io_mutex_ hold for fd + slice on I/O paths.
+- OpenSL URI source of a packed file now plays from its APK window.
+- ADPF: no JNI with the engine's exception pending; g_on atomic; the core
+  clock sampled one frame in eight.
+- Shared code cache key includes unsafe_optimizations; guest pthread workers
+  start the sampler; the frame-native name compared by pointer once seen;
+  devgate's TLS check robust under pipefail; 76 dead chain duplicates of the
+  fast-math functions removed (fmt_test compares fast math with host libm by
+  dlsym now); AGENTS.md mentions smali.patch.
+Not taken: the mutex destroy witness (removed on purpose in 0fd81d8, bionic
+behaviour; destroying a mutex another thread is about to lock is guest UB);
+Ret's HARNESS_NOJITCALLBACKS branch (keeps the old cost for A/B).

@@ -54,8 +54,11 @@ struct ZipEntry {
 
 // Reads the central directory. A zip64 archive (over 4 GB or 65535
 // entries) is refused with a message: APKs stay below that (the packer
-// splits them).
-bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::string* err);
+// splits them). With only_prefix, entries whose name does not start with it
+// are left out before their local header is read (one pread each saved: a
+// base APK has thousands of entries, the packed ones are a few).
+bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::string* err,
+                  const std::string& only_prefix = std::string());
 
 // base.apk first, then the split_*.apk files of its directory, sorted:
 // Android installs an app's split APKs next to its base.apk under that name.

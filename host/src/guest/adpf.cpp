@@ -90,6 +90,7 @@ std::uint64_t CoreKhz(int cpu) {
 struct FrameThread {
     std::uint64_t last_cpu = 0;    // thread CPU time at the previous mark
     std::uint64_t next_check = 0;  // wall time of the next refresh-rate check
+    std::uint32_t frames = 0;      // marks counted, for the clock sampling
 };
 thread_local FrameThread t_frame;
 
@@ -105,7 +106,7 @@ using ReportFn = int (*)(Session*, std::int64_t);
 using CloseFn = void (*)(Session*);
 using PreferEfficiencyFn = int (*)(Session*, bool);
 
-bool g_on = false;
+std::atomic<bool> g_on{false};  // read by FrameDone outside g_mu
 void* (*g_env_for_thread)() = nullptr;
 GetManagerFn g_get_manager = nullptr;
 CreateSessionFn g_create = nullptr;
@@ -136,6 +137,13 @@ float RefreshRate(const char** how) {
     *how = "no JNIEnv on this thread";
     JNIEnv* env = g_env_for_thread ? static_cast<JNIEnv*>(g_env_for_thread()) : nullptr;
     if (!env) {
+        return 0.f;
+    }
+    // A frame mark comes right after the guest's own JNI work: an exception
+    // it left pending is the engine's (Java sees it when the native call
+    // returns). No JNI call is allowed then, and clearing it would hide it.
+    if (env->ExceptionCheck()) {
+        *how = "a Java exception is pending (the engine's)";
         return 0.f;
     }
     if (env->PushLocalFrame(32) != 0) {
@@ -225,7 +233,7 @@ void OpenSessionHere(pid_t tid) {
     Manager* manager = g_get_manager();
     if (!manager) {
         Note("no performance hint manager: off");
-        g_on = false;
+        g_on.store(false, std::memory_order_relaxed);
         return;
     }
     const char* how = nullptr;
@@ -242,7 +250,7 @@ void OpenSessionHere(pid_t tid) {
     g_session = g_create(manager, tids, 1, target);
     if (!g_session) {
         Note("createSession failed: off");
-        g_on = false;
+        g_on.store(false, std::memory_order_relaxed);
         return;
     }
     const bool efficient = g_prefer_efficiency && g_prefer_efficiency(g_session, true) == 0;
@@ -285,7 +293,7 @@ void Init(void* (*env_for_thread)()) {
         Note("no APerformanceHint (Android 13+): off");
         return;
     }
-    g_on = true;
+    g_on.store(true, std::memory_order_relaxed);
     Note("on");
 #else
     (void)env_for_thread;
@@ -304,13 +312,18 @@ void FrameDone() {
     g_frames.fetch_add(1, std::memory_order_relaxed);
     g_cpu_ns.fetch_add(work, std::memory_order_relaxed);
 #if defined(__ANDROID__)
-    if (const std::uint64_t khz = CoreKhz(sched_getcpu())) {
-        g_cycles.fetch_add(work * khz / 1000000u, std::memory_order_relaxed);  // ns * kHz / 1e6
-        g_cycles_cpu_ns.fetch_add(work, std::memory_order_relaxed);
+    // The clock of one frame in eight: a sysfs read can cost microseconds on
+    // some kernels, and the [adpf] line only needs an average (cycles and the
+    // CPU time they cover are summed over the same sampled frames).
+    if ((++t.frames & 7u) == 0) {
+        if (const std::uint64_t khz = CoreKhz(sched_getcpu())) {
+            g_cycles.fetch_add(work * khz / 1000000u, std::memory_order_relaxed);  // ns * kHz / 1e6
+            g_cycles_cpu_ns.fetch_add(work, std::memory_order_relaxed);
+        }
     }
 #endif
 #if defined(__ANDROID__)
-    if (!g_on) {
+    if (!g_on.load(std::memory_order_relaxed)) {
         return;
     }
     const pid_t tid = gettid();
@@ -326,7 +339,7 @@ void FrameDone() {
         period = PeriodFromRate(RefreshRate(&how));
     }
     std::lock_guard<std::mutex> l(g_mu);  // once a frame, uncontended
-    if (!g_on) {
+    if (!g_on.load(std::memory_order_relaxed)) {
         return;
     }
     if (g_session_tid != tid) {

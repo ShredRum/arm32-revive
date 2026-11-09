@@ -1446,22 +1446,18 @@ const char* Runtime::GuestStr(std::uint32_t guest) {
     // printf family then rendered a truncated string AND reported the
     // truncated length. It is now a generous sanity limit.
     constexpr std::size_t kMax = 1u << 16;
-    // Fast path: the mapping that holds the first byte, found once; if the
-    // terminator lies inside it (and within kMax), the string is returned in
-    // place: every byte up to the NUL is in one readable mapping. A string
-    // that runs to the mapping's end takes the byte-wise path below. (It
-    // checked every byte and copied: ~2.5 % of SW2's game thread on a phone.)
-    {
-        const MappingTable::Hit h = mappings_.Find(guest, 1);
-        if (h.end != 0 && (h.prot & PROT_READ) != 0) {
-            const std::size_t avail = std::min<std::size_t>(h.end - guest, kMax);
-            const char* p = H<const char>(guest);
-            if (std::memchr(p, 0, avail) != nullptr) {
-                return p;
-            }
-        }
-    }
+    // Fast path: the length found mapping by mapping (GuestStrnlen: one
+    // lookup per mapping and a memchr), then exactly that many bytes copied.
+    // (It checked every byte: ~2.5 % of SW2's game thread on a phone.) The
+    // copy matters: another guest thread may rewrite the terminator, and host
+    // code reading the guest bytes in place could then run off the mapping.
     thread_local static std::string scratch;
+    std::uint32_t len = 0;
+    if (GuestStrnlen(guest, static_cast<std::uint32_t>(kMax), &len)) {
+        scratch.assign(H<const char>(guest), len);
+        return scratch.c_str();
+    }
+    // Unreadable before a terminator: the readable prefix, byte by byte.
     scratch.clear();
     if (!CheckAccess(guest, 1, false, false)) {
         return scratch.c_str();
@@ -2419,9 +2415,34 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                                        : nullptr) {
             const std::uint64_t at = sl->off + off;
             const std::uint64_t page = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
-            if (at % page == 0 && off + a1 <= sl->size) {
-                Ret(regs, GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, at));
-                return;
+            // Bytes of the last page past the file's end must read as zeros
+            // (a real file's tail page), not as the APK's next entry: a
+            // private mapping gets them cleared (copy-on-write), a shared one
+            // with such a tail takes the copy below.
+            const std::uint64_t mapped = (std::uint64_t(a1) + 0xFFFu) & ~std::uint64_t(0xFFFu);
+            const std::uint64_t in_file = off + a1 <= sl->size ? sl->size - off : 0;
+            const bool tail = in_file != 0 && mapped > in_file;
+            const bool shared = (a3 & MAP_SHARED) != 0;
+            if (at % page == 0 && in_file != 0 && !(tail && shared)) {
+                const std::uint32_t g =
+                    GuestMmap(a0, a1, static_cast<int>(a2), static_cast<int>(a3), hfd, at);
+                if (g != 0xFFFFFFFFu && tail) {
+                    const std::uint64_t hp = GuestMemory::HostPageSize();
+                    const auto from = reinterpret_cast<std::uintptr_t>(H(g + static_cast<std::uint32_t>(in_file)));
+                    const auto to = reinterpret_cast<std::uintptr_t>(H(g)) + mapped;
+                    const std::uintptr_t lo = from & ~std::uintptr_t(hp - 1);
+                    if (::mprotect(reinterpret_cast<void*>(lo), to - lo, PROT_READ | PROT_WRITE) == 0) {
+                        std::memset(reinterpret_cast<void*>(from), 0, to - from);
+                        ::mprotect(reinterpret_cast<void*>(lo), to - lo,
+                                   static_cast<int>(a2) & (PROT_READ | PROT_WRITE | PROT_EXEC));
+                    }
+                }
+                if (g != 0xFFFFFFFFu) {
+                    Ret(regs, g);
+                    return;
+                }
+                // The host refused the window (e.g. 16 KiB host pages and a
+                // length that is not a multiple): the copy below.
             }
             const int flags = (static_cast<int>(a3) & ~MAP_SHARED) | MAP_PRIVATE | MAP_ANONYMOUS;
             const std::uint32_t g = GuestMmap(a0, a1, static_cast<int>(a2) | PROT_WRITE, flags, -1, 0);
@@ -5319,14 +5340,24 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!vfs_on_) {
                 return nullptr;
             }
+            // The in-memory index first: most paths are not packed, and they
+            // then cost no extra lstat.
+            const abvfs::File* pf = vfs_.Find(hp);
+            if (pf == nullptr) {
+                return nullptr;
+            }
             struct stat st {};
             if (::lstat(hp.c_str(), &st) == 0 || errno != ENOENT) {
                 return nullptr;
             }
-            return vfs_.Find(hp);
+            return pf;
         };
         // Makes the real file a write needs at hp: an empty one when the
         // caller truncates anyway, else a copy of the packed one.
+        // The real file then stands for the packed one under every spelling:
+        // the packed entry is marked deleted (Find matches any case, a real
+        // file only its own spelling, so another spelling would otherwise
+        // still reach the old packed bytes).
         auto materialize = [&](const abvfs::File& pf, const std::string& hp, bool truncating) -> bool {
             if (truncating) {
                 const int fd = ::open(hp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
@@ -5334,9 +5365,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return false;
                 }
                 ::close(fd);
-                return true;
+            } else if (!vfs_.CopyUp(pf, hp)) {
+                return false;
             }
-            return vfs_.CopyUp(pf, hp);
+            vfs_.MarkDeleted(hp);
+            return true;
         };
         auto file_of = [&](std::uint32_t h) -> FILE* {
             std::lock_guard<std::mutex> io(io_mutex_);
@@ -5431,6 +5464,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::lock_guard<std::mutex> io(io_mutex_);
             const auto it = fd_map_.find(g);
             return it == fd_map_.end() ? -1 : it->second;
+        };
+        // The host fd and, for a packed file, its slice: one io_mutex_ hold
+        // where the I/O paths needed host_fd_of and FdSlice (two).
+        auto host_fd_slice_of = [&](std::uint32_t g, std::shared_ptr<abvfs::Slice>* sl) -> int {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            const auto it = fd_map_.find(g);
+            if (it == fd_map_.end()) {
+                return -1;
+            }
+            if (fd_slices_.load(std::memory_order_relaxed) != 0) {
+                const auto si = fd_slice_.find(g);
+                if (si != fd_slice_.end()) {
+                    *sl = si->second;
+                }
+            }
+            return it->second;
         };
         auto alloc_guest_fd = [&](int hfd) -> std::uint32_t {
             std::lock_guard<std::mutex> io(io_mutex_);
@@ -5944,14 +5993,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (id == I::fdopen_) {
-            const int hfd = host_fd_of(a0);
+            std::shared_ptr<abvfs::Slice> sl_of;
+            const int hfd = host_fd_slice_of(a0, &sl_of);
             if (hfd < 0) {
                 Ret(regs, 0);
                 return;
             }
             // A packed file: a read-only FILE over the same open file (its
             // position is the fd's, as fdopen shares the description).
-            std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            std::shared_ptr<abvfs::Slice> sl = std::move(sl_of);
             if (sl && std::strpbrk(GuestStr(a1), "wa+") != nullptr) {
                 set_guest_errno(EINVAL);  // the fd is open read-only
                 Ret(regs, 0);
@@ -6364,7 +6414,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (id == I::pread_ || id == I::pwrite_) {
             // (fd, buf, count, off_t offset): bionic arm32 off_t is 32-bit
             // and signed (the 64-bit forms are pread64/pwrite64).
-            const int hfd = host_fd_of(a0);
+            std::shared_ptr<abvfs::Slice> sl_of;
+            const int hfd = host_fd_slice_of(a0, &sl_of);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
                 Ret(regs, 0xFFFFFFFFu);
@@ -6380,7 +6431,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            const std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            const std::shared_ptr<abvfs::Slice> sl = std::move(sl_of);
             const ssize_t r = id == I::pread_
                                   ? (sl ? abvfs::SlicePread(*sl, hfd, H(a1), a2, a3)
                                         : ::pread(hfd, H(a1), a2, static_cast<off_t>(a3)))
@@ -6407,7 +6458,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, a2);
                 return;
             }
-            const int hfd = host_fd_of(a0);
+            std::shared_ptr<abvfs::Slice> sl_of;
+            const int hfd = host_fd_slice_of(a0, &sl_of);
             if (hfd < 0) {
                 set_guest_errno(EBADF);
                 Ret(regs, 0xFFFFFFFFu);
@@ -6422,7 +6474,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // so other threads keep running (2026-10-10 deadlock fix). A read
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
-            const std::shared_ptr<abvfs::Slice> sl = id == I::read_ ? FdSlice(a0) : nullptr;
+            const std::shared_ptr<abvfs::Slice> sl = id == I::read_ ? std::move(sl_of) : nullptr;
             ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
                            : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
@@ -6474,13 +6526,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // lseek(int fd, off_t off, int whence): off_t is a signed 32-bit
             // long on the guest, so the offset must be sign-extended (a
             // negative SEEK_CUR/SEEK_END offset used to become +4 GB).
-            const int hfd = host_fd_of(a0);
+            std::shared_ptr<abvfs::Slice> sl_of;
+            const int hfd = host_fd_slice_of(a0, &sl_of);
             if (hfd < 0) {
                 SetGuestErrno(EBADF);
                 Ret(regs, 0xFFFFFFFFu);
                 return;
             }
-            const std::shared_ptr<abvfs::Slice> sl = FdSlice(a0);
+            const std::shared_ptr<abvfs::Slice> sl = std::move(sl_of);
             const off_t r =
                 sl ? static_cast<off_t>(abvfs::SliceSeek(*sl, static_cast<std::int32_t>(a1), (int)a2))
                    : ::lseek(hfd, static_cast<off_t>(static_cast<std::int32_t>(a1)), (int)a2);
@@ -8023,73 +8076,21 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::__signbit_:
     case I::__signbitf_:
     case I::__signbitl_:
-    case I::acos_:
-    case I::acosf_:
-    case I::acosh_:
-    case I::asin_:
-    case I::asinf_:
-    case I::asinh_:
-    case I::atan_:
-    case I::atan2_:
-    case I::atan2f_:
-    case I::atanf_:
-    case I::atanh_:
-    case I::cbrt_:
-    case I::cbrtf_:
-    case I::ceil_:
-    case I::ceilf_:
-    case I::copysign_:
-    case I::copysignf_:
-    case I::cos_:
-    case I::cosf_:
-    case I::cosh_:
-    case I::coshf_:
-    case I::erf_:
-    case I::erfc_:
-    case I::erfcf_:
-    case I::erff_:
-    case I::exp_:
-    case I::exp2_:
-    case I::exp2f_:
-    case I::expf_:
-    case I::expm1_:
-    case I::expm1f_:
-    case I::fdim_:
-    case I::fdimf_:
-    case I::floor_:
-    case I::floorf_:
     case I::fma_:
     case I::fmaf_:
-    case I::fmax_:
-    case I::fmaxf_:
-    case I::fmin_:
-    case I::fminf_:
-    case I::fmod_:
-    case I::fmodf_:
     case I::frexp_:
     case I::frexpf_:
-    case I::hypot_:
-    case I::hypotf_:
     case I::ilogb_:
     case I::ilogbf_:
     case I::isnan_:
     case I::ldexp_:
     case I::ldexpf_:
-    case I::lgamma_:
-    case I::lgammaf_:
     case I::llrint_:
     case I::llrintf_:
     case I::llround_:
     case I::llroundf_:
-    case I::log_:
-    case I::log10_:
-    case I::log10f_:
-    case I::log1p_:
-    case I::log2_:
-    case I::log2f_:
     case I::logb_:
     case I::logbf_:
-    case I::logf_:
     case I::lrint_:
     case I::lrintf_:
     case I::lround_:
@@ -8099,41 +8100,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::nan_:
     case I::nanf_:
     case I::nanl_:
-    case I::nearbyint_:
-    case I::nearbyintf_:
     case I::nextafter_:
     case I::nextafterf_:
     case I::nexttoward_:
     case I::nexttowardf_:
-    case I::pow_:
-    case I::powf_:
-    case I::remainder_:
-    case I::remainderf_:
     case I::remquo_:
     case I::remquof_:
-    case I::rint_:
-    case I::rintf_:
-    case I::round_:
-    case I::roundf_:
     case I::scalbln_:
     case I::scalblnf_:
     case I::scalbn_:
     case I::scalbnf_:
     case I::scalbnl_:
-    case I::sin_:
-    case I::sinf_:
-    case I::sinh_:
-    case I::sinhf_:
-    case I::sqrt_:
-    case I::sqrtf_:
-    case I::tan_:
-    case I::tanf_:
-    case I::tanh_:
-    case I::tanhf_:
-    case I::tgamma_:
-    case I::tgammaf_:
-    case I::trunc_:
-    case I::truncf_:
 #include "math_thunks.inc"
     // --- libm: PURE-MATH-END ---
     case I::glBufferData_:
@@ -13183,6 +13160,7 @@ Runtime::JitPtr Runtime::NewJit(const Dynarmic::A32::UserConfig& cfg) {
             const Dynarmic::A32::UserConfig& c = e.cfg;
             if (cfg.callbacks == c.callbacks && cfg.global_monitor == c.global_monitor &&
                 cfg.fastmem_pointer == c.fastmem_pointer && cfg.optimizations == c.optimizations &&
+                cfg.unsafe_optimizations == c.unsafe_optimizations &&  // gates Unsafe_HostFpsr
                 cfg.enable_cycle_counting == c.enable_cycle_counting) {
                 jit.reset(new Dynarmic::A32::Jit(cfg, e.cache));
                 break;
@@ -13338,6 +13316,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         t_hot.active_jit = &jit;
         t_worker_jit = &jit;
         RegisterSigThread(tid, &jit);
+        sampler::ThreadUses();  // the profiler's timer for a guest-created thread, when on
         PushLocalFrame();  // real handles made here go with the thread, as on a JVM
         // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
         // workers; racy values, liveness only — same caveat as main beat).

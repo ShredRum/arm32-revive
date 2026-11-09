@@ -25,7 +25,10 @@ library `libabhost.so`:
   where needed. Guest heap = dlmalloc mspace (1 GB virtual).
 - `host/src/apphost.cpp` = `JNI_OnLoad`, per-thread JIT/stack, boot sequence, and
   the generated `Java_*` forwarders (`apphost_gen.inc`, from `host/gen_apphost.py`).
-- The Java side of the original APK is unchanged except the loaded library name.
+- The Java side of the original APK is unchanged except the loaded library name,
+  and a title's `games/<id>/smali.patch` when it has one (applied by
+  `prepare-tree.sh`; MCSM: the launcher activity, the expansion downloader
+  only checked for an OBB file whose servers are dead).
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
 space, star-wars, star-wars-ii, star-wars-ii-amz. One shared host core.

@@ -43,6 +43,7 @@
 #include <atomic>
 #include <sys/mman.h>
 #include <chrono>
+#include <dlfcn.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -563,8 +564,10 @@ int main() {
         Expect("sem_post on a destroyed sem = -1", std::to_string((std::int32_t)call(115, kSem)), "-1");
     }
 
-    // --- fast-math table: bit-identical to the name chain for every entry
-    //     (r0 and r1 compared: a double result is r0:r1).
+    // --- fast-math table: bit-identical to the host libm function of the
+    //     same name, looked up by dlsym (so a table entry that names one
+    //     function and calls another is caught). r0 and r1 compared: a double
+    //     result is r0:r1. (The name chain no longer has these functions.)
     {
         const float fx[] = {0.5f, -1.25f, 3.0f, 100.0f, 0.0f};
         const float fy[] = {2.0f, -0.75f, 0.5f, 3.0f, 1.0f};
@@ -589,8 +592,36 @@ int main() {
                 }
                 abr::RuntimeTestAccess::RegsView chain{}, fast{};
                 const abr::RuntimeTestAccess::RegsView in{};
-                abr::RuntimeTestAccess::Call(rt, kMathBase + 2 * i, args, in, &chain);
                 abr::RuntimeTestAccess::Call(rt, kMathBase + 2 * i + 1, args, in, &fast);
+                void* sym = ::dlsym(RTLD_DEFAULT, abr::kFastMath[i].name);
+                if (sym == nullptr) {
+                    if (bad++ == 0) first_bad = std::string(abr::kFastMath[i].name) + " not in libm";
+                    continue;
+                }
+                switch (abr::kFastMath[i].kind) {
+                case abr::MathKind::F_F: {
+                    const float r = reinterpret_cast<float (*)(float)>(sym)(fx[k]);
+                    std::memcpy(&chain[0], &r, 4);
+                    chain[1] = fast[1];  // r1 is not the result
+                    break;
+                }
+                case abr::MathKind::FF_F: {
+                    const float r = reinterpret_cast<float (*)(float, float)>(sym)(fx[k], fy[k]);
+                    std::memcpy(&chain[0], &r, 4);
+                    chain[1] = fast[1];
+                    break;
+                }
+                case abr::MathKind::D_D: {
+                    const double r = reinterpret_cast<double (*)(double)>(sym)(dx[k]);
+                    std::memcpy(&chain[0], &r, 8);
+                    break;
+                }
+                case abr::MathKind::DD_D: {
+                    const double r = reinterpret_cast<double (*)(double, double)>(sym)(dx[k], dy[k]);
+                    std::memcpy(&chain[0], &r, 8);
+                    break;
+                }
+                }
                 if (chain[0] != fast[0] || chain[1] != fast[1]) {
                     if (bad++ == 0) {
                         first_bad = std::string(abr::kFastMath[i].name) + " #" + std::to_string(k);
@@ -598,7 +629,7 @@ int main() {
                 }
             }
         }
-        Expect("fast math = name chain, all " + std::to_string(abr::kFastMathCount) + " functions",
+        Expect("fast math = host libm, all " + std::to_string(abr::kFastMathCount) + " functions",
                bad ? first_bad : std::string("same"), "same");
     }
 
@@ -3769,8 +3800,12 @@ int main() {
             again.Build(abvfs::AppApks(root + "/app/base.apk"), root + "/data/abport_deleted.txt");
             Expect("vfs: deletion survives a restart",
                    std::to_string(again.Find(root + "/data/files/Net/A.bin") == nullptr), "1");
-            Expect("vfs: other packed files stay",
-                   std::to_string(again.Find(root + "/data/files/Net/D.txt") != nullptr), "1");
+            // D.txt was copied up (r+ above): its real copy stands for it
+            // under every spelling, so the packed entry is marked too.
+            Expect("vfs: a copied-up file's packed entry is marked",
+                   std::to_string(again.Find(root + "/data/files/Net/D.txt") == nullptr), "1");
+            Expect("vfs: ...and its real copy is still there",
+                   ReadHostFile(root + "/data/files/Net/D.txt"), "Zbc");
         }
         // A real file written after the unlink wins over nothing; unlink again works.
         put(kMode, "w");

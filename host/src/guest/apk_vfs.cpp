@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <ctime>
@@ -72,7 +73,8 @@ std::string JoinCI(const std::string& dir, const std::string& part) {
 
 }  // namespace
 
-bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::string* err) {
+bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::string* err,
+                  const std::string& only_prefix) {
     out->clear();
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
@@ -143,6 +145,9 @@ bool ReadZipIndex(const std::string& path, std::vector<ZipEntry>* out, std::stri
         z.usize = Le32(h + 24);
         const std::uint64_t lho = Le32(h + 42);
         p += 46 + nlen + xlen + clen;
+        if (!only_prefix.empty() && z.name.compare(0, only_prefix.size(), only_prefix) != 0) {
+            continue;  // not wanted: no read of its local header
+        }
         if (z.csize == 0xffffffffu || z.usize == 0xffffffffu || lho == 0xffffffffu) {
             *err = "zip64 entry (not supported: keep each APK under 4 GB): " + z.name;
             return false;
@@ -346,7 +351,7 @@ std::string Pack::Build(const std::vector<std::string>& apks, const std::string&
         apk_dev_.push_back(::stat(apks_[i].c_str(), &ast) == 0 ? ast.st_dev : 0);
         std::vector<ZipEntry> zs;
         std::string err;
-        if (!ReadZipIndex(apks_[i], &zs, &err)) {
+        if (!ReadZipIndex(apks_[i], &zs, &err, kPrefix)) {
             errors += " " + apks_[i] + ": " + err + ";";
             continue;
         }
@@ -504,10 +509,19 @@ void Pack::Stat(const File& f, struct stat* st) const {
 }
 
 bool Pack::CopyUp(const File& f, const std::string& host_path) const {
+    // One copy-up at a time: two threads opening the same packed file for
+    // writing must not both copy, and the second must not replace a copy the
+    // first has already written to. The second finds the real file and is done.
+    static std::mutex copy_mu;
+    std::lock_guard<std::mutex> lock(copy_mu);
+    struct stat st {};
+    if (::lstat(host_path.c_str(), &st) == 0) return true;
     std::shared_ptr<Slice> s;
     const int in = Open(f, &s);
     if (in < 0) return false;
-    const std::string tmp = host_path + ".abport-copy";
+    static std::atomic<unsigned> serial{0};
+    const std::string tmp = host_path + ".abport-copy." + std::to_string(::getpid()) + "." +
+                            std::to_string(serial.fetch_add(1, std::memory_order_relaxed));
     const int out = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (out < 0) {
         ::close(in);

@@ -130,6 +130,7 @@ struct Runtime::OpenSl {
     struct Obj {
         std::vector<std::uint32_t> itfs;  // guest interface handles made for it
         std::unique_ptr<Cb> cb;           // object callback (async Realize)
+        int packed_fd = -1;               // the APK fd a packed URI source plays from
     };
     std::mutex mu;  // the maps; never held across a host OpenSL call
     std::unordered_map<std::uint32_t, Itf> itfs;  // guest handle -> interface (objects too)
@@ -481,17 +482,20 @@ bool Runtime::OpenSlCall(const std::string& n, Regs& regs) {
         case 6: {  // Destroy: the host waits for its callbacks; then the handles go
             (*o)->Destroy(o);
             std::vector<std::uint32_t> gone;
+            int packed_fd = -1;
             {
                 std::lock_guard<std::mutex> l(s.mu);
                 const auto it = s.objs.find(self);
                 if (it != s.objs.end()) {
                     gone = it->second.itfs;
+                    packed_fd = it->second.packed_fd;
                     s.objs.erase(it);
                 }
                 gone.push_back(self);
                 for (std::uint32_t h : gone) s.itfs.erase(h);
             }
             for (std::uint32_t h : gone) GuestFree(h);
+            if (packed_fd >= 0) ::close(packed_fd);  // the host player is gone
             return ret(SL_RESULT_SUCCESS);
         }
         case 7:
@@ -533,6 +537,15 @@ bool Runtime::OpenSlCall(const std::string& n, Regs& regs) {
             SLDataLocator_URI loc_uri{};
             std::string uri;
             void* hloc = nullptr;
+            // The APK fd of a packed URI source: closed on every early return,
+            // handed to the player's record once it exists.
+            struct FdOwner {
+                int fd = -1;
+                ~FdOwner() {
+                    if (fd >= 0) ::close(fd);
+                }
+            } packed;
+            int& packed_fd = packed.fd;
             std::uint32_t ltype = 0;
             std::memcpy(&ltype, H(sloc), 4);
             if ((ltype == SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE ||
@@ -578,13 +591,29 @@ bool Runtime::OpenSlCall(const std::string& n, Regs& regs) {
                 if (file || (!g.empty() && g[0] == '/')) {
                     const std::string hp2 = MapGuestPathString(file ? g.substr(7) : g);
                     if (hp2.empty()) return ret(SL_RESULT_CONTENT_NOT_FOUND);
+                    struct stat rst {};
+                    const abvfs::File* pf =
+                        vfs_on_ && ::lstat(hp2.c_str(), &rst) != 0 ? vfs_.Find(hp2) : nullptr;
+                    if (pf) {
+                        // A packed file has no host path: its window in the
+                        // APK, as for an Android FD source (fd kept open for
+                        // the player's lifetime, closed at Destroy).
+                        std::shared_ptr<abvfs::Slice> sl;
+                        packed_fd = vfs_.Open(*pf, &sl);
+                        if (packed_fd < 0) return ret(SL_RESULT_CONTENT_NOT_FOUND);
+                        loc_fd = {SL_DATALOCATOR_ANDROIDFD, packed_fd, static_cast<SLAint64>(sl->off),
+                                  static_cast<SLAint64>(sl->size)};
+                        hloc = &loc_fd;
+                    }
                     uri = "file://" + hp2;
                 } else {
                     uri = g;  // a network URL as given
                 }
-                loc_uri = {SL_DATALOCATOR_URI,
-                           reinterpret_cast<SLchar*>(const_cast<char*>(uri.c_str()))};
-                hloc = &loc_uri;
+                if (packed_fd < 0) {
+                    loc_uri = {SL_DATALOCATOR_URI,
+                               reinterpret_cast<SLchar*>(const_cast<char*>(uri.c_str()))};
+                    hloc = &loc_uri;
+                }
             } else {
                 std::printf("[sles] CreateAudioPlayer: source locator %08x not served\n", ltype);
                 return ret(kSlContentUnsupported);
@@ -641,6 +670,11 @@ bool Runtime::OpenSlCall(const std::string& n, Regs& regs) {
             if (!h) {
                 (*player)->Destroy(player);
                 return ret(kSlMemoryFailure);
+            }
+            if (packed_fd >= 0) {
+                std::lock_guard<std::mutex> l(s.mu);
+                s.objs[h].packed_fd = packed_fd;
+                packed_fd = -1;  // the record owns it now
             }
             put32(out, h);
             return ret(SL_RESULT_SUCCESS);

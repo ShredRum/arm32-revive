@@ -14,9 +14,13 @@ WANT=$(unzip -p $APK lib/arm64-v8a/$HOSTLIB | md5sum | cut -c1-32)
 # A phone build (API 29, ELF TLS) does not load on Android 7-9: say so here
 # instead of a crash at the first start.
 READELF=$(ls tools/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf | head -1)
+[ -x "$READELF" ] || { echo "devgate: llvm-readelf not found under tools/ (needed for the TLS check)" >&2; exit 1; }
 TMPLIB=$(mktemp)
 unzip -p $APK lib/arm64-v8a/$HOSTLIB > "$TMPLIB"
-if "$READELF" -lW "$TMPLIB" | grep -q " TLS "; then
+# The program headers first, then the test: grep -q in a pipe could close it
+# early and, under pipefail, turn a match into a failed pipeline.
+PHDRS=$("$READELF" -lW "$TMPLIB")
+if printf '%s\n' "$PHDRS" | grep -c " TLS " >/dev/null; then
     SDK=$(ssh -o BatchMode=yes -p $P $DEV getprop ro.build.version.sdk)
     if [ "${SDK:-0}" -lt 29 ]; then
         rm -f "$TMPLIB"
