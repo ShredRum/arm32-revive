@@ -5136,24 +5136,24 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // descending sp past the threshold: return can't-unwind (0) so the
         // run terminates with the ORIGINAL exception visible instead of a
         // silent overflow. Matches device semantics (uncaught -> terminate).
-        // a0 = pc, a1 = frame sp. Tracked per stack range (main vs workers).
+        // a0 = pc; the caller's sp (r13) is the frame (a1 is the int* count,
+        // which need not be on the stack). Tracked per stack range (main vs
+        // workers).
         struct NestTrack {
             std::uint32_t pc = 0xFFFFFFFFu;
             std::uint32_t sp = 0xFFFFFFFFu;
             unsigned depth = 0;
         };
         static NestTrack tracks[2];
-        NestTrack& tr = (a1 >= abr::kStackBase && a1 < abr::kStackTop) ? tracks[0] : tracks[1];
-        if (a0 == tr.pc && a1 != 0 && a1 < tr.sp) {
+        const std::uint32_t fsp = regs[13];
+        NestTrack& tr = (fsp >= abr::kStackBase && fsp < abr::kStackTop) ? tracks[0] : tracks[1];
+        if (a0 == tr.pc && fsp < tr.sp) {
             tr.depth++;
         } else {
             tr.depth = 0;
             tr.pc = a0;
-            tr.sp = a1;
         }
-        if (a0 == tr.pc && a1 != 0) {
-            tr.sp = a1;
-        }
+        tr.sp = fsp;
         // HARNESS_NESTMAX overrides the abort depth (default 512) to test
         // whether a deeper handler catches (fallback paths) vs true spiral.
         static std::int64_t nestmax = -2;
@@ -5168,7 +5168,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // and re-presents). Halt loud: the stack holds the whole spiral
             // and the original throw is ~512 levels up, intact for forensics.
             std::printf("[unwind] LOUD nesting %u deep at pc=%08x sp=%08x -- halting\n", tr.depth,
-                        a0, a1);
+                        a0, fsp);
             // Forensics for this fatal halt: R7 and the words the SU16
             // pop-frame reads ([R7-12..R7+8]).
             {
