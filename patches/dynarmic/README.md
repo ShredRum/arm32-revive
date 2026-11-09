@@ -269,4 +269,6 @@ and the guest halted. Angry Birds Stella's OpenSSL reads CNTVCT at static
 init (`_armv7_tick`, OPENSSL_cpuid_setup). arm64 backend: `MRS CNTVCT_EL0`
 and `MRS CNTFRQ_EL0`, the same counter. x64 backend (PC tools): the host's
 steady clock at 24 MHz. A coprocessor a user attaches for cp15 still wins.
+Which reads are the timer is decided in one place,
+`frontend/A32/a32_generic_timer.h`, used by the frontend and both backends.
 fmt_test: CNTVCT twice, not decreasing; CNTFRQ nonzero.

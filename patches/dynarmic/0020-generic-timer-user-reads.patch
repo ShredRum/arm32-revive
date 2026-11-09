@@ -1,24 +1,53 @@
+--- /dev/null
++++ b/src/dynarmic/frontend/A32/a32_generic_timer.h
+@@ -0,0 +1,28 @@
++/* This file is part of the dynarmic project.
++ * SPDX-License-Identifier: 0BSD
++ */
++
++#pragma once
++
++#include <cstddef>
++
++#include "dynarmic/interface/A32/coprocessor_util.h"
++
++namespace Dynarmic::A32 {
++
++// The generic timer, readable from user mode under Linux (the kernel enables
++// it; the vDSO's clocks read it), served from the host's own counter with no
++// coprocessor attached (ab-port). The frontend accepts these reads and every
++// backend emits them, from these two tests only.
++
++// CNTFRQ: MRC p15, 0, Rt, c14, c0, 0.
++constexpr bool IsGenericTimerCntfrq(std::size_t coproc_no, bool two, std::size_t opc1, CoprocReg CRn, CoprocReg CRm, std::size_t opc2) {
++    return coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C14 && CRm == CoprocReg::C0 && opc2 == 0;
++}
++
++// CNTVCT: MRRC p15, 1, Rt, Rt2, c14.
++constexpr bool IsGenericTimerCntvct(std::size_t coproc_no, bool two, std::size_t opc, CoprocReg CRm) {
++    return coproc_no == 15 && !two && opc == 1 && CRm == CoprocReg::C14;
++}
++
++}  // namespace Dynarmic::A32
 --- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
 +++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
-@@ -42,7 +42,20 @@
+@@ -9,6 +9,7 @@
+ #include <mcl/bit/bit_field.hpp>
+ #include <mcl/bit/rotate.hpp>
+ 
++#include "dynarmic/frontend/A32/a32_generic_timer.h"
+ #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+ #include "dynarmic/frontend/A32/a32_location_descriptor.h"
+ #include "dynarmic/frontend/A32/a32_types.h"
+@@ -42,7 +43,10 @@
      bool CoprocessorAttached(size_t coproc_no) const { return (options.coprocessors >> coproc_no) & 1; }
      // TPIDRURO is answered from the Jit's state, with no coprocessor attached.
      bool CoprocessorAttachedForRead(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) const {
 -        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3);
-+        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3) || IsCntfrq(coproc_no, two, opc1, CRn, CRm, opc2);
-+    }
-+    // The generic timer, readable from user mode under Linux (the kernel
-+    // enables it; the vDSO's clocks read it): CNTFRQ (MRC p15, 0, Rt, c14,
-+    // c0, 0) and CNTVCT (MRRC p15, 1, Rt, Rt2, c14). Served from the host's
-+    // own counter, with no coprocessor (ab-port).
-+    static bool IsCntfrq(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) {
-+        return coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C14 && CRm == CoprocReg::C0 && opc2 == 0;
-+    }
-+    static bool IsCntvct(size_t coproc_no, bool two, size_t opc, CoprocReg CRm) {
-+        return coproc_no == 15 && !two && opc == 1 && CRm == CoprocReg::C14;
++        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3) || IsGenericTimerCntfrq(coproc_no, two, opc1, CRn, CRm, opc2);
 +    }
 +    bool CoprocessorAttachedForReadTwo(size_t coproc_no, bool two, size_t opc, CoprocReg CRm) const {
-+        return CoprocessorAttached(coproc_no) || IsCntvct(coproc_no, two, opc, CRm);
++        return CoprocessorAttached(coproc_no) || IsGenericTimerCntvct(coproc_no, two, opc, CRm);
      }
      // MCR p15 barriers (deprecated but valid on ARMv7): no coprocessor either.
      enum class Cp15Barrier { None, Dmb, Dsb, Isb };
@@ -46,12 +75,20 @@
      const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
 --- a/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
 +++ b/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
-@@ -170,6 +170,13 @@
+@@ -10,6 +10,7 @@
+ #include "dynarmic/backend/arm64/emit_arm64.h"
+ #include "dynarmic/backend/arm64/emit_context.h"
+ #include "dynarmic/backend/arm64/reg_alloc.h"
++#include "dynarmic/frontend/A32/a32_generic_timer.h"
+ #include "dynarmic/interface/A32/coprocessor.h"
+ #include "dynarmic/ir/basic_block.h"
+ #include "dynarmic/ir/microinstruction.h"
+@@ -170,6 +171,13 @@
      }
  
      std::shared_ptr<A32::Coprocessor> coproc = ctx.conf.coprocessors[coproc_num];
 +    // CNTFRQ with no coprocessor attached: the host's counter frequency.
-+    if (!coproc && coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C14 && CRm == A32::CoprocReg::C0 && opc2 == 0) {
++    if (!coproc && A32::IsGenericTimerCntfrq(coproc_num, two, opc1, CRn, CRm, opc2)) {
 +        auto Xvalue = ctx.reg_alloc.WriteX(inst);
 +        RegAlloc::Realize(Xvalue);
 +        code.MRS(Xvalue, oaknut::SystemReg::CNTFRQ_EL0);
@@ -60,13 +97,13 @@
      if (!coproc) {
          EmitCoprocessorException();
          return;
-@@ -209,6 +216,14 @@
+@@ -209,6 +217,14 @@
      const auto CRm = static_cast<A32::CoprocReg>(coproc_info[3]);
  
      std::shared_ptr<A32::Coprocessor> coproc = ctx.conf.coprocessors[coproc_num];
 +    // CNTVCT with no coprocessor attached: the host's virtual counter, the
 +    // one a 32-bit process reads on an arm64 kernel.
-+    if (!coproc && coproc_num == 15 && !two && opc == 1 && CRm == A32::CoprocReg::C14) {
++    if (!coproc && A32::IsGenericTimerCntvct(coproc_num, two, opc, CRm)) {
 +        auto Xvalue = ctx.reg_alloc.WriteX(inst);
 +        RegAlloc::Realize(Xvalue);
 +        code.MRS(Xvalue, oaknut::SystemReg::CNTVCT_EL0);
@@ -85,12 +122,20 @@
  #include <optional>
  #include <utility>
  
-@@ -981,6 +982,13 @@
+@@ -25,6 +26,7 @@
+ #include "dynarmic/backend/x64/perf_map.h"
+ #include "dynarmic/backend/x64/stack_layout.h"
+ #include "dynarmic/common/variant_util.h"
++#include "dynarmic/frontend/A32/a32_generic_timer.h"
+ #include "dynarmic/frontend/A32/a32_location_descriptor.h"
+ #include "dynarmic/frontend/A32/a32_types.h"
+ #include "dynarmic/interface/A32/coprocessor.h"
+@@ -981,6 +983,13 @@
          ctx.reg_alloc.DefineValue(inst, reg_word);
          return;
      }
 +    // CNTFRQ: the 24 MHz of HostCntvct.
-+    if (!conf.coprocessors[coproc_num] && coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C14 && CRm == A32::CoprocReg::C0 && opc2 == 0) {
++    if (!conf.coprocessors[coproc_num] && A32::IsGenericTimerCntfrq(coproc_num, two, opc1, CRn, CRm, opc2)) {
 +        const Xbyak::Reg32 reg_word = ctx.reg_alloc.ScratchGpr().cvt32();
 +        code.mov(reg_word, 24000000);
 +        ctx.reg_alloc.DefineValue(inst, reg_word);
@@ -99,7 +144,7 @@
  
      std::shared_ptr<A32::Coprocessor> coproc = conf.coprocessors[coproc_num];
      if (!coproc) {
-@@ -1015,6 +1023,15 @@
+@@ -1015,6 +1024,15 @@
      UNREACHABLE();
  }
  
@@ -115,11 +160,11 @@
  void A32EmitX64::EmitA32CoprocGetTwoWords(A32EmitContext& ctx, IR::Inst* inst) {
      const auto coproc_info = inst->GetArg(0).GetCoprocInfo();
      const size_t coproc_num = coproc_info[0];
-@@ -1023,6 +1040,11 @@
+@@ -1023,6 +1041,11 @@
      const auto CRm = static_cast<A32::CoprocReg>(coproc_info[3]);
  
      std::shared_ptr<A32::Coprocessor> coproc = conf.coprocessors[coproc_num];
-+    if (!coproc && coproc_num == 15 && !two && opc == 1 && CRm == A32::CoprocReg::C14) {
++    if (!coproc && A32::IsGenericTimerCntvct(coproc_num, two, opc, CRm)) {
 +        ctx.reg_alloc.HostCall(inst);
 +        code.CallFunction(&HostCntvct);
 +        return;
