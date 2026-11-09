@@ -29,6 +29,7 @@
 #include <random>
 #include <stdlib.h>
 #include <string>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -238,7 +239,7 @@ static void DeathHex(char*& p, std::uint64_t v, int digits) {
     }
 }
 static void DeathHandler(int sig, siginfo_t* info, void* ucv) {
-    char buf[512];
+    char buf[1792];
     char* p = buf;
     const char* t = "DEATH sig=";
     while (*t) {
@@ -326,9 +327,61 @@ static void DeathHandler(int sig, siginfo_t* info, void* ucv) {
             }
         }
     }
+    // The interrupted code's own chain (the handler's chain above starts in
+    // the signal frame): its lr, then the x29 walk from its frame. A crash in
+    // a system library (ART) is named from these and the maps below.
+    if (ucv && (p - buf) < 600) {
+        const auto& mc = ((ucontext_t*)ucv)->uc_mcontext;
+        const char* t8 = " tid=";
+        while (*t8) {
+            *p++ = *t8++;
+        }
+        DeathHex(p, (std::uint64_t)syscall(SYS_gettid), 8);
+        const char* t9 = " ctx=";
+        while (*t9) {
+            *p++ = *t9++;
+        }
+        DeathHex(p, mc.regs[30], 16);
+        std::uint64_t fp = mc.regs[29];
+        for (int f = 0; f < 10 && fp >= 0x7000000000ull && (fp & 7) == 0 && (p - buf) < 1000; f++) {
+            const std::uint64_t* fr = (const std::uint64_t*)fp;
+            const std::uint64_t next = fr[0];
+            *p++ = ' ';
+            DeathHex(p, fr[1], 16);
+            if (next <= fp) {
+                break;
+            }
+            fp = next;
+        }
+    }
     *p++ = '\n';
+    // The interrupted thread's registers: x0..x30, sp.
+    if (ucv) {
+        const auto& mc = ((ucontext_t*)ucv)->uc_mcontext;
+        for (int i = 0; i <= 31; i++) {
+            *p++ = i == 31 ? 's' : 'x';
+            if (i == 31) {
+                *p++ = 'p';
+            } else {
+                DeathHex(p, (std::uint64_t)i, 2);
+            }
+            *p++ = '=';
+            DeathHex(p, i == 31 ? mc.sp : mc.regs[i], 16);
+            *p++ = (i % 4 == 3) ? '\n' : ' ';
+        }
+    }
     if (g_death_fd >= 0) {
         (void)write(g_death_fd, buf, (std::size_t)(p - buf));
+        // The process's maps, to place the addresses above (plain syscalls).
+        const int mfd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+        if (mfd >= 0) {
+            char mb[4096];
+            ssize_t n;
+            while ((n = read(mfd, mb, sizeof(mb))) > 0) {
+                (void)write(g_death_fd, mb, (std::size_t)n);
+            }
+            close(mfd);
+        }
     }
     signal(sig, SIG_DFL);
     raise(sig);

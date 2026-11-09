@@ -7,7 +7,7 @@ cd "/home/shredrum/Рабочий стол/ab-port"
 G=$1; WAIT=${2:-40}
 DEV=${DEV:-u0_a41@192.168.1.202}; P=8022
 PKG=$(python3 scripts/profile.py $G apk.package)
-APK=games/$G/work/apk_signed.apk
+APK=${GATE_APK:-games/$G/work/apk_signed.apk}   # GATE_APK: e.g. the DIAG=1 twin
 HOSTLIB=$(python3 scripts/profile.py $G host.lib)
 ACT=$(python3 scripts/profile.py $G apk.activity 2>/dev/null || echo com.rovio.fusion.App)
 WANT=$(unzip -p $APK lib/arm64-v8a/$HOSTLIB | md5sum | cut -c1-32)
