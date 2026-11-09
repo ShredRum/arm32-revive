@@ -126,8 +126,20 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
   bridge, gap stays = code generation; then bisect that half.
   Done 2026-11-09 (sandbox, SW2 menu, process CPU per frame, 3 cold runs
   each): his build 9.95/10.16/10.00 ms; his bridge on our dynarmic tree
-  10.46/10.38/10.39; ours 10.88/11.06/10.87. So of ~0.9 ms, ~0.37 ms is
-  code generation (our dynarmic vs his) and ~0.53 ms is the bridge.
+  10.46/10.38/10.39; ours 10.88/11.06/10.87. (Measured one variant after
+  the other: the split below was WRONG, the phone warmed between them.)
+  Interleaved 2026-11-09, his bridge on four Dynarmics, 3 rounds: his
+  10.06, our tree 10.19, our tree + three fixes 10.07 ms: code generation
+  is ~0.1 ms at most. Interleaved his port vs ours, cool phone, 4 rounds:
+  9.24-9.30 vs 9.95-10.26 ms, +0.79 ms (~8.5 %): the gap is the bridge.
+  HARNESS_PROF (now a summary every 10 s) and his perf line: guest time
+  per frame equal (8.99 vs 8.96 ms), host calls per frame equal (~5200:
+  memcmp ~2370, strlen ~1000, strcmp ~371, free, memcpy, floor, malloc, GL).
+  So ~150 ns more per call on average; FMT_BENCH (now also strlen/strcmp)
+  shows 28 ns per call in a hot loop, so the extra cost appears only in the
+  game. Phone (Android 15, frame counts not captured): ours used more CPU
+  per second in both pairs (+3.6 %, +16 %). Sampling profilers do not work
+  on the sandbox (its kernel delivers timer signals only at system calls).
   Build: ~/Рабочий стол/mrempathy-cmp/build-ourdyn.sh, package-ourdyn.sh.
   .ads vs .amz (their engine .so differ, a separate build of 1.9.25): his
   bridge packaged from the amz APK, all on the charger, same session: his
