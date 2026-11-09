@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -238,135 +239,105 @@ static void DeathHex(char*& p, std::uint64_t v, int digits) {
         *p++ = H[(v >> (i * 4)) & 0xFu];
     }
 }
+static void DeathStr(char*& p, const char* s) {
+    while (*s) {
+        *p++ = *s++;
+    }
+}
+// Reads 8 bytes of this process's memory without faulting: the frame
+// chains below follow pointers that a crash may have left anywhere, and a
+// second SIGSEGV inside this handler (SIGSEGV is blocked here) would kill
+// the process with nothing written. process_vm_readv returns EFAULT.
+static bool DeathRead(std::uint64_t addr, std::uint64_t* out) {
+    struct iovec local {out, 8};
+    struct iovec remote {reinterpret_cast<void*>(addr), 8};
+    return syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL) == 8;
+}
+// An x29 chain from `fp`: up to `max` return addresses, each as raw[-off
+// from our base] when `with_off`.
+static void DeathChain(char*& p, const char* end, std::uint64_t fp, int max, bool with_off) {
+    for (int f = 0; f < max && (fp & 7) == 0 && p + 36 < end; f++) {
+        std::uint64_t next = 0, ret = 0;
+        if (!DeathRead(fp, &next) || !DeathRead(fp + 8, &ret)) {
+            break;
+        }
+        *p++ = ' ';
+        DeathHex(p, ret, 16);
+        if (with_off) {
+            *p++ = '-';
+            DeathHex(p, ret - g_self_base, 16);
+        }
+        if (next <= fp) {
+            break;
+        }
+        fp = next;
+    }
+}
 static void DeathHandler(int sig, siginfo_t* info, void* ucv) {
     char buf[1792];
     char* p = buf;
-    const char* t = "DEATH sig=";
-    while (*t) {
-        *p++ = *t++;
-    }
+    const char* const end = buf + sizeof(buf);
+    const ucontext_t* uc = static_cast<const ucontext_t*>(ucv);
+    DeathStr(p, "DEATH sig=");
     DeathHex(p, (std::uint64_t)sig, 2);
     // Faulting HOST instruction (the real crash site when the host, not the
     // guest, dereferenced garbage): raw pc + offset from our load base.
-    if (ucv) {
-        const std::uintptr_t hpc = (std::uintptr_t)((ucontext_t*)ucv)->uc_mcontext.pc;
-        const char* th = " hpc=";
-        while (*th) {
-            *p++ = *th++;
-        }
+    if (uc) {
+        const std::uintptr_t hpc = (std::uintptr_t)uc->uc_mcontext.pc;
+        DeathStr(p, " hpc=");
         DeathHex(p, hpc, 16);
-        const char* tho = " hoff=";
-        while (*tho) {
-            *p++ = *tho++;
-        }
+        DeathStr(p, " hoff=");
         DeathHex(p, hpc - g_self_base, 16);
     }
     // Sender forensics: si_code/si_pid/si_uid tell abort()-in-thread apart
     // from an external tgkill (SI_TKILL) or ART runtime abort.
-    const char* tc = " code=";
-    while (*tc) {
-        *p++ = *tc++;
-    }
+    DeathStr(p, " code=");
     DeathHex(p, (std::uint64_t)(info ? info->si_code : 0), 8);
-    const char* tp = " pid=";
-    while (*tp) {
-        *p++ = *tp++;
-    }
+    DeathStr(p, " pid=");
     DeathHex(p, (std::uint64_t)(info ? info->si_pid : 0), 8);
-    const char* t2 = " addr=";
-    while (*t2) {
-        *p++ = *t2++;
-    }
+    DeathStr(p, " addr=");
     DeathHex(p, (std::uint64_t)(info ? info->si_addr : nullptr), 16);
     if (g_rt) {
-        Dynarmic::A32::Jit* aj = g_rt->ActiveJit();
-        if (aj) {
+        if (Dynarmic::A32::Jit* aj = g_rt->ActiveJit()) {
             auto& r = aj->Regs();
-            const char* t3 = " pc=";
-            while (*t3) {
-                *p++ = *t3++;
-            }
+            DeathStr(p, " pc=");
             DeathHex(p, r[15], 8);
-            const char* t4 = " lr=";
-            while (*t4) {
-                *p++ = *t4++;
-            }
+            DeathStr(p, " lr=");
             DeathHex(p, r[14], 8);
-            const char* t5 = " sp=";
-            while (*t5) {
-                *p++ = *t5++;
-            }
+            DeathStr(p, " sp=");
             DeathHex(p, r[13], 8);
-            const char* t6 = " r0=";
-            while (*t6) {
-                *p++ = *t6++;
-            }
+            DeathStr(p, " r0=");
             DeathHex(p, r[0], 8);
-            // Host frame-pointer walk (pure x29-chain reads, async-safe):
-            // names the aborter (dlmalloc vs ART vs terminate) when the
-            // guest pc alone can't. Capped to fit buf.
-            const char* t7 = " host=";
-            while (*t7) {
-                *p++ = *t7++;
-            }
-            {
-                std::uint64_t fp = (std::uint64_t)__builtin_frame_address(0);
-                for (int f = 0; f < 8 && fp >= 0x7000000000ull && (p - buf) < 460; f++) {
-                    const std::uint64_t* fr = (const std::uint64_t*)fp;
-                    std::uint64_t next = fr[0];
-                    std::uint64_t ret = fr[1];
-                    if (next <= fp) {
-                        break;
-                    }
-                    fp = next;
-                    DeathHex(p, ret, 16);
-                    *p++ = '-';
-                    DeathHex(p, ret - g_self_base, 16);  // '<-base' offset
-                    *p++ = ' ';
-                }
-            }
+            // The handler's own chain (it starts in the signal frame): names
+            // the aborter (dlmalloc vs ART vs terminate) of a raised signal.
+            DeathStr(p, " host=");
+            DeathChain(p, end - 600, (std::uint64_t)__builtin_frame_address(0), 8, true);
         }
     }
-    // The interrupted code's own chain (the handler's chain above starts in
-    // the signal frame): its lr, then the x29 walk from its frame. A crash in
-    // a system library (ART) is named from these and the maps below.
-    if (ucv && (p - buf) < 600) {
-        const auto& mc = ((ucontext_t*)ucv)->uc_mcontext;
-        const char* t8 = " tid=";
-        while (*t8) {
-            *p++ = *t8++;
-        }
+    // The interrupted code's own chain: its lr, then the x29 walk from its
+    // frame. A crash in a system library (ART) is named from these and the
+    // maps below.
+    if (uc) {
+        const auto& mc = uc->uc_mcontext;
+        DeathStr(p, " tid=");
         DeathHex(p, (std::uint64_t)syscall(SYS_gettid), 8);
-        const char* t9 = " ctx=";
-        while (*t9) {
-            *p++ = *t9++;
-        }
+        DeathStr(p, " ctx=");
         DeathHex(p, mc.regs[30], 16);
-        std::uint64_t fp = mc.regs[29];
-        for (int f = 0; f < 10 && fp >= 0x7000000000ull && (fp & 7) == 0 && (p - buf) < 1000; f++) {
-            const std::uint64_t* fr = (const std::uint64_t*)fp;
-            const std::uint64_t next = fr[0];
-            *p++ = ' ';
-            DeathHex(p, fr[1], 16);
-            if (next <= fp) {
-                break;
-            }
-            fp = next;
-        }
+        DeathChain(p, end - 600, mc.regs[29], 10, false);
     }
     *p++ = '\n';
-    // The interrupted thread's registers: x0..x30, sp.
-    if (ucv) {
-        const auto& mc = ((ucontext_t*)ucv)->uc_mcontext;
-        for (int i = 0; i <= 31; i++) {
-            *p++ = i == 31 ? 's' : 'x';
-            if (i == 31) {
-                *p++ = 'p';
-            } else {
+    // The interrupted thread's registers: x0..x30, sp (32 x 21 bytes).
+    if (uc) {
+        const auto& mc = uc->uc_mcontext;
+        for (int i = 0; i < 32; i++) {
+            if (i < 31) {
+                *p++ = 'x';
                 DeathHex(p, (std::uint64_t)i, 2);
+            } else {
+                DeathStr(p, "sp");
             }
             *p++ = '=';
-            DeathHex(p, i == 31 ? mc.sp : mc.regs[i], 16);
+            DeathHex(p, i < 31 ? mc.regs[i] : mc.sp, 16);
             *p++ = (i % 4 == 3) ? '\n' : ' ';
         }
     }
