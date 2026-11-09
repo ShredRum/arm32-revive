@@ -258,3 +258,15 @@ program order; the exit path reads and clears the flag with LDAXR/STLXR.
 Run entry keeps LDAR (once per Run). Sandbox FMT_BENCH: 30.0-30.2 -> 29.9-30.0
 ns per call (noise); the phone profile of MCSM had ~0.8 % of JIT samples just
 after an LDAR, to be checked there.
+
+## 0020-generic-timer-user-reads.patch
+
+The ARM generic timer from user mode: CNTVCT (`mrrc p15, 1, Rt, Rt2, c14`)
+and CNTFRQ (`mrc p15, 0, Rt, c14, c0, 0`), with no coprocessor attached.
+Linux lets user mode read them (the vDSO's clocks do), so on a phone a
+32-bit process reads them directly; Dynarmic raised UndefinedInstruction
+and the guest halted. Angry Birds Stella's OpenSSL reads CNTVCT at static
+init (`_armv7_tick`, OPENSSL_cpuid_setup). arm64 backend: `MRS CNTVCT_EL0`
+and `MRS CNTFRQ_EL0`, the same counter. x64 backend (PC tools): the host's
+steady clock at 24 MHz. A coprocessor a user attaches for cp15 still wins.
+fmt_test: CNTVCT twice, not decreasing; CNTFRQ nonzero.

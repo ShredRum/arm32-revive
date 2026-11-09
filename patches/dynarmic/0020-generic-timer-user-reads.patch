@@ -1,0 +1,129 @@
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -42,7 +42,20 @@
+     bool CoprocessorAttached(size_t coproc_no) const { return (options.coprocessors >> coproc_no) & 1; }
+     // TPIDRURO is answered from the Jit's state, with no coprocessor attached.
+     bool CoprocessorAttachedForRead(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) const {
+-        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3);
++        return CoprocessorAttached(coproc_no) || (coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3) || IsCntfrq(coproc_no, two, opc1, CRn, CRm, opc2);
++    }
++    // The generic timer, readable from user mode under Linux (the kernel
++    // enables it; the vDSO's clocks read it): CNTFRQ (MRC p15, 0, Rt, c14,
++    // c0, 0) and CNTVCT (MRRC p15, 1, Rt, Rt2, c14). Served from the host's
++    // own counter, with no coprocessor (ab-port).
++    static bool IsCntfrq(size_t coproc_no, bool two, size_t opc1, CoprocReg CRn, CoprocReg CRm, size_t opc2) {
++        return coproc_no == 15 && !two && opc1 == 0 && CRn == CoprocReg::C14 && CRm == CoprocReg::C0 && opc2 == 0;
++    }
++    static bool IsCntvct(size_t coproc_no, bool two, size_t opc, CoprocReg CRm) {
++        return coproc_no == 15 && !two && opc == 1 && CRm == CoprocReg::C14;
++    }
++    bool CoprocessorAttachedForReadTwo(size_t coproc_no, bool two, size_t opc, CoprocReg CRm) const {
++        return CoprocessorAttached(coproc_no) || IsCntvct(coproc_no, two, opc, CRm);
+     }
+     // MCR p15 barriers (deprecated but valid on ARMv7): no coprocessor either.
+     enum class Cp15Barrier { None, Dmb, Dsb, Isb };
+--- a/src/dynarmic/frontend/A32/translate/impl/coprocessor.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/coprocessor.cpp
+@@ -146,7 +146,7 @@
+     const bool two = cond == Cond::NV;
+ 
+     if (two || ArmConditionPassed(cond)) {
+-        if (!CoprocessorAttached(coproc_no)) {
++        if (!CoprocessorAttachedForReadTwo(coproc_no, two, opc, CRm)) {
+             return UndefinedInstruction();
+         }
+         const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_coprocessor.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_coprocessor.cpp
+@@ -16,7 +16,7 @@
+ }
+ 
+ bool TranslatorVisitor::thumb32_MRRC(bool two, Reg t2, Reg t, size_t coproc_no, size_t opc, CoprocReg CRm) {
+-    if (!CoprocessorAttached(coproc_no)) {
++    if (!CoprocessorAttachedForReadTwo(coproc_no, two, opc, CRm)) {
+         return UndefinedInstruction();
+     }
+     const auto two_words = ir.CoprocGetTwoWords(coproc_no, two, opc, CRm);
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
+@@ -170,6 +170,13 @@
+     }
+ 
+     std::shared_ptr<A32::Coprocessor> coproc = ctx.conf.coprocessors[coproc_num];
++    // CNTFRQ with no coprocessor attached: the host's counter frequency.
++    if (!coproc && coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C14 && CRm == A32::CoprocReg::C0 && opc2 == 0) {
++        auto Xvalue = ctx.reg_alloc.WriteX(inst);
++        RegAlloc::Realize(Xvalue);
++        code.MRS(Xvalue, oaknut::SystemReg::CNTFRQ_EL0);
++        return;
++    }
+     if (!coproc) {
+         EmitCoprocessorException();
+         return;
+@@ -209,6 +216,14 @@
+     const auto CRm = static_cast<A32::CoprocReg>(coproc_info[3]);
+ 
+     std::shared_ptr<A32::Coprocessor> coproc = ctx.conf.coprocessors[coproc_num];
++    // CNTVCT with no coprocessor attached: the host's virtual counter, the
++    // one a 32-bit process reads on an arm64 kernel.
++    if (!coproc && coproc_num == 15 && !two && opc == 1 && CRm == A32::CoprocReg::C14) {
++        auto Xvalue = ctx.reg_alloc.WriteX(inst);
++        RegAlloc::Realize(Xvalue);
++        code.MRS(Xvalue, oaknut::SystemReg::CNTVCT_EL0);
++        return;
++    }
+     if (!coproc) {
+         EmitCoprocessorException();
+         return;
+--- a/src/dynarmic/backend/x64/a32_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a32_emit_x64.cpp
+@@ -6,6 +6,7 @@
+ #include "dynarmic/backend/x64/a32_emit_x64.h"
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <optional>
+ #include <utility>
+ 
+@@ -981,6 +982,13 @@
+         ctx.reg_alloc.DefineValue(inst, reg_word);
+         return;
+     }
++    // CNTFRQ: the 24 MHz of HostCntvct.
++    if (!conf.coprocessors[coproc_num] && coproc_num == 15 && !two && opc1 == 0 && CRn == A32::CoprocReg::C14 && CRm == A32::CoprocReg::C0 && opc2 == 0) {
++        const Xbyak::Reg32 reg_word = ctx.reg_alloc.ScratchGpr().cvt32();
++        code.mov(reg_word, 24000000);
++        ctx.reg_alloc.DefineValue(inst, reg_word);
++        return;
++    }
+ 
+     std::shared_ptr<A32::Coprocessor> coproc = conf.coprocessors[coproc_num];
+     if (!coproc) {
+@@ -1015,6 +1023,15 @@
+     UNREACHABLE();
+ }
+ 
++// PC tools only (ab-port): the generic timer of an arm64 host has no x64
++// equivalent, so CNTVCT counts the host's steady clock at 24 MHz (CNTFRQ).
++static u64 HostCntvct() {
++    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                std::chrono::steady_clock::now().time_since_epoch())
++                                .count()) *
++           3 / 125;
++}
++
+ void A32EmitX64::EmitA32CoprocGetTwoWords(A32EmitContext& ctx, IR::Inst* inst) {
+     const auto coproc_info = inst->GetArg(0).GetCoprocInfo();
+     const size_t coproc_num = coproc_info[0];
+@@ -1023,6 +1040,11 @@
+     const auto CRm = static_cast<A32::CoprocReg>(coproc_info[3]);
+ 
+     std::shared_ptr<A32::Coprocessor> coproc = conf.coprocessors[coproc_num];
++    if (!coproc && coproc_num == 15 && !two && opc == 1 && CRm == A32::CoprocReg::C14) {
++        ctx.reg_alloc.HostCall(inst);
++        code.CallFunction(&HostCntvct);
++        return;
++    }
+     if (!coproc) {
+         EmitCoprocessorException();
+         return;

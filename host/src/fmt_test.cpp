@@ -3603,6 +3603,44 @@ int main() {
         rt.ReleaseCpuId(id);
     }
 
+    // --- the generic timer from user mode (patches/dynarmic 0020): CNTVCT
+    //     (MRRC p15, 1, Rt, Rt2, c14) twice, rising, and CNTFRQ (MRC p15, 0,
+    //     Rt, c14, c0, 0) nonzero. OpenSSL's CPU probe in Angry Birds Stella
+    //     reads CNTVCT at static init; the kernel lets user mode do it.
+    {
+        const std::uint32_t kCode = 0x60006000u, kHalt = kCode + 0x100;
+        abr::RuntimeTestAccess::MapRwx(rt, kCode, 0x1000);
+        const std::uint32_t code[] = {
+            0xEC510F1Eu,  // mrrc p15, #1, r0, r1, c14
+            0xEC532F1Eu,  // mrrc p15, #1, r2, r3, c14
+            0xEE1E4F10u,  // mrc p15, #0, r4, c14, c0, #0
+            0xEA000000u | (((kHalt - (kCode + 12 + 8)) >> 2) & 0xFFFFFFu),  // b halt
+        };
+        std::memcpy(rt.H(kCode), code, sizeof(code));
+        const std::uint32_t svc_halt = 0xEF000000u;
+        std::memcpy(rt.H(kHalt), &svc_halt, 4);
+        abr::GuestCallbacks cb(&rt);
+        Dynarmic::A32::UserConfig cfg;
+        cfg.callbacks = &cb;
+        std::size_t id = 0;
+        rt.AcquireCpuId(&id);
+        cfg.global_monitor = &rt.Monitor();
+        cfg.processor_id = id;
+        const auto jit = rt.NewJit(cfg);
+        rt.ThreadEnter(jit.get(), 960);
+        jit->Regs()[15] = kCode;
+        jit->SetCpsr(0x10);
+        jit->Run();
+        const auto& r = jit->Regs();
+        const std::uint64_t first = (std::uint64_t(r[1]) << 32) | r[0];
+        const std::uint64_t second = (std::uint64_t(r[3]) << 32) | r[2];
+        Expect("CNTVCT reads, and does not go back", std::to_string(first != 0 && second >= first), "1");
+        Expect("CNTFRQ reads nonzero", std::to_string(r[4] != 0), "1");
+        rt.ThreadEnter(nullptr, 0);
+        rt.ReapHostThread(960);
+        rt.ReleaseCpuId(id);
+    }
+
     // --- FMT_BENCH=1 only: cost of one guest->host call (getpid, whose
     //     handler is a Ret of a cached value) through the real dispatch path:
     //     trampoline svc, CallSVC, OnSvc, the handler, FinishSvc, back to the
