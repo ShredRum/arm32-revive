@@ -125,10 +125,10 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
   our dynarmic tree with all our patches; same menu runs. Gap gone = our
   bridge, gap stays = code generation; then bisect that half.
 - X3 LTO: undecided; measure on MCSM (most calls) before deciding.
-- Code review of the range from the capital review (2026-10-25) to the MCSM
-  branch start (0d1c81b): jit-dispatch, R-007, jit-opts. Not run yet.
-- A fresh phone APK set (all titles + MCSM base) with c98c753 (review
-  fixes), 0019 and the ADPF fixes: the owner's phone has older builds.
+- Code review of 2cba59a..0d1c81b: run 2026-11-09 (REVIEW.md), selective:
+  the dynarmic patches, the memory checks and mmap family were read; most
+  of dispatch.cpp/apphost.cpp/realgl.cpp in that range was not. Wave-1
+  area B also has only its summary.
 - X5 MCSM permissions, X7 display cutout (owner deciding), X8 language.
 - Old: R-014 (one SW2 black screen), R-010 (99 Bricks), section C cleanup.
 - MrEmpathy's SW2 build stays on the sandbox (package .ads, network blocked
