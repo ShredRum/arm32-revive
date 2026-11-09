@@ -1612,10 +1612,8 @@ static bool Boot(JavaVM* vm) {
     // Guest identity: the packaging step wrote the guest .so's SHA-256 next
     // to it inside the APK. Comparing it with the extracted image makes the
     // identity of the running guest a RUNTIME fact. The GNU build-id note is
-    // missing from some titles' images (Seasons, Space), so for them this is
-    // the only identity check there is; the build-id note stays as a second,
-    // independent signal where the image has one.
-    bool guest_identity_ok = !multi.empty();  // every library checked above
+    // missing from some titles' images (Seasons, Space): this is the identity
+    // check. (Several guest libraries were each checked above.)
     if (multi.empty()) {
         const std::size_t slash = guest_entry.find_last_of('/');
         const std::string digest_entry =
@@ -1662,7 +1660,6 @@ static bool Boot(JavaVM* vm) {
         }
         if (!want.empty() && !got.empty()) {
             if (wlow == got) {
-                guest_identity_ok = true;
                 Log("[guest] sha256 OK %s", got.c_str());
             } else {
                 Log("[guest] LOUD guest sha256 mismatch: apk says %s, image is %s -- refusing to run",
@@ -1732,7 +1729,6 @@ static bool Boot(JavaVM* vm) {
     }
     Log("guest: %zu imports %zu init halt=%08x once=%08x", g_mod->imports.size(),
         g_mod->init_array.size(), g_mod->halt_va, g_mod->once_va);
-    CheckGuestBuildId(*g_mod, guest_identity_ok);
     // Trampoline map (first 48): lets any future death-pc name its import
     // offline. Slots: 0 = halt (swi 0), 1 = once return (swi kSwiOnce), then
     // import idx at slot idx+2 (swi idx+1) -- so name it by the va printed

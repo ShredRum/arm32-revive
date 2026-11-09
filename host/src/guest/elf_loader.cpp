@@ -498,9 +498,6 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         return false;
     };
     auto apply_one = [&](std::uint32_t r_off, std::uint32_t type, std::uint32_t symidx) -> bool {
-        if (r_off == 0x672010u) {
-            std::printf("[relaudit] write to 00672010: type=%u symidx=%u\n", type, symidx);
-        }
         std::uint32_t cur = 0;
         if (!read32(r_off, cur)) {
             return false;

@@ -30,6 +30,9 @@ against `games/<id>/profile.toml`:
 | star-wars-ii | 143/144 | 4457 | 143 | 3 (same) |
 | star-wars-ii-amz | 143/144 | 4457 | 143 | 3 (same) |
 
+Since 2026-11-09: LOUD is 0 for every title (the build-id pin is gone), and
+`svc` is counted only by a `--diag` build (0 otherwise).
+
 Also: `fmt_test` ALL OK (shipping + `--diag`), `zip_test`, `cbnz_test`,
 `smoke_a32`; Seasons golden level (85-line state + 46 JSON fields, see
 games/seasons/JOURNAL.md); device gate on the sandbox
@@ -38,7 +41,7 @@ USAGE_ERROR/LOUD/STUCK/FATAL = 0, files/death.log 0 B, process alive).
 
 ## Next steps (as of 2026-10-27)
 
-1. Diag-only leftovers (no effect on shipping builds): Rio diag VAs armed for every title under HARNESS_DIAG (G-05/G-11, F-34), build-id pin (F-pin, R-001), HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE), remaining DiagOn-gated TEMP-DIAG logs.
+1. Diag-only leftovers (no effect on shipping builds): F-34, HARNESS_* experiment knobs (HOSTSHACK, DNS1/2, NETTYPE), remaining DiagOn-gated TEMP-DIAG logs.
 2. Reliability (owner 2026-10-27: only fixes with no runtime cost; guards against cases that do not occur are not worth a cost): F-24/F-25, C-09, C-22 (risky: may stop a title that reads NULL today), D-08/D-12/D-13, static fields 145-151, G-08/G-09/G-14, H-04, F-35/F-36; E-04 and C-11 need a measured cost first; fmt_test statfs f_namelen expects 255 (fails on the sandbox's filesystem: 256).
 3. S3/S4 leftovers per area; docs: games/*/JOURNAL.md stale AGENTS section references.
 4. Branch `bricks` (99 Bricks / Unity bring-up) changes the shared core. Before it
@@ -67,7 +70,7 @@ Status: open / confirmed / refuted / fixed (commit) / wontfix (reason).
 
 | id | sev | where | finding | evidence | status |
 |---|---|---|---|---|---|
-| R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | confirmed |
+| R-001 | S4 | elf_loader.h:134 CheckGuestBuildId; harness.cpp:687 | harness-only: non-Rio guests have no GNU build-id note, harness does not verify the SHA like apphost does (apphost.cpp:1484 passes identity_verified), so it prints LOUD. Bigger question for G: the shared core pins Rio VAs/hooks at all | readelf -n: no build-id in the 5 non-Rio guests; device path prints a plain line | fixed 2026-11-09 with F-pin: the pin is gone; harness LOUD 0 for every title |
 | R-002 | S2 | dispatch.cpp:4114,10071,10080,10086 | printf `%u` given size_t/unsigned long | clangd -Wformat | fixed 52120ed |
 | R-004 | S2 | star-wars-ii | boot ends at "Asset downloading failed": the ORIGINAL APK does the same on a real device (content servers are dead); star-wars-ii-amz ships the assets and is the playable build | wontfix (original behaviour); 2026-10-26 owner: plain star-wars-ii is no longer built or gated, `games/star-wars-ii/` is kept |
 | R-006 | S3 | getcwd / relative paths (MapGuestPath) | the bridge treats the files dir as the CWD (getcwd returns it, bare relative names go there); a real Android app's CWD is "/". The comment "original CWD = files dir" is unverified (2026-10-27: getcwd now returns the guest spelling and checks the buffer, the choice of directory was kept). Check what getcwd returns in the original APK on the sandbox | open |
@@ -262,7 +265,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | F-23/24 | S3 | MemoryReadCode, Read/Write | bad code read returns 0 (Dynarmic caches a zero block, wrong pc in the halt); bad data access halts only at block end, the rest of the block runs on 0. Fix: nullopt, check_halt_on_memory_access, MemoryAbort | F-23 fixed (MemoryReadCode -> nullopt, NoExecuteFault when reached, test); F-24 open |
 | F-25 | S3 | InitDataImports | runs before any Jit: LOUD branches call ActiveJit()->HaltExecution on null | open |
 | F-34 | S3 | diag mode | HARNESS_DIAG arms Rio probe VAs for all six titles | open |
-| F-pin | S3 | elf_loader.h IsPinnedGuest | build-id pin gates nothing (only its own log); delete it, harness verifies the SHA from profile.toml (closes R-001) | open |
+| F-pin | S3 | elf_loader.h IsPinnedGuest | build-id pin gates nothing (only its own log); delete it, harness verifies the SHA from profile.toml (closes R-001) | fixed 2026-11-09: removed; apphost's guest sha256 check is the identity |
 | F-01..03 | S4 | relocations | REL32 lacks -P (unused), weak undefined -> trampoline, GLOB_DAT addend applied (all 0 in these guests) | open |
 | F-06 | S3 | Find_exidx | exidx table returned for trampoline pcs; nest guard state shared across threads | open |
 | F-12..21 | S3 | elf parsing | unbounded table reads / uint32 wraps on malformed ELF (low risk: guest SHA is checked first) | open |
@@ -279,7 +282,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-02 | S2 | generic 0-stub | unimplemented imports answer 0: vasprintf never writes *strp (Rio libc++ 0x42690c), fnmatch always matches (Seasons 0x46100c), raise(SIGFPE) continues, geteuid = root, basename/setlocale NULL, wcslen/wmem*/towlower 0 in five titles | fixed b979090 |
 | G-03 | S3 | registry dump | ungated hex dump of the first 60 reads/writes of any "registry" file into apphost.log in shipping; FILE* set never pruned | fixed 2dadd39 |
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
-| G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | open |
+| G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | fixed: the probes were gone from the code; the last Rio-only VAs (loader relaudit, harness snapshots/death words) removed 2026-11-09 |
 | G-06 | S3 | apphost nativeDeinit | Java-stack forensics ran ungated on every exit (FindClass/NewObject/3000-char log, leaked refs) | fixed dbcb76c |
 | G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
 | G-09 | S3 | unwind nest guard | leftover racy crutch | open |

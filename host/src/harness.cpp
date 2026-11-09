@@ -29,12 +29,6 @@ namespace {
 constexpr unsigned kWatchdogSeconds = 60;
 volatile int g_current_init = -1;
 volatile bool g_running = false;
-std::uint32_t g_snap_region[64] = {};
-// Load-time value of the literal-pool word the init loop watches. The old
-// check compared against a Rio-specific constant (0x2200990d), which made
-// every non-Rio title print "[corrupt]" after every init even though the
-// image was intact. Baseline must come from the loaded image itself.
-std::uint32_t g_snap_4de210 = 0;
 
 void Watchdog(int) {
     char buf[128];
@@ -648,13 +642,6 @@ int main(int argc, char** argv) {
     std::printf("loaded %s: %zu imports (%zu pending data), %zu init, %zu fini, halt=%08x\n",
                 mod.path.c_str(), mod.imports.size(), mod.pending_data.size(), mod.init_array.size(),
                 mod.fini_array.size(), mod.halt_va);
-    abr::CheckGuestBuildId(mod);
-    // Temporary GOT audit: JUMP_SLOT region must not retain file values.
-    for (std::uint32_t a : {0x671000u, 0x671010u, 0x671018u, 0x671020u}) {
-        std::uint32_t v = 0;
-        std::memcpy(&v, mem.host(a), 4);
-        std::printf("[got] %08x = %08x\n", a, v);
-    }
     for (const auto& pd : mod.pending_data) {
         std::printf("[pending] loc=%08x idx=%u (%s) addend=%08x\n", pd.loc_va, pd.import_idx,
                     mod.imports[pd.import_idx].name.c_str(), pd.addend);
@@ -667,20 +654,6 @@ int main(int argc, char** argv) {
                         mod.imports[i].tramp_va);
         }
     }
-    // Snapshot of the mystery region: what is at VA 0x672010 right after load?
-    {
-        std::uint32_t v = 0;
-        std::memcpy(&v, mem.host(0x672010), 4);
-        std::printf("[snap] VA 00672010 after load = %08x (base=%p)\n", v, (void*)mem.base());
-        std::uint32_t w = 0;
-        std::memcpy(&w, mem.host(0x4de210), 4);
-        g_snap_4de210 = w;
-        std::printf("[snap] VA 004de210 after load = %08x\n", w);
-        for (int i = 0; i < 64; i++) {
-            std::memcpy(&g_snap_region[i], mem.host(0x672000 + i * 4), 4);
-        }
-    }
-
     abr::Runtime rt(mem, mod);
     rt.AddModuleSegments(mod);
     // Canary + errno slot for the main thread (before InitDataImports: the
@@ -885,28 +858,11 @@ int main(int argc, char** argv) {
         std::printf("hr=%d (+%llu svc)\n", static_cast<int>(hr),
                     (unsigned long long)(rt.svc_count - svc_before));
         std::fflush(stdout);
-        // Corruption watch: literal pool word must survive all inits.
-        {
-            std::uint32_t w = 0;
-            std::memcpy(&w, mem.host(0x4de210), 4);
-            if (w != g_snap_4de210) {
-                std::printf("[corrupt] VA 004de210 = %08x after init #%zu (load=%08x)\n", w, k,
-                            g_snap_4de210);
-            }
-        }
         if (hr == Dynarmic::HaltReason::UserDefined1) {
             ok_count++;
         } else {
             std::printf("[init] #%zu @%08x HALTED hr=%d regs: r0=%08x lr=%08x\n", k,
                         mod.init_array[k], static_cast<int>(hr), regs[0], regs[14]);
-            // Death-state snapshot: key words that feed the fatal path.
-            for (std::uint32_t a : {0x4de210u, 0x672010u, 0x1aed88u, 0x66ffccu, 0x66e668u}) {
-                std::uint32_t v = 0xDEADDEADu;
-                if (rt.CheckRange(a, 4, false)) {
-                    std::memcpy(&v, mem.host(a), 4);
-                }
-                std::printf("[death] *(%08x) = %08x\n", a, v);
-            }
             break;
         }
         jit.ClearHalt(Dynarmic::HaltReason::UserDefined1);
@@ -915,20 +871,6 @@ int main(int argc, char** argv) {
     std::printf("init done: %zu/%zu clean, svc=%llu halts=%llu\n", ok_count, mod.init_array.size(),
                 (unsigned long long)rt.svc_count, (unsigned long long)rt.halt_count);
     if (ok_count != mod.init_array.size()) {
-        // Diff the mystery region vs post-load snapshot: did any filler run?
-        int ndiff = 0;
-        for (int i = 0; i < 64; i++) {
-            std::uint32_t v = 0;
-            std::memcpy(&v, mem.host(0x672000 + i * 4), 4);
-            if (v != g_snap_region[i]) {
-                if (ndiff < 10) {
-                    std::printf("[regdiff] %08x: load=%08x now=%08x\n", 0x672000 + i * 4,
-                                g_snap_region[i], v);
-                }
-                ndiff++;
-            }
-        }
-        std::printf("[regdiff] total changed words: %d\n", ndiff);
         auto& regs = jit.Regs();
         std::printf("[bt] sp=%08x r11=%08x lr=%08x\n", regs[13], regs[11], regs[14]);
         std::printf("[bt] r4-r10:");
