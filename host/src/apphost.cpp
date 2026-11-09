@@ -940,7 +940,8 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     words.push_back(g_rt->WrapObject(thiz));
     AppendJniArgs(words, sig, ap, floats, [](void* o) { return g_rt->WrapObject(o); });
     // HARNESS_PROF: a render-thread frame that takes too long is broken down.
-    const bool frame_prof = abr::prof::g_enabled && !st->in_guest.load() && std::strstr(name, "nativeRender");
+    const bool frame_prof = abr::prof::g_enabled && !st->in_guest.load() &&
+                            (std::strstr(name, "nativeRender") || std::strstr(name, "nativeUpdate"));
     const std::uint64_t frame_t0 = frame_prof ? abr::prof::FrameBegin() : 0;
     Dynarmic::A32::Jit* used = nullptr;
     const Dynarmic::HaltReason hr = RunWordsOn(*st, name, va, words, &used);
