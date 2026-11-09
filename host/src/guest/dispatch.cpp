@@ -641,6 +641,11 @@ bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool
         if (h.end == 0) {
             return false;
         }
+        if (!h.uniform) {
+            // Pages that differ: the answer is for this range only.
+            const int p = h.prot;
+            return exec ? (p & PROT_EXEC) != 0 : write ? (p & PROT_WRITE) != 0 : (p & PROT_READ) != 0;
+        }
         hit.s = h.start;
         hit.e = h.end;
         hit.p = h.prot;
@@ -1534,6 +1539,10 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
         const MappingTable::Hit h = mappings_.Find(guest, size);
         if (h.end == 0) {
             return false;
+        }
+        if (!h.uniform) {
+            // Pages that differ: the answer is for this range only.
+            return write ? ((h.prot & PROT_WRITE) != 0) : ((h.prot & PROT_READ) != 0);
         }
         hit.s = h.start;
         hit.e = h.end;

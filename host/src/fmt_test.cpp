@@ -167,6 +167,7 @@ struct RuntimeTestAccess {
     }
     static std::size_t FreeErrnoCount(Runtime& rt) { return rt.errno_free_.size(); }
     static bool InMapping(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, false); }
+    static bool Writable(Runtime& rt, std::uint32_t a, std::size_t n) { return rt.CheckRange(a, n, true); }
     static void MapRwx(Runtime& rt, std::uint32_t a, std::uint32_t n) {
         rt.mem().Map(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
         rt.AddMapping(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
@@ -1611,6 +1612,17 @@ int main() {
                  " old=" + (abr::RuntimeTestAccess::InMapping(rt, m, 1) ? "mapped" : "gone");
         }
         Expect("mremap: in place refused when taken, moves with MAYMOVE", mr, "-1 kept old=gone");
+        // A range over pages of different protections answers for itself
+        // only: the RW page stays writable after a read check of RW+R.
+        const std::uint32_t pp = mmap_at(0, 2 * 4096, PROT_READ | PROT_WRITE, 0);
+        std::string mixed = "mmap-failed";
+        if (pp != 0xFFFFFFFFu) {
+            mmap_at(pp + 4096, 4096, PROT_READ, MAP_FIXED);
+            mixed = std::string(abr::RuntimeTestAccess::InMapping(rt, pp, 2 * 4096) ? "r" : "-") +
+                    (abr::RuntimeTestAccess::Writable(rt, pp, 4) ? "w" : "-") +
+                    (abr::RuntimeTestAccess::Writable(rt, pp + 4096, 4) ? "w" : "-");
+        }
+        Expect("mapping check over pages that differ is not cached for the span", mixed, "rw-");
         // Boehm's GC_unmap shape: PROT_NONE MAP_FIXED over the middle page of
         // a three-page mapping, then a partial munmap of the first page.
         const std::uint32_t t = mmap_at(0, 3 * 4096, PROT_READ | PROT_WRITE, 0);

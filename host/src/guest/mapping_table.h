@@ -46,6 +46,11 @@ public:
         std::uint32_t start = 0;
         std::uint32_t end = 0;  // exclusive; 0 = no mapping
         int prot = 0;
+        // Every page of [start, end) has `prot`. False when the range asked
+        // for spans pages that differ: `prot` is then their intersection,
+        // right for that range only, and a cache must not reuse the hit for
+        // a part of it.
+        bool uniform = true;
     };
 
     static bool InArena(std::uint32_t start, std::uint64_t end) {
@@ -224,7 +229,7 @@ private:
                 hi++;
             }
         }
-        return Hit{kArenaBase + (lo << 12), kArenaBase + ((hi + 1) << 12), prot};
+        return Hit{kArenaBase + (lo << 12), kArenaBase + ((hi + 1) << 12), prot, uniform};
     }
 
     struct Entry {
