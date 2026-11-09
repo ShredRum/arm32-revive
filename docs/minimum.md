@@ -124,6 +124,11 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
   0.1-0.3 ms of the 0.8). Next step: build his bridge (scratchpad/cmp) on
   our dynarmic tree with all our patches; same menu runs. Gap gone = our
   bridge, gap stays = code generation; then bisect that half.
+  Done 2026-11-09 (sandbox, SW2 menu, process CPU per frame, 3 cold runs
+  each): his build 9.95/10.16/10.00 ms; his bridge on our dynarmic tree
+  10.46/10.38/10.39; ours 10.88/11.06/10.87. So of ~0.9 ms, ~0.37 ms is
+  code generation (our dynarmic vs his) and ~0.53 ms is the bridge.
+  Build: ~/Рабочий стол/mrempathy-cmp/build-ourdyn.sh, package-ourdyn.sh.
 - X3 LTO: undecided; measure on MCSM (most calls) before deciding.
 - Code review of 2cba59a..0d1c81b: run 2026-11-09 (REVIEW.md), selective:
   the dynarmic patches, the memory checks and mmap family were read; most
