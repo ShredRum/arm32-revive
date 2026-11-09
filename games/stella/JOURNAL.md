@@ -28,12 +28,28 @@ titles): the Google Play original, not rebuilt.
   `dl_unwind_find_exidx` (link.h, same contract); that import was not
   served. Now it shares the exidx handler: the exception is caught, the
   engine goes on, offline network errors are caught by the engine too.
-- OPEN: then a host SIGSEGV inside libart (death.log: hpc in libart text,
-  CheckLoadStringByTypeIdx / ErrorStringPrintf region per its .symtab, fault
-  address looks like UTF-16 text), guest at the halt trampoline (a guest
-  call had returned). The last JNI calls before it: GetByteArrayElements /
-  ReleaseByteArrayElements of an 8192-byte array on a second thread
-  (likely AudioOutput.nativeMixData, nested inside nativeInit). Suspect
-  memory corruption earlier, not that call itself. Next: a run with
-  HARNESS_DIAG and the JNI ref bookkeeping (local frames, wrapped objects)
-  around nativeMixData; compare with Seasons, which also nests it and works.
+- Then a host SIGSEGV inside libart on the UI thread. Fixed (below).
+
+## 2026-11-09: the libart crash = a direct-buffer copy-back into freed memory
+
+- death.log now keeps the interrupted thread's own frame chain, its
+  registers and /proc/self/maps. libart's text is linked at +0x23000 from
+  its file offset: the crash was mspace_malloc in ART's **non-moving
+  space**, following a free-list pointer read out of high-entropy bytes
+  (earlier symbolization without the bias pointed at DexFileVerifier: wrong).
+- On Android 7 a direct ByteBuffer is a non-movable Java array in that
+  space. During nativeInit the engine reads data through many short-lived
+  direct buffers (GetDirectBufferAddress, then DeleteLocalRef). The host
+  gave the guest a shadow copy and wrote it back only when nativeInit
+  returned, seconds later: by then the collector had freed some of those
+  buffers, so the copy-back wrote over freed heap. Now the shadow goes back
+  when the guest releases the reference (still alive then), or at the end
+  of the call, whichever comes first.
+- CheckJNI (DIAG=1 debuggable twin) reported nothing: the bad write was a
+  plain memcpy, not a JNI call.
+- Result: boots to the island menu, 60 s alive, death.log empty. The five
+  live titles pass the sandbox gate with this build.
+- Not reproduced: one jitcallbacks=on DIAG log lacked the nested
+  nativeMixData's ReleaseByteArrayElements line; the next run had it
+  (lines from several threads interleave in apphost.log).
+- Next: play a level (touch, audio), then the Zappar scanner libraries.
