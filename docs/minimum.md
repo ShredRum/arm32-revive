@@ -129,6 +129,11 @@ Ideas only (MrEmpathy's ports have no license: no code copied).
   10.46/10.38/10.39; ours 10.88/11.06/10.87. So of ~0.9 ms, ~0.37 ms is
   code generation (our dynarmic vs his) and ~0.53 ms is the bridge.
   Build: ~/Рабочий стол/mrempathy-cmp/build-ourdyn.sh, package-ourdyn.sh.
+  .ads vs .amz (their engine .so differ, a separate build of 1.9.25): his
+  bridge packaged from the amz APK, all on the charger, same session: his
+  amz 10.17/10.28/10.04, his ads 10.33/10.15/(11.06), ours amz
+  11.35/11.27/(12.26) ms. The APK makes no difference; the gap on the
+  charger is ~1.1 ms (warmer phone).
 - X3 LTO: undecided; measure on MCSM (most calls) before deciding.
 - Code review of 2cba59a..0d1c81b: run 2026-11-09 (REVIEW.md), selective:
   the dynarmic patches, the memory checks and mmap family were read; most
