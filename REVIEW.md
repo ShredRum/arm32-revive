@@ -315,3 +315,30 @@ fmt_test ALL OK PC and arm64):
 Not taken: the mutex destroy witness (removed on purpose in 0fd81d8, bionic
 behaviour; destroying a mutex another thread is about to lock is guest UB);
 Ret's HARNESS_NOJITCALLBACKS branch (keeps the old cost for A/B).
+
+## 2026-11-09: code review of 2cba59a..0d1c81b (capital review to the MCSM branch)
+
+One `/code-review high` run. The range is ~170 commits; the reviewer read
+selectively: dynarmic 0001, 0002, 0005-0012, mapping_table.h,
+jni_call_words.h, CheckAccess/CheckRange, mmap/mprotect/munmap/mremap, the
+TLS thunk, the cond-queue rewrite, the JNI string temp refs, codewatch. Most
+of dispatch.cpp, apphost.cpp and realgl.cpp was not read line by line.
+8 findings, each checked against the current code:
+- Fixed: a mapping hit over arena pages of different protections was cached
+  for the whole span with their intersection, so a later check of a more
+  permissive page inside it failed (a legal write halted the guest).
+  Hits now say whether they are uniform; CheckAccess/CheckRange cache only
+  uniform ones.
+- Fixed: mremap(MREMAP_MAYMOVE) of PROT_NONE pages copied them with a host
+  memcpy (host SIGSEGV). The old pages are opened to reads first.
+- Fixed (dynarmic 0021): 0011's runs could join an op in the guest's own FP
+  mode (latent: the A32 frontend never emits one).
+- Accepted, documented: 0012 sees a callback's halt at the next backward
+  link, SVC or dispatcher exit (patches/dynarmic/README.md); on a 16 KB-page
+  host, guest mprotect/munmap of 4 KB pages is not enforced against JIT code
+  (comment in GuestMprotect); 0010's whole-D-register VLD1/VST1 is not
+  per-element atomic against another thread (no title relies on it);
+  0008's codewatch rehash holds cache_mutex (diag builds only); edeec19
+  bundled three changes (history).
+- B (files/sockets/assets/time) of wave 1 still has only its summary; the
+  unread parts of this range stay unreviewed.
