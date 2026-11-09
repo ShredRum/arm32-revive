@@ -5115,7 +5115,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     case I::__gnu_Unwind_Find_exidx_:
-    if (id == I::__gnu_Unwind_Find_exidx_) {
+    case I::dl_unwind_find_exidx_:
+    // bionic's dl_unwind_find_exidx (link.h) has the same contract: the
+    // .ARM.exidx table of the module holding pc, and its entry count. An
+    // unwinder that defines its own __gnu_Unwind_Find_exidx calls it
+    // (Angry Birds Stella).
+    if (id == I::__gnu_Unwind_Find_exidx_ || id == I::dl_unwind_find_exidx_) {
         // Nest guard (subagent #6): the phase driver can re-present the same
         // handler frame forever (pad transfer never happens) — 131K nested
         // throws, 64B/level, 8MB stack blow. Legit retry loops REUSE stack;

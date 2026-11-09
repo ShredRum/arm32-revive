@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Stella
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "stella"
+title        = "Angry Birds Stella"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
+
+[apk]
+package      = "com.rovio.angrybirdsstella"
+version_name = "1.1.5"
+version_code = 1152
+# The original says min 14 / target 21; Android 14+ refuses to install a
+# package that targets below 24 (as Seasons, which shipped with 22). 24 is the
+# smallest step from the original's behaviour that installs.
+min_sdk      = 24
+target_sdk   = 24
+original     = "original/com.rovio.angrybirdsstella.1152.apk"
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libPurple.so"          # Gen.library_name, loaded by App.onCreate
+size   = 9004672
+sha256 = "03f567d12fb608b0d3cb0713fcb188407c6f6c0f4d3e29cb2f3515bc0c265767"
+md5    = "42e95100be703c5fcd22d62ba5025602"
+# The Zappar scanner (com.extrareality.SceneGraph: ers_cpu_check,
+# stlport_shared, scenegraph[_neon]) loads its own libraries only when the
+# scanner opens; not served yet (JOURNAL.md).
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"   # framework shared by the whole series
+jni_exports  = 83                   # 44 com.rovio.fusion + 39 com.rovio.skynest
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+
+[strip]
+libs = []
+
+[tree]
+smali_lib_name_orig = "Purple"   # Gen.smali: const-string v0, "Purple" -> "abhost"

@@ -327,4 +327,208 @@ extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purch
 extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
     abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone", "(J)V", env, thiz, a0); return;
 }
-// GEN_COUNT=109
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jdouble a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement", "(JILjava/lang/String;ZD)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone", "(JI)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged(JNIEnv* env, jobject thiz, jboolean a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged", "(Z)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit", "()V", env, thiz); return;
+}
+extern "C" jint Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeInit(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeInputAxis(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInputAxis", "(IFI)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativePause(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativePause", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResume", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate", "()Z", env, thiz);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeDeinit", "()V", env, thiz); return;
+}
+extern "C" jint Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeInit(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInputAxis(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInputAxis", "(IFI)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeKeyInput(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativePause(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativePause", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResume", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeUpdate", "()Z", env, thiz);
+}
+extern "C" void Java_com_rovio_fusion_Share_onShareClosed(JNIEnv* env, jclass thiz, jint a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_Share_onShareClosed", "(I)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_AdsSdk_onAdHidden(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdHidden", "(JI)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_AdsSdk_onAdReady(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdReady", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_AdsSdk_onAdShown(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdShown", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_AdsSdk_onAdSizeChanged(JNIEnv* env, jobject thiz, jlong a0, jint a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdSizeChanged", "(JII)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_AdsSdk_onClick(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onClick", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_AgeGenderQuery_onNativeCancel(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AgeGenderQuery_onNativeCancel", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_AgeGenderQuery_onNativeCompleted(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jobject a3) {
+    abr::AppHost_Call("Java_com_rovio_skynest_AgeGenderQuery_onNativeCompleted", "(JILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_backButtonPressed(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_backButtonPressed", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_checkEmail(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_checkEmail", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_checkPassword(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_checkPassword", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_onButtonClicked(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_onButtonClicked", "(JI)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_onRegisterNewAccount(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2, jint a3, jint a4, jint a5, jobject a6, jint a7) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_onRegisterNewAccount", "(JLjava/lang/String;Ljava/lang/String;IIILjava/lang/String;I)V", env, thiz, a0, a1, a2, a3, a4, a5, a6, a7); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_onRequestNewPassword(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_onRequestNewPassword", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_IdentityLoginUI_onSignInClicked(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_IdentityLoginUI_onSignInClicked", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onCustomControlClicked(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jfloat a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onCustomControlClicked", "(JLjava/lang/String;F)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onVideoEnded(JNIEnv* env, jobject thiz, jlong a0, jboolean a1, jfloat a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onVideoEnded", "(JZF)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onVideoTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onVideoTrackEvent", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_linkClickedCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_linkClickedCallback", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_urlLoadedCallback(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_urlLoadedCallback", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_viewCollapsedCallback(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_viewCollapsedCallback", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_viewExpandedCallback(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_viewExpandedCallback", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_viewHiddenCallback(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_viewHiddenCallback", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jint a2, jobject a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished", "(JLjava/lang/String;ILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/skynest/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetFriendsCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetFriendsCallback", "(JLjava/lang/String;I)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetUserProfileCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetUserProfileCallback", "(JLjava/lang/String;I)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onLoginCompleteCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jboolean a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onLoginCompleteCallback", "(JLjava/lang/String;ZI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onSendAppRequestCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onSendAppRequestCallback", "(JLcom/rovio/skynest/socialnetwork/SocialServiceResponse;I)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onShareCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onShareCallback", "(JLcom/rovio/skynest/socialnetwork/SocialServiceResponse;I)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewClosed(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewClosed", "(JI[Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared", "(J[Ljava/lang/String;[Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+// GEN_COUNT=177
