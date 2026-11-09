@@ -153,6 +153,12 @@ blocks contains such a link, so a spinning loop still stops (fmt_test halts
 one from another thread), and straight code soon reaches the dispatcher or an
 SVC, which check too. dispatch_bench: branchy loop 2.50 -> 2.40 ns, call and
 return 2.88 -> 2.78 ns.
+A halt that a memory callback asks for (the host's BAD read/write of a wild
+guest pointer) is therefore seen at the next backward link, SVC or
+dispatcher exit, not at the next forward link: the guest may run on to the
+end of its forward chain of blocks first. Every access there is still
+checked (no host fault); a halting guest's own memory is not protected
+from it. Accepted for the cost (code review 2026-11-09).
 
 ## 0013-guest-pc-for-host-pc.patch
 
@@ -272,3 +278,11 @@ steady clock at 24 MHz. A coprocessor a user attaches for cp15 still wins.
 Which reads are the timer is decided in one place,
 `frontend/A32/a32_generic_timer.h`, used by the frontend and both backends.
 fmt_test: CNTVCT twice, not decreasing; CNTFRQ nonzero.
+
+## 0021-fpcr-run-standard-mode-only.patch
+
+0011 let vector math share one FPCR switch from its opcode alone. An
+operation of those opcodes whose `fpcr_controlled` is true (the guest's own
+mode, not the standard one) now never joins a run, so a run cannot set one
+mode and leave its neighbour in the other. The A32 frontend always passes
+false today; this keeps 0011 right if that changes (code review).

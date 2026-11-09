@@ -1,0 +1,13 @@
+--- a/src/dynarmic/backend/arm64/emit_arm64_vector_floating_point.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_vector_floating_point.cpp
+@@ -59,7 +59,9 @@
+     case IR::Opcode::FPVectorMul64:
+     case IR::Opcode::FPVectorMulAdd32:
+     case IR::Opcode::FPVectorMulAdd64:
+-        return true;
++        // Standard mode only: the last argument is fpcr_controlled, and an
++        // operation in the guest's own mode never joins a run.
++        return !inst.GetArg(inst.NumArgs() - 1).GetU1();
+     default:
+         return false;
+     }
