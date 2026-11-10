@@ -369,3 +369,18 @@ boot (com.google.android.gms SignInActivity, from com.prime31.GameHelper
 patch of PlayGameServicesPlugin.authenticate() alone did not remove it
 (dropped, not committed). The comparison build of 889703b for the sandbox
 is work/boots/libabhost_889703b_sandbox.so.
+
+Review of 889703b..HEAD (2026-11-10, code-review skill at medium + a manual
+pass over threads and the Android-only code): 10 findings, 9 fixed in
+add9d17 (glGetFloatv variable lists overflowed a host array; ensure_parent
+lost a race between two threads; fread halted on a count larger than the
+buffer; strtok_r skipped a wild save pointer; dead duplicate handlers;
+boots.sh and harness-all.sh checks). The tenth (batch 7 answers 0 where a
+PC mock answered) is the owner's decision and stays. Manual pass: cond /
+rwlock / once without mutex_, the ThreadEnter fast path, the JNIEnv cache,
+pthread_create's attr, 28c6491 (audio copy freed at release) read again:
+nothing found beyond ExceptionDescribe (runs Java) taken off the
+"no Java" JNI list. The 99 Bricks early death is NOT explained by the
+review: no new LOUD line preceded it, so batch 7, fcntl and the stub are
+ruled out; it still needs boot batches against 889703b.
+Not re-gated on a device after these fixes (the sandbox was off).

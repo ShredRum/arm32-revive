@@ -14828,7 +14828,9 @@ std::uint32_t Runtime::NewByteArray(std::uint32_t len) {
 // monitors. Everything else may (calls, constructors, class lookup and the
 // ID getters that initialise a class, Throw, the JavaVM table).
 static bool JniRunsNoJava(std::uint32_t fn) {
-    return (fn >= 15 && fn <= 26 && fn != 18) || fn == 31 || fn == 32 || (fn >= 95 && fn <= 112) ||
+    // Not 16: ExceptionDescribe runs Throwable.printStackTrace(). Not 18: FatalError.
+    return fn == 15 || fn == 17 || (fn >= 19 && fn <= 26) || fn == 31 || fn == 32 ||
+           (fn >= 95 && fn <= 112) ||
            (fn >= 145 && fn <= 214) || (fn >= 217 && fn <= 228) || (fn >= 230 && fn <= 232);
 }
 
