@@ -2574,6 +2574,29 @@ int main() {
         Expect("ARM: barriers run, an unattached coprocessor halts", run(kPage, 0x10), "7,0,stopped");
         Expect("Thumb: the same", run(kPage + 0x100, 0x30), "7,0,stopped");
         Expect("ARM: add pc, r0, pc branches to r0 + pc", run(kPage + 0x200, 0x10), "4,3,stopped");
+        // A store into a write-guarded range (RELRO after relocation) is not
+        // done and halts the guest (it used to be dropped while the guest
+        // ran on): mov r1,#0x77; str r1,[r0]; mcr p3. r0 is set below.
+        const std::uint32_t store[] = {0xe3a01077, 0xe5801000, 0xee010310};
+        std::memcpy(rt.H(kPage + 0x300), store, sizeof(store));
+        const std::uint32_t kGuarded = kPage + 0x800;
+        std::memset(rt.H(kGuarded), 0, 8);
+        rt.AddWriteGuard(kGuarded, 4, "TEST");
+        const auto store_to = [&](std::uint32_t at) {
+            jit.ClearHalt(Dynarmic::HaltReason::UserDefined2);
+            jit.Regs().fill(0);
+            jit.Regs()[0] = at;
+            jit.Regs()[15] = kPage + 0x300;
+            jit.SetCpsr(0x10);
+            jit.Run();
+            std::uint32_t v = 0;
+            std::memcpy(&v, rt.H(at), 4);
+            return std::to_string(v);
+        };
+        Expect("a store next to the guard is done", store_to(kGuarded + 4), "119");
+        abr::RuntimeTestAccess::TakeStopped(rt);  // the mcr that ends the program
+        Expect("a store into the guard is not done", store_to(kGuarded), "0");
+        Expect("a store into the guard halts", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
         rt.ThreadEnter(nullptr, 0);
         rt.ReleaseCpuId(id);
     }

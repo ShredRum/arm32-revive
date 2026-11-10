@@ -483,7 +483,6 @@ public:
     void AddWriteGuard(std::uint32_t start, std::uint32_t size, const char* what);
     // True when [addr,addr+size) lies inside a guard; *what names it.
     bool WriteGuardHit(std::uint32_t addr, std::size_t size, const char** what);
-    bool NoteWriteGuard() { return ++write_guard_hits_ <= 32; }
     // Valid code addresses: module RX segments, trampoline page, HALT slot.
     bool IsCodeAddress(std::uint32_t va);
 
@@ -806,10 +805,7 @@ public:
     }
 
     // True for the first few bad accesses (log), false once flooding.
-    bool NoteBad() {
-        bad_count++;
-        return bad_count <= 10;
-    }
+    bool NoteBad() { return bad_count.fetch_add(1, std::memory_order_relaxed) < 10; }
 
     // Event ring (HARNESS_MALLOCLOG=1): last 200k malloc/free lines in RAM,
     // zero steady-state I/O; DumpEventRing() prints them on demand at
@@ -1285,7 +1281,6 @@ private:
         const char* what;
     };
     std::vector<WriteGuard> write_guards_;
-    std::atomic<unsigned> write_guard_hits_{0};
     // Real GLES backend (HARNESS_REALGL=1); null until first gl* call.
     // Harness-only bring-up; same forwarding serves the device build later.
     class RealGL* realgl_ = nullptr;
@@ -1362,7 +1357,7 @@ private:
         if ((addr & (sizeof(T) - 1)) != 0) {
             // ARMv7: an unaligned exclusive access is an alignment fault.
             if (rt_->NoteBad()) {
-                std::printf("[mem] BAD unaligned exclusive write @ %08x size %zu -- halting\n",
+                std::printf("[mem] LOUD BAD unaligned exclusive write @ %08x size %zu -- halting\n",
                             addr, sizeof(T));
             }
             rt_->stop_step_ = true;
@@ -1374,7 +1369,7 @@ private:
         if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat) ||
             !rt_->CheckAccess(addr, sizeof(T), true, false)) {
             if (rt_->NoteBad()) {
-                std::printf("[mem] BAD exclusive write @ %08x size %zu%s%s -- halting\n", addr,
+                std::printf("[mem] LOUD BAD exclusive write @ %08x size %zu%s%s -- halting\n", addr,
                             sizeof(T), gwhat ? " guard=" : "", gwhat ? gwhat : "");
             }
             rt_->stop_step_ = true;

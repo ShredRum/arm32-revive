@@ -14732,7 +14732,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         if (jfn == 6 || jfn == 4 || jfn == 7) {  // GetEnv / Attach / AttachAsDaemon
             if (!CheckRange(a1, 4, true)) {
-                std::printf("[jvm] fn#%u BAD env_out %08x -- halting\n", jfn, a1);
+                std::printf("[jvm] LOUD fn#%u BAD env_out %08x -- halting\n", jfn, a1);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
@@ -14891,7 +14891,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // 5th arg (buf) rides the guest stack at [sp].
         std::uint32_t buf = 0;
         if (!CheckRange(regs[13], 4, false)) {
-            std::printf("[jni] region BAD sp %08x -- halting\n", regs[13]);
+            std::printf("[jni] LOUD region BAD sp %08x -- halting\n", regs[13]);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
@@ -14934,7 +14934,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (fn == 220) {
             const std::uint32_t want = a3 * 2;
             if (!CheckRange(buf, want, true)) {
-                std::printf("[jni] region BAD buf %08x -- halting\n", buf);
+                std::printf("[jni] LOUD region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
@@ -14967,7 +14967,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
             const std::uint32_t want = static_cast<std::uint32_t>(bytes.size());
             if (!CheckRange(buf, want, true)) {
-                std::printf("[jni] region BAD buf %08x -- halting\n", buf);
+                std::printf("[jni] LOUD region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
@@ -16704,7 +16704,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     }
     case 6: {  // FindClass(env, name) -> jclass (interned mock)
         if (!CheckRange(a1, 1, false)) {
-            std::printf("[jni] FindClass BAD name %08x -- halting\n", a1);
+            std::printf("[jni] LOUD FindClass BAD name %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
@@ -16735,7 +16735,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 144:  // GetStaticFieldID(env, class, name, sig) -> jfieldID cookie
     {
         if (!CheckRange(a2, 1, false) || !CheckRange(a3, 1, false)) {
-            std::printf("[jni] Get%sMethodID BAD name/sig -- halting\n",
+            std::printf("[jni] LOUD Get%sMethodID BAD name/sig -- halting\n",
                         fn == 33 ? "" : "Static");
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -16944,7 +16944,7 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
     }
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
+            std::printf("[mem][t%u] LOUD BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x -- halting\n",
                         t_hot.tid, exec ? "exec" : "read", addr, sizeof(T),
                         rt_->ActiveJit()->Regs()[15], rt_->ActiveJit()->Regs()[14],
                         rt_->ActiveJit()->Regs()[4]);
@@ -16975,34 +16975,22 @@ void GuestCallbacks::Write(VAddr addr, T v) {
     if (prof::g_enabled) {
         prof::t_slow_mem++;
     }
-    {
-        const char* gwhat = nullptr;
-        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
-            // RELRO after relocation: the real loader makes these pages
-            // read-only, so this write cannot be legitimate. Refuse it (a
-            // zeroed GOT slot turns the next PLT call into `pc = 0`), and name
-            // the writer: pc + caller LR + the args that name the victim/source.
-            if (rt_->NoteWriteGuard()) {
-                std::printf("[mem] %s write REFUSED @ %08x size %zu guest-pc=%08x lr=%08x\n",
-                            gwhat, addr, sizeof(T), rt_->ActiveJit()->Regs()[15],
-                            rt_->ActiveJit()->Regs()[14]);
-                std::printf("[mem] %s REFUSED regs r0=%08x r1=%08x r2=%08x r3=%08x "
-                            "r4=%08x r5=%08x r6=%08x r7=%08x\n",
-                            gwhat, rt_->ActiveJit()->Regs()[0], rt_->ActiveJit()->Regs()[1],
-                            rt_->ActiveJit()->Regs()[2], rt_->ActiveJit()->Regs()[3],
-                            rt_->ActiveJit()->Regs()[4], rt_->ActiveJit()->Regs()[5],
-                            rt_->ActiveJit()->Regs()[6], rt_->ActiveJit()->Regs()[7]);
-            }
-            return;
-        }
-    }
-    if (!rt_->CheckAccess(addr, sizeof(T), true, false)) {
+    // RELRO after relocation is read-only as the real loader makes it (the
+    // mapping table says so; the guard list names it and also covers a
+    // RELRO that shares a table entry). A write there halts like any other
+    // bad write: it used to be dropped while the guest ran on.
+    const char* gwhat = nullptr;
+    if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat) || !rt_->CheckAccess(addr, sizeof(T), true, false)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,
-                        sizeof(T), rt_->ActiveJit()->Regs()[15]);
+            std::printf("[mem] LOUD BAD write @ %08x size %zu%s%s guest-pc=%08x -- halting\n", addr,
+                        sizeof(T), gwhat ? " guard=" : "", gwhat ? gwhat : "",
+                        rt_->ActiveJit()->Regs()[15]);
             // The registers that usually name the writer and its object.
-            std::printf("[mem] BAD regs lr=%08x r4=%08x r5=%08x r6=%08x r7=%08x\n",
-                        rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[4],
+            std::printf("[mem] BAD regs lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
+                        "r6=%08x r7=%08x\n",
+                        rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[0],
+                        rt_->ActiveJit()->Regs()[1], rt_->ActiveJit()->Regs()[2],
+                        rt_->ActiveJit()->Regs()[3], rt_->ActiveJit()->Regs()[4],
                         rt_->ActiveJit()->Regs()[5], rt_->ActiveJit()->Regs()[6],
                         rt_->ActiveJit()->Regs()[7]);
             rt_->DumpEventRing();
@@ -17130,7 +17118,7 @@ void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) { Write(a, v); }
 void GuestCallbacks::MemoryWrite64(VAddr a, std::uint64_t v) { Write(a, v); }
 
 void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
-    std::printf("[jit] InterpreterFallback pc=%08x n=%zu\n", pc, n);
+    std::printf("[jit] LOUD InterpreterFallback pc=%08x n=%zu -- halting\n", pc, n);
     rt_->stop_step_ = true;
     rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
 }
