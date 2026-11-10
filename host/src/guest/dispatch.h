@@ -469,18 +469,12 @@ public:
     // AbrHeapCorruptionHook). Polled by the watchdog.
     unsigned HeapCorruptionCount();
     std::uint32_t HeapCorruptionPc();
-    // HUNT watch (HARNESS_HEAPWATCH): true = write lands outside every live
-    // heap allocation (overflow); quarantined = UAF write. LOUD capped.
-    // Runs on EVERY guest store when fastmem is off: hunt-only cost.
-    bool HeapWatchViolation(std::uint32_t addr, std::size_t size);
 
     // The live-block index (live_heap.h): exact base lookups for free and
-    // realloc; Containing is a bounded back-probe for diagnostics. The heap
-    // lock (heap_mu_) is taken inside.
+    // realloc. The heap lock (heap_mu_) is taken inside.
     void LiveIdxInsert(std::uint32_t base, std::uint32_t size);
     std::uint32_t LiveIdxErase(std::uint32_t base);       // 0 = was not live
     std::uint32_t LiveIdxFind(std::uint32_t base);        // 0 = not live
-    bool LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size);
     // One-line index + consumer-counter report (diag only; see apphost.cpp).
     void PrintHeapIdx();
     // Validates a guest range before host-side bulk access.
@@ -939,26 +933,15 @@ private:
     std::atomic<bool> jit_callbacks_on_{true};
     std::vector<CodeCacheEntry> code_caches_;
     void* heap_ms_ = nullptr;           // dlmalloc mspace over the heap arena
-    std::uint32_t heap_base_ = kHeapBase;  // arena start (HARNESS_HEAPBASE)
+    std::uint32_t heap_base_ = kHeapBase;  // arena start
     std::uint64_t heap_used_ = 0;          // live bytes telemetry (OOM log)
 #ifdef ABR_DIAG_COUNTERS
     DiagCounters diag_;
 #endif
-    // Quarantine: recently-freed blocks held out of reuse (UAF oracle).
-    // Poisoned on free, verified on release to dlmalloc; a clobbered block
-    // names a live use-after-free LOUD instead of corrupting silently.
-    struct QEnt {
-        std::uint32_t addr = 0;
-        std::uint32_t size = 0;
-    };
-    // HARNESS_NORELEASE=1 (triage): every freed block is held for good, so
-    // this list grows without bound and needs the set for its check.
-    std::vector<QEnt> norelease_held_;
-    std::unordered_set<std::uint32_t> norelease_set_;
     std::uint32_t mmap_next_ = kMmapArenaBase;
     std::recursive_mutex mutex_;
     // The guest heap's own lock: dlmalloc's mspace, the live-block index,
-    // heap_used_, the quarantine/norelease lists and the audio array pool.
+    // heap_used_.
     // Not the runtime's mutex_ (malloc/free are among the hottest imports).
     // Order: mutex_ -> heap_mu_; heap code never takes mutex_.
     std::recursive_mutex heap_mu_;
@@ -1024,8 +1007,6 @@ private:
     // mutex_). They answer "what did the old structure actually cost / did its
     // odd paths ever fire", instead of asserting it. Printed by PrintHeapIdx
     // under HARNESS_DIAG only.
-    unsigned long long hx_contain_ok_ = 0;     // interior found by the back-probe
-    unsigned long long hx_contain_miss_ = 0;   // in-arena, not inside a live block
     unsigned long long hx_free_unknown_ = 0;   // free of a pointer we never handed out
     unsigned long long hx_realloc_unknown_ = 0;
 

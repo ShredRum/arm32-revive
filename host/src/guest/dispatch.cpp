@@ -244,10 +244,6 @@ Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // Room for imports made at run time (RuntimeImport): the table must not
     // move while other threads index it.
     mod_.imports.reserve(mod_.imports.size() + 512);
-    // HARNESS_HEAPBASE=hex: relocate heap start (address-sensitivity probe).
-    if (const char* e = std::getenv("HARNESS_HEAPBASE")) {
-        heap_base_ = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
-    }
     // Heap + stacks + trampolines + tables + guest data are all committable.
     mem_.Map(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
     AddMapping(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
@@ -422,8 +418,7 @@ static void Hex64(char*& p, std::uint64_t v) {
 }
 
 // Live-block index (live_heap.h): exact for block bases, which is what
-// free/realloc ask. Containment of an interior address (LiveIdxContaining) is
-// a bounded back-probe, asked only by diagnostics.
+// free/realloc ask.
 void Runtime::LiveIdxInsert(std::uint32_t base, std::uint32_t size) {
     live_idx_.Insert(base, size);
 }
@@ -437,62 +432,15 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
     return live_idx_.Find(base);
 }
 
-bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);
-    // A live block whose base is this very address (one hash lookup), else one
-    // whose base is at most 64 x 8 B behind the 8-aligned address (bounded
-    // back-probe): blocks larger than that are not found from their interior.
-    // Diagnostics only (heapwatch).
-    std::uint32_t b = 0, s = 0;
-    bool found = false;
-    const std::uint32_t exact = live_idx_.Find(addr);
-    if (exact) {
-        b = addr;
-        s = exact;
-        found = true;
-    } else if (addr >= heap_base_ && (std::uint64_t)addr < (std::uint64_t)heap_base_ + kHeapSize) {
-        // Interior pointer. Only an in-arena address can be inside a live block,
-        // so the common non-heap destination (guest stack, module) costs one
-        // range check and nothing else.
-        {
-            const std::uint32_t a8 = addr & ~std::uint32_t(7);
-            for (unsigned k = 1; k <= 64; ++k) {
-                const std::uint32_t off = k * 8u;
-                if (a8 < heap_base_ + off) {
-                    break;  // walked past the start of the arena
-                }
-                const std::uint32_t cand = a8 - off;
-                const std::uint32_t cs = live_idx_.Find(cand);
-                if (cs && (std::uint64_t)addr - cand < cs) {
-                    b = cand;
-                    s = cs;
-                    found = true;
-                    ++hx_contain_ok_;
-                    break;
-                }
-            }
-        }
-        if (!found) {
-            ++hx_contain_miss_;
-        }
-    }
-    if (found) {
-        *base = b;
-        *size = s;
-    }
-    return found;
-}
-
 void Runtime::PrintHeapIdx() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
     std::printf(
         "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
-        "contain_ok=%llu contain_miss=%llu free_unk=%llu "
+        "free_unk=%llu "
         "realloc_unk=%llu usedKB=%llu\n",
         live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
-        live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_contain_ok_,
-        hx_contain_miss_, hx_free_unknown_,
+        live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_free_unknown_,
         hx_realloc_unknown_,
         (unsigned long long)(heap_used_ >> 10));
 }
@@ -532,82 +480,30 @@ bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool
     return (hit.p & PROT_READ) != 0;
 }
 
-static std::uint32_t PadGlobal() {
-    // Parsed once (getenv per call = linear environ scan on hot paths).
-    static std::int64_t v = -1;
-    if (v < 0) {
-        v = 0;
-        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
-            v = (std::int64_t)std::strtoul(pe, nullptr, 0);
-            if (v > 4096) {
-                v = 4096;
-            }
-        }
-    }
-    return (std::uint32_t)v;
-}
-
-// Zero-fill policy (bump parity). The bump allocator only ever handed out
-// virgin arena, so a fresh block read as zeros. dlmalloc reuses freed chunks,
-// so a fresh block can contain stale bytes -- and a stale pointer-shaped value
-// read as a pointer is a wild dereference. HARNESS_ZEROFILL=<bytes>|all zeroes
-// every request up to <bytes> ("all" = no limit). Default off (dlmalloc
-// semantics, fastest); parsed once.
-static std::uint32_t ZeroFillLimit() {
-    static std::int64_t v = -2;
-    if (v == -2) {
-        v = 0;
-        if (const char* ze = std::getenv("HARNESS_ZEROFILL")) {
-            if (std::strcmp(ze, "all") == 0) {
-                v = 0xFFFFFFFFLL;
-            } else {
-                v = (std::int64_t)std::strtoul(ze, nullptr, 0);
-            }
-        }
-    }
-    return (std::uint32_t)v;
-}
-
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0, size); }
 
 // align == 0: plain malloc. Otherwise a power of two (memalign semantics);
 // the block is a normal heap block for free/realloc/usable_size.
 // The heap's debug knobs, read once (EnvOn scans its table on every call,
 // and malloc/free are hot). The environment is final before guest code runs.
-enum HeapKnobId { kMallocLog, kNoRelease };
+enum HeapKnobId { kMallocLog };
 static bool HeapKnob(HeapKnobId k) {
-    static const bool on[2] = {EnvOn("HARNESS_MALLOCLOG"), EnvOn("HARNESS_NORELEASE")};
+    static const bool on[1] = {EnvOn("HARNESS_MALLOCLOG")};
     return on[k];
 }
 
 std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
     RtLock lock(*this, 1, &heap_mu_);
-    // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
-    // disease test for wall4: game memsets 255B into 144B objects; dense bump
-    // packing puts live neighbors in the blast radius, dlmalloc may not).
-    // Parsed once (getenv per malloc = linear environ scan on the hot path).
-    static std::int64_t mallocpad = -1;
-    if (mallocpad < 0) {
-        mallocpad = 0;
-        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
-            mallocpad = (std::int64_t)std::strtoul(pe, nullptr, 0);
-            if (mallocpad > 4096) {
-                mallocpad = 4096;
-            }
-        }
-    }
-    const std::uint32_t pad = (std::uint32_t)mallocpad;
     // Round in 64 bits: (size + 7) used to wrap for sizes >= 0xFFFFFFF9 and
     // hand back an 8-byte block for a near-4 GB request. Anything larger
     // than the whole arena fails like a real malloc (NULL).
     const std::uint64_t rounded =
         std::max<std::uint64_t>((std::uint64_t(size) + 7) & ~std::uint64_t(7), 8);
-    if (rounded + pad > kHeapSize) {
+    if (rounded > kHeapSize) {
         return 0;
     }
     size = static_cast<std::uint32_t>(rounded);
-    const std::uint32_t total =
-        size + pad;  // pad kept: MALLOCPAD layout probe stays available
+    const std::uint32_t total = size;
     void* hp = !heap_ms_ ? nullptr
                : align > 8 ? mspace_memalign(heap_ms_, align, total)
                            : mspace_malloc(heap_ms_, total);
@@ -666,17 +562,6 @@ std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
         // thunk into terminate -> silent SIGABRT.
         mspace_free(heap_ms_, hp);
         return 0;
-    }
-    // NOTE (2026-10-16): blanket zero-fill was removed here (a full memset per
-    // malloc incl. multi-MB textures cost 1fps + audio lag). It is back behind
-    // HARNESS_ZEROFILL (see ZeroFillLimit) so the "fresh memory must read as
-    // zeros (bump parity)" hypothesis can be tested without a rebuild; the
-    // shipping default stays off.
-    {
-        const std::uint32_t zl = ZeroFillLimit();
-        if (zl && size <= zl) {
-            std::memset(H(out), 0, size);
-        }
     }
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
@@ -770,25 +655,11 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         return 0;
     }
     // dlmalloc copies min(old,new) itself; migrate our size map + used
-    // counter. Also drop any audio-pool reference: the block may move.
-    // Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
-    // Pre-dump chunk header zone (writers smash here; names the content).
-    {
-        static int rhd = 0;
-        if (DiagOn() && rhd < 30 && addr >= 32 && CheckRange(addr - 32, 32, false)) {
-            rhd++;
-            const std::uint8_t* hp = H<const std::uint8_t>(addr - 32);
-            std::printf("[realloc] pre %08x:", addr);
-            for (int i = 0; i < 32; i++) {
-                std::printf(" %02x", hp[i]);
-            }
-            std::printf("\n");
-        }
-    }
-    if (std::uint64_t(size) + PadGlobal() > kHeapSize) {
+    // counter. Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
+    if (size > kHeapSize) {
         return 0;  // too large: the old block stays valid (realloc contract)
     }
-    const std::uint32_t rtotal = size + PadGlobal();
+    const std::uint32_t rtotal = size;
     void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), rtotal) : nullptr;
     if (!hp) {
         return 0;  // old block stays valid (realloc contract), LOUD via OOM path next
@@ -822,15 +693,6 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         }
 #endif
     }
-    // Zero-fill policy: the bytes past the old size are fresh to the guest.
-    // Bump parity says they read as zeros; dlmalloc's copy leaves whatever the
-    // destination chunk held. Zero only the grown tail (never the payload).
-    {
-        const std::uint32_t zl = ZeroFillLimit();
-        if (zl && size <= zl && (std::uint64_t)size > old) {
-            std::memset(H(out) + old, 0, size - old);
-        }
-    }
     return out;
 }
 
@@ -850,10 +712,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
         ~InLock() { acc.fetch_add(DiagTicks() - t0, std::memory_order_relaxed); }
     } in_lock{diag_.free_in_lock};
 #endif
-    if (!norelease_set_.empty() && norelease_set_.count(addr)) {
-        std::printf("[heap] LOUD double free of a held block %08x (NORELEASE)\n", addr);
-        return;
-    }
     // One hash lookup yields the size and removes the entry. 0 = "never
     // handed out" (or already freed) -> ignored, counted.
 #ifdef ABR_DIAG_COUNTERS
@@ -881,12 +739,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
     }
     if (HeapKnob(kMallocLog)) {
         log_free(size);
-    }
-    // HARNESS_NORELEASE=1 (triage): hold every freed block for good.
-    if (HeapKnob(kNoRelease)) {
-        norelease_held_.push_back({addr, size});
-        norelease_set_.insert(addr);
-        return;
     }
     g_last_free_addr = addr;
     g_last_free_size = size;
@@ -1453,34 +1305,6 @@ bool Runtime::IsCodeAddress(std::uint32_t va) {
     }
     const MappingTable::Hit h = mappings_.Find(va, 1);
     return h.end != 0 && (h.prot & PROT_EXEC) != 0;
-}
-
-// Bulk-write watchpoint: scan a just-written guest range for the WP value.
-static std::int64_t WriteWP() {
-    static std::int64_t wp = -2;
-    if (wp == -2) {
-        wp = -1;
-        if (const char* e = std::getenv("HARNESS_WP")) {
-            wp = static_cast<std::int64_t>(std::strtoul(e, nullptr, 16));
-        }
-    }
-    return wp;
-}
-void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what) {
-    const std::int64_t wp = WriteWP();
-    if (wp < 0 || len < 4) {
-        return;
-    }
-    const std::uint32_t w = static_cast<std::uint32_t>(wp);
-    for (std::size_t i = 0; i + 4 <= len; i++) {
-        std::uint32_t v = 0;
-        std::memcpy(&v, rt->H(guest + static_cast<std::uint32_t>(i)), 4);
-        if (v == w) {
-            std::printf("[wp-bulk] %08x now at %08x via %s guest-pc=%08x\n", w,
-                        guest + static_cast<std::uint32_t>(i), what, rt->jit()->Regs()[15]);
-            return;
-        }
-    }
 }
 
 std::uint64_t Runtime::JitSvcCount(Dynarmic::A32::Jit* jit) {
@@ -9737,7 +9561,6 @@ void Runtime::GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::u
                            std::uint32_t len) {
     using I = ImportId;
     std::memmove(H(dst), H<const void>(src), len);
-    ScanWP(this, dst, len, n.c_str());
     Ret(regs, dst);
 }
 
@@ -9756,7 +9579,6 @@ void Runtime::GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::ui
         }
     }
     std::memset(H(dst), fill, len);
-    ScanWP(this, dst, len, n.c_str());
     Ret(regs, dst);
 }
 
@@ -10546,53 +10368,6 @@ extern "C" __attribute__((noinline)) void AbrHeapCorruptionHook(void) {
 
 unsigned Runtime::HeapCorruptionCount() {
     return g_heap_corrupt_n.load(std::memory_order_relaxed);
-}
-
-bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
-    // Cheap prefilter (no lock): outside the heap arena entirely.
-    const std::uint64_t a = addr;
-    if (a < heap_base_ || a + size > (std::uint64_t)heap_base_ + kHeapSize) {
-        return false;
-    }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
-    // D2: one containment query covers both old branches (an exact base hit is
-    // just containment with base == addr).
-    std::uint32_t cbase = 0, csize = 0;
-    if (LiveIdxContaining(addr, &cbase, &csize) &&
-        (std::uint64_t)addr + size <= (std::uint64_t)cbase + csize) {
-        return false;  // fully inside a live allocation
-    }
-    // Quarantined (freed, held)? Distinct verdict: UAF write.
-    for (const auto& q : norelease_held_) {
-        if (a >= q.addr && a + size <= (std::uint64_t)q.addr + q.size) {
-            static int qn = 0;
-            if (qn < 30) {
-                qn++;
-                std::printf("[heapwatch] UAF-WRITE addr=%08x size=%zu q=%08x+%u\n", addr, size,
-                            q.addr, q.size);
-            }
-            return true;
-        }
-    }
-    {
-        static int wn = 0;
-        if (wn < 30) {
-            wn++;
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::uint32_t pc = 0;
-            if (aj) {
-                pc = aj->Regs()[15];
-            }
-            std::printf("[heapwatch] WILD-WRITE addr=%08x size=%zu pc=%08x lr=%08x\n", addr, size,
-                        pc, lr);
-        }
-    }
-    return true;
 }
 
 std::uint32_t Runtime::HeapCorruptionPc() {
@@ -17562,23 +17337,6 @@ void Runtime::SvcHistDump() {
 
 // ---- memory callbacks ----
 
-// Value watchpoints (HARNESS_WP=hexvalue): trace where a value is written/loaded.
-static std::int64_t ReadWP() {
-    return WriteWP();
-}
-
-// Address watchpoint (HARNESS_WPA=hexaddr): log every data read from addr.
-static std::int64_t WatchAddr() {
-    static std::int64_t wa = -2;
-    if (wa == -2) {
-        wa = -1;
-        if (const char* e = std::getenv("HARNESS_WPA")) {
-            wa = static_cast<std::int64_t>(std::strtoul(e, nullptr, 16));
-        }
-    }
-    return wa;
-}
-
 template <typename T>
 T GuestCallbacks::Read(VAddr addr, bool exec) {
     if (prof::g_enabled) {
@@ -17607,36 +17365,6 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
         const std::uint8_t* p = rt_->H<const std::uint8_t>(addr);
         for (std::size_t i = 0; i < sizeof(T); i++) {
             v |= T(p[i]) << (8 * i);
-        }
-    }
-    // Data-load trace (HARNESS_TRACELOADS=1, step mode): every data read.
-    static std::int64_t tl = -2;
-    if (tl == -2) {
-        tl = -1;
-        if (std::getenv("HARNESS_TRACELOADS")) {
-            tl = 1;
-        }
-    }
-    if (tl > 0 && !exec && addr >= 0x650000u) {
-        std::printf("[ld] pc=%08x [%08x] = %08x\n", rt_->ActiveJit()->Regs()[15], addr,
-                    static_cast<std::uint32_t>(v));
-    }
-    if (sizeof(T) == 4) {
-        const std::int64_t wp = ReadWP();
-        if (wp >= 0 && v == static_cast<T>(wp)) {
-            auto& regs = rt_->ActiveJit()->Regs();
-            std::printf("[wpr] %08x loaded from %08x guest-pc=%08x\n", static_cast<std::uint32_t>(v),
-                        addr, regs[15]);
-            std::printf("[wpr] regs:");
-            for (int r = 0; r < 16; r++) {
-                std::printf(" r%d=%08x", r, regs[r]);
-            }
-            std::printf("\n");
-        }
-        const std::int64_t wa = WatchAddr();
-        if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
-            std::printf("[wpa] read from %08x = %08x guest-pc=%08x\n", addr,
-                        static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
         }
     }
     return v;
@@ -17672,49 +17400,16 @@ void GuestCallbacks::Write(VAddr addr, T v) {
         if (rt_->NoteBad()) {
             std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,
                         sizeof(T), rt_->ActiveJit()->Regs()[15]);
-            // Fox-hunt (2026-10-15): GC mark-store faults need the list owner
-            // (r4), victim object (r6) and marker source (r7) to name the
-            // writer. Capped by NoteBad like the line above.
+            // The registers that usually name the writer and its object.
             std::printf("[mem] BAD regs lr=%08x r4=%08x r5=%08x r6=%08x r7=%08x\n",
                         rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[4],
                         rt_->ActiveJit()->Regs()[5], rt_->ActiveJit()->Regs()[6],
                         rt_->ActiveJit()->Regs()[7]);
-            // Fox-hunt: identify the gray object at r7 (header dump names the
-            // type: table/stack/closure) + find the garbage slot nearby (the
-            // deterministic heap makes its address stable across boots ->
-            // range-watch it next run to catch the writer). Capped by NoteBad.
-            {
-                const std::uint32_t o7 = rt_->ActiveJit()->Regs()[7];
-                if (rt_->CheckRange(o7 - 16, 512, false)) {
-                    const std::uint8_t* p = rt_->H<const std::uint8_t>(o7 - 16);
-                    std::printf("[mem] BAD r7obj:");
-                    for (int j = 0; j < 512; j++) {
-                        std::printf(" %02x", p[j]);
-                    }
-                    std::printf("\n");
-                }
-            }
             rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
-    }
-    const std::int64_t wa = WatchAddr();
-    if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
-        std::printf("[wpa-w] write to %08x = %08x guest-pc=%08x\n", addr,
-                    static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
-    }
-    // HUNT watch: every legal guest store checked against live heap.
-    // Static tristate (no EnvOn mutex on this path: millions of stores).
-    {
-        static int hwen = -1;
-        if (hwen < 0) {
-            hwen = std::getenv("HARNESS_HEAPWATCH") ? 1 : 0;
-        }
-        if (hwen) {
-            rt_->HeapWatchViolation(addr, sizeof(T));
-        }
     }
     if ((addr & (sizeof(T) - 1)) == 0) {
         __atomic_store_n(rt_->H<T>(addr), v, __ATOMIC_RELAXED);  // single-copy atomic
@@ -17831,28 +17526,7 @@ std::optional<std::uint32_t> GuestCallbacks::MemoryReadCode(VAddr a) {
 }
 void GuestCallbacks::MemoryWrite8(VAddr a, std::uint8_t v) { Write(a, v); }
 void GuestCallbacks::MemoryWrite16(VAddr a, std::uint16_t v) { Write(a, v); }
-void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) {
-    Write(a, v);
-    // Value watchpoint (HARNESS_WP=hexvalue): who materializes a value?
-    const std::int64_t wp = WriteWP();
-    if (wp >= 0 && v == static_cast<std::uint32_t>(wp)) {
-        std::printf("[wp] %08x written to %08x guest-pc=%08x\n", v, a, rt_->ActiveJit()->Regs()[15]);
-    }
-    // Address watchpoint, write side (HARNESS_WPA=hexaddr also arms this).
-    // NOTE: bulk stores (guest memset/memcpy thunks) bypass callbacks.
-    const std::int64_t wa = WatchAddr();
-    if (wa >= 0 && a == static_cast<std::uint32_t>(wa)) {
-        auto& regs = rt_->ActiveJit()->Regs();
-        std::printf("[wpa] WRITE to %08x = %08x guest-pc=%08x%s\n", a, v, regs[15],
-                    rt_->GuestTid() == 1 ? "" : " (T2+)");
-        std::printf("[wpa] regs:");
-        for (int r = 0; r < 12; r++) {
-            std::printf(" r%d=%08x", r, regs[r]);
-        }
-        std::printf("\n");
-    }
-}
-
+void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) { Write(a, v); }
 void GuestCallbacks::MemoryWrite64(VAddr a, std::uint64_t v) { Write(a, v); }
 
 void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {

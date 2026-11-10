@@ -723,8 +723,8 @@ int main(int argc, char** argv) {
     cfg.enable_cycle_counting = abr::kJitCycleCounting;
     // Fastmem prototype (HARNESS_FASTMEM=1): direct host access to the 1:1
     // 4GB reservation; faults fall back to callbacks (BAD halting
-    // preserved via slow path). Diags that sniff callbacks (WP/ScanWP/
-    // HEXFIND/memcmp3) go blind under fastmem. Default off.
+    // preserved via slow path). Diags that sniff callbacks go blind under
+    // fastmem. Default off.
     if (abr::JitFastmemOn()) {
         cfg.fastmem_pointer = reinterpret_cast<std::uintptr_t>(rt.mem().base());
     }
