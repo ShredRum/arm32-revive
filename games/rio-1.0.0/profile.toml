@@ -12,7 +12,7 @@ package      = "com.rovio.angrybirdsrio"
 version_name = "1.0.0"
 version_code = 100
 min_sdk      = 4
-target_sdk   = 8
+target_sdk   = 26
 original     = "original/Angry_Birds_Rio_v1.0.0.apk"
 activity     = "com.rovio.ka3d.App"
 signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
