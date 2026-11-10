@@ -620,6 +620,9 @@ public:
     // there is then a clean halt in every mode (fastmem stores fault too).
     void ProtectRelro(const LoadedModule& mod);
     bool CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec);
+    // The lookup under CheckRange, CheckAccess and GuestStrnlen: the mapping
+    // that holds [addr, end), its protection, and where it ends.
+    bool FindMapping(std::uint32_t addr, std::uint64_t end, int* prot, std::uint32_t* ext_end);
 
     // --- file bridge (bring-up): guest paths under files-prefix map to a host
     // directory (harness: <project>/work/files). FILE*/DIR* are opaque guest

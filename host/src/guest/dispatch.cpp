@@ -413,39 +413,61 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
     return live_idx_.Find(base);
 }
 
-bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
-    const std::uint64_t end = std::uint64_t(addr) + size;
-    // Last-hit cache (perf): string/scan loops probe per byte. The cached
-    // extent is valid while the table's epoch is unchanged (it moves when an
-    // entry's protection changes, e.g. munmap).
-    // One thread_local (one TLS lookup), not four.
-    thread_local struct {
-        std::uint32_t s = 1, e = 0, epoch = 0;
-        int p = 0;
-    } hit;
+// The mapping that holds [addr, end) and its protection, from the thread's
+// last two lookups while the table's epoch is unchanged (it moves when a
+// protection changes or arena pages come or go). Two slots: a copy or a
+// compare works on two mappings at once (heap and a module's data), and one
+// slot would send every other lookup to the table. *ext_end = how far the
+// answer reaches past addr (at least `end`).
+namespace {
+struct MapHit {
+    std::uint32_t s = 1, e = 0, epoch = 0;
+    int p = 0;
+};
+struct MapCache {
+    MapHit h[2];
+    unsigned victim = 0;
+};
+thread_local MapCache t_map_cache;
+}  // namespace
+
+bool Runtime::FindMapping(std::uint32_t addr, std::uint64_t end, int* prot, std::uint32_t* ext_end) {
+    MapCache& c = t_map_cache;  // one TLS lookup
     const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit.epoch || !(addr >= hit.s && end <= hit.e)) {
-        const MappingTable::Hit h = mappings_.Find(addr, size);
-        if (h.end == 0) {
-            return false;
+    for (const MapHit& h : c.h) {
+        if (ep == h.epoch && addr >= h.s && end <= h.e) {
+            *prot = h.p;
+            *ext_end = h.e;
+            return true;
         }
-        if (!h.uniform) {
-            // Pages that differ: the answer is for this range only.
-            const int p = h.prot;
-            return exec ? (p & PROT_EXEC) != 0 : write ? (p & PROT_WRITE) != 0 : (p & PROT_READ) != 0;
-        }
-        hit.s = h.start;
-        hit.e = h.end;
-        hit.p = h.prot;
-        hit.epoch = ep;
     }
-    if (exec) {
-        return (hit.p & PROT_EXEC) != 0;
+    const MappingTable::Hit f = mappings_.Find(addr, end - addr);
+    if (f.end == 0) {
+        return false;
     }
-    if (write) {
-        return (hit.p & PROT_WRITE) != 0;
+    *prot = f.prot;
+    if (!f.uniform) {
+        // Pages that differ: the answer is for this range only.
+        *ext_end = static_cast<std::uint32_t>(end);
+        return true;
     }
-    return (hit.p & PROT_READ) != 0;
+    *ext_end = f.end;
+    MapHit& v = c.h[c.victim];
+    c.victim ^= 1u;
+    v.s = f.start;
+    v.e = f.end;
+    v.p = f.prot;
+    v.epoch = ep;
+    return true;
+}
+
+bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
+    int p = 0;
+    std::uint32_t ext = 0;
+    if (!FindMapping(addr, std::uint64_t(addr) + size, &p, &ext)) {
+        return false;
+    }
+    return ((exec ? PROT_EXEC : write ? PROT_WRITE : PROT_READ) & p) != 0;
 }
 
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0, size); }
@@ -1178,14 +1200,13 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
         }
         // Readable extent that contains cur (same first-match rule as
         // CheckRange).
-        const MappingTable::Hit h = mappings_.Find(cur, 1);
-        if (h.end == 0 || (h.prot & PROT_READ) == 0) {
+        int prot = 0;
+        std::uint32_t ext_end = 0;
+        if (!FindMapping(cur, std::uint64_t(cur) + 1, &prot, &ext_end) || (prot & PROT_READ) == 0) {
             return false;
         }
-        const std::uint64_t ext_end = h.end;
-        const std::uint64_t avail = ext_end - cur;
-        const std::uint32_t chunk =
-            static_cast<std::uint32_t>(std::min<std::uint64_t>(avail, max - done));
+        const std::uint32_t avail = ext_end - cur;
+        const std::uint32_t chunk = std::min(avail, max - done);
         const void* hit = std::memchr(H<const char>(cur), 0, chunk);
         if (hit) {
             *len = done + static_cast<std::uint32_t>(static_cast<const char*>(hit) -
@@ -1208,28 +1229,12 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (end > 0x100000000ULL) {
         return false;
     }
-    // Same epoch-checked last-hit cache as CheckAccess.
-    // One thread_local (one TLS lookup), not four.
-    thread_local struct {
-        std::uint32_t s = 1, e = 0, epoch = 0;
-        int p = 0;
-    } hit;
-    const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit.epoch || !(guest >= hit.s && end <= hit.e)) {
-        const MappingTable::Hit h = mappings_.Find(guest, size);
-        if (h.end == 0) {
-            return false;
-        }
-        if (!h.uniform) {
-            // Pages that differ: the answer is for this range only.
-            return write ? ((h.prot & PROT_WRITE) != 0) : ((h.prot & PROT_READ) != 0);
-        }
-        hit.s = h.start;
-        hit.e = h.end;
-        hit.p = h.prot;
-        hit.epoch = ep;
+    int p = 0;
+    std::uint32_t ext = 0;
+    if (!FindMapping(guest, end, &p, &ext)) {
+        return false;
     }
-    return write ? ((hit.p & PROT_WRITE) != 0) : ((hit.p & PROT_READ) != 0);
+    return ((write ? PROT_WRITE : PROT_READ) & p) != 0;
 }
 
 void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
@@ -2592,26 +2597,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strncasecmp_:
     case I::strncmp_:
     if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
-        // Compare in guest memory. Both strings are validated up to their NUL
-        // (or up to n for the n-variants), so the host compare never reads an
-        // unmapped byte.
+        // Compare in guest memory, one pass in the common case: the host
+        // compare is bounded by what is readable after both pointers, so it
+        // stops at the first difference or NUL and cannot leave a mapping
+        // (also when another guest thread rewrites a terminator meanwhile).
         const bool bounded = (id == I::strncmp_ || id == I::strncasecmp_);
+        const bool nocase = (id == I::strcasecmp_ || id == I::strncasecmp_);
         const std::uint32_t lim = bounded ? a2 : 0xFFFFFFFFu;
-        std::uint32_t la = 0, lb = 0;
-        if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
-            goto bad_ptr;
+        if (lim == 0) {
+            Ret(regs, 0);
+            return;
         }
         const char* pa = H<const char>(a0);
         const char* pb = H<const char>(a1);
-        int r = 0;
-        if (id == I::strcmp_) {
-            r = std::strcmp(pa, pb);
-        } else if (id == I::strncmp_) {
-            r = std::strncmp(pa, pb, a2);
-        } else if (id == I::strcasecmp_) {
-            r = strcasecmp(pa, pb);
-        } else {
-            r = strncasecmp(pa, pb, a2);
+        int pra = 0, prb = 0;
+        std::uint32_t ea = 0, eb = 0;
+        if (!FindMapping(a0, std::uint64_t(a0) + 1, &pra, &ea) || !(pra & PROT_READ) ||
+            !FindMapping(a1, std::uint64_t(a1) + 1, &prb, &eb) || !(prb & PROT_READ)) {
+            goto bad_ptr;
+        }
+        const std::uint32_t n = std::min(lim, std::min(ea - a0, eb - a1));
+        int r = nocase ? strncasecmp(pa, pb, n) : std::strncmp(pa, pb, n);
+        if (r == 0 && n < lim && std::memchr(pa, 0, n) == nullptr) {
+            // n equal bytes and no NUL: a string runs into the next mapping.
+            // The lengths mapping by mapping, then the compare over them.
+            std::uint32_t la = 0, lb = 0;
+            if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
+                goto bad_ptr;
+            }
+            // Up to and with the shorter string's NUL, never past lim.
+            const std::uint32_t m = std::min(lim, std::min(la, lb) + (la != lb || la < lim ? 1u : 0u));
+            r = nocase ? strncasecmp(pa, pb, m) : std::memcmp(pa, pb, m);
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
@@ -2688,17 +2704,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strstr_:
     if (id == I::strchr_ || id == I::strrchr_ || id == I::strstr_ || id == I::strpbrk_ || id == I::strspn_ ||
         id == I::strcspn_) {
-        // Bounded guest strlen for the haystack (and needle where needed).
-        auto gstrlen = [&](std::uint32_t s) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(s + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(s + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
+        // Both strings are checked up to their NUL first (GuestStrnlen).
+        auto gstrlen = [&](std::uint32_t p) -> std::uint32_t {
+            std::uint32_t l = 0;
+            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
         };
         const std::uint32_t hl = gstrlen(a0);
         if (hl == 0xFFFFFFFFu) {
@@ -2754,88 +2763,57 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             state = strtok_state;
         }
         auto gstrlen2 = [&](std::uint32_t p) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(p + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(p + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
+            std::uint32_t l = 0;
+            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
         };
         const std::uint32_t dl = gstrlen2(a1);
-        if (dl == 0xFFFFFFFFu || state == 0) {
-            if (id == I::strtok_r_ && state == 0) {
-                Ret(regs, 0);
-                return;
-            }
+        if (dl == 0xFFFFFFFFu) {
             goto bad_ptr;
         }
-        std::string delim(H<const char>(a1), dl);
-        // Skip leading delimiters (needs write access: we NUL-terminate).
-        std::uint32_t cur = state;
-        for (;;) {
-            if (!CheckRange(cur, 1, false)) {
-                goto bad_ptr;
-            }
-            char c = *H<const char>(cur);
-            if (c == '\0') {
-                if (id == I::strtok_r_) {
-                    std::uint32_t z = 0;
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &z, 4);
-                    }
-                } else {
-                    strtok_state = 0;
-                }
-                Ret(regs, 0);
-                return;
-            }
-            if (delim.find(c) == std::string::npos) {
-                break;
-            }
-            if (!CheckRange(cur, 1, true)) {
-                goto bad_ptr;
-            }
-            cur++;
+        if (state == 0) {
+            Ret(regs, 0);  // no string left (bionic: strtok(NULL) after the end)
+            return;
         }
-        const std::uint32_t tok = cur;
-        // Scan to next delimiter/NUL.
-        for (;;) {
-            if (!CheckRange(cur, 1, false)) {
+        const std::string delim(H<const char>(a1), dl);
+        // The rest of the string is checked once, up to its NUL.
+        const std::uint32_t sl = gstrlen2(state);
+        if (sl == 0xFFFFFFFFu) {
+            goto bad_ptr;
+        }
+        const char* base = H<const char>(state);
+        auto save = [&](std::uint32_t v) {
+            if (id == I::strtok_r_) {
+                if (CheckRange(a2, 4, true)) {
+                    std::memcpy(H(a2), &v, 4);
+                }
+            } else {
+                strtok_state = v;
+            }
+        };
+        std::uint32_t i = 0;
+        while (i < sl && delim.find(base[i]) != std::string::npos) {
+            i++;  // leading delimiters
+        }
+        if (i == sl) {
+            save(0);
+            Ret(regs, 0);
+            return;
+        }
+        const std::uint32_t tok = state + i;
+        while (i < sl && delim.find(base[i]) == std::string::npos) {
+            i++;
+        }
+        if (i == sl) {
+            save(state + sl);  // at the NUL: the next call finds no token
+        } else {
+            if (!CheckRange(state + i, 1, true)) {
                 goto bad_ptr;
             }
-            char c = *H<const char>(cur);
-            if (c == '\0') {
-                if (id == I::strtok_r_) {
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &cur, 4);
-                    }
-                } else {
-                    strtok_state = cur;
-                }
-                Ret(regs, tok);
-                return;
-            }
-            if (delim.find(c) != std::string::npos) {
-                if (!CheckRange(cur, 1, true)) {
-                    goto bad_ptr;
-                }
-                *H<char>(cur) = '\0';
-                const std::uint32_t next = cur + 1;
-                if (id == I::strtok_r_) {
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &next, 4);
-                    }
-                } else {
-                    strtok_state = next;
-                }
-                Ret(regs, tok);
-                return;
-            }
-            cur++;
+            *H<char>(state + i) = '\0';
+            save(state + i + 1);
         }
+        Ret(regs, tok);
+        return;
     }
     case I::fscanf_:
     case I::sscanf_:
@@ -8162,16 +8140,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strxfrm_:
     {
         // Bounded guest strlen; 0xFFFFFFFF = unreadable or unterminated.
-        auto guest_strlen = [&](std::uint32_t s) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(s + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(s + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
+        auto guest_strlen = [&](std::uint32_t p) -> std::uint32_t {
+            std::uint32_t l = 0;
+            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
         };
         if (id == I::strcasestr_) {
             const std::uint32_t hl = guest_strlen(a0), nl = guest_strlen(a1);

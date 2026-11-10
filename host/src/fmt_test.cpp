@@ -172,6 +172,10 @@ struct RuntimeTestAccess {
         rt.mem().Map(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
         rt.AddMapping(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
     }
+    static void MapRw(Runtime& rt, std::uint32_t a, std::uint32_t n) {
+        rt.mem().Map(a, n, PROT_READ | PROT_WRITE);
+        rt.AddMapping(a, n, PROT_READ | PROT_WRITE);
+    }
     static bool TakeStopped(Runtime& rt) {
         const bool s = rt.stop_step_;
         rt.stop_step_ = false;
@@ -507,6 +511,12 @@ int main() {
     mod.imports.push_back(abr::Import{"rename", true, 0, 0, 0});        // 125
     mod.imports.push_back(abr::Import{"rmdir", true, 0, 0, 0});         // 126
     mod.imports.push_back(abr::Import{"slCreateEngine", true, 0, 0, 0});  // 127
+    mod.imports.push_back(abr::Import{"strncmp", true, 0, 0, 0});       // 128
+    mod.imports.push_back(abr::Import{"strcasecmp", true, 0, 0, 0});    // 129
+    mod.imports.push_back(abr::Import{"strtok", true, 0, 0, 0});        // 130
+    mod.imports.push_back(abr::Import{"strtok_r", true, 0, 0, 0});      // 131
+    mod.imports.push_back(abr::Import{"strchr", true, 0, 0, 0});        // 132
+    mod.imports.push_back(abr::Import{"strstr", true, 0, 0, 0});        // 133
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -2332,6 +2342,103 @@ int main() {
         const std::uint32_t a_cmp[4] = {kD, kS, 0, 0};
         Expect("strcmp(xyz, xyy) > 0",
                static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 48, a_cmp)) > 0 ? "1" : "0", "1");
+    }
+
+    // --- strcmp family, strchr/strstr, strtok: results as libc's, also for
+    //     strings that end at a mapping's last bytes or cross into the next
+    //     mapping; an unterminated string at the end of memory halts.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t a[4] = {x, y, z, 0};
+            return static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, idx, a));
+        };
+        auto sign = [](std::int32_t v) { return v < 0 ? "<" : v > 0 ? ">" : "="; };
+        const std::uint32_t kA = 0x10103000, kB = 0x10103100;
+        std::string got;
+        const char* pairs[][2] = {{"", ""}, {"a", ""}, {"", "a"}, {"abc", "abc"}, {"abc", "abd"},
+                                  {"abc", "ab"}, {"ab", "abc"}, {"\xff", "a"}};
+        for (auto& pr : pairs) {
+            put(kA, pr[0]);
+            put(kB, pr[1]);
+            got += sign(call(48, kA, kB));
+        }
+        Expect("strcmp signs", got, "=><=<><>");
+        put(kA, "abcdef");
+        put(kB, "abcxyz");
+        got = sign(call(128, kA, kB, 3));
+        got += sign(call(128, kA, kB, 4));
+        got += sign(call(128, kA, kB, 0));
+        put(kB, "abc");
+        got += sign(call(128, kA, kB, 3));
+        got += sign(call(128, kA, kB, 9));
+        Expect("strncmp signs", got, "=<==>");
+        put(kA, "HeLLo");
+        put(kB, "hello");
+        got = sign(call(129, kA, kB));
+        put(kB, "help");
+        got += sign(call(129, kA, kB));
+        Expect("strcasecmp signs", got, "=<");
+        Expect("strcmp ok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+
+        // Two mappings side by side in the mmap arena (different protection,
+        // so two extents); the string crosses from the first into the
+        // second, its twin lies in the heap.
+        const std::uint32_t kM = 0x7A000000u;
+        abr::RuntimeTestAccess::MapRwx(rt, kM, 0x1000);
+        abr::RuntimeTestAccess::MapRw(rt, kM + 0x1000, 0x1000);
+        const std::uint32_t kX = kM + 0x1000 - 4;
+        put(kX, "crossing");
+        put(kA, "crossing");
+        got = sign(call(48, kX, kA));
+        put(kA, "crossinh");
+        got += sign(call(48, kX, kA));
+        got += sign(call(48, kA, kX));
+        put(kA, "cross");
+        got += sign(call(48, kX, kA));
+        got += sign(call(128, kX, kA, 5));
+        Expect("strcmp across two mappings", got, "=<>>=");
+        Expect("strstr across two mappings",
+               std::to_string(call(133, kX, kB) == 0) + std::to_string(call(132, kX, 'i') - kX), "15");
+        Expect("cross-mapping compares do not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0",
+               "0");
+        // "ab" + NUL in the heap's last 3 bytes: equal strings stop there.
+        const std::uint32_t kTail = 0x50000000u - 3;
+        put(kTail, "ab");
+        put(kA, "ab");
+        Expect("strcmp at the mapping end", sign(call(48, kTail, kA)), "=");
+        Expect("strcmp at the mapping end does not halt",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        // No NUL before the end of the mapping: a real libc faults.
+        std::memcpy(rt.H(kTail), "abc", 3);
+        put(kA, "abc");
+        call(48, kTail, kA);
+        Expect("strcmp(unterminated at mapping end) halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+        call(132, kTail, 'z');
+        Expect("strchr(unterminated at mapping end) halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+        put(kTail, "ab");
+
+        // strtok / strtok_r: tokens, NULs written, NULL at the end and after.
+        put(kA, ",,ab,cd;;e");
+        put(kB, ",;");
+        got.clear();
+        for (std::uint32_t first = kA, i = 0; i < 5; i++, first = 0) {
+            const std::uint32_t t = static_cast<std::uint32_t>(call(130, first, kB));
+            got += t ? std::string(rt.H<const char>(t)) + "@" + std::to_string(t - kA) : "null";
+            got += " ";
+        }
+        Expect("strtok tokens", got, "ab@2 cd@5 e@9 null null ");
+        const std::uint32_t kSave = 0x10103200;
+        put(kA, "x  y");
+        put(kB, " ");
+        got.clear();
+        for (std::uint32_t first = kA, i = 0; i < 3; i++, first = 0) {
+            const std::uint32_t t = static_cast<std::uint32_t>(call(131, first, kB, kSave));
+            got += t ? std::string(rt.H<const char>(t)) : "null";
+        }
+        Expect("strtok_r tokens", got, "xynull");
+        Expect("strtok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
     }
 
     // --- LDREX/STREX are atomic across threads: 4 Jits on the shared monitor,
