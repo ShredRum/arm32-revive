@@ -3884,6 +3884,18 @@ int main() {
                     abr::JitCallbacksOn() ? "on" : "off");
         std::printf("bench strlen call: %.1f ns per call\n", bench("strlen", kData, 0));
         std::printf("bench strcmp call: %.1f ns per call\n", bench("strcmp", kData, kData + 0x20));
+        // What one pointer check costs inside those handlers: CheckRange on
+        // two mappings in turn (the code page and the scratch page).
+        {
+            unsigned okc = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (std::uint32_t i = 0; i < (1u << 24); i++) {
+                okc += abr::RuntimeTestAccess::InMapping(rt, (i & 1) ? kData + (i & 0xFF) : kScratch + (i & 0xFF), 16);
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+            std::printf("bench range check: %.2f ns per check (%u ok)\n",
+                        std::chrono::duration<double, std::nano>(t1 - t0).count() / double(1u << 24), okc);
+        }
     }
 
     // --- packed files (apk_vfs.h): files under assets/abport/<root>/ of
