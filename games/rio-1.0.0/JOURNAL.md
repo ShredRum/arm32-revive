@@ -58,4 +58,5 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   - `prepare-tree.sh rio-1.0.0 --force` cleanly applies `smali.patch` with zero rejects.
   - Sandbox devgate passed clean: 0 halts, 0 LOUD markers, 0 crashes (`death=0`).
   - Phone build verified and signed.
+  - Real device verified (Samsung Galaxy A56 5G, Android 17 / API 35/36, arm64-only): boots clean, main menu, level selection, full level gameplay, slingshot, physics, audio and collisions confirmed working without crashes or freezes.
 
