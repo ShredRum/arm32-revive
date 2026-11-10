@@ -200,14 +200,32 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         }
     }
 
-    // Locate .ARM.exidx (SHT_ARM_EXIDX) for __gnu_Unwind_Find_exidx support.
-    // The table lives inside a mapped PT_LOAD (bias 0 => VA == link address).
-    if (ehdr.e_shoff != 0 && ehdr.e_shentsize >= sizeof(Elf32_Shdr)) {
+    // Locate .ARM.exidx for __gnu_Unwind_Find_exidx support.
+    // Check PT_ARM_EXIDX (0x70000001) in program headers first (present even if stripped).
+    constexpr std::uint32_t PT_ARM_EXIDX_TYPE = 0x70000001;
+    for (int i = 0; i < ehdr.e_phnum; i++) {
+        Elf32_Phdr ph;
+        std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
+        if (ph.p_type == PT_ARM_EXIDX_TYPE && ph.p_memsz >= 8) {
+            if (first) {
+                out.exidx_va = ph.p_vaddr + bias;
+                out.exidx_count = ph.p_memsz / 8;
+            } else {
+                extra.exidx_va = ph.p_vaddr + bias;
+                extra.exidx_count = ph.p_memsz / 8;
+            }
+            std::printf("[exidx] phdr VA=%08x count=%u\n", ph.p_vaddr + bias, ph.p_memsz / 8);
+            break;
+        }
+    }
+    // Fallback to SHT_ARM_EXIDX in section headers if not found via phdr.
+    if ((first ? out.exidx_count : extra.exidx_count) == 0 &&
+        ehdr.e_shoff != 0 && ehdr.e_shentsize >= sizeof(Elf32_Shdr)) {
         for (std::uint32_t si = 0;
              si < ehdr.e_shnum && (std::uint64_t)(si + 1) * ehdr.e_shentsize <= len; si++) {
             Elf32_Shdr sh;
             std::memcpy(&sh, file + ehdr.e_shoff + si * ehdr.e_shentsize, sizeof(sh));
-            if (sh.sh_type == SHT_ARM_EXIDX && sh.sh_entsize >= 8 && sh.sh_size >= 8) {
+            if (sh.sh_type == SHT_ARM_EXIDX && sh.sh_size >= 8) {
                 if (first) {
                     out.exidx_va = sh.sh_addr + bias;
                     out.exidx_count = sh.sh_size / 8;
@@ -215,7 +233,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
                     extra.exidx_va = sh.sh_addr + bias;
                     extra.exidx_count = sh.sh_size / 8;
                 }
-                std::printf("[exidx] VA=%08x count=%u\n", sh.sh_addr + bias, sh.sh_size / 8);
+                std::printf("[exidx] shdr VA=%08x count=%u\n", sh.sh_addr + bias, sh.sh_size / 8);
                 break;
             }
         }

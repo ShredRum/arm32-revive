@@ -41,7 +41,7 @@ for prof in games/*/profile.toml; do
     [ -n "$op" ] && [ "$op" != "$PKG" ] && OTHERS="$OTHERS $op"
 done
 scp -q -P $P $APK $DEV:ab_gate.apk || exit 1
-$S "for o in $OTHERS; do sudo /system/bin/am force-stop \$o; done; sudo /system/bin/am force-stop $PKG; sudo pm install -r ~/ab_gate.apk >/dev/null && rm ~/ab_gate.apk" || exit 1
+$S "for o in $OTHERS; do sudo /system/bin/am force-stop \$o; done; sudo /system/bin/am force-stop $PKG; { sudo pm install -r -d ~/ab_gate.apk >/dev/null 2>&1 || { sudo pm uninstall $PKG >/dev/null 2>&1; sudo pm install ~/ab_gate.apk >/dev/null; }; } && rm ~/ab_gate.apk" || exit 1
 GOT=$($S "A=\$(pm path $PKG | sed 's/^package://'); sudo unzip -p \$A lib/arm64-v8a/$HOSTLIB | md5sum" | cut -c1-32)
 echo "lib want=$WANT installed=$GOT $([ "$WANT" = "$GOT" ] && echo OK || echo MISMATCH)"
 [ "$WANT" = "$GOT" ] || { echo "devgate: installed lib differs from the APK -- stopping" >&2; exit 1; }
