@@ -61,6 +61,7 @@ not gated; the folder stays. "All titles" below means the other six.
 scripts/build-lib.sh --native          # PC: harness, fmt_test, other tests
 ./host/build-native/fmt_test           # expect "ALL OK"
 ./host/build-native/harness <guest.so> # expect the init line from REVIEW.md
+scripts/harness-all.sh                 # the same for all six titles, with LOUD counts
 scripts/deploy.sh <id>                 # arm64 lib + signed APK + device commands
 scripts/build-lib.sh && scripts/swap-lib.sh <id>...   # host-only change: ~1 s per APK
 scripts/devgate.sh <id> [seconds]      # sandbox install + boot gate (default 40 s) + screenshot
@@ -152,8 +153,21 @@ reuse only hides a use-after-free).
 
 - Never patch a guest `.so` or an original APK; guest sha256 is checked at
   packaging.
-- A wild guest pointer must become a clean guest halt (LOUD + HaltExecution),
-  never a host SIGSEGV: keep `CheckRange`/`CheckAccess` on every guest pointer.
+- A wild guest pointer must become a guest halt with a LOUD log line, never a
+  host crash and never a quiet skip. How is free: a check per call
+  (`CheckRange`/`CheckAccess`, ~5 ns, `FMT_BENCH=1 fmt_test` prints it) or a
+  fault handler, whichever is cheaper and proven.
+- Every line that halts the guest, and every answer the host had to invent
+  (an unimplemented import, a Java call that could not be made), contains
+  `LOUD`: the device gate greps for it.
+- A protection or a diagnostic added during an investigation is marked as
+  such and removed in the commit that fixes the root cause. One that stays
+  says why, in the code and in the commit message. Before calling existing
+  code "needed", trace it with `git log -S`: a comment tells what was
+  believed then.
+- A device is never told the PC harness's invented answers (API level,
+  screen size, device id): on Android the real Java method answers, or the
+  call fails with a LOUD line.
 - Verify against primary sources (NDK headers, jni.h, AAPCS32, GLES2 spec,
   guest disassembly with `llvm-objdump`), not against these docs or comments.
   Do address arithmetic in code, never in your head.

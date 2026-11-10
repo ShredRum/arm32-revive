@@ -39,9 +39,8 @@ on every writer; its root cause was the JNI table off by one (1177bac), and
          uniqcall/call# (be88baa); none is named as a tool in the docs
    - [x] realgl.cpp black-frame dumps, active_tex_/bound_tex2d_/tex_size_,
          SHOTSWAP/SHOTCLEAR (d7578bc); plain GLDRAWLOG lines stay
-   - [ ] left: harness.cpp (PC only) [memselftest] and the "[heap] top"
-         exit line still carry TEMP-DIAG tags; POLLDBG, DNS1/2, NETTYPE,
-         DEVID, LOCALE knobs (minimum.md list) not part of this batch
+   - [x] harness.cpp [memselftest] and the "[heap] top" exit line;
+         POLLDBG, DNS1/2, NETTYPE, DEVID, LOCALE knobs: removed
 4. Dead or title-specific code — B-R3/R4, A-C1
    - [x] "add pc" emulation in ExceptionRaised (unreachable; fmt_test case
          runs `add pc, r0, pc` on the JIT) (d5404b0)
@@ -52,14 +51,14 @@ on every writer; its root cause was the JNI table off by one (1177bac), and
    Batches 3-4 verified: native build without new warnings, fmt_test ALL
    OK, harness init lines unchanged on all six titles, sandbox lib builds.
    Device gate: not run yet.
-5. Cheaper hot paths (MOVE): per-byte CheckRange in strchr/strstr/strtok
+5. [x] (see "State 2026-11-10" at the end) Cheaper hot paths (MOVE): per-byte CheckRange in strchr/strstr/strtok
    family -> GuestStrnlen; GuestStrnlen without a cache; strcmp double
    pass; JNIEnv lookup, per-call RegisterSigThread, RealCallObject
    re-parsing; cond/rwlock under the global mutex — A/B MOVE lists
-6. Correctness found on the way: RELRO write guard drops instead of
+6. [x] (except the shader 0x01 rewrite) Correctness found on the way: RELRO write guard drops instead of
    halting; halting lines without "LOUD" are invisible to the gate;
    wild pointers that fail silently (fread dst, snprintf dst)
-7. Android mocks of 2014 (API 21, 800x480...) and AudioOutput special
+7. [x] Android mocks of 2014 (API 21, 800x480...) and AudioOutput special
    cases: PC-only — B-R6/R7
 
 Owner decisions pending: ensure_parent (directories on every write-open;
@@ -260,32 +259,86 @@ private caches). Kept: B, C (last, own commit), E (as a fault handler).
 ## Batch 6 additions: decided items from the audits (owner, 2026-11-10)
 
 Each one as proposed in the conversation of 2026-11-10:
-- [ ] ensure_parent: keep the behaviour, make it free — open first; only on
+- [x] ensure_parent: keep the behaviour, make it free — open first; only on
       ENOENT create the parents and retry (the owner kept it in 96acf7f).
-- [ ] Generic 0-stub for unimplemented imports: keep returning, but log
+- [x] Generic 0-stub for unimplemented imports: keep returning, but log
       LOUD (once per name) so the gate sees it; implement each one that
       shows up.
-- [ ] fcntl F_SETLK/F_GETLK/F_SETLKW: forward to the host with struct flock
+- [x] fcntl F_SETLK/F_GETLK/F_SETLKW: forward to the host with struct flock
       converted 32 -> 64 bit, instead of "success" for unhandled commands.
-- [ ] Page size: the guest is told 4096 everywhere (sysconf, getauxval
+- [x] Page size: the guest is told 4096 everywhere (sysconf, getauxval
       AT_PAGESZ, __page_size); 16 KB host pages stay the bridge's concern.
-- [ ] pthread_create honours its attr: detached threads are reaped when
+- [x] pthread_create honours its attr: detached threads are reaped when
       they end (no entry left in threads_), the requested stack size is
       used within a sane range.
-- [ ] GL getters that return silently on a bad pointer halt LOUD instead.
-- [ ] qsort/bsearch: drop the arbitrary 64 MiB cap, check the range (n*size,
+- [x] GL getters that return silently on a bad pointer halt LOUD instead.
+- [x] qsort/bsearch: drop the arbitrary 64 MiB cap, check the range (n*size,
       overflow-safe).
 - [ ] Shader 0x01 -> newline rewrite: test on the sandbox without it; drop
       it if every title still draws.
-- [ ] A free of an unknown address: one LOUD line (capped).
-- [ ] heap_used_ accounting: malloc and free use the same size.
+- [x] A free of an unknown address: one LOUD line (capped).
+- [x] heap_used_ accounting: malloc and free use the same size.
 
 ## Also to do (2026-11-10)
 
-- [ ] Batch 3 leftovers: harness.cpp `[memselftest]` and the `[heap] top`
+- [x] Batch 3 leftovers: harness.cpp `[memselftest]` and the `[heap] top`
       exit line; knobs listed in docs/minimum.md (POLLDBG, DNS1/2, NETTYPE,
       DEVID, LOCALE): decide and remove what is a closed experiment.
 - [ ] After batches 5-7 and C: a fresh read-only audit of the whole host
       for anything these two audits missed.
 - [ ] The final sandbox session also gates the `classic` branch (the union
       of forwarders changed: all titles) before either branch is merged.
+
+
+## State 2026-11-10 (second session): batches 5-7 committed, device gate NOT run
+
+Verified on the PC only: native build, fmt_test ALL OK, `scripts/harness-all.sh`
+(six titles, init lines unchanged, LOUD 0), the sandbox Android lib compiles.
+Nothing here has run on a device yet.
+
+Commits after 889703b:
+- 954a5cd one mapping cache (FindMapping, two slots) under CheckRange /
+  CheckAccess / GuestStrnlen; strcmp family in one pass; no per-byte checks
+- (next) CallImport: memcmp/strlen/strcmp are HotImport kinds, GL by gl_id (B)
+- Batch 5 rest: ThreadEnter fast path, JNIEnv thread_local, ForgetGlBindings
+  only for JNI functions that can run Java, cond/rwlock own lock, pthread_once
+  fast path, lazy ensure_parent, open-failure log capped
+- 64 KB guard after the 4 GB; FMT_BENCH "range check" line
+- RELRO write halts; LOUD on every halting line
+- fread/fwrite wild pointer halts; generic stub LOUD once per name; fcntl locks
+- page size 4096; pthread_create attr (detached, larger stacks)
+- GL bad pointers halt; glGetFloatv/Booleanv; qsort cap; unknown free LOUD;
+  heap_used_
+- Batch 7 (Android-only code, the riskiest for the gate)
+- harness leftovers; AGENTS.md rules
+
+Decided NOT to do, with the reason:
+- E (pointer checks in a fault handler): measured, one CheckRange is ~4.6 ns;
+  ~6500 per SW2 menu frame = ~0.03 ms of ~10 ms. Cannot pay for a SIGSEGV
+  recovery path, and writes need the page map anyway. Only its guard region
+  was done.
+- M4 (RealCallObject descriptor cache): runs only against a real JVM, so no PC
+  test can cover it; count JNI calls per frame on a device first.
+- pthread_create with a stack SMALLER than 8 MB: not honoured. The stacks come
+  from the guest heap without a guard page; a smaller stack would turn an
+  overflow into silent heap damage. Needs guard-paged stacks first.
+- M9-M11 (AppHost_Call name map, WrapObject(thiz), strstr nativeUpdate): low
+  value, not started.
+
+Still to do:
+- [ ] Device gate of all titles (+ `classic`): launch, menu, level, sound,
+      background/resume. Watch for the NEW LOUD lines, each names a place
+      where the host used to invent an answer: `[jni] LOUD Java call ... could
+      not be made`, `[stub] LOUD unimplemented import`, `[fcntl] LOUD
+      unimplemented command`, `[heap] LOUD free of`, `[realgl] ... LOUD
+      BAD-PTR`. Each one that shows up is fixed at its cause (implement the
+      import / command), not silenced.
+- [ ] Shader 0x01 -> newline: test without it on the sandbox.
+- [ ] C (`svc; bx lr` trampoline): NOT started; the experiment files in the
+      scratchpad are gone. Dynarmic ends an svc block with PopRSBHint for
+      pc+4 (arm_SVC), so C saves one fast-dispatch lookup per import call:
+      consistent with the measured -0.03 ms. Do it only after this branch
+      passed the gate, in its own commit, judged by the dispatch counters.
+- [ ] Speed before/after vs master, interleaved.
+- [ ] A read-only audit of this session's diff (889703b..HEAD) was not done
+      (session budget): do it before the merge.
