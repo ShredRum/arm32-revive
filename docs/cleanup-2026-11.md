@@ -23,13 +23,35 @@ on every writer; its root cause was the JNI table off by one (1177bac), and
    - [x] big_live_ side index — A3
 2. [x] JNI audio buffer pool `array_pool_` (scan on every free/realloc, leaks
    past 8) — B-R2
-3. Retired knobs and diag remnants: MALLOCPAD, ZEROFILL, NORELEASE,
-   HEAPBASE, realloc pre-dump, TIMEWARP, NOWORKER, WP/WPA/HEAPWATCH/
-   TRACELOADS (fastmem makes them blind on device), MEMDUMP, registry
-   dumps, Fox-hunt dump, HOSTSHACK, WBEAT, closed-hunt logs — A6-A9, B
-4. Dead or title-specific code: "add pc" emulation (unreachable), Rio text
-   range in the ExceptionRaised backtrace, unwind nest guard (cause fixed
-   6de206a) — B-R3/R4, A
+3. Retired knobs and diag remnants — A6-A9, B
+   - [x] MALLOCPAD, ZEROFILL, NORELEASE, HEAPBASE, realloc pre-dump,
+         HEAPWATCH/WP/WPA/TRACELOADS, Fox-hunt dump (dbc4c53)
+   - [x] TIMEWARP, NOWORKER, WBEAT (also the worker-Jit use-after-free),
+         MEMDUMP, HOSTSHACK (2856fd2)
+   - [x] closed-hunt TEMP-DIAG logs in dispatch.cpp: preamble socket log,
+         pthread_create job/URL sniffing, sscanf inputs, registry [regio]
+         dumps + FILE* tagging, pipe log, recv inbound bytes, fcntl parking
+         line, opendir log, fake-GL [glsrc]/[gltex] + work/shaders stash,
+         memset wall4 log, inet_ntop/pton logs (87d73b8). The [import]
+         "first call" audit stays (general tool).
+   - [x] apphost.cpp RunGuestNative/AppHost_Call forensics: [screen],
+         [rate], PrintHeapIdx (+ its two counters), [input], r0 polarity,
+         uniqcall/call# (be88baa); none is named as a tool in the docs
+   - [x] realgl.cpp black-frame dumps, active_tex_/bound_tex2d_/tex_size_,
+         SHOTSWAP/SHOTCLEAR (d7578bc); plain GLDRAWLOG lines stay
+   - [ ] left: harness.cpp (PC only) [memselftest] and the "[heap] top"
+         exit line still carry TEMP-DIAG tags; POLLDBG, DNS1/2, NETTYPE,
+         DEVID, LOCALE knobs (minimum.md list) not part of this batch
+4. Dead or title-specific code — B-R3/R4, A-C1
+   - [x] "add pc" emulation in ExceptionRaised (unreachable; fmt_test case
+         runs `add pc, r0, pc` on the JIT) (d5404b0)
+   - [x] ExceptionRaised backtrace: ScanStackForReturnAddresses instead of
+         Rio's [0x1000, 0x6EE000); the halting line says LOUD (62b1471)
+   - [x] unwind nest guard + HARNESS_NESTMAX / HARNESS_EXIDXLOG and the
+         now-unused FindExidx; cause fixed 6de206a / 4af8d8a (55db929)
+   Batches 3-4 verified: native build without new warnings, fmt_test ALL
+   OK, harness init lines unchanged on all six titles, sandbox lib builds.
+   Device gate: not run yet.
 5. Cheaper hot paths (MOVE): per-byte CheckRange in strchr/strstr/strtok
    family -> GuestStrnlen; GuestStrnlen without a cache; strcmp double
    pass; JNIEnv lookup, per-call RegisterSigThread, RealCallObject

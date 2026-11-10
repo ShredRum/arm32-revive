@@ -129,7 +129,7 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | A-16 | S3 | 641 calloc | calloc(0,x) returns NULL (should return a unique pointer) | fixed 68d7bda |
 | A-17 | S3 | 1550 printf %s | NULL prints ELF header (VA 0 mapped); want "(null)" | open |
 | A-18 | S3 | 3311 snprintf | unmapped dst silently skipped, full length returned | open |
-| A-19 | S3 | 3175, 3200 localtime | TIMEWARP applied twice (diag); tm_zone NULL | open |
+| A-19 | S3 | 3175, 3200 localtime | TIMEWARP applied twice (diag; knob removed 2856fd2); tm_zone NULL | open |
 | A-20 | S3 | 2070 syscall | returns -ENOSYS raw instead of -1+errno; tgkill fakes success | open |
 | A-21 | S3 | 1361-1472 ExpandPrintf | trailing %/bad spec not counted; 1 MiB loop guard stops counting; %10p width placement; %*d INT_MIN | open |
 | A-22 | S4 | math_thunks.inc:290,371 | __signbitl/nanl treat long double as float (dead) | open |
@@ -269,7 +269,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | F-01..03 | S4 | relocations | REL32 lacks -P (unused), weak undefined -> trampoline, GLOB_DAT addend applied (all 0 in these guests) | open |
 | F-06 | S3 | Find_exidx | exidx table returned for trampoline pcs; nest guard state shared across threads | open |
 | F-12..21 | S3 | elf parsing | unbounded table reads / uint32 wraps on malformed ELF (low risk: guest SHA is checked first) | open |
-| F-26 | S4 | ExceptionRaised | add-pc emulation dead (Dynarmic handles add pc natively) | open |
+| F-26 | S4 | ExceptionRaised | add-pc emulation dead (Dynarmic handles add pc natively) | fixed d5404b0 |
 | F-29 | S3 | Runtime::jit_ | still points at the OnLoad Jit after its thread exits (= C-32) | open |
 | F-35 | S3 | gate | harness runs with fastmem off, unlike shipping | open |
 | F-36 | S3 | cbnz_test | always returns 0, checks nothing | open |
