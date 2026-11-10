@@ -42,3 +42,19 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   - Restored original segment protections after applying relocations in `elf_loader.cpp`.
   - Scoped `devgate.sh` reinstall fallback strictly to `INSTALL_FAILED_VERSION_DOWNGRADE`.
   - Regression gate passed across all titles (`fmt_test` ALL OK, `harness-all.sh` LOUD=0, `devgate` clean).
+
+## 2026-11-11: AdMob Neutralization for Android 14+ / TargetSdk 26
+
+- **Issue**: On modern Android (Android 14+, targetSdk >= 24), the 2011-era AdMob SDK (`com.admob.android.ads`) throws `SecurityException: MODE_WORLD_WRITEABLE no longer supported` in `com.admob.android.ads.j.a` during `getSharedPreferences("admob_prefs", 2)`. This caused the game to crash ~6 seconds after launch when `RequestAdRunnable` ran on the UI thread.
+- **Fix**: Added `games/rio-1.0.0/smali.patch` to neutralize dead AdMob requests in `InterstitialAdWrapper`, `AdViewWrapper`, and their Runnables:
+  - `InterstitialAdWrapper.requestVideoAd` and `requestAndShowVideo`: immediately post `OnFailedToReceiveInterstitialRunnable` to the GL thread (invoking `setVideoReady(handle, false)`).
+  - `InterstitialAdWrapper.showVideoAd`: immediately posts `OnFailedToReceiveInterstitialRunnable` to the GL thread.
+  - `AdViewWrapper.requestAd`: immediately posts `RequestAdResultRunnable(false)` to the GL thread (invoking `requestAdCallback(handle, false)`).
+  - `AdViewWrapper.hide`: immediately posts `HidingFinishedRunnable` to the GL thread (invoking `hidingFinishedCallback(handle)`).
+  - `AdViewWrapper.show`: converted to no-op.
+  - Runnables (`RequestAdRunnable`, `MyRequestAdRunnable`, `ShowAdRunnable`): dead AdMob invocations replaced with immediate GL thread callbacks.
+- **Verification**:
+  - `prepare-tree.sh rio-1.0.0 --force` cleanly applies `smali.patch` with zero rejects.
+  - Sandbox devgate passed clean: 0 halts, 0 LOUD markers, 0 crashes (`death=0`).
+  - Phone build verified and signed.
+

@@ -1,0 +1,381 @@
+diff -ruN a/smali/com/rovio/angrybirds/AdViewWrapper.smali b/smali/com/rovio/angrybirds/AdViewWrapper.smali
+--- a/smali/com/rovio/angrybirds/AdViewWrapper.smali	2026-11-11 00:06:11.882472183 +0200
++++ b/smali/com/rovio/angrybirds/AdViewWrapper.smali	2026-11-11 00:06:40.402268936 +0200
+@@ -41,21 +41,18 @@
+ 
+ # virtual methods
+ .method public hide()V
+-    .locals 3
++    .locals 2
+ 
+     .prologue
+-    .line 38
++    # ab-port: notify engine on GL thread that hiding is finished
+     iget-object v0, p0, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    new-instance v1, Lcom/rovio/angrybirds/SetAddVisibilityRunnable;
++    new-instance v1, Lcom/rovio/angrybirds/HidingFinishedRunnable;
+ 
+-    const/4 v2, 0x0
++    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/HidingFinishedRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;)V
+ 
+-    invoke-direct {v1, p0, v2}, Lcom/rovio/angrybirds/SetAddVisibilityRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;Z)V
+-
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
++    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    .line 39
+     return-void
+ .end method
+ 
+@@ -143,19 +140,20 @@
+ .end method
+ 
+ .method public requestAd()V
+-    .locals 2
++    .locals 3
+ 
+     .prologue
+-    .line 45
++    # ab-port: AdMob 2011 is dead; notify engine that request failed (succeeded = false)
+     iget-object v0, p0, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    new-instance v1, Lcom/rovio/angrybirds/MyRequestAdRunnable;
++    new-instance v1, Lcom/rovio/angrybirds/RequestAdResultRunnable;
++
++    const/4 v2, 0x0
+ 
+-    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/MyRequestAdRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;)V
++    invoke-direct {v1, p0, v2}, Lcom/rovio/angrybirds/RequestAdResultRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;Z)V
+ 
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
++    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    .line 46
+     return-void
+ .end method
+ 
+@@ -163,20 +161,9 @@
+ .end method
+ 
+ .method public show()V
+-    .locals 3
++    .locals 0
+ 
+     .prologue
+-    .line 31
+-    iget-object v0, p0, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+-
+-    new-instance v1, Lcom/rovio/angrybirds/SetAddVisibilityRunnable;
+-
+-    const/4 v2, 0x1
+-
+-    invoke-direct {v1, p0, v2}, Lcom/rovio/angrybirds/SetAddVisibilityRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;Z)V
+-
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
+-
+-    .line 32
++    # ab-port: no-op since no banner ad exists
+     return-void
+ .end method
+diff -ruN a/smali/com/rovio/angrybirds/InterstitialAdWrapper.smali b/smali/com/rovio/angrybirds/InterstitialAdWrapper.smali
+--- a/smali/com/rovio/angrybirds/InterstitialAdWrapper.smali	2026-11-11 00:06:11.883540720 +0200
++++ b/smali/com/rovio/angrybirds/InterstitialAdWrapper.smali	2026-11-11 00:06:24.454084117 +0200
+@@ -89,21 +89,19 @@
+     .locals 2
+ 
+     .prologue
+-    .line 48
++    # ab-port: AdMob 2011 is dead and crashes with SecurityException; notify engine that no ad is available
+     const/4 v0, 0x1
+ 
+     iput-boolean v0, p0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_runOnReceive:Z
+ 
+-    .line 49
+     iget-object v0, p0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    new-instance v1, Lcom/rovio/angrybirds/RequestAdRunnable;
++    new-instance v1, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;
+ 
+-    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/RequestAdRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
++    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
+ 
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
++    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    .line 50
+     return-void
+ .end method
+ 
+@@ -111,21 +109,19 @@
+     .locals 2
+ 
+     .prologue
+-    .line 31
++    # ab-port: AdMob 2011 is dead and crashes with SecurityException; notify engine that no ad is available
+     const/4 v0, 0x0
+ 
+     iput-boolean v0, p0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_runOnReceive:Z
+ 
+-    .line 32
+     iget-object v0, p0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    new-instance v1, Lcom/rovio/angrybirds/RequestAdRunnable;
++    new-instance v1, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;
+ 
+-    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/RequestAdRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
++    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
+ 
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
++    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    .line 33
+     return-void
+ .end method
+ 
+@@ -136,15 +132,14 @@
+     .locals 2
+ 
+     .prologue
+-    .line 40
++    # ab-port: AdMob 2011 is dead; notify engine that video is not ready
+     iget-object v0, p0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    new-instance v1, Lcom/rovio/angrybirds/ShowAdRunnable;
++    new-instance v1, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;
+ 
+-    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/ShowAdRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
++    invoke-direct {v1, p0}, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
+ 
+-    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnUiThread(Ljava/lang/Runnable;)V
++    invoke-virtual {v0, v1}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    .line 41
+     return-void
+ .end method
+diff -ruN a/smali/com/rovio/angrybirds/MyRequestAdRunnable.smali b/smali/com/rovio/angrybirds/MyRequestAdRunnable.smali
+--- a/smali/com/rovio/angrybirds/MyRequestAdRunnable.smali	2026-11-11 00:06:11.884419964 +0200
++++ b/smali/com/rovio/angrybirds/MyRequestAdRunnable.smali	2026-11-11 00:07:25.678791345 +0200
+@@ -27,99 +27,21 @@
+ 
+ # virtual methods
+ .method public run()V
+-    .locals 5
++    .locals 4
+ 
+     .prologue
+-    const/4 v4, -0x2
++    # ab-port: AdMob 2011 is dead; notify engine that request failed (succeeded = false)
++    iget-object v0, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+ 
+-    .line 92
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
++    iget-object v1, v0, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
++    new-instance v2, Lcom/rovio/angrybirds/RequestAdResultRunnable;
+ 
+-    if-eqz v1, :cond_0
++    const/4 v3, 0x0
+ 
+-    .line 93
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
++    invoke-direct {v2, v0, v3}, Lcom/rovio/angrybirds/RequestAdResultRunnable;-><init>(Lcom/rovio/angrybirds/AdViewWrapper;Z)V
+ 
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
++    invoke-virtual {v1, v2}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    iget-object v1, v1, Lcom/rovio/ka3d/App;->m_rootViewGroup:Landroid/widget/RelativeLayout;
+-
+-    iget-object v2, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v2, v2, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    invoke-virtual {v1, v2}, Landroid/widget/RelativeLayout;->removeView(Landroid/view/View;)V
+-
+-    .line 96
+-    :cond_0
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    new-instance v2, Lcom/admob/android/ads/AdView;
+-
+-    iget-object v3, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v3, v3, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+-
+-    invoke-direct {v2, v3}, Lcom/admob/android/ads/AdView;-><init>(Landroid/app/Activity;)V
+-
+-    iput-object v2, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    .line 97
+-    new-instance v0, Landroid/widget/RelativeLayout$LayoutParams;
+-
+-    invoke-direct {v0, v4, v4}, Landroid/widget/RelativeLayout$LayoutParams;-><init>(II)V
+-
+-    .line 98
+-    .local v0, "params":Landroid/widget/RelativeLayout$LayoutParams;
+-    const/16 v1, 0xb
+-
+-    invoke-virtual {v0, v1}, Landroid/widget/RelativeLayout$LayoutParams;->addRule(I)V
+-
+-    .line 99
+-    const/16 v1, 0xa
+-
+-    invoke-virtual {v0, v1}, Landroid/widget/RelativeLayout$LayoutParams;->addRule(I)V
+-
+-    .line 100
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    invoke-virtual {v1, v0}, Lcom/admob/android/ads/AdView;->setLayoutParams(Landroid/view/ViewGroup$LayoutParams;)V
+-
+-    .line 101
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    iget-object v2, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    invoke-virtual {v1, v2}, Lcom/admob/android/ads/AdView;->setAdListener(Lcom/admob/android/ads/AdListener;)V
+-
+-    .line 102
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    const/16 v2, 0x8
+-
+-    invoke-virtual {v1, v2}, Lcom/admob/android/ads/AdView;->setVisibility(I)V
+-
+-    .line 103
+-    iget-object v1, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/AdViewWrapper;->m_app:Lcom/rovio/ka3d/App;
+-
+-    iget-object v1, v1, Lcom/rovio/ka3d/App;->m_rootViewGroup:Landroid/widget/RelativeLayout;
+-
+-    iget-object v2, p0, Lcom/rovio/angrybirds/MyRequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/AdViewWrapper;
+-
+-    iget-object v2, v2, Lcom/rovio/angrybirds/AdViewWrapper;->m_adView:Lcom/admob/android/ads/AdView;
+-
+-    invoke-virtual {v1, v2}, Landroid/widget/RelativeLayout;->addView(Landroid/view/View;)V
+-
+-    .line 104
+     return-void
+ .end method
+diff -ruN a/smali/com/rovio/angrybirds/RequestAdRunnable.smali b/smali/com/rovio/angrybirds/RequestAdRunnable.smali
+--- a/smali/com/rovio/angrybirds/RequestAdRunnable.smali	2026-11-11 00:06:11.885345659 +0200
++++ b/smali/com/rovio/angrybirds/RequestAdRunnable.smali	2026-11-11 00:06:52.544409355 +0200
+@@ -27,75 +27,19 @@
+ 
+ # virtual methods
+ .method public run()V
+-    .locals 4
++    .locals 3
+ 
+     .prologue
+-    .line 81
++    # ab-port: AdMob 2011 is dead; notify engine that ad failed
+     iget-object v0, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+ 
+-    iget-object v0, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_videoType:Lcom/admob/android/ads/InterstitialAd$Event;
++    iget-object v1, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+ 
+-    sget-object v1, Lcom/admob/android/ads/InterstitialAd$Event;->APP_START:Lcom/admob/android/ads/InterstitialAd$Event;
++    new-instance v2, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;
+ 
+-    if-ne v0, v1, :cond_1
++    invoke-direct {v2, v0}, Lcom/rovio/angrybirds/OnFailedToReceiveInterstitialRunnable;-><init>(Lcom/rovio/angrybirds/InterstitialAdWrapper;)V
+ 
+-    .line 82
+-    const-string v0, "a14d6fa2b901034"
++    invoke-virtual {v1, v2}, Lcom/rovio/ka3d/App;->runOnGLThread(Ljava/lang/Runnable;)V
+ 
+-    invoke-static {v0}, Lcom/admob/android/ads/AdManager;->setInterstitialPublisherId(Ljava/lang/String;)V
+-
+-    .line 86
+-    :cond_0
+-    :goto_0
+-    iget-object v0, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    new-instance v1, Lcom/admob/android/ads/InterstitialAd;
+-
+-    iget-object v2, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v2, v2, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_videoType:Lcom/admob/android/ads/InterstitialAd$Event;
+-
+-    iget-object v3, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    invoke-direct {v1, v2, v3}, Lcom/admob/android/ads/InterstitialAd;-><init>(Lcom/admob/android/ads/InterstitialAd$Event;Lcom/admob/android/ads/InterstitialAdListener;)V
+-
+-    iput-object v1, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_ad:Lcom/admob/android/ads/InterstitialAd;
+-
+-    .line 87
+-    iget-object v0, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v0, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_ad:Lcom/admob/android/ads/InterstitialAd;
+-
+-    iget-object v1, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+-
+-    invoke-virtual {v0, v1}, Lcom/admob/android/ads/InterstitialAd;->requestAd(Landroid/content/Context;)V
+-
+-    .line 88
+-    iget-object v0, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    sget-object v1, Lcom/admob/android/ads/InterstitialAd$Event;->SCREEN_CHANGE:Lcom/admob/android/ads/InterstitialAd$Event;
+-
+-    iput-object v1, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_videoType:Lcom/admob/android/ads/InterstitialAd$Event;
+-
+-    .line 89
+     return-void
+-
+-    .line 83
+-    :cond_1
+-    iget-object v0, p0, Lcom/rovio/angrybirds/RequestAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v0, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_videoType:Lcom/admob/android/ads/InterstitialAd$Event;
+-
+-    sget-object v1, Lcom/admob/android/ads/InterstitialAd$Event;->SCREEN_CHANGE:Lcom/admob/android/ads/InterstitialAd$Event;
+-
+-    if-ne v0, v1, :cond_0
+-
+-    .line 84
+-    const-string v0, "a14d6fa30bd89fa"
+-
+-    invoke-static {v0}, Lcom/admob/android/ads/AdManager;->setInterstitialPublisherId(Ljava/lang/String;)V
+-
+-    goto :goto_0
+ .end method
+diff -ruN a/smali/com/rovio/angrybirds/ShowAdRunnable.smali b/smali/com/rovio/angrybirds/ShowAdRunnable.smali
+--- a/smali/com/rovio/angrybirds/ShowAdRunnable.smali	2026-11-11 00:06:11.886234653 +0200
++++ b/smali/com/rovio/angrybirds/ShowAdRunnable.smali	2026-11-11 00:07:15.664676073 +0200
+@@ -30,7 +30,7 @@
+     .locals 4
+ 
+     .prologue
+-    .line 98
++    # ab-port: AdMob 2011 is dead; setVideoReady false
+     iget-object v0, p0, Lcom/rovio/angrybirds/ShowAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+ 
+     iget-object v1, p0, Lcom/rovio/angrybirds/ShowAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+@@ -41,17 +41,5 @@
+ 
+     invoke-virtual {v0, v1, v2, v3}, Lcom/rovio/angrybirds/InterstitialAdWrapper;->setVideoReady(JZ)V
+ 
+-    .line 99
+-    iget-object v0, p0, Lcom/rovio/angrybirds/ShowAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v0, v0, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_ad:Lcom/admob/android/ads/InterstitialAd;
+-
+-    iget-object v1, p0, Lcom/rovio/angrybirds/ShowAdRunnable;->m_wrapper:Lcom/rovio/angrybirds/InterstitialAdWrapper;
+-
+-    iget-object v1, v1, Lcom/rovio/angrybirds/InterstitialAdWrapper;->m_app:Lcom/rovio/ka3d/App;
+-
+-    invoke-virtual {v0, v1}, Lcom/admob/android/ads/InterstitialAd;->show(Landroid/app/Activity;)V
+-
+-    .line 100
+     return-void
+ .end method
