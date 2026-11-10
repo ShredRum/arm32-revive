@@ -4637,69 +4637,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // unwinder that defines its own __gnu_Unwind_Find_exidx calls it
     // (Angry Birds Stella).
     if (id == I::__gnu_Unwind_Find_exidx_ || id == I::dl_unwind_find_exidx_) {
-        // Nest guard (subagent #6): the phase driver can re-present the same
-        // handler frame forever (pad transfer never happens) — 131K nested
-        // throws, 64B/level, 8MB stack blow. Legit retry loops REUSE stack;
-        // nesting marches sp down monotonically. Break on same-pc + strictly
-        // descending sp past the threshold: return can't-unwind (0) so the
-        // run terminates with the ORIGINAL exception visible instead of a
-        // silent overflow. Matches device semantics (uncaught -> terminate).
-        // a0 = pc; the caller's sp (r13) is the frame (a1 is the int* count,
-        // which need not be on the stack). Tracked per stack range (main vs
-        // workers).
-        struct NestTrack {
-            std::uint32_t pc = 0xFFFFFFFFu;
-            std::uint32_t sp = 0xFFFFFFFFu;
-            unsigned depth = 0;
-        };
-        static NestTrack tracks[2];
-        const std::uint32_t fsp = regs[13];
-        NestTrack& tr = (fsp >= abr::kStackBase && fsp < abr::kStackTop) ? tracks[0] : tracks[1];
-        if (a0 == tr.pc && fsp < tr.sp) {
-            tr.depth++;
-        } else {
-            tr.depth = 0;
-            tr.pc = a0;
-        }
-        tr.sp = fsp;
-        // HARNESS_NESTMAX overrides the abort depth (default 512) to test
-        // whether a deeper handler catches (fallback paths) vs true spiral.
-        static std::int64_t nestmax = -2;
-        if (nestmax == -2) {
-            nestmax = 512;
-            if (const char* ne = std::getenv("HARNESS_NESTMAX")) {
-                nestmax = (std::int64_t)std::strtoul(ne, nullptr, 0);
-            }
-        }
-        if ((std::int64_t)tr.depth > nestmax) {
-            // Returning 0 does NOT stop this driver (it takes the NULL path
-            // and re-presents). Halt loud: the stack holds the whole spiral
-            // and the original throw is ~512 levels up, intact for forensics.
-            std::printf("[unwind] LOUD nesting %u deep at pc=%08x sp=%08x -- halting\n", tr.depth,
-                        a0, fsp);
-            // Forensics for this fatal halt: R7 and the words the SU16
-            // pop-frame reads ([R7-12..R7+8]).
-            {
-                std::uint32_t r7v = regs[7];
-                std::printf("[unwind] R7=%08x SP=%08x LR=%08x : ", r7v, regs[13], regs[14]);
-                for (int k = -12; k <= 8; k += 4) {
-                    std::uint32_t w = 0xDEADBEEFu;
-                    if (CheckRange(r7v + k, 4, false)) {
-                        std::memcpy(&w, H<const std::uint8_t>(r7v + k), 4);
-                    }
-                    std::printf("[%+d]=%08x ", k, w);
-                }
-                std::printf("\n");
-            }
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
-            return;
-        }
-        // HARNESS_EXIDXLOG=1: temp-diag (unwinder spiral): log every lookup.
-        if (EnvOn("HARNESS_EXIDXLOG")) {
-            std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
-                        FindExidx(a0), regs[7], regs[13], regs[14]);
-        }
         // The imported ABI is (pc, int* count) -> the exidx TABLE BASE of the
         // module holding pc, with *count = number of 8-byte entries; the caller
         // (the guest's own statically linked libgcc) then binary-searches that
@@ -4712,7 +4649,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // FATAL before any descriptor runs, and the first main-thread throw
         // wedges the updater (black screen). The ABI answer is correct for
         // every image: frame #1 then pops its saved LR (0x457FE7) and the walk
-        // continues into __cxa_throw and the game's own handler.
+        // continues into __cxa_throw and the game's own handler. (A nest guard
+        // that halted 512 identical nested lookups lived here; the spiral it
+        // stopped was this wrong answer, fixed in 6de206a / 4af8d8a.)
         const std::uint32_t pc = a0 & ~std::uint32_t(1);
         std::uint32_t base = 0, count = 0;
         if (IsCodeAddress(pc)) {
@@ -9394,45 +9333,6 @@ void Runtime::ExidxFor(std::uint32_t pc, std::uint32_t* base, std::uint32_t* cou
             return;
         }
     }
-}
-
-std::uint32_t Runtime::FindExidx(std::uint32_t pc) {
-    std::uint32_t base = 0, count = 0;
-    ExidxFor(pc & ~std::uint32_t(1), &base, &count);
-    if (base == 0 || count == 0) {
-        return 0;
-    }
-    pc &= ~std::uint32_t(1);  // exidx function addresses exclude the Thumb bit
-    // Table sorted by function address ascending. prel31: bit30 is the sign
-    // (verified: exact fn matches for 0x2F91B0/0x45A758/0xC1550, 0 violations).
-    auto fn_of = [&](std::uint32_t idx) -> std::uint32_t {
-        std::uint32_t w = 0;
-        std::memcpy(&w, H(base + idx * 8), 4);
-        std::int32_t off;
-        if (w & 0x40000000u) {
-            off = -static_cast<std::int32_t>(0x40000000u - (w & 0x3FFFFFFFu));
-        } else {
-            off = static_cast<std::int32_t>(w & 0x3FFFFFFFu);
-        }
-        return (base + idx * 8) + static_cast<std::uint32_t>(off);
-    };
-    // Bounds-check the whole table first (host-side bulk access discipline).
-    if (!CheckRange(base, count * 8, false)) {
-        return 0;
-    }
-    std::uint32_t lo = 0, hi = count;
-    while (lo < hi) {
-        const std::uint32_t mid = lo + (hi - lo) / 2;
-        if (fn_of(mid) <= pc) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    if (lo == 0) {
-        return 0;  // pc below the first entry
-    }
-    return base + (lo - 1) * 8;
 }
 
 void Runtime::InitDataImports() {

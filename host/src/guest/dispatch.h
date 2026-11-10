@@ -694,10 +694,6 @@ public:
     // The original app's targetSdkVersion (0 = unknown: current behaviour).
     void SetGuestTargetSdk(int sdk) { guest_target_sdk_ = sdk; }
 
-    // __gnu_Unwind_Find_exidx: binary search of .ARM.exidx (prel31), returns
-    // entry VA or 0. Lets the in-module unwinder do its real job instead of
-    // degrading on a stubbed NULL.
-    std::uint32_t FindExidx(std::uint32_t pc);
     // .ARM.exidx table {base, count} of the loaded library that holds pc.
     void ExidxFor(std::uint32_t pc, std::uint32_t* base, std::uint32_t* count) const;
     void ProtectOneRelro(std::uint32_t relro_start, std::uint32_t relro_size);
