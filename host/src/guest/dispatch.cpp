@@ -4472,8 +4472,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // (absolute CLOCK_MONOTONIC deadline).
         const bool mono = (id == I::pthread_cond_timedwait_monotonic_ ||
                            id == I::pthread_cond_timedwait_monotonic_np_);
-        std::string base = mono ? "pthread_cond_timedwait" : n;
-        Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, base, a0, a1, a2, mono));
+        Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, n, a0, a1, a2, mono));
         return;
     }
     case I::pthread_key_create_:
@@ -4795,12 +4794,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, ptr_result ? 0u : 0xFFFFFFFFu);
             return false;
         };
-        auto ensure_parent = [&](const std::string& hp) {
+        // The guests write files into directories they never make (the owner
+        // kept this behaviour in 96acf7f). The write-open is tried first; only
+        // when it fails with ENOENT are the parents made and the open tried
+        // again, so an open into an existing directory costs nothing extra.
+        // True when a directory was created.
+        auto ensure_parent = [&](const std::string& hp) -> bool {
             const std::size_t slash = hp.rfind('/');
-            if (slash != std::string::npos && slash > 0) {
-                std::error_code ec;
-                std::filesystem::create_directories(hp.substr(0, slash), ec);
+            if (slash == std::string::npos || slash == 0) {
+                return false;
             }
+            std::error_code ec;
+            return std::filesystem::create_directories(hp.substr(0, slash), ec) && !ec;
         };
         // Packed files (apk_vfs.h): the packed file at host path hp when
         // there is no real one (a real file, even a dangling link, wins).
@@ -5124,10 +5129,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
             }
-            if (mode.find_first_of("wax+") != std::string::npos) {
-                ensure_parent(hp);
-            }
             FILE* f = std::fopen(hp.c_str(), mode.c_str());
+            if (!f && errno == ENOENT && mode.find_first_of("wax+") != std::string::npos &&
+                ensure_parent(hp)) {
+                f = std::fopen(hp.c_str(), mode.c_str());
+            }
+            const int fopen_errno = errno;  // before the logs: printf may change it
             if (EnvOn("HARNESS_PATHLOG")) {
                 std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %s\n", GuestTid(), hp.c_str(),
                             mode.c_str(), f ? "ok" : "NULL");
@@ -5135,9 +5142,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!f) {
                 if (DiagOn()) {
                     std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
-                                mode.c_str(), errno);
+                                mode.c_str(), fopen_errno);
                 }
-                SetGuestErrno(errno);
+                SetGuestErrno(fopen_errno);
                 Ret(regs, 0);
                 return;
             }
@@ -5483,13 +5490,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
             }
-            if ((a1 & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0) {
-                ensure_parent(hp);
-            }
             int fd = ::open(hp.c_str(), (int)a1, (mode_t)a2);
+            if (fd < 0 && errno == ENOENT && (a1 & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0 &&
+                ensure_parent(hp)) {
+                fd = ::open(hp.c_str(), (int)a1, (mode_t)a2);
+            }
             if (fd < 0) {
-                std::printf("[files] open(\"%s\",%o) -> -1 (errno %d)\n", hp.c_str(), a1, errno);
-                SetGuestErrno(errno);
+                const int e = errno;  // before the log: printf may change it
+                // Engines probe for files that are not there: the first
+                // failures are logged, the rest only under diagnostics.
+                static std::atomic<int> logged{0};
+                if (DiagOn() || logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+                    std::printf("[files] open(\"%s\",%o) -> -1 (errno %d)\n", hp.c_str(), a1, e);
+                }
+                SetGuestErrno(e);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -5513,10 +5527,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, "mkstemp")) {
                 return;
             }
-            ensure_parent(hp);
             std::vector<char> tmpl(hp.begin(), hp.end());
             tmpl.push_back('\0');
-            const int fd = ::mkstemp(tmpl.data());
+            int fd = ::mkstemp(tmpl.data());
+            if (fd < 0 && errno == ENOENT && ensure_parent(hp)) {
+                tmpl.assign(hp.begin(), hp.end());  // a failed mkstemp may have changed it
+                tmpl.push_back('\0');
+                fd = ::mkstemp(tmpl.data());
+            }
             if (fd < 0) {
                 SetGuestErrno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -6946,8 +6964,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 if (!need_host(hp2, "rename-dst")) {
                     return;
                 }
-                ensure_parent(hp2);
-                const int r = ::rename(hp.c_str(), hp2.c_str());
+                int r = ::rename(hp.c_str(), hp2.c_str());
+                if (r != 0 && errno == ENOENT && ensure_parent(hp2)) {
+                    r = ::rename(hp.c_str(), hp2.c_str());
+                }
                 if (r != 0) {
                     SetGuestErrno(errno);
                 } else if (vfs_on_) {
@@ -8792,26 +8812,34 @@ static std::shared_ptr<pthread_rwlock_t> NewHostRwlock() {
 
 std::uint32_t Runtime::PthreadRwlock(ImportId id, const std::string& n, std::uint32_t obj) {
     using I = ImportId;
-    // Same discipline as PthreadMutex: resolve under guard (taking a
-    // reference), operate outside. Lazy-creates static initializers
-    // (PTHREAD_RWLOCK_INITIALIZER).
+    // Same discipline as PthreadMutex: resolve under the map's own lock
+    // (taking a reference), operate outside. Lazy-creates static
+    // initializers (PTHREAD_RWLOCK_INITIALIZER).
     std::shared_ptr<pthread_rwlock_t> rw;
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (id == I::pthread_rwlock_init_ || id == I::pthread_rwlock_destroy_) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         if (id == I::pthread_rwlock_init_) {
             rwlock_map_[obj] = NewHostRwlock();
-            return 0;
-        }
-        if (id == I::pthread_rwlock_destroy_) {
+        } else {
             rwlock_map_.erase(obj);  // freed when the last user lets go
-            return 0;
         }
+        return 0;
+    }
+    {
+        std::shared_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        const auto it = rwlock_map_.find(obj);
+        if (it != rwlock_map_.end()) {
+            rw = it->second;
+        }
+    }
+    if (!rw) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         auto it = rwlock_map_.find(obj);
         if (it == rwlock_map_.end()) {
             it = rwlock_map_.emplace(obj, NewHostRwlock()).first;
         }
         rw = it->second;
-    }  // guard released: blocking rdlock/wrlock below must not hold mutex_.
+    }
     pthread_rwlock_t* r = rw.get();
     if (id == I::pthread_rwlock_rdlock_) {
         return static_cast<std::uint32_t>(pthread_rwlock_rdlock(r));
@@ -8844,8 +8872,11 @@ static std::shared_ptr<Runtime::HostCond> NewHostCond() {
 std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                                    std::uint32_t arg2, bool monotonic) {
     using I = ImportId;
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The cond map has its own reader/writer lock (sync_map_mu_), not the
+    // runtime's mutex_: a signal or a wait only reads the map, and what
+    // orders a wake against a wait is the cond's own lock (hc->m).
     if (id == I::pthread_cond_init_ || id == I::pthread_cond_destroy_) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         if (id == I::pthread_cond_init_) {
             if (cond_map_.count(cond) != 0) {
                 std::printf("[cond] re-init obj=%08x (t%u)\n", cond, GuestTid());
@@ -8856,15 +8887,27 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         }
         return 0;
     }
-    auto it = cond_map_.find(cond);
-    if (it == cond_map_.end()) {
-        // Lazy creation for statically-initialized condvars
-        // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
-        it = cond_map_.emplace(cond, NewHostCond()).first;
-    }
     // Own references: the cond and mutex stay alive while this thread waits,
     // even if another thread destroys them meanwhile.
-    const std::shared_ptr<HostCond> hc = it->second;
+    std::shared_ptr<HostCond> found;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        const auto it = cond_map_.find(cond);
+        if (it != cond_map_.end()) {
+            found = it->second;
+        }
+    }
+    if (!found) {
+        // Lazy creation for statically-initialized condvars
+        // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        auto it = cond_map_.find(cond);
+        if (it == cond_map_.end()) {
+            it = cond_map_.emplace(cond, NewHostCond()).first;
+        }
+        found = it->second;
+    }
+    const std::shared_ptr<HostCond> hc = found;
     using Waiter = HostCond::Waiter;
     auto unlink = [&](Waiter* w) {
         (w->prev ? w->prev->next : hc->head) = w->next;
@@ -8938,7 +8981,6 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
             t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
             t_sig->wait_cv.store(hc.get());
         }
-        mutex_.unlock();
         // The guest mutex is let go for the wait: its holder book too (as an
         // unlock by its owner would), restored after the relock below.
         const std::int32_t held_depth = mx->depth.exchange(0, std::memory_order_relaxed);
@@ -8992,7 +9034,6 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         relock();
         mx->holder.store(GuestTid(), std::memory_order_relaxed);
         mx->depth.store(held_depth > 0 ? held_depth : 1, std::memory_order_relaxed);
-        mutex_.lock();
         return r;
     };
     if (id == I::pthread_cond_wait_) {
@@ -9176,15 +9217,20 @@ void Runtime::GuestMemSet(Regs& regs, std::uint32_t dst, int fill, std::uint32_t
 
 bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
                           std::array<std::uint32_t, 16>& regs) {
-    // unique_lock (not lock_guard): the state==1 case below has to release the
-    // dispatcher lock while it waits.
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (!CheckRange(control, 4, false)) {
-        std::printf("[once] BAD control %08x -- halting\n", control);
+        std::printf("[once] LOUD BAD control %08x -- halting\n", control);
         stop_step_ = true;
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return false;
     }
+    // Done already (the usual call): one load and no lock, as bionic's fast
+    // path. Not started (0) and in progress (1) take the dispatcher lock.
+    if (__atomic_load_n(H<std::uint32_t>(control), __ATOMIC_ACQUIRE) > 1u) {
+        return false;
+    }
+    // unique_lock (not lock_guard): the state==1 case below has to release the
+    // dispatcher lock while it waits.
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     // Same control already held by THIS thread => pathological recursion (break
     // it). This must be decided before the wait below: waiting on our own init
     // would never end. A DIFFERENT control while one is in progress is
@@ -9928,11 +9974,21 @@ std::uint32_t Runtime::HeapCorruptionPc() {
 }
 
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
+    // Every Java -> native call comes through here. A thread that is
+    // registered already (t_sig is the entry of t_hot.tid; entries are never
+    // removed) only publishes the Jit it runs on now: no lock, no map, no
+    // gettid. A signal sender that still reads the previous Jit halts a Jit
+    // that is alive and stopped, which is harmless.
+    const bool registered = t_sig && t_rt == this && t_hot.tid == tid && !t_hot.is_proxy;
     t_hot.active_jit = jit;
     t_hot.tid = tid;
     if (jit) {
         jit->SetTpidruro(0);  // BindTls
-        RegisterSigThread(tid, jit);
+        if (registered) {
+            t_sig->jit.store(jit, std::memory_order_release);
+        } else {
+            RegisterSigThread(tid, jit);
+        }
         sampler::ThreadUses();  // the profiler's timer for this thread, when on
     } else if (t_sig) {
         std::lock_guard<std::mutex> l(sig_mu_);  // see GuestSendSignal
@@ -12595,7 +12651,7 @@ void Runtime::DumpGuestThreads() {
             const char* same = "?";
             std::uint64_t wakes = 0;
             std::uint32_t last_by = 0;
-            std::unique_lock<std::recursive_mutex> g(mutex_, std::try_to_lock);
+            std::shared_lock<std::shared_mutex> g(sync_map_mu_, std::try_to_lock);
             if (g.owns_lock()) {
                 const auto it = cond_map_.find(gc);
                 same = it == cond_map_.end() ? "unmapped" : it->second.get() == wcv ? "yes" : "NO";
@@ -14610,8 +14666,19 @@ std::uint32_t Runtime::NewByteArray(std::uint32_t len) {
     return out;  // opaque jbyteArray handle == buffer VA
 }
 
+// JNI functions (jni.h JNINativeInterface index) that cannot run Java code:
+// references, pending-exception queries, field access, strings, arrays,
+// monitors. Everything else may (calls, constructors, class lookup and the
+// ID getters that initialise a class, Throw, the JavaVM table).
+static bool JniRunsNoJava(std::uint32_t fn) {
+    return (fn >= 15 && fn <= 26 && fn != 18) || fn == 31 || fn == 32 || (fn >= 95 && fn <= 112) ||
+           (fn >= 145 && fn <= 214) || (fn >= 217 && fn <= 228) || (fn >= 230 && fn <= 232);
+}
+
 void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
-    ForgetGlBindings();  // Java code may run: its GL context may change
+    if (!JniRunsNoJava(fn)) {
+        ForgetGlBindings();  // Java code may run: its GL context may change
+    }
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
 #ifdef __ANDROID__
     JavaCopies java_copies;

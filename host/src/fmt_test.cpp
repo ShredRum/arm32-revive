@@ -3292,6 +3292,34 @@ int main() {
                std::to_string(static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 63, aargs))), "-1");
         Expect("access(unmapped path) errno ENOENT", std::to_string(guest_errno()), std::to_string(ENOENT));
         Expect("unmapped path does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        // A write-open into a directory that does not exist makes it (the
+        // guests rely on that); a read-open there makes nothing.
+        {
+            put(kP, "/data/data/abr.errno/files/p1/p2/new.txt");
+            put(kBuf, "r");
+            const std::uint32_t fr[4] = {kP, kBuf, 0, 0};
+            const std::uint32_t r1 = abr::RuntimeTestAccess::Call(rt, 21, fr);
+            const bool made_by_read = std::filesystem::exists(host_dir + "/p1");
+            const std::uint32_t e1 = guest_errno();
+            put(kBuf, "w");
+            const std::uint32_t w1 = abr::RuntimeTestAccess::Call(rt, 21, fr);
+            Expect("fopen r / w in a missing directory",
+                   std::to_string(r1) + " " + std::to_string(e1) + " " + (made_by_read ? "1" : "0") + " " +
+                       (w1 != 0 ? "open" : "NULL") + " " +
+                       (std::filesystem::exists(host_dir + "/p1/p2/new.txt") ? "1" : "0"),
+                   "0 " + std::to_string(ENOENT) + " 0 open 1");
+            const std::uint32_t fc[4] = {w1, 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 22, fc);
+            put(kP, "/data/data/abr.errno/files/q1/q2/new.bin");
+            const std::uint32_t oa[4] = {kP, O_WRONLY | O_CREAT, 0644, 0};
+            const std::int32_t fd = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 54, oa));
+            Expect("open(O_CREAT) in a missing directory",
+                   std::string(fd >= 0 ? "fd" : "-1") + " " +
+                       (std::filesystem::exists(host_dir + "/q1/q2/new.bin") ? "1" : "0"),
+                   "fd 1");
+            const std::uint32_t ca[4] = {static_cast<std::uint32_t>(fd), 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 36, ca);
+        }
         // mkstemp writes the suffix at the end of the GUEST template
         const std::string tmpl = "/data/data/abr.errno/files/tXXXXXX";
         put(kP, tmpl);

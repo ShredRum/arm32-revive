@@ -965,18 +965,21 @@ private:
 
     // Host-side pthread object maps (guest addr -> host object).
     // Host sync objects behind guest mutex/rwlock/cond addresses. Shared
-    // ownership: every operation takes its own reference under mutex_ before
+    // ownership: every operation takes its own reference under the map's lock before
     // it blocks, so a guest *_destroy (which only drops the map entry) can
     // never free an object another thread is still waiting in. The deleter
     // runs pthread_*_destroy when the last user lets go.
     // Guest mutex -> host mutex. Its own reader/writer lock (mutex_map_mu_),
-    // never the runtime's mutex_: lock/unlock only read it. Order: mutex_
-    // (PthreadCond) -> mutex_map_mu_.
+    // never the runtime's mutex_: lock/unlock only read it.
     std::shared_mutex mutex_map_mu_;
     std::unordered_map<std::uint32_t, std::shared_ptr<HostMutex>> mutex_map_;
     void NoteLocked(HostMutex& hm);
     void NoteUnlocking(HostMutex& hm, std::uint32_t obj);
     std::atomic<unsigned long> mutex_foreign_unlocks_{0};
+    // Guest rwlock / cond -> host object, under their own reader/writer lock
+    // (sync_map_mu_): the operations only read the maps. Nothing else is
+    // taken while it is held.
+    std::shared_mutex sync_map_mu_;
     std::unordered_map<std::uint32_t, std::shared_ptr<pthread_rwlock_t>> rwlock_map_;
     std::unordered_map<std::uint32_t, std::shared_ptr<HostCond>> cond_map_;
     std::unordered_map<std::uint32_t, std::uint32_t> key_map_;  // key -> guest destructor (0: none)

@@ -1283,11 +1283,20 @@ struct GuestThreadAttach {
 };
 
 void* RealEnvForThread() {
+    // Asked several times per guest JNI call. A thread's JNIEnv stays the
+    // same while it is attached, and both attachments remembered here last
+    // until the thread ends (HostThread: a Java thread or attached in
+    // Enter; GuestThreadAttach: detached by its destructor at thread exit).
+    thread_local JNIEnv* cached = nullptr;
+    if (cached) {
+        return cached;
+    }
     const pid_t me = gettid();
     {
         std::lock_guard<std::mutex> l(g_tmu);
         const auto it = g_threads.find(me);
         if (it != g_threads.end()) {
+            cached = it->second->env;
             return static_cast<void*>(it->second->env);
         }
     }
@@ -1295,12 +1304,13 @@ void* RealEnvForThread() {
     if (!attach.env && g_vm) {
         JNIEnv* env = nullptr;
         if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
-            return env;  // attached by someone else (not ours to detach)
+            return env;  // attached by someone else (not ours to detach, not cached)
         }
         if (g_vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
             attach.env = env;
         }
     }
+    cached = attach.env;
     return attach.env;
 }
 }  // namespace
