@@ -228,3 +228,31 @@ but few.
 | K17 | apphost.cpp:440-680 watchdog (STUCK, 2000x1 ms sampling, stack scan 0x4000) | diagnostic thread, every 10 s | — | KEEP (off the hot path) |
 | K18 | patches/dynarmic 0001-0021 | no crutch-like patch found: 0006/0007 are root fixes, 0008/0004 diag-only builds, 0003/0020 correct semantics | README.md | KEEP |
 | K19 | opensl.cpp, apk_vfs.cpp, adpf.cpp, sampler.cpp, prof.h, fast_math.h | no crutches found; prof/sampler are gated by plain globals (no TLS when off) | — | KEEP |
+
+## After the cleanup: small effects measured together (owner, 2026-11-10)
+
+Each of these was set aside alone as "within noise" (single-run spread
+±0.2-0.3 ms, 4 interleaved rounds resolve ~±0.1-0.15 ms), but together
+they may be 0.3-0.5 ms of the ~0.79 ms menu gap:
+- (struck: dynarmic H1-H4, see the correction below)
+- C: the bridge's `svc`-only trampoline unbalances the return stack
+  (fix on the bridge side: `svc; bx lr`, which also lets bx do ARM/Thumb);
+- B: hot small imports before the CallImport preamble (gl_id test);
+- E: pointer checks in memcmp/strlen/strcmp (series not finished).
+Plan: one build with all of them vs baseline, 6-8 interleaved rounds;
+if the sum is visible, split with dynarmic's dispatch counters (0004,
+diag build: dispatcher entries per frame, no timing noise) and keep only
+what pays.
+
+Correction (2026-11-10): dynarmic H1-H4 do not apply to our port (they
+remove work the shared cache needs; measured on MrEmpathy's bridge with
+private caches). Kept: B, C (last, own commit), E (as a fault handler).
+
+## AGENTS.md rule changes (owner agreed, 2026-11-10)
+
+- Wild guest pointers: state the goal, not the means. "A wild guest
+  pointer must become a guest halt with a LOUD log line, never a host
+  crash; per-call checks or a fault handler, whichever is cheaper."
+- New rule: protections and diagnostics added during an investigation are
+  marked as such and removed in the commit that fixes the root cause; one
+  that stays says why (in the code and the commit message).
