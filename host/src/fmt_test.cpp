@@ -2440,6 +2440,12 @@ int main() {
         // mcr p15 dmb; movs r0,#7; mcr p3,0,r0,c1,c0,0; movs r1,#9
         const std::uint16_t thumb[] = {0xee07, 0x0fba, 0x2007, 0xee01, 0x0310, 0x2109};
         std::memcpy(rt.H(kPage + 0x100), thumb, sizeof(thumb));
+        // The switch idiom `add pc, r0, pc` (ADD register, Rd = PC, S = 0) is
+        // a plain branch to r0 + its address + 8 that Dynarmic runs itself:
+        // mov r0,#4; add pc,r0,pc; mov r1,#1; mov r1,#2; mov r1,#3; mcr p3
+        const std::uint32_t addpc[] = {0xe3a00004, 0xe080f00f, 0xe3a01001,
+                                       0xe3a01002, 0xe3a01003, 0xee010310};
+        std::memcpy(rt.H(kPage + 0x200), addpc, sizeof(addpc));
         abr::GuestCallbacks cb4(&rt);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = &cb4;
@@ -2460,6 +2466,7 @@ int main() {
         };
         Expect("ARM: barriers run, an unattached coprocessor halts", run(kPage, 0x10), "7,0,stopped");
         Expect("Thumb: the same", run(kPage + 0x100, 0x30), "7,0,stopped");
+        Expect("ARM: add pc, r0, pc branches to r0 + pc", run(kPage + 0x200, 0x10), "4,3,stopped");
         rt.ThreadEnter(nullptr, 0);
         rt.ReleaseCpuId(id);
     }

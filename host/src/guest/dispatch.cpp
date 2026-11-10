@@ -17304,77 +17304,9 @@ void Runtime::InetThunk(ImportId id, Regs& regs, std::uint32_t a0, std::uint32_t
 }
 
 void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
-    // Emulate the classic ARM switch idiom `add pc, rN, pc` (Rd==pc, Rm==pc),
-    // which Dynarmic reports as UnpredictableInstruction. Semantics: branch to
-    // rN + (insn+8), staying in ARM state. Narrow match: ADD-register, S==0,
-    // no shift, Rd==15, Rm==15 (any cond, any Rn).
-    if (ex == Exception::UnpredictableInstruction) {
-        const std::uint32_t a = pc & ~std::uint32_t(3);
-        std::uint32_t w = 0xDEADDEADu;
-        const bool ok = rt_->CheckRange(a, 4, false);
-        if (ok) {
-            std::memcpy(&w, rt_->H(a), 4);
-        }
-        std::printf("[jit] unpred @%08x ok=%d w=%08x\n", a, (int)ok, w);
-        // NOTE: in Run mode Dynarmic reports the BLOCK start, so `a` is the
-        // `ldr rN, [pc, #imm]` while the unpredictable `add pc, rN, pc` sits
-        // at a+4. Match the 2-insn pair and emulate both (idempotent if the
-        // ldr already executed: same value rewritten).
-        if (ok && rt_->CheckRange(a + 4, 4, false)) {
-            std::uint32_t w1 = 0;
-            std::memcpy(&w1, rt_->H(a + 4), 4);
-            const bool is_ldr = ((w >> 26) & 3u) == 1 && ((w >> 25) & 1u) == 0 &&
-                                ((w >> 20) & 1u) == 1 && ((w >> 16) & 0xFu) == 0xFu;
-            const std::uint32_t rt = (w >> 12) & 0xFu;
-            const bool is_add =
-                ((w1 >> 26) & 3u) == 0 && ((w1 >> 25) & 1u) == 0 && ((w1 >> 21) & 0xFu) == 4 &&
-                ((w1 >> 20) & 1u) == 0 && ((w1 >> 12) & 0xFu) == 0xFu && (w1 & 0xFu) == 0xFu &&
-                (w1 & 0xFF0u) == 0 && ((w1 >> 16) & 0xFu) == rt;
-            if (is_ldr && is_add) {
-                const std::uint32_t off = w & 0xFFFu;
-                const std::uint32_t lit = ((w >> 23) & 1u) ? (a + 8 + off) : (a + 8 - off);
-                if (rt_->CheckRange(lit, 4, false)) {
-                    std::uint32_t rval = 0;
-                    std::memcpy(&rval, rt_->H(lit), 4);
-                    const std::uint32_t target = rval + (a + 4) + 8;
-                    auto& regs = rt_->ActiveJit()->Regs();
-                    regs[rt] = rval;
-                    regs[15] = target;
-                    // Entries are ARM (pad does `bx pc` to switch); the JIT may
-                    // still be Thumb (it falls through `bx pc` without switching).
-                    // Force USER+ARM, NZCV/GE preserved — same contract as Ret().
-                    {
-                        std::uint32_t cpsr = rt_->ActiveJit()->Cpsr();
-                        cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10);
-                        rt_->ActiveJit()->SetCpsr(cpsr);
-                    }
-                    static std::uint64_t addpc_hits = 0;
-                    if (++addpc_hits <= 3) {
-                        std::printf("[jit] ldr/add-pc @%08x r%u=%08x -> %08x\n", a, rt, rval,
-                                    target);
-                    }
-                    return;  // resume, do NOT halt
-                }
-            }
-        }
-        if (ok) {
-            const bool is_add = ((w >> 26) & 3u) == 0 && ((w >> 25) & 1u) == 0 &&
-                                ((w >> 21) & 0xFu) == 4 && ((w >> 20) & 1u) == 0;
-            if (is_add && ((w >> 12) & 0xFu) == 0xFu && (w & 0xFu) == 0xFu &&
-                (w & 0xFF0u) == 0) {
-                auto& regs = rt_->ActiveJit()->Regs();
-                const std::uint32_t rn = (w >> 16) & 0xFu;
-                const std::uint32_t target = regs[rn] + a + 8;
-                static std::uint64_t addpc_hits = 0;
-                if (++addpc_hits <= 3) {
-                    std::printf("[jit] add-pc idiom @%08x r%u=%08x -> %08x\n", a, rn, regs[rn],
-                                target);
-                }
-                regs[15] = target;
-                return;  // resume, do NOT halt
-            }
-        }
-    }
+    // Undefined/unpredictable instruction, breakpoint, ...: a clean guest
+    // halt. (An `add pc, rN, pc` emulation lived here until 2026-11: Dynarmic
+    // executes ADD with Rd == PC and S == 0 itself, so it never ran.)
     std::printf("[jit] ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
     // DIAG: mini-backtrace for null-jumps (pc=0): lr + stack code-pointers.
     {
