@@ -221,10 +221,6 @@ RealGL* Runtime::RealGLBackend() {
     return realgl_;
 }
 
-// TEMP-DIAG (registry ParseError): registry FILE* set + dump counter.
-static std::set<FILE*> g_regfiles;
-static int g_regdump_n = 0;
-
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
     // Room for imports made at run time (RuntimeImport): the table must not
     // move while other threads index it.
@@ -1930,17 +1926,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
         return;
     }
-    // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
-    // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
-    // DIAG off this also stops paying the ~17 string compares per call.
-    if (DiagOn() &&
-        (id == I::socket_ || id == I::connect_ || id == I::send_ || id == I::sendto_ || id == I::recv_ ||
-         id == I::recvfrom_ || id == I::bind_ || id == I::listen_ || id == I::setsockopt_ ||
-         id == I::shutdown_)) {
-        std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
-                    GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
-    }
-
     // DIAG-only audit: record every distinct guest import actually CALLED.
     // Used to find host-side service gaps of the kind that broke Space (a
     // missing strtod left luaO_str2d's endptr uninitialised, so Lua's
@@ -1985,25 +1970,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
                 goto bad_ptr;
             }
-            GuestMemCopy(id, regs, n, a0, a1, a2);
+            GuestMemCopy(regs, a0, a1, a2);
             return;
         case HotImport::MemSet:
             if (!CheckRange(a0, a2, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, static_cast<int>(a1 & 0xFF), a2);
+            GuestMemSet(regs, a0, static_cast<int>(a1 & 0xFF), a2);
             return;
         case HotImport::MemSetAeabi:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, static_cast<int>(a2 & 0xFF), a1);
+            GuestMemSet(regs, a0, static_cast<int>(a2 & 0xFF), a1);
             return;
         case HotImport::MemClr:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, 0, a1);
+            GuestMemSet(regs, a0, 0, a1);
             return;
         case HotImport::None:
             break;
@@ -2909,16 +2894,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         const std::string inp(from_stream ? stream_text : std::string(GuestStr(a0)));
         const std::string fmt(GuestStr(a1));
-        // TEMP-DIAG (worker jobs): log parsed inputs (URL flows).
-        if (DiagOn()) {  // PLAN.md A: diagnostic layer
-            static int sc = 0;
-            if (sc < 30) {
-                sc++;
-                std::printf("[sscanf][t%u]%s \"%s\" fmt \"%s\"\n", GuestTid(),
-                            GuestTid() == 1 ? "" : "(T2+)",
-                            inp.c_str(), fmt.c_str());
-            }
-        }
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 2;  // first vararg: r2
         std::uint32_t stack = regs[13];
@@ -4572,51 +4547,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::pthread_create_:
     if (id == I::pthread_create_) {
-        // TEMP-DIAG (worker hang): log the job name (inline C string at
-        // [arg+0x20], seen as "Configuration") so runs inventory jobs.
-        // Also scan [arg,arg+0x200] for an http URL (job identity).
-        if (DiagOn()) {  // job-name / URL sniffing is diagnostics only
-            std::string jn = "?";
-            if (CheckRange(a3 + 0x20, 32, false)) {
-                char tmp[33] = {0};
-                for (int i = 0; i < 32; i++) {
-                    char c = 0;
-                    std::memcpy(&c, H(a3 + 0x20 + (std::uint32_t)i), 1);
-                    if (!c) {
-                        break;
-                    }
-                    tmp[i] = (c >= 32 && c < 127) ? c : '?';
-                }
-                if (tmp[0]) {
-                    jn = tmp;
-                }
-            }
-            std::string surl = "-";
-            if (CheckRange(a3, 0x200, false)) {
-                for (std::uint32_t k = 0; k + 8 < 0x200; k++) {
-                    char c4[5] = {0};
-                    std::memcpy(c4, H(a3 + k), 4);
-                    if (!std::strcmp(c4, "http")) {
-                        char ub[81] = {0};
-                        for (int j = 0; j < 80; j++) {
-                            char c = 0;
-                            if (!CheckRange(a3 + k + j, 1, false)) {
-                                break;
-                            }
-                            std::memcpy(&c, H(a3 + k + j), 1);
-                            if (!c) {
-                                break;
-                            }
-                            ub[j] = (c >= 32 && c < 127) ? c : '?';
-                        }
-                        surl = ub;
-                        break;
-                    }
-                }
-            }
-            std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
-                        jn.c_str(), surl.c_str());
-        }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
     }
@@ -5295,13 +5225,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %08x\n", GuestTid(), hp.c_str(),
                             mode.c_str(), h);
             }
-            // TEMP-DIAG (registry ParseError): track registry handles to dump
-            // their exact bytes on fread/fwrite below.
-            // Diagnostics only: in shipping this dumped save-file bytes to the log.
-            if (DiagOn() && hp.find("registry") != std::string::npos) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                g_regfiles.insert(f);
-            }
             Ret(regs, h);
             return;
         }
@@ -5328,10 +5251,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-            }
-            if (id == I::fclose_ && DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                g_regfiles.erase(f);  // a reused FILE* must not inherit the tag
             }
             int r = (id == I::fclose_) ? std::fclose(f) : std::fflush(f);
             if (id == I::fclose_) {
@@ -5371,29 +5290,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            std::size_t got = std::fread(H(a0), a1, a2, f);
+            const std::size_t got = std::fread(H(a0), a1, a2, f);
             if (got < a2) {
                 SetGuestErrno(errno ? errno : EIO);
-            }
-            // TEMP-DIAG (registry ParseError): dump exact bytes read.
-            bool regdump = false;
-            if (DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                regdump = g_regfiles.count(f) && g_regdump_n < 60;
-            }
-            if (regdump) {
-                g_regdump_n++;
-                std::size_t nb = got * a1;
-                if (nb > 192) {
-                    nb = 192;
-                }
-                const std::uint8_t* p = H<const std::uint8_t>(a0);
-                std::printf("[regio] fread #%d %zu items(%zuB):", g_regdump_n, static_cast<std::size_t>(got),
-                            static_cast<std::size_t>(got) * a1);
-                for (std::size_t i = 0; i < nb; i++) {
-                    std::printf(" %02x", p[i]);
-                }
-                std::printf("\n");
             }
             Ret(regs, static_cast<std::uint32_t>(got));
             return;
@@ -5405,23 +5304,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!f || a1 == 0 || a2 == 0 || !CheckRange(a0, (std::size_t)a1 * a2, false)) {
                 Ret(regs, 0);
                 return;
-            }
-            // TEMP-DIAG (registry ParseError): dump exact bytes written.
-            bool regdump = false;
-            if (DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                regdump = g_regfiles.count(f) && g_regdump_n < 60;
-            }
-            if (regdump) {
-                g_regdump_n++;
-                std::size_t nb = (std::size_t)a1 * a2;
-                std::size_t show = nb > 192 ? 192 : nb;
-                const std::uint8_t* p = H<const std::uint8_t>(a0);
-                std::printf("[regio] fwrite #%d %uB:", g_regdump_n, (unsigned)nb);
-                for (std::size_t i = 0; i < show; i++) {
-                    std::printf(" %02x", p[i]);
-                }
-                std::printf("%s\n", nb > show ? " ..." : "");
             }
             const std::size_t wrote = std::fwrite(H(a0), a1, a2, f);
             if (wrote < a2) {
@@ -6055,45 +5937,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
             const std::shared_ptr<abvfs::Slice> sl = id == I::read_ ? std::move(sl_of) : nullptr;
-            ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
-                           : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
-            // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
-            // pipes show up here via fd_map_; files too, capped). Skip
-            // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
-            // Diagnostic layer (PLAN.md B7): with DIAG off skip the per-I/O
-            // fstat + io_mutex + fd_map probe that only fed this capped log.
-            if (DiagOn() && (id == I::write_ || id == I::read_) && r > 0) {
-                static int wlog = 0;
-                bool interesting = false;
-                {
-                    std::lock_guard<std::mutex> io(io_mutex_);
-                    const auto it = fd_map_.find(a0);
-                    if (it != fd_map_.end()) {
-                        struct stat fs {};
-                        if (::fstat(it->second, &fs) == 0 &&
-                            (S_ISFIFO(fs.st_mode) || S_ISSOCK(fs.st_mode))) {
-                            interesting = true;
-                        }
-                    } else if (a0 <= 2) {
-                        interesting = true;
-                    }
-                }
-                if (interesting && wlog < 200) {
-                    wlog++;
-                    const std::uint8_t* p = H<const std::uint8_t>(a1);
-                    std::string hex;
-                    char b[8];
-                    ssize_t show = r > 32 ? 32 : r;
-                    for (ssize_t i = 0; i < show; i++) {
-                        std::snprintf(b, sizeof(b), "%02x", p[i]);
-                        hex += b;
-                    }
-                    // Thread marker: GuestTid directly (1=main, else worker).
-                    std::printf("[pipelog][t%u]%s %s gfd=%u %zdB: %s%s\n", GuestTid(),
-                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
-                                r > show ? "..." : "");
-                }
-            }
+            const ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
+                                 : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             if (r < 0) {
                 set_guest_errno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -6732,25 +6577,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (r == 0 && EnvOn("HARNESS_POLLDBG")) {
                 std::printf("[recv-dbg] %s(gfd %u) r=0 (EOF)\n", n.c_str(), a0);
             }
-            // TEMP-DIAG (network bring-up): inbound bytes are the signal
-            // (DNS replies, HTTP bodies). Capped hex.
-            {
-                static int nlog = 0;
-                if (DiagOn() && nlog < 40 && r > 0) {
-                    nlog++;
-                    const std::uint8_t* p = H<const std::uint8_t>(a1);
-                    std::string hex;
-                    char b[8];
-                    ssize_t show = r > 32 ? 32 : r;
-                    for (ssize_t i = 0; i < show; i++) {
-                        std::snprintf(b, sizeof(b), "%02x", p[i]);
-                        hex += b;
-                    }
-                    std::printf("[netsock]%s %s(gfd %u) %zdB: %s%s\n",
-                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
-                                r > show ? "..." : "");
-                }
-            }
             if (addr && (std::uint32_t)sl <= addrlen) {
                 std::memcpy(H(addr), &ss, sl);
                 if (CheckRange(addrlenptr, 4, true)) {
@@ -6807,17 +6633,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
         // stub kept fds blocking -> handshake breakage -> HttpRequestException).
         if (id == I::fcntl_) {
-            // TEMP-DIAG (stuck workers): pinpoint the parking line.
-            static int fcl = 0;
-            const int fldiag = (DiagOn() && fcl < 40) ? fcl++ : -1;
-            if (fldiag >= 0) {
-                std::printf("[fcntl] #%d enter tid=%u fd=%d cmd=%d arg=%d\n", fldiag, GuestTid(),
-                            (int)a0, (int)a1, (int)a2);
-            }
             const int hfd = host_fd_of(a0);
-            if (fldiag >= 0) {
-                std::printf("[fcntl] #%d mapped tid=%u hfd=%d\n", fldiag, GuestTid(), hfd);
-            }
             if (hfd < 0) {
                 set_guest_errno(EBADF);
                 Ret(regs, static_cast<std::uint32_t>(-1));
@@ -6932,7 +6748,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (id == I::inet_addr_ || id == I::inet_aton_ || id == I::inet_pton_ || id == I::inet_ntoa_ ||
             id == I::inet_ntop_) {
-            InetThunk(id, regs, n, a0, a1, a2, a3);
+            InetThunk(id, regs, a0, a1, a2, a3);
             return;
         }
         if (id == I::stat_ || id == I::access_ || id == I::mkdir_ || id == I::unlink_ || id == I::remove_ ||
@@ -7250,15 +7066,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "opendir")) {
                 return;
-            }
-            // TEMP-DIAG (worker dir scans): which trees does it list?
-            {
-                static int odlog = 0;
-                if (odlog < 15 && DiagOn()) {
-                    odlog++;
-                    std::printf("[files]%s opendir(\"%s\")%s\n", GuestTid() == 1 ? "" : "(T2+)",
-                                hp.c_str(), odlog == 15 ? " (quiet henceforth)" : "");
-                }
             }
             DIR* d = ::opendir(hp.c_str());
             if (!d) {
@@ -7870,65 +7677,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (id == I::glTexImage2D_ || id == I::glTexSubImage2D_ || id == I::glCompressedTexImage2D_ ||
             id == I::glCopyTexImage2D_ || id == I::glReadPixels_ || id == I::glBufferData_ ||
             id == I::glVertexAttribPointer_ || id == I::glShaderSource_) {
-            // Accepted and ignored (no real GL yet): fake upload succeeds.
-            // Bulk-pointer args are range-checked but not consumed.
-            // TEMP-DIAG (real-GLES prep): log call signatures to learn what
-            // the host GPU must accept (formats, sizes, shader sources).
-            if (id == I::glShaderSource_ && a1 > 0 && a1 < 16 && CheckRange(a2, 4 * a1, false)) {
-                std::printf("[glsrc] shader=%u count=%u\n", a0, a1);
-                for (std::uint32_t i = 0; i < a1; i++) {
-                    std::uint32_t sp = 0;
-                    std::memcpy(&sp, H(a2 + i * 4), 4);
-                    std::int32_t slen = -1;
-                    if (a3 && CheckRange(a3 + i * 4, 4, false)) {
-                        std::memcpy(&slen, H(a3 + i * 4), 4);
-                    }
-                    if (!sp || !CheckRange(sp, 1, false)) {
-                        std::printf("[glsrc] #%u NULL\n", i);
-                        continue;
-                    }
-                    std::size_t L = 0;
-                    const char* s = reinterpret_cast<const char*>(H(sp));
-                    if (slen < 0) {
-                        while (L < 4096 && CheckRange(sp + (std::uint32_t)L, 1, false) && s[L]) {
-                            L++;
-                        }
-                    } else {
-                        L = (std::size_t)slen > 65536 ? 65536 : (std::size_t)slen;
-                    }
-                    std::printf("[glsrc] #%u ptr=%08x slen=%d : %.200s\n", i, sp, slen,
-                                std::string(s, L > 200 ? 200 : L).c_str());
-                    // TEMP-DIAG (real-GLES prep): stash full source for
-                    // offline compile tests (host FS, harness-only).
-#ifndef __ANDROID__
-                    if (L > 16 && L <= 65536) {
-                        std::filesystem::create_directories("work/shaders");
-                        char fn[64];
-                        std::snprintf(fn, sizeof(fn), "work/shaders/src_%u_%u.glsl", a0, i);
-                        FILE* f = std::fopen(fn, "wb");
-                        if (f) {
-                            std::fwrite(s, 1, L, f);
-                            std::fclose(f);
-                        }
-                    }
-#endif
-                }
-            }
-            if ((id == I::glTexImage2D_ || id == I::glCompressedTexImage2D_) && a1 <= 8) {
-                // APCS: (target,level,intfmt,width) in regs; the rest on guest
-                // stack: height,border,format,type,data.
-                std::uint32_t stk[5] = {0};
-                for (int i = 0; i < 5; i++) {
-                    if (CheckRange(regs[13] + (std::uint32_t)(i * 4), 4, false)) {
-                        std::memcpy(&stk[i], H(regs[13] + (std::uint32_t)(i * 4)), 4);
-                    }
-                }
-                std::printf("[gltex] %s tgt=%04x lvl=%u ifmt=%04x %ux%u fmt=%04x typ=%04x data=%08x\n",
-                            n.c_str(), a0, a1, a2, a3, stk[0], stk[2], stk[3], stk[4]);
-            }
-#ifndef __ANDROID__
+            // Accepted and ignored (the harness has no GL): the fake upload
+            // succeeds; bulk-pointer args are not consumed.
             std::printf("[gl] %s accepted (fake)\n", n.c_str());
-#endif
             Ret(regs, 0);
             return;
         }
@@ -9488,27 +9239,12 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
 }
 
 // memcpy too: a copy with overlapping ranges works, as on bionic.
-void Runtime::GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
-                           std::uint32_t len) {
-    using I = ImportId;
+void Runtime::GuestMemCopy(Regs& regs, std::uint32_t dst, std::uint32_t src, std::uint32_t len) {
     std::memmove(H(dst), H<const void>(src), len);
     Ret(regs, dst);
 }
 
-void Runtime::GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, int fill,
-                          std::uint32_t len) {
-    using I = ImportId;
-    // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
-    // Diagnostic layer (PLAN.md A4): off in shipping.
-    if (DiagOn()) {
-        static int mcount = 0;
-        if (n.compare(0, 14, "__aeabi_memclr") != 0 && mcount < 400) {
-            mcount++;
-            std::uint32_t lr = ActiveJit() ? ActiveJit()->Regs()[14] : 0;
-            std::printf("[memset] %s dst=%08x len=%u fill=%02x lr=%08x\n", n.c_str(), dst, len,
-                        fill & 0xFF, lr);
-        }
-    }
+void Runtime::GuestMemSet(Regs& regs, std::uint32_t dst, int fill, std::uint32_t len) {
     std::memset(H(dst), fill, len);
     Ret(regs, dst);
 }
@@ -17487,22 +17223,9 @@ std::string Runtime::SvcName(std::uint32_t swi) const {
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:
 // CallImport's gotos to bad_ptr cannot cross automatic inits, so this lives
 // here. All paths Ret()+return (handled).
-void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
-                        std::uint32_t a2, std::uint32_t a3) {
+void Runtime::InetThunk(ImportId id, Regs& regs, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                        std::uint32_t a3) {
     using I = ImportId;
-    // TEMP-DIAG (ntop failures): log args, capped (ntop has its own cap;
-    // pton spam must not eat it).
-    if (DiagOn()) {  // PLAN.md A: diagnostic layer
-        static int ilog = 0, olog = 0;
-        if (id == I::inet_ntop_ && olog < 12) {
-            olog++;
-            std::printf("[netsock] %s(%u %08x %08x %08x)%s\n", n.c_str(), a0, a1, a2, a3,
-                        olog == 12 ? " (quiet henceforth)" : "");
-        } else if (id == I::inet_pton_ && ilog < 4) {
-            ilog++;
-            std::printf("[netsock] %s(%u %08x %08x %08x)\n", n.c_str(), a0, a1, a2, a3);
-        }
-    }
     if (id == I::inet_ntoa_ || id == I::inet_ntop_) {
         // inet_ntoa(struct in_addr): addr comes BY VALUE in r0 (NOT a
         // pointer). inet_ntop(af, src, dst, size): dst=a2, size=a3.
@@ -17519,18 +17242,6 @@ void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint
             const std::uint32_t need = (a0 == 10 /*AF_INET6*/) ? 46u : 16u;
             if ((a0 != 2 && a0 != 10) || a3 < need || !CheckRange(a1, 4, false) ||
                 !CheckRange(a2, need, true)) {
-                if (DiagOn()) {  // which check failed
-                    const std::uint8_t* sp2 =
-                        (a1 && CheckRange(a1, 16, false)) ? H<const std::uint8_t>(a1) : nullptr;
-                    std::printf("[netsock] ntop-FAIL af=%u size=%u src=%08x dst=%08x%s", a0, a3,
-                                a1, a2, sp2 ? " bytes:" : " (src unreadable)");
-                    if (sp2) {
-                        for (int q = 0; q < 16; q++) {
-                            std::printf(" %02x", sp2[q]);
-                        }
-                    }
-                    std::printf("\n");
-                }
                 SetGuestErrno(a0 != 2 && a0 != 10 ? EAFNOSUPPORT : ENOSPC);
                 Ret(regs, 0);
                 return;

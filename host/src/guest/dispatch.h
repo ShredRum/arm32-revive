@@ -883,14 +883,12 @@ private:
     void FinishSvc(Dynarmic::A32::Jit* jit, Regs& regs);
   private:
     void RetVoid(Regs& regs) { Ret(regs, regs[0], regs[1]); }
-    void GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
-                      std::uint32_t len);
-    void GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, int fill,
-                     std::uint32_t len);
+    void GuestMemCopy(Regs& regs, std::uint32_t dst, std::uint32_t src, std::uint32_t len);
+    void GuestMemSet(Regs& regs, std::uint32_t dst, int fill, std::uint32_t len);
     // inet_* helpers live here (not inside CallImport): gotos to bad_ptr
     // cannot cross their automatic inits (2026-10-10).
-    void InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
-                   std::uint32_t a2, std::uint32_t a3);
+    void InetThunk(ImportId id, Regs& regs, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                   std::uint32_t a3);
     GuestMemory& mem_;
     LoadedModule& mod_;
     Dynarmic::A32::Jit* jit_ = nullptr;
