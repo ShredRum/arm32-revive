@@ -660,6 +660,15 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
     using G = GlId;  // the import's load-time id (gl_ids.h); name is for logs only
+    // A guest pointer the call needs that is not guest memory: a real driver
+    // would fault there, so the guest halts with a LOUD line (never a quiet
+    // skip that leaves the caller's variable unwritten).
+    auto bad = [&](std::uint32_t p) {
+        std::printf("[realgl] %s LOUD BAD-PTR %08x -- halting\n", name, p);
+        r->HaltGuest();
+        r->Ret(regs, 0);
+        return true;
+    };
 #ifdef ABR_DIAG_COUNTERS
     DiagGlRedundant(r, id, a0, a1, a2, a3, sp);
 #endif
@@ -763,8 +772,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         const std::uint32_t out = fb ? a3 : a2;
         const std::uint32_t count = (!fb && a1 == GL_CURRENT_VERTEX_ATTRIB) ? 4u : 1u;
         if (!r->CheckRange(out, count * 4u, true)) {
-            r->Ret(regs, 0);
-            return true;
+            return bad(out);
         }
         GLint v[4] = {0, 0, 0, 0};
         if (fb) {
@@ -781,8 +789,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // driver as a host address inside guest memory -- hand back the guest
         // address; a buffer offset is returned as it was given.
         if (!r->CheckRange(a2, 4, true)) {
-            r->Ret(regs, 0);
-            return true;
+            return bad(a2);
         }
         void* p = nullptr;
         glGetVertexAttribPointerv((GLuint)a0, (GLenum)a1, &p);
@@ -1005,31 +1012,40 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glGetShaderiv || id == G::glGetProgramiv) {
         // (obj, pname, params): forward REAL status.
+        if (!r->CheckRange(a2, 4, true)) {
+            return bad(a2);
+        }
         GLint v = 0;
         if (id == G::glGetShaderiv) {
             glGetShaderiv((GLuint)a0, (GLenum)a1, &v);
         } else {
             glGetProgramiv((GLuint)a0, (GLenum)a1, &v);
         }
-        if (r->CheckRange(a2, 4, true)) {
-            std::uint32_t w = (std::uint32_t)v;
-            std::memcpy(r->H(a2), &w, 4);
-        }
+        std::uint32_t w = (std::uint32_t)v;
+        std::memcpy(r->H(a2), &w, 4);
         if (GlDrawLog()) std::printf("[realgl] %s(%u,%04x) -> %d\n", name, a0, a1, v);
         r->Ret(regs, 0);
         return true;
     }
     if (id == G::glGetShaderInfoLog || id == G::glGetProgramInfoLog) {
         // (obj, bufSize, length*, infoLog*): forward REAL log.
+        // length may be NULL (gl2.h); the log is fetched all the same (it
+        // was skipped then).
         std::uint32_t lenptr = 0;
-        if (a2 && r->CheckRange(a2, 4, true)) {
+        if (a2 && !r->CheckRange(a2, 4, true)) {
+            return bad(a2);
+        }
+        if ((GLsizei)a1 > 0 && !r->CheckRange(a3, a1, true)) {
+            return bad(a3);
+        }
+        if ((GLsizei)a1 > 0) {
             if (id == G::glGetShaderInfoLog) {
-                glGetShaderInfoLog((GLuint)a0, (GLsizei)a1, (GLsizei*)&lenptr,
-                                   a3 && r->CheckRange(a3, a1, true) ? (char*)r->H(a3) : nullptr);
+                glGetShaderInfoLog((GLuint)a0, (GLsizei)a1, (GLsizei*)&lenptr, (char*)r->H(a3));
             } else {
-                glGetProgramInfoLog((GLuint)a0, (GLsizei)a1, (GLsizei*)&lenptr,
-                                    a3 && r->CheckRange(a3, a1, true) ? (char*)r->H(a3) : nullptr);
+                glGetProgramInfoLog((GLuint)a0, (GLsizei)a1, (GLsizei*)&lenptr, (char*)r->H(a3));
             }
+        }
+        if (a2) {
             std::memcpy(r->H(a2), &lenptr, 4);
         }
         if (GlDrawLog()) std::printf("[realgl] %s(%u) len=%u\n", name, a0, lenptr);
@@ -1057,19 +1073,27 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         GLsizei len = 0;
         GLint size = 0;
         GLenum type = 0;
-        char* nm = (namep && blen && r->CheckRange(namep, blen, true)) ? (char*)r->H(namep) : nullptr;
+        if ((GLsizei)blen > 0 && !r->CheckRange(namep, blen, true)) {
+            return bad(namep);
+        }
+        for (std::uint32_t out : {lenp, sizep, typep}) {
+            if (out && !r->CheckRange(out, 4, true)) {
+                return bad(out);
+            }
+        }
+        char* nm = (GLsizei)blen > 0 ? (char*)r->H(namep) : nullptr;
         if (id == G::glGetActiveUniform) {
             glGetActiveUniform((GLuint)a0, (GLuint)a1, (GLsizei)blen, &len, &size, &type, nm);
         } else {
             glGetActiveAttrib((GLuint)a0, (GLuint)a1, (GLsizei)blen, &len, &size, &type, nm);
         }
-        if (lenp && r->CheckRange(lenp, 4, true)) {
+        if (lenp) {
             std::memcpy(r->H(lenp), &len, 4);
         }
-        if (sizep && r->CheckRange(sizep, 4, true)) {
+        if (sizep) {
             std::memcpy(r->H(sizep), &size, 4);
         }
-        if (typep && r->CheckRange(typep, 4, true)) {
+        if (typep) {
             std::memcpy(r->H(typep), &type, 4);
         }
         if (GlDrawLog()) std::printf("[realgl] %s(%u,%u) -> \"%s\"\n", name, a0, a1, nm ? nm : "?");
@@ -1095,12 +1119,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // check passes -> driver writes past the guest buffer). Cap 1M (game
         // gens handfuls; wrap/garbage caught) + LOUD instead of smash.
         const std::uint64_t bytes64 = (std::uint64_t)a0 * 4;
-        if (a0 >= 0x100000u || !r->CheckRange(a1, (std::size_t)bytes64, !is_del)) {
-            if (a0 >= 0x100000u) {
-                std::printf("[realgl] %s LOUD n=%u rejected\n", name, a0);
-            }
+        if (a0 >= 0x100000u) {
+            std::printf("[realgl] %s LOUD n=%u rejected\n", name, a0);
             r->Ret(regs, 0);
             return true;
+        }
+        if (!r->CheckRange(a1, (std::size_t)bytes64, !is_del)) {
+            return bad(a1);
         }
         if (id == G::glGenTextures || id == G::glDeleteTextures) {
             is_del ? glDeleteTextures((GLsizei)a0, (const GLuint*)r->H(a1))
@@ -1199,9 +1224,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             return true;
         }
         if (!r->CheckRange(a2, comps * 4, true)) {
-            std::printf("[realgl] %s LOUD params %08x out of range\n", name, a2);
-            r->Ret(regs, 0);
-            return true;
+            return bad(a2);
         }
         GLfloat vals[16] = {};  // the largest GLES2 uniform value: mat4
         glGetUniformfv((GLuint)a0, (GLint)a1, vals);
@@ -1300,8 +1323,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         if (id == G::glCompressedTexImage2D) {
             // regs: target,level,intfmt,width; stack: height,border,imageSize,data.
             std::uint32_t h = Stk(r, sp, 0), size = Stk(r, sp, 2), dat = Stk(r, sp, 3);
-            const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
-                                                                             : nullptr;
+            if (dat && size && !r->CheckRange(dat, size, false)) {
+                return bad(dat);
+            }
+            const void* p = (dat && size) ? (const void*)r->H(dat) : nullptr;
             glCompressedTexImage2D((GLenum)a0, (GLint)a1, (GLenum)a2, (GLsizei)a3, (GLsizei)h, 0,
                                    (GLsizei)size, p);
             // Game-owned error signal (ETC fallback); query + print for diag only.
@@ -1314,8 +1339,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             // regs: target,level,xoff,yoff; stack: w,h,format,imageSize,data.
             std::uint32_t w = Stk(r, sp, 0), h = Stk(r, sp, 1), fmt = Stk(r, sp, 2),
                           size = Stk(r, sp, 3), dat = Stk(r, sp, 4);
-            const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
-                                                                             : nullptr;
+            if (dat && size && !r->CheckRange(dat, size, false)) {
+                return bad(dat);
+            }
+            const void* p = (dat && size) ? (const void*)r->H(dat) : nullptr;
             glCompressedTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w,
                                       (GLsizei)h, (GLenum)fmt, (GLsizei)size, p);
             // Same game-owned-signal reasoning as the Tex branch.
@@ -1334,9 +1361,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         //   CopyTexSubImage2D(target, level, xoff, yoff | x, y, w, h)
         std::uint32_t st[4] = {0, 0, 0, 0};
         if (!r->CheckRange(sp, sizeof(st), false)) {
-            std::printf("[realgl] %s LOUD stack args unreadable\n", name);
-            r->Ret(regs, 0);
-            return true;
+            return bad(sp);  // the stack arguments
         }
         std::memcpy(st, r->H(sp), sizeof(st));
         if (id == G::glCopyTexImage2D) {
@@ -1385,8 +1410,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             size = a2;
             dat = a3;
         }
-        const void* p = (dat && size && r->CheckRange(dat, size, false)) ? (const void*)r->H(dat)
-                                                                         : nullptr;
+        if (dat && size && !r->CheckRange(dat, size, false)) {
+            return bad(dat);
+        }
+        const void* p = (dat && size) ? (const void*)r->H(dat) : nullptr;
         if (id == G::glBufferData) {
             glBufferData((GLenum)a0, (GLsizeiptr)size, p, (GLenum)a3);
         } else {
@@ -1556,11 +1583,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glGetBufferParameteriv) {
         // (target, pname, params): one GLint for every GLES2 pname.
+        if (!r->CheckRange(a2, 4, true)) {
+            return bad(a2);
+        }
         GLint v = 0;
         glGetBufferParameteriv((GLenum)a0, (GLenum)a1, &v);
-        if (r->CheckRange(a2, 4, true)) {
-            std::memcpy(r->H(a2), &v, 4);
-        }
+        std::memcpy(r->H(a2), &v, 4);
         r->Ret(regs, 0);
         return true;
     }
@@ -1606,8 +1634,23 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                 std::printf("[realgl] %s(%04x) -> %d,%d,%d,%d\n", name, a0, v[0], v[1], v[2], v[3]);
             }
         } else {
-            std::printf("[realgl] %s UNHANDLED -> fake\n", name);
-            return false;
+            // glGetFloatv / glGetBooleanv: the same counts, 4-byte floats or
+            // 1-byte booleans (they fell to the generic stub, which wrote
+            // nothing).
+            const bool fl = (id == G::glGetFloatv);
+            const std::uint32_t bytes = static_cast<std::uint32_t>(cnt) * (fl ? 4u : 1u);
+            if (!r->CheckRange(a1, bytes, true)) {
+                return bad(a1);
+            }
+            if (fl) {
+                GLfloat v[4] = {0, 0, 0, 0};
+                glGetFloatv((GLenum)a0, v);
+                std::memcpy(r->H(a1), v, bytes);
+            } else {
+                GLboolean v[4] = {0, 0, 0, 0};
+                glGetBooleanv((GLenum)a0, v);
+                std::memcpy(r->H(a1), v, bytes);
+            }
         }
         r->Ret(regs, 0);
         return true;

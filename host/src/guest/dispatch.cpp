@@ -539,7 +539,7 @@ std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
             usable = size;  // paranoia: never below the request
         }
         LiveIdxInsert(out, usable);
-        heap_used_ += total;
+        heap_used_ += usable;  // the size free takes off again
 #ifdef ABR_DIAG_COUNTERS
         if (heap_used_ > diag_.heap_peak) {
             diag_.heap_peak = heap_used_;
@@ -604,7 +604,7 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         usable = (std::uint32_t)total;
     }
     LiveIdxInsert(out, usable);
-    heap_used_ += total;
+    heap_used_ += usable;  // the size free takes off again
 #ifdef ABR_DIAG_COUNTERS
     if (heap_used_ > diag_.heap_peak) {
         diag_.heap_peak = heap_used_;
@@ -660,6 +660,7 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         // quarantining it would later mspace_free a moved chunk (double-free).
         std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
         LiveIdxErase(addr);
+        heap_used_ = heap_used_ >= old ? heap_used_ - old : 0;
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
@@ -671,10 +672,8 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
             usable = rtotal;
         }
         LiveIdxInsert(out, usable);
-        heap_used_ += (std::uint64_t)rtotal > old ? (std::uint64_t)rtotal - old : 0;
-        if ((std::uint64_t)old > rtotal) {
-            heap_used_ -= (std::uint64_t)old - rtotal;
-        }
+        // Both are the sizes the index holds (the old block's and the new).
+        heap_used_ = heap_used_ + usable >= old ? heap_used_ + usable - old : 0;
 #ifdef ABR_DIAG_COUNTERS
         if (heap_used_ > diag_.heap_peak) {
             diag_.heap_peak = heap_used_;
@@ -688,7 +687,8 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // The block goes straight back to dlmalloc. No quarantine (REVIEW R-013:
     // a delay before reuse only hides a use-after-free; the owner ruled it
     // out). A free of an address the heap never handed out (or freed twice)
-    // is ignored and counted, as before.
+    // is ignored, with a LOUD line (the first 10): the heap never gets a
+    // pointer it does not own, and the guest's bug is on the record.
     if (!addr) {
         return;
     }
@@ -721,6 +721,15 @@ void Runtime::GuestFree(std::uint32_t addr) {
     if (!size) {
         if (HeapKnob(kMallocLog)) {
             log_free(0xFFFFFFFFu);
+        }
+        static std::atomic<int> unknown{0};
+        if (unknown.fetch_add(1, std::memory_order_relaxed) < 10) {
+            std::uint32_t lr = 0;
+            if (Dynarmic::A32::Jit* aj = ActiveJit()) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] LOUD free of %08x: not a live block (double free or a foreign "
+                        "pointer) lr=%08x -- ignored\n", addr, lr);
         }
         return;
     }
@@ -7904,8 +7913,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         const std::uint64_t total = (std::uint64_t)cnt * sz;
-        if (!base || !compar || total == 0 || total > 0x4000000u ||
-            !CheckRange(base, (std::size_t)total, false)) {
+        // The array is sorted in place: it must be writable guest memory
+        // (64-bit product, so no overflow; any size a mapping holds).
+        if (!base || !compar || !CheckRange(base, (std::size_t)total, true)) {
             goto bad_ptr;
         }
         std::vector<std::uint8_t> buf((std::size_t)total);
@@ -7959,8 +7969,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         const std::uint64_t total = (std::uint64_t)cnt * sz;
-        if (!base || !key || total == 0 || total > 0x4000000u ||
-            !CheckRange(key, sz, false) || !CheckRange(base, (std::size_t)total, false)) {
+        if (!base || !key || !CheckRange(key, sz, false) ||
+            !CheckRange(base, (std::size_t)total, false)) {
             goto bad_ptr;
         }
         std::uint32_t lo = 0, hi = cnt, found = 0;
