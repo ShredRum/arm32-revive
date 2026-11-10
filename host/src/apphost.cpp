@@ -25,7 +25,6 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
-#include <unordered_set>
 #include <random>
 #include <stdlib.h>
 #include <string>
@@ -878,40 +877,6 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     if (!st) {
         return 1;  // same as a dropped re-entrant frame: logged LOUD in Enter
     }
-    // Surface-size witnesses (2026-10-20, Play worldScale=0 triage). The guest
-    // Lua camera code consumes screenWidth/screenHeight from these two calls;
-    // a zero here makes worldScale unrecoverably zero. Diagnostic only.
-    if (DiagOn() && (std::strstr(name, "nativeInit") || std::strstr(name, "nativeResize"))) {
-        va_list ap2;
-        va_copy(ap2, ap);
-        const int sw = va_arg(ap2, int);
-        const int sh = va_arg(ap2, int);
-        va_end(ap2);
-        std::printf("[screen] %s(%d,%d)\n", name, sw, sh);
-    }
-    // RATE telemetry (2026-10-14, tap-freeze triage): uncapped entry stamp
-    // for the 3 frame-path methods. Answers pump-alive vs pump-dead without
-    // taps. Observe-only (no guest state touched). Diagnostic layer: only
-    // under HARNESS_DIAG (stdout is unbuffered, so this is a write() syscall
-    // per frame otherwise -- PLAN.md A2).
-    if (DiagOn() && (std::strstr(name, "nativeUpdate") || std::strstr(name, "nativeRender") ||
-                     std::strstr(name, "nativeInput"))) {
-        struct timespec rts {};
-        ::clock_gettime(CLOCK_MONOTONIC, &rts);
-        const long long rms = (long long)rts.tv_sec * 1000 + rts.tv_nsec / 1000000;
-        std::printf("[rate] %s t=%lld tid=%d\n", name, rms, (int)gettid());
-    }
-    // D2 telemetry (2026-10-18): the live-block index plus its consumer
-    // counters, every ~600 nativeUpdate frames (~10 s). Answers "what did the
-    // old std::map actually cost, and did its odd paths (interior containment,
-    // free-of-unknown, stale pool entries) ever fire" with numbers instead of
-    // assumptions. Diag only, exactly like the rate stamp above.
-    if (DiagOn() && std::strstr(name, "nativeUpdate")) {
-        static unsigned long n = 0;
-        if (++n % 600 == 0 && g_rt) {
-            g_rt->PrintHeapIdx();
-        }
-    }
     // Watchdog entry stamp (nativeUpdate only).
     static int upd_seq = 0;
     const bool is_update = std::strstr(name, "nativeUpdate") != nullptr;
@@ -954,40 +919,11 @@ std::uint64_t RunGuestNative(const char* name, std::uint32_t va, const char* sig
     if (is_update) {
         g_upd_done_ms = WallMs();
     }
-#ifdef __ANDROID__
-    // Input-stream forensics (PLAY button animates but never fires):
-    // log every nativeInput action + coords (capped). words[2]=action,
-    // [3]=x-bits, [4]=y-bits (IJNI: env,thiz,action,x,y,?).
-    if (DiagOn() && std::strstr(name, "nativeInput") && words.size() >= 5) {
-        static int in_n = 0;
-        if (in_n < 60) {
-            float xf = 0, yf = 0;
-            std::uint32_t xw = words[3], yw = words[4];
-            std::memcpy(&xf, &xw, 4);
-            std::memcpy(&yf, &yw, 4);
-            Log("[input] act=%u x=%.0f y=%.0f r0=%08x", words[2], xf, yf, regs[0]);
-        }
-        in_n++;
-    }
-#endif
     if (hr != Dynarmic::HaltReason::UserDefined1) {
         Log("%s ended hr=%d r0=%08x pc=%08x lr=%08x sp=%08x", name, (int)hr, regs[0],
             regs[15], regs[14], regs[13]);
         DumpHaltTailOnce(name, (int)hr);
     }
-#ifdef __ANDROID__
-    // r0-polarity forensics: log EVERY nativeUpdate return (clean ones
-    // are silent above). Java quits on r0=0 (smali: if-nez v0 skips EXITING,
-    // so nonzero = continue); need per-update 0/1.
-    // Capped (updates are ~30/s idle).
-    else if (DiagOn() && std::strstr(name, "nativeUpdate")) {
-        static int un = 0;
-        if (un < 400) {
-            Log("%s r0=%08x", name, regs[0]);
-        }
-        un++;
-    }
-#endif
     return (std::uint64_t)regs[0] | ((std::uint64_t)regs[1] << 32);
 }
 
@@ -1307,31 +1243,6 @@ void AdoptAppClassLoader(JNIEnv* env, void* thiz) {
 std::uint64_t AppHost_Call(const char* name, const char* sig, void* env, void* thiz, ...) {
     va_list ap;
     va_start(ap, thiz);
-    static int calln = 0;
-#ifdef __ANDROID__
-    // Lifecycle inventory: log every DISTINCT native once (uncapped by
-    // design; ~63 max). Answers "which Java->native traffic exists".
-    {
-        static std::unordered_set<std::string> seen;
-        static std::mutex smu;
-        if (DiagOn()) {
-            std::lock_guard<std::mutex> l(smu);
-            if (seen.insert(name).second) {
-                Log("uniqcall %s", name);
-            }
-        }
-    }
-    if (DiagOn() && calln < 400) {  // device runs long; 40 hid continuation (§94)
-#else
-    if (calln < 40) {
-#endif
-        Log("call#%d %s", calln, name);
-#ifdef __ANDROID__
-    }
-#else
-    }
-#endif
-    calln++;
     HostLocalFrame frame;
 #ifdef __ANDROID__
     AdoptAppClassLoader(static_cast<JNIEnv*>(env), thiz);

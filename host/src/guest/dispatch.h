@@ -475,8 +475,6 @@ public:
     void LiveIdxInsert(std::uint32_t base, std::uint32_t size);
     std::uint32_t LiveIdxErase(std::uint32_t base);       // 0 = was not live
     std::uint32_t LiveIdxFind(std::uint32_t base);        // 0 = not live
-    // One-line index + consumer-counter report (diag only; see apphost.cpp).
-    void PrintHeapIdx();
     // Validates a guest range before host-side bulk access.
     bool CheckRange(std::uint32_t guest, std::size_t size, bool write);
     // Refuse guest writes into [start,start+size) (RELRO after relocation).
@@ -1001,12 +999,6 @@ private:
     // has been OFF by default since D1. See live_heap.h for the shape and the
     // semantics kept; harness.cpp has the differential self-test.
     abr::LiveHeapIndex live_idx_;
-    // D2 measurement counters (plain members: every call site already holds
-    // mutex_). They answer "what did the old structure actually cost / did its
-    // odd paths ever fire", instead of asserting it. Printed by PrintHeapIdx
-    // under HARNESS_DIAG only.
-    unsigned long long hx_free_unknown_ = 0;   // free of a pointer we never handed out
-    unsigned long long hx_realloc_unknown_ = 0;
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {

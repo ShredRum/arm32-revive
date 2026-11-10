@@ -413,19 +413,6 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
     return live_idx_.Find(base);
 }
 
-void Runtime::PrintHeapIdx() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
-    std::printf(
-        "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
-        "free_unk=%llu "
-        "realloc_unk=%llu usedKB=%llu\n",
-        live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
-        live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_free_unknown_,
-        hx_realloc_unknown_,
-        (unsigned long long)(heap_used_ >> 10));
-}
-
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
     const std::uint64_t end = std::uint64_t(addr) + size;
     // Last-hit cache (perf): string/scan loops probe per byte. The cached
@@ -625,7 +612,6 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         known = (old != 0);
     }
     if (!known) {
-        ++hx_realloc_unknown_;
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
@@ -712,7 +698,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
         RingPush(tmp);
     };
     if (!size) {
-        ++hx_free_unknown_;
         if (HeapKnob(kMallocLog)) {
             log_free(0xFFFFFFFFu);
         }
