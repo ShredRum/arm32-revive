@@ -30,6 +30,9 @@ rio_boot2.log
 
 # Local working areas without a games/<id>/ home (root-level leftovers).
 work/
+Ghidra_*/
+Ghidra_AngryBirdsRio/
+Ghidra_AngryBirdsRio_1.0/
 Ghidra_AngryBirdsSpace/
 Ghidra_AngryBirdsSeasons/
 Ghidra_AngryBirdsStarWars/
