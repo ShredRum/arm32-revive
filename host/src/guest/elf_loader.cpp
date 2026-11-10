@@ -486,7 +486,11 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
     // import: getauxval and __gnu_Unwind_Find_exidx are exported by libc.
     auto unexported_weak = [](const Elf32_Sym& s, const std::string& name) {
         static const char* const kNames[] = {"__data_start", "data_start", "__cxa_begin_cleanup",
-                                             "__cxa_type_match", "__cxa_call_unexpected"};
+                                             "__cxa_type_match", "__cxa_call_unexpected",
+                                             // Angry Birds 8.0.3 (abseil's hooks for a
+                                             // scheduler Android does not have)
+                                             "__google_potentially_blocking_region_begin",
+                                             "__google_potentially_blocking_region_end"};
         if (ELF32_ST_BIND(s.st_info) != STB_WEAK) {
             return false;
         }

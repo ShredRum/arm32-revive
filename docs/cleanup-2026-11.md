@@ -351,3 +351,13 @@ imports that worker threads called and that silently answered 0
 (pthread_condattr_init, pthread_condattr_destroy, pthread_setname_np); they
 are implemented now. NOT checked yet: a level, sound, background/resume,
 the `classic` branch, speed.
+
+After merging `classic` (2026-11-10): boot gate of all eight titles on the
+sandbox. classic showed two LOUD stubs: weak references Android does not
+export (`__google_potentially_blocking_region_begin/end`), now resolved to 0
+as on a device; clean after that. 99 Bricks: 1 boot of 3 died early
+(`[mem] LOUD BAD read @ 00000078 guest-pc=033e1204`, thread t2, inside
+UnityPlayer.nativeActivityIndicatorStyle), the other 2 clean. NOT known
+whether this is new: 99 Bricks has open intermittent defects (R-007, R-010)
+with a different symptom. Needs a 20-30 boot batch on this build against
+889703b before the merge to master.
