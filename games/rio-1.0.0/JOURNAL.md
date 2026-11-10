@@ -53,6 +53,7 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   - `AdViewWrapper.hide`: immediately posts `HidingFinishedRunnable` to the GL thread (invoking `hidingFinishedCallback(handle)`).
   - `AdViewWrapper.show`: converted to no-op.
   - Runnables (`RequestAdRunnable`, `MyRequestAdRunnable`, `ShowAdRunnable`): dead AdMob invocations replaced with immediate GL thread callbacks.
+  - `WebViewWrapper$8.run`: on Android 4.4+, Chromium WebView forbids invoking WebView methods from non-UI threads (`RuntimeException: A WebView method was called on thread 'GLThread'`). Replaced `mWebView.getTitle()` on the GL thread with an empty string `""`, preventing GLThread termination and static screen freeze.
 - **Verification**:
   - `prepare-tree.sh rio-1.0.0 --force` cleanly applies `smali.patch` with zero rejects.
   - Sandbox devgate passed clean: 0 halts, 0 LOUD markers, 0 crashes (`death=0`).

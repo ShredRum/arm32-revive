@@ -379,3 +379,24 @@ diff -ruN a/smali/com/rovio/angrybirds/ShowAdRunnable.smali b/smali/com/rovio/an
 -    .line 100
      return-void
  .end method
+diff -ruN a/smali/com/rovio/ka3d/WebViewWrapper$8.smali b/smali/com/rovio/ka3d/WebViewWrapper$8.smali
+--- a/smali/com/rovio/ka3d/WebViewWrapper$8.smali	2026-11-11 00:23:22.463315462 +0200
++++ b/smali/com/rovio/ka3d/WebViewWrapper$8.smali	2026-11-11 00:23:33.518698869 +0200
+@@ -64,15 +64,8 @@
+ 
+     iget-boolean v3, p0, Lcom/rovio/ka3d/WebViewWrapper$8;->val$succeeded:Z
+ 
+-    iget-object v4, p0, Lcom/rovio/ka3d/WebViewWrapper$8;->this$0:Lcom/rovio/ka3d/WebViewWrapper;
+-
+-    invoke-static {v4}, Lcom/rovio/ka3d/WebViewWrapper;->access$200(Lcom/rovio/ka3d/WebViewWrapper;)Landroid/webkit/WebView;
+-
+-    move-result-object v4
+-
+-    invoke-virtual {v4}, Landroid/webkit/WebView;->getTitle()Ljava/lang/String;
+-
+-    move-result-object v4
++    # ab-port: WebView methods must not be called from GLThread (Chromium WebView throws RuntimeException); pass empty title
++    const-string v4, ""
+ 
+     invoke-static {v0, v1, v2, v3, v4}, Lcom/rovio/ka3d/WebViewWrapper;->access$500(Lcom/rovio/ka3d/WebViewWrapper;JZLjava/lang/String;)V
+ 
