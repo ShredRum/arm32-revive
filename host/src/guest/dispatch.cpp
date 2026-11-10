@@ -6537,14 +6537,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                  addr ? &sl : nullptr);
             if (r < 0) {
                 set_guest_errno(errno);
-                if (EnvOn("HARNESS_POLLDBG")) {
-                    std::printf("[recv-dbg] %s(gfd %u) r=-1 errno=%d\n", n.c_str(), a0, errno);
-                }
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
-            }
-            if (r == 0 && EnvOn("HARNESS_POLLDBG")) {
-                std::printf("[recv-dbg] %s(gfd %u) r=0 (EOF)\n", n.c_str(), a0);
             }
             if (addr && (std::uint32_t)sl <= addrlen) {
                 std::memcpy(H(addr), &ss, sl);
@@ -7737,7 +7731,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // length; a missing property gives "" and 0. On the device the real
         // property service answers (it used to be a table of invented values:
         // sdk 21, model "izan", DNS 8.8.8.8). The native harness has no
-        // property service and keeps a small table (HARNESS_DNS1/2 override).
+        // property service and keeps a small table.
         if (!CheckRange(a1, kGuestPropValueMax, true)) {
             goto bad_ptr;
         }
@@ -7758,9 +7752,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
 #else
         if (key == "net.dns1" || key == "net.dns2") {
             val = (key == "net.dns1") ? "8.8.8.8" : "8.8.4.4";
-            if (const char* e = std::getenv(key == "net.dns1" ? "HARNESS_DNS1" : "HARNESS_DNS2")) {
-                val = e;
-            }
         } else if (key == "ro.build.version.sdk") {
             val = "21";
         }
@@ -14781,6 +14772,18 @@ static bool JniRunsNoJava(std::uint32_t fn) {
            (fn >= 145 && fn <= 214) || (fn >= 217 && fn <= 228) || (fn >= 230 && fn <= 232);
 }
 
+// A guest JNI call of a Java method that could not be made real: LOUD, once
+// per method.
+void Runtime::NoteFailedJavaCall(std::uint32_t fn, std::uint32_t method, const std::string& mdesc) {
+    static std::mutex mu;
+    static std::set<std::uint32_t> seen;
+    std::lock_guard<std::mutex> l(mu);
+    if (seen.size() < 200 && seen.insert(method).second) {
+        std::printf("[jni] LOUD Java call fn#%u %s could not be made -- the guest gets 0 / an "
+                    "empty result\n", fn, mdesc.empty() ? "(unknown method id)" : mdesc.c_str());
+    }
+}
+
 void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     if (!JniRunsNoJava(fn)) {
         ForgetGlBindings();  // Java code may run: its GL context may change
@@ -14855,13 +14858,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
 #ifdef __ANDROID__
-    // Every Call<T>Method / CallStatic<T>Method family goes to the real Java
-    // method first (the Object families 34-36/114-116 already did); the mock
-    // answers below are only the fallback when the call cannot be made real
-    // (no JVM on this thread, a mock-only class/object). The mocks were
-    // device answers from 2014 (API 21, 800x480, density group 1...) and
-    // dropped every void call, e.g. App.quitRequested (which only calls
-    // stopLockTask() in all six titles).
+    // Every Call<T>Method / CallStatic<T>Method family is the real Java
+    // method on a device (the Object families 34-36/114-116 below too).
+    // When the call cannot be made (the method threw, the receiver is not a
+    // real object) the answer is 0 / false / nothing and one LOUD line per
+    // method. The switch cases of these families answer for the PC harness
+    // only, which has no JVM: a phone of 2014 (API 21, 800x480, 240 PPI,
+    // startOutput = true). A device must never be told those.
     if ((fn >= 37 && fn <= 63) || (fn >= 117 && fn <= 143)) {
         std::string mdesc;
         {
@@ -14874,6 +14877,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (!mdesc.empty() && RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
             return;
         }
+        NoteFailedJavaCall(fn, a2, mdesc);
+        Ret(regs, 0, 0);
+        return;
     }
 #endif
     switch (fn) {
@@ -15972,71 +15978,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 mdesc = it->second;
             }
         }
-        // AudioOutput.startOutput()Z: our mixer is live (mixdata proven) —
-        // report started, as on device. Everything else defaults to false
-        // (logged-out services etc.).
-#ifdef __ANDROID__
-        // Product host: real startOutput on real objects (starts real
-        // audio -> real callbacks -> mixdata). No-arg boolean only; other
-        // shapes stay mocked below.
-        if (mdesc.find("startOutput()Z") != std::string::npos) {
-            JNIEnv* re = GuestCallbacks::g_real_env_hook
-                             ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
-                             : nullptr;
-            void* robj = UnwrapObject(a1);
-            if (re && robj) {
-                std::string d = mdesc;
-                const std::size_t dot = d.rfind('.');
-                const std::size_t par = d.find('(');
-                if (dot != std::string::npos && par != std::string::npos && dot < par) {
-                    const std::string cls = d.substr(0, dot);
-                    jclass rclazz = nullptr;
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(mutex_);
-                        const auto it = real_classes_.find(cls);
-                        if (it != real_classes_.end()) {
-                            rclazz = static_cast<jclass>(it->second);
-                        }
-                    }
-                    if (!rclazz) {
-                        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
-                    }
-                    if (!rclazz) {
-                        jclass lc = re->FindClass(cls.c_str());
-                        if (lc && !re->ExceptionCheck()) {
-                            rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
-                            re->DeleteLocalRef(lc);
-                            if (rclazz) {
-                                std::lock_guard<std::recursive_mutex> lock(mutex_);
-                                real_classes_[cls] = rclazz;
-                            }
-                        } else {
-                            re->ExceptionClear();
-                        }
-                    }
-                    jmethodID rmid = nullptr;
-                    if (rclazz) {
-                        rmid = re->GetMethodID(rclazz, "startOutput", "()Z");
-                        if (!rmid || re->ExceptionCheck()) {
-                            re->ExceptionClear();
-                            rmid = nullptr;
-                        }
-                    }
-                    if (rmid) {
-                        jboolean rr = re->CallBooleanMethodA(static_cast<jobject>(robj),
-                                                             rmid, nullptr);
-                        if (!re->ExceptionCheck()) {
-                            std::printf("[jni] CallBooleanMethod startOutput -> %u (real)\n",
-                                        (unsigned)rr);
-                            Ret(regs, rr ? 1u : 0u);
-                            return;
-                        }
-                        re->ExceptionClear();
-                    }
-                }
-            }
-        }
-#endif
+        // PC harness only (a device made the real call in the prologue):
+        // AudioOutput.startOutput()Z reports started, everything else false.
         const std::uint32_t rv =
             (mdesc.find("startOutput") != std::string::npos) ? 1 : 0;
         if (DiagOn()) {
@@ -16060,25 +16003,6 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (DiagOn()) {
             std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
         }
-#ifdef __ANDROID__
-        // Product host: the guest's audio engine calls AudioOutput.stopOutput()
-        // on pause and AudioOutput.requestExclusiveAudio(Z) on focus changes.
-        // Java never calls stopOutput (no caller in the dex); the only caller
-        // is the native side, so the generic void mock below would drop it and
-        // leave the AudioTrack playing after the app is backgrounded. Forward
-        // exactly these two to the real object; every other void call stays
-        // mocked (services/analytics are intentionally inert).
-        if (mdesc.find("AudioOutput.stopOutput") != std::string::npos ||
-            mdesc.find("AudioOutput.requestExclusiveAudio") != std::string::npos) {
-            if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
-                return;
-            }
-            // A real AudioOutput that cannot take its own method is an anomaly,
-            // not a mock path. The old silent drop WAS the background-audio bug.
-            std::printf("[jni] LOUD %s real call failed -- audio state not applied\n",
-                        mdesc.c_str());
-        }
-#endif
         Ret(regs, 0);  // void JNI: zero r0
         return;
     }
@@ -16107,14 +16031,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
             return;
         }
-        {
-            // A mock answer where the real call was meant to run: the guest
-            // gets "" or an inert object, so name the method.
-            static std::atomic<int> mock_logs{0};
-            if (mock_logs.fetch_add(1) < 40) {
-                std::printf("[jni] Call%sObject %s: no real call, a mock result\n",
-                            is_static ? "Static" : "", mdesc.c_str());
-            }
+        // The real call could not be made: the guest gets "" (a String
+        // method) or an inert object, never NULL (the engines do not check),
+        // and the method is named with LOUD. The one expected case is the
+        // offline policy: networkType() of an offline title is refused by
+        // RealCallObject on purpose and answers "" below.
+        if (mdesc.find("networkType") == std::string::npos || network_allowed_) {
+            NoteFailedJavaCall(fn, a2, mdesc);
         }
 #endif
         if (mdesc.size() >= 20 &&
@@ -16123,31 +16046,22 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             if (mdesc.find("getPathToFileCacheDirectory") != std::string::npos) {
                 content = GuestFilesPrefix();
             }
-            // HARNESS_DEVID=<hex16> overrides the mock device ID (default: a
-            // fixed plausible ANDROID_ID; empty broke key-derivation paths).
+#ifndef __ANDROID__
+            // PC harness (no JVM): a fixed plausible ANDROID_ID and locale
+            // (empty ones broke key-derivation and locale-dependent paths).
             if (mdesc.find("getUniqueId") != std::string::npos) {
                 content = "0123456789abcdef";
-                if (const char* d = std::getenv("HARNESS_DEVID")) {
-                    content = d;
-                }
             }
-            // HARNESS_LOCALE=<tag> overrides the mock locale (default en_US;
-            // empty broke locale-dependent paths). Real tag: e.g. en_US.
             if (mdesc.find("systemLocale") != std::string::npos) {
                 content = "en_US";
-                if (const char* d = std::getenv("HARNESS_LOCALE")) {
-                    content = d;
-                }
             }
+#endif
             // rcs.core.Utils.networkType() of an offline title (an online
             // one asks the real method): "" is what the real method returns
             // without network (getActiveNetworkInfo() == null -> exception
-            // -> ""), next to "wifi" and "cellular". HARNESS_NETTYPE overrides.
+            // -> ""), next to "wifi" and "cellular".
             if (mdesc.find("networkType") != std::string::npos) {
                 content = "";
-                if (const char* d = std::getenv("HARNESS_NETTYPE")) {
-                    content = d;
-                }
             }
             // UUID.toString() must be a valid UUID (empty string stalled the
             // installation-ID flow into a forever poll-wait; device always
