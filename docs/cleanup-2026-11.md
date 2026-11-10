@@ -279,3 +279,13 @@ Each one as proposed in the conversation of 2026-11-10:
       it if every title still draws.
 - [ ] A free of an unknown address: one LOUD line (capped).
 - [ ] heap_used_ accounting: malloc and free use the same size.
+
+## Also to do (2026-11-10)
+
+- [ ] Batch 3 leftovers: harness.cpp `[memselftest]` and the `[heap] top`
+      exit line; knobs listed in docs/minimum.md (POLLDBG, DNS1/2, NETTYPE,
+      DEVID, LOCALE): decide and remove what is a closed experiment.
+- [ ] After batches 5-7 and C: a fresh read-only audit of the whole host
+      for anything these two audits missed.
+- [ ] The final sandbox session also gates the `classic` branch (the union
+      of forwarders changed: all titles) before either branch is merged.
