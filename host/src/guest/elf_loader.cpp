@@ -775,6 +775,12 @@ bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import
         mem.Protect(page, 0x1000, PROT_READ | PROT_WRITE);
         std::memcpy(mem.host(pd.loc_va), &v, 4);
     }
+    // Restore protection on any read-only segment pages temporarily made writable
+    for (const auto& seg : mod.segments) {
+        if ((seg.prot & PROT_WRITE) == 0) {
+            mem.Protect(seg.start, seg.size, seg.prot);
+        }
+    }
     mod.imports[import_idx].tramp_va = guest_addr;
     // Data imports use the slot as their guest address, so call_va must
     // follow it (call_va is "the address the guest branches to").

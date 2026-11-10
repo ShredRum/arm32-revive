@@ -358,25 +358,30 @@ struct Gles1Api {
     void (*glTexEnvi)(GLenum, GLenum, GLint) = nullptr;
     void (*glVertexPointer)(GLint, GLenum, GLsizei, const void*) = nullptr;
 
+    // OES framebuffer object extension in GLES 1.1
+    void (*glGenFramebuffersOES)(GLsizei, GLuint*) = nullptr;
+    void (*glBindFramebufferOES)(GLenum, GLuint) = nullptr;
+    void (*glFramebufferTexture2DOES)(GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+    void (*glFramebufferRenderbufferOES)(GLenum, GLenum, GLenum, GLuint) = nullptr;
+    void (*glDeleteFramebuffersOES)(GLsizei, const GLuint*) = nullptr;
+    void (*glGenRenderbuffersOES)(GLsizei, GLuint*) = nullptr;
+    void (*glBindRenderbufferOES)(GLenum, GLuint) = nullptr;
+    void (*glRenderbufferStorageOES)(GLenum, GLenum, GLsizei, GLsizei) = nullptr;
+    void (*glDeleteRenderbuffersOES)(GLsizei, const GLuint*) = nullptr;
+    GLenum (*glCheckFramebufferStatusOES)(GLenum) = nullptr;
+
     bool Init() {
         if (handle) {
             return true;
         }
-        static const char* const kLibs[] = {
-            "libGLESv1_CM.so",
-            "libGLESv1_CM.so.1",
-            "libGLESv1_CM_nvidia.so",
-            nullptr
-        };
-        for (int i = 0; kLibs[i]; i++) {
-            handle = dlopen(kLibs[i], RTLD_NOW | RTLD_GLOBAL);
-            if (handle) {
-                break;
-            }
-        }
+#ifdef __ANDROID__
+        handle = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_GLOBAL);
+#else
+        handle = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
-            handle = dlopen(nullptr, RTLD_NOW | RTLD_GLOBAL);
+            handle = dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);
         }
+#endif
         if (!handle) {
             return false;
         }
@@ -397,6 +402,17 @@ struct Gles1Api {
         ABR_LOAD_GLES1(glTexCoordPointer);
         ABR_LOAD_GLES1(glTexEnvi);
         ABR_LOAD_GLES1(glVertexPointer);
+
+        ABR_LOAD_GLES1(glGenFramebuffersOES);
+        ABR_LOAD_GLES1(glBindFramebufferOES);
+        ABR_LOAD_GLES1(glFramebufferTexture2DOES);
+        ABR_LOAD_GLES1(glFramebufferRenderbufferOES);
+        ABR_LOAD_GLES1(glDeleteFramebuffersOES);
+        ABR_LOAD_GLES1(glGenRenderbuffersOES);
+        ABR_LOAD_GLES1(glBindRenderbufferOES);
+        ABR_LOAD_GLES1(glRenderbufferStorageOES);
+        ABR_LOAD_GLES1(glDeleteRenderbuffersOES);
+        ABR_LOAD_GLES1(glCheckFramebufferStatusOES);
 #undef ABR_LOAD_GLES1
         return true;
     }
@@ -481,6 +497,13 @@ struct GlThread {
     ClientArray client_tex_coord[4];
 };
 thread_local GlThread t_gl;
+
+static inline bool HasClientArrays() {
+    return t_gl.client_vertex.enabled || t_gl.client_normal.enabled ||
+           t_gl.client_color.enabled || t_gl.client_tex_coord[0].enabled ||
+           t_gl.client_tex_coord[1].enabled || t_gl.client_tex_coord[2].enabled ||
+           t_gl.client_tex_coord[3].enabled;
+}
 
 static bool ValidateClientArray(Runtime* r, const char* name, const char* arr_name,
                                 const ClientArray& arr, std::uint32_t max_vert_idx) {
@@ -937,7 +960,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glCheckFramebufferStatus || id == G::glCheckFramebufferStatusOES) {
-        r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
+        if (id == G::glCheckFramebufferStatusOES && EnsureGles1() && g_gles1.glCheckFramebufferStatusOES) {
+            r->Ret(regs, (std::uint32_t)g_gles1.glCheckFramebufferStatusOES((GLenum)a0));
+        } else {
+            r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
+        }
         return true;
     }
     if (id == G::glGetFramebufferAttachmentParameteriv || id == G::glGetVertexAttribiv) {
@@ -1005,9 +1032,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         std::memcpy(&f[1], &a1, 4);
         std::memcpy(&f[2], &a2, 4);
         std::memcpy(&f[3], &a3, 4);
-        if (EnsureGles1() && g_gles1.glColor4f) {
-            g_gles1.glColor4f(f[0], f[1], f[2], f[3]);
+        if (!EnsureGles1() || !g_gles1.glColor4f) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glColor4f(f[0], f[1], f[2], f[3]);
         r->Ret(regs, 0);
         return true;
     }
@@ -1334,11 +1364,23 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (id == G::glGenFramebuffers || id == G::glGenFramebuffersOES ||
                    id == G::glDeleteFramebuffers || id == G::glDeleteFramebuffersOES) {
-            is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
-                   : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            if (id == G::glGenFramebuffersOES && EnsureGles1() && g_gles1.glGenFramebuffersOES) {
+                g_gles1.glGenFramebuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
+            } else if (id == G::glDeleteFramebuffersOES && EnsureGles1() && g_gles1.glDeleteFramebuffersOES) {
+                g_gles1.glDeleteFramebuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
+            } else {
+                is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
+                       : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            }
         } else {
-            is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
-                   : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            if (id == G::glGenRenderbuffersOES && EnsureGles1() && g_gles1.glGenRenderbuffersOES) {
+                g_gles1.glGenRenderbuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
+            } else if (id == G::glDeleteRenderbuffersOES && EnsureGles1() && g_gles1.glDeleteRenderbuffersOES) {
+                g_gles1.glDeleteRenderbuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
+            } else {
+                is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
+                       : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            }
         }
         if (GlDrawLog()) std::printf("[realgl] %s(%u) ok\n", name, a0);
         r->Ret(regs, 0);
@@ -1346,12 +1388,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES ||
         id == G::glBindRenderbuffer || id == G::glBindRenderbufferOES) {
-        // The guests DO use framebuffers (measured: glBindFramebuffer x3,
-        // glBindRenderbuffer x2 per guest); before this the calls fell into
-        // the generic tail, which answered "success" without doing
-        // anything, so the game rendered into nothing.
-        if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES) {
+        if (id == G::glBindFramebufferOES && EnsureGles1() && g_gles1.glBindFramebufferOES) {
+            g_gles1.glBindFramebufferOES((GLenum)a0, (GLuint)a1);
+        } else if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES) {
             glBindFramebuffer((GLenum)a0, (GLuint)a1);
+        } else if (id == G::glBindRenderbufferOES && EnsureGles1() && g_gles1.glBindRenderbufferOES) {
+            g_gles1.glBindRenderbufferOES((GLenum)a0, (GLuint)a1);
         } else {
             glBindRenderbuffer((GLenum)a0, (GLuint)a1);
         }
@@ -1361,7 +1403,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glFramebufferRenderbuffer || id == G::glFramebufferRenderbufferOES) {
         // (target, attachment, renderbuffertarget, renderbuffer)
-        glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        if (id == G::glFramebufferRenderbufferOES && EnsureGles1() && g_gles1.glFramebufferRenderbufferOES) {
+            g_gles1.glFramebufferRenderbufferOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        } else {
+            glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        }
         if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%04x,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
@@ -1370,7 +1416,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // (target, attachment, textarget, texture, level) -- the level is
         // the first stack word.
         const std::uint32_t level = Stk(r, sp, 0);
-        glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        if (id == G::glFramebufferTexture2DOES && EnsureGles1() && g_gles1.glFramebufferTexture2DOES) {
+            g_gles1.glFramebufferTexture2DOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        } else {
+            glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        }
         if (GlDrawLog()) {
             std::printf("[realgl] %s(%04x,%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3, level);
         }
@@ -1379,7 +1429,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glRenderbufferStorage || id == G::glRenderbufferStorageOES) {
         // (target, internalformat, width, height)
-        glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        if (id == G::glRenderbufferStorageOES && EnsureGles1() && g_gles1.glRenderbufferStorageOES) {
+            g_gles1.glRenderbufferStorageOES((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        } else {
+            glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        }
         if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
@@ -1661,9 +1715,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glClientActiveTexture) {
-        if (EnsureGles1() && g_gles1.glClientActiveTexture) {
-            g_gles1.glClientActiveTexture((GLenum)a0);
+        if (!EnsureGles1() || !g_gles1.glClientActiveTexture) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glClientActiveTexture((GLenum)a0);
         const std::uint32_t unit = (a0 >= 0x84C0u && a0 < 0x84C4u) ? (a0 - 0x84C0u) : 0u;
         t_gl.client_active_texture = unit;
         r->Ret(regs, 0);
@@ -1671,10 +1728,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glEnableClientState || id == G::glDisableClientState) {
         const bool want = (id == G::glEnableClientState);
-        if (EnsureGles1()) {
-            if (want && g_gles1.glEnableClientState) g_gles1.glEnableClientState((GLenum)a0);
-            else if (!want && g_gles1.glDisableClientState) g_gles1.glDisableClientState((GLenum)a0);
+        if (!EnsureGles1() || (want ? !g_gles1.glEnableClientState : !g_gles1.glDisableClientState)) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        if (want) g_gles1.glEnableClientState((GLenum)a0);
+        else g_gles1.glDisableClientState((GLenum)a0);
         switch (a0) {
             case 0x8074: // GL_VERTEX_ARRAY
                 t_gl.client_vertex.enabled = want;
@@ -1709,9 +1769,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
             p = (const void*)r->H(a3);
         }
-        if (EnsureGles1() && g_gles1.glVertexPointer) {
-            g_gles1.glVertexPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        if (!EnsureGles1() || !g_gles1.glVertexPointer) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glVertexPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
         t_gl.client_vertex.size = (GLint)a0;
         t_gl.client_vertex.type = (GLenum)a1;
         t_gl.client_vertex.stride = (GLsizei)a2;
@@ -1733,9 +1796,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
             p = (const void*)r->H(a3);
         }
-        if (EnsureGles1() && g_gles1.glColorPointer) {
-            g_gles1.glColorPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        if (!EnsureGles1() || !g_gles1.glColorPointer) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glColorPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
         t_gl.client_color.size = (GLint)a0;
         t_gl.client_color.type = (GLenum)a1;
         t_gl.client_color.stride = (GLsizei)a2;
@@ -1757,9 +1823,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
             p = (const void*)r->H(a3);
         }
-        if (EnsureGles1() && g_gles1.glTexCoordPointer) {
-            g_gles1.glTexCoordPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        if (!EnsureGles1() || !g_gles1.glTexCoordPointer) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glTexCoordPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
         const std::uint32_t u = t_gl.client_active_texture;
         if (u < 4) {
             t_gl.client_tex_coord[u].size = (GLint)a0;
@@ -1784,9 +1853,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             }
             p = (const void*)r->H(a2);
         }
-        if (EnsureGles1() && g_gles1.glNormalPointer) {
-            g_gles1.glNormalPointer((GLenum)a0, (GLsizei)a1, p);
+        if (!EnsureGles1() || !g_gles1.glNormalPointer) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glNormalPointer((GLenum)a0, (GLsizei)a1, p);
         t_gl.client_normal.size = 3;
         t_gl.client_normal.type = (GLenum)a0;
         t_gl.client_normal.stride = (GLsizei)a1;
@@ -1797,7 +1869,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glDrawArrays || id == G::glDrawElements) {
         if (id == G::glDrawArrays) {
-            if ((GLsizei)a2 > 0) {
+            if (HasClientArrays() && (GLsizei)a2 > 0) {
                 const std::uint32_t max_idx = (std::uint32_t)(GLint)a1 + (std::uint32_t)(GLsizei)a2 - 1u;
                 if (!ValidateClientArrays(r, name, max_idx)) {
                     return true;
@@ -1813,6 +1885,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             const bool ibo = BoundBuffer(GL_ELEMENT_ARRAY_BUFFER_BINDING) != 0;
             if (ibo) {
                 p = (const void*)(std::uintptr_t)a3;
+                if (HasClientArrays()) {
+                    std::printf("[realgl] %s LOUD MIXEDIBO element buffer bound with client vertex arrays -- halting\n", name);
+                    r->HaltGuest();
+                    return true;
+                }
             } else if (a3) {
                 const std::uint64_t isz = IndexSize(a2);
                 const std::uint64_t need = (std::uint64_t)(GLsizei)a1 * isz;
@@ -1828,7 +1905,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                 }
             }
             if ((p || ibo) && (GLsizei)a1 > 0) {
-                if (p) {
+                if (p && HasClientArrays()) {
                     std::uint32_t max_idx = 0;
                     if (a2 == 0x1401u) { // GL_UNSIGNED_BYTE
                         const auto* u8 = (const std::uint8_t*)p;
@@ -1856,9 +1933,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glMatrixMode) {
-        if (EnsureGles1() && g_gles1.glMatrixMode) {
-            g_gles1.glMatrixMode((GLenum)a0);
+        if (!EnsureGles1() || !g_gles1.glMatrixMode) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glMatrixMode((GLenum)a0);
         r->Ret(regs, 0);
         return true;
     }
@@ -1868,9 +1948,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             r->HaltGuest();
             return true;
         }
-        if (EnsureGles1() && g_gles1.glLoadMatrixf) {
-            g_gles1.glLoadMatrixf((const GLfloat*)r->H(a0));
+        if (!EnsureGles1() || !g_gles1.glLoadMatrixf) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glLoadMatrixf((const GLfloat*)r->H(a0));
         r->Ret(regs, 0);
         return true;
     }
@@ -1881,9 +1964,12 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             r->HaltGuest();
             return true;
         }
-        if (EnsureGles1() && g_gles1.glLightfv) {
-            g_gles1.glLightfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
+        if (!EnsureGles1() || !g_gles1.glLightfv) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glLightfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
         r->Ret(regs, 0);
         return true;
     }
@@ -1894,16 +1980,22 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             r->HaltGuest();
             return true;
         }
-        if (EnsureGles1() && g_gles1.glMaterialfv) {
-            g_gles1.glMaterialfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
+        if (!EnsureGles1() || !g_gles1.glMaterialfv) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glMaterialfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
         r->Ret(regs, 0);
         return true;
     }
     if (id == G::glTexEnvi) {
-        if (EnsureGles1() && g_gles1.glTexEnvi) {
-            g_gles1.glTexEnvi((GLenum)a0, (GLenum)a1, (GLint)a2);
+        if (!EnsureGles1() || !g_gles1.glTexEnvi) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
         }
+        g_gles1.glTexEnvi((GLenum)a0, (GLenum)a1, (GLint)a2);
         r->Ret(regs, 0);
         return true;
     }
