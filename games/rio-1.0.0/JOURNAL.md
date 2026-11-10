@@ -27,3 +27,18 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   - `Java_com_rovio_ka3d_WebViewWrapper_{urlLoadedCallback,linkClickedCallback}`
   - `Java_com_rovio_angrybirds_AdViewWrapper_{hidingFinishedCallback,requestAdCallback}`
   - `Java_com_rovio_angrybirds_InterstitialAdWrapper_setVideoReady`
+
+## 2026-11-10: Port Completion & Review Fixes
+
+- Unwinder `.ARM.exidx`: registered via `PT_ARM_EXIDX` program header; handled GCC 4.4 `sh_entsize == 0`.
+- Fixed-function OpenGL ES 1.1 forwarding via `libGLESv1_CM.so` and OES framebuffer extension support.
+- Verified interactive gameplay on sandbox: menu navigation, level 1-1, audio playback, physics simulation, slingshot input and collision scoring (17 670 pts).
+- Review fixes addressed:
+  - Guarded client array bounds validation in `glDrawElements` / `glDrawArrays` behind `HasClientArrays()`, eliminating draw-call overhead on GLES 2.0+ titles.
+  - Enforced `LOUD` halts on any unimplemented or missing GLES 1.1 entry point (no quiet skips).
+  - Added explicit detection and `LOUD` halt for mixed IBO + client vertex arrays.
+  - Resolved OES framebuffer functions directly from GLES 1.1 when available.
+  - Added `CheckRange` validation on `__srget` memory writes.
+  - Restored original segment protections after applying relocations in `elf_loader.cpp`.
+  - Scoped `devgate.sh` reinstall fallback strictly to `INSTALL_FAILED_VERSION_DOWNGRADE`.
+  - Regression gate passed across all titles (`fmt_test` ALL OK, `harness-all.sh` LOUD=0, `devgate` clean).
