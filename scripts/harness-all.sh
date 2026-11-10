@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.." || exit 1
 H=./host/build-native/harness
 [ -x "$H" ] || { echo "harness-all: $H is missing (scripts/build-lib.sh --native)" >&2; exit 1; }
 rc=0
-for g in rio seasons space star-wars star-wars-ii-amz stella classic; do
+for g in rio seasons space star-wars star-wars-ii-amz stella classic rio-1.0.0; do
     lib=$(python3 scripts/profile.py "$g" guest.lib)
     want=$(python3 scripts/profile.py "$g" guest.sha256)
     f=""

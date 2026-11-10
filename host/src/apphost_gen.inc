@@ -327,6 +327,51 @@ extern "C" void Java_org_libsdl_app_SDLInputConnection_nativeCommitText(JNIEnv* 
 extern "C" void Java_org_libsdl_app_SDLInputConnection_nativeSetComposingText(JNIEnv* env, jobject thiz, jobject a0, jint a1) {
     abr::AppHost_Call("Java_org_libsdl_app_SDLInputConnection_nativeSetComposingText", "(Ljava/lang/String;I)V", env, thiz, a0, a1); return;
 }
+extern "C" void Java_com_rovio_angrybirds_AdViewWrapper_hidingFinishedCallback(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_angrybirds_AdViewWrapper_hidingFinishedCallback", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_angrybirds_AdViewWrapper_requestAdCallback(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_angrybirds_AdViewWrapper_requestAdCallback", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_angrybirds_InterstitialAdWrapper_setVideoReady(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_angrybirds_InterstitialAdWrapper_setVideoReady", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_ka3d_AudioOutput_nativeMixData(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_AudioOutput_nativeMixData", "(J[BI)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_ka3d_MyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeDeinit", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_ka3d_MyRenderer_nativeInit(JNIEnv* env, jobject thiz, jint a0, jint a1, jobject a2) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeInit", "(IILjava/lang/String;)Z", env, thiz, a0, a1, a2);
+}
+extern "C" void Java_com_rovio_ka3d_MyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_ka3d_MyRenderer_nativeKeyInput(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeKeyInput", "(II)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_ka3d_MyRenderer_nativePause(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativePause", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_ka3d_MyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_ka3d_MyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeResume", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_ka3d_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_ka3d_MyRenderer_nativeUpdate", "()Z", env, thiz);
+}
+extern "C" void Java_com_rovio_ka3d_ShowAlertResultRunnable_showAlertResultCallback(JNIEnv* env, jobject thiz, jlong a0, jlong a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_ShowAlertResultRunnable_showAlertResultCallback", "(JJII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" jboolean Java_com_rovio_ka3d_WebViewWrapper_linkClickedCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_ka3d_WebViewWrapper_linkClickedCallback", "(JLjava/lang/String;)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_ka3d_WebViewWrapper_urlLoadedCallback(JNIEnv* env, jobject thiz, jlong a0, jboolean a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_ka3d_WebViewWrapper_urlLoadedCallback", "(JZLjava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
 extern "C" void Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback(JNIEnv* env, jobject thiz, jlong a0, jlong a1, jint a2, jint a3) {
     abr::AppHost_Call("Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback", "(JJII)V", env, thiz, a0, a1, a2, a3); return;
 }
@@ -546,4 +591,4 @@ extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_on
 extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared", "(J[Ljava/lang/String;[Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
 }
-// GEN_COUNT=182
+// GEN_COUNT=197

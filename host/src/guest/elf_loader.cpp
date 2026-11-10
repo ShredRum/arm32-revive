@@ -753,6 +753,8 @@ bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import
             continue;
         }
         const std::uint32_t v = pd.addend + guest_addr;
+        const std::uint32_t page = pd.loc_va & ~std::uint32_t(0xFFF);
+        mem.Protect(page, 0x1000, PROT_READ | PROT_WRITE);
         std::memcpy(mem.host(pd.loc_va), &v, 4);
     }
     mod.imports[import_idx].tramp_va = guest_addr;

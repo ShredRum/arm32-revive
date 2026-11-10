@@ -4820,7 +4820,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::stat_:
     case I::statfs_:
     case I::tmpfile_:
+    case I::tmpnam_:
     case I::truncate_:
+    case I::__srget_:
     case I::ungetc_:
     case I::unlink_:
     case I::utime_:
@@ -5419,6 +5421,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
             return;
         }
+        if (id == I::__srget_) {
+            FILE* f = file_of(a0);
+            if (!f) {
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            const int c = std::fgetc(f);
+            // Keep _r at 0 so inline getc continues to call __srget
+            std::uint32_t zero = 0;
+            std::memcpy(H(a0 + 4), &zero, 4);
+            Ret(regs, static_cast<std::uint32_t>(c));
+            return;
+        }
         if (id == I::vfprintf_) {
             // vfprintf(stream, fmt, va_list): the arguments start at the va
             // pointer, as in vprintf.
@@ -5529,6 +5544,24 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             Ret(regs, h);
+            return;
+        }
+        if (id == I::tmpnam_) {
+            static std::uint32_t s_buf = 0;
+            if (!s_buf) {
+                s_buf = GuestMalloc(64);
+            }
+            std::uint32_t dst = a0 ? a0 : s_buf;
+            if (!dst || !CheckRange(dst, 64, true)) {
+                goto bad_ptr;
+            }
+            static std::atomic<std::uint32_t> s_seq{1};
+            std::string prefix = files_prefix_.empty() ? "/tmp" : files_prefix_;
+            char name_buf[64];
+            std::snprintf(name_buf, sizeof(name_buf), "%s/tmp_%u_%u",
+                          prefix.c_str(), GuestTid(), s_seq.fetch_add(1));
+            std::memcpy(H(dst), name_buf, std::strlen(name_buf) + 1);
+            Ret(regs, dst);
             return;
         }
         if (id == I::open_) {
@@ -9601,8 +9634,9 @@ void Runtime::InitDataImports() {
     const std::uint32_t var_environ = GuestMalloc(4);
     const std::uint32_t env_array = GuestMalloc(4);
     const std::uint32_t var_nothrow = GuestMalloc(4);
+    const std::uint32_t var_dso_handle = GuestMalloc(4);
     if (!var_ctype || !var_guard || !var_lower || !var_upper || !var_page || !sF ||
-        !var_environ || !env_array || !var_nothrow) {
+        !var_environ || !env_array || !var_nothrow || !var_dso_handle) {
         std::printf("[data] LOUD var alloc failed -- halting\n");
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
@@ -9633,6 +9667,7 @@ void Runtime::InitDataImports() {
         RebuildEnvironLocked();  // entries the host set before this point
     }
     std::memset(H(var_nothrow), 0, 4);
+    std::memcpy(H(var_dso_handle), &var_dso_handle, 4);
     // __sF: bind the three bionic std streams to the host's. The GOT slot must
     // hold the ARRAY BASE (the guest does a single deref: ldr rX,[got]; add
     // rX,rX,#168), unlike the pointer-cell variables above.
@@ -9657,6 +9692,7 @@ void Runtime::InitDataImports() {
         {"__sF", sF},
         {"environ", var_environ},
         {"_ZSt7nothrow", var_nothrow},
+        {"__dso_handle", var_dso_handle},
     };
     // Bind a data import to a guest address: patch every GOT slot that
     // refers to it and point the import itself at the address (a data
@@ -9667,7 +9703,7 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            if (!CheckRange(pd.loc_va, 4, true)) {
+            if (!CheckRange(pd.loc_va, 4, false)) {
                 std::printf("[data] LOUD import %u loc %08x out of range -- halting\n", idx,
                             pd.loc_va);
                 stop_step_ = true;
@@ -9688,13 +9724,15 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            if (!CheckRange(pd.loc_va, 4, true)) {
+            if (!CheckRange(pd.loc_va, 4, false)) {
                 std::printf("[data] LOUD %s loc %08x out of range -- halting\n", s.name, pd.loc_va);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
             const std::uint32_t v = pd.addend + s.addr;
+            const std::uint32_t page = pd.loc_va & ~std::uint32_t(0xFFF);
+            mem_.Protect(page, 0x1000, PROT_READ | PROT_WRITE);
             std::memcpy(H(pd.loc_va), &v, 4);
             patched++;
         }
@@ -9744,6 +9782,13 @@ void Runtime::InitDataImports() {
         std::printf("[data] LOUD uncovered data import \"%s\" -> zero page %08x "
                     "(the guest expected a real libc object)\n",
                     mod_.imports[i].name.c_str(), page);
+    }
+    // Restore protection on any read-only segment pages temporarily made writable
+    // while applying text relocations (DT_TEXTREL).
+    for (const auto& seg : mod_.segments) {
+        if ((seg.prot & PROT_WRITE) == 0) {
+            mem_.Protect(seg.start, seg.size, seg.prot);
+        }
     }
 }
 

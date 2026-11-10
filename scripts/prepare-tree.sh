@@ -71,7 +71,7 @@ mkdir -p "$TREE/assets/guestlib/armeabi-v7a"
 for l in "$GUEST_LIB" $GUEST_DEPS; do
     mv "$TREE/lib/armeabi-v7a/$l" "$TREE/assets/guestlib/armeabi-v7a/$l"
 done
-rm -rf "$TREE/lib/armeabi-v7a" "$TREE/lib/x86"
+rm -rf "$TREE/lib/armeabi-v7a" "$TREE/lib/armeabi" "$TREE/lib/x86"
 mkdir -p "$TREE/lib/arm64-v8a"
 
 echo "== seeds =="

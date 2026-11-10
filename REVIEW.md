@@ -29,6 +29,8 @@ against `games/<id>/profile.toml`:
 | star-wars | 96/97 | 2320 | 96 | 3 (same) |
 | star-wars-ii | 143/144 | 4457 | 143 | 3 (same) |
 | star-wars-ii-amz | 143/144 | 4457 | 143 | 3 (same) |
+| classic | 125/126 | 0 | 125 | 0 |
+| rio-1.0.0 | 11/11 | 0 | 11 | 0 |
 
 Since 2026-11-09: LOUD is 0 for every title (the build-id pin is gone), and
 `svc` is counted only by a `--diag` build (0 otherwise).
