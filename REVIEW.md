@@ -125,11 +125,11 @@ survive as agent summaries (a re-run fills the gaps into work/review/).
 | A-12 | S3 | 3511 poll | timeout -1 becomes 5000 (spurious timeout); >5000 not capped despite comment | fixed e4b29a4 |
 | A-13 | S3 | 2314 memchr | getenv("HARNESS_MEMDUMP") on every call in shipping | fixed febf56c |
 | A-14 | S3 | 2308, 2283 | memchr/strncpy validate the full n bytes of source -> false halts | fixed 5d397e9 (strncpy; memchr open) |
-| A-15 | S3 | math_thunks.inc:268, 1846 | __fpclassifyd/sysconf pass host constants (ok on bionic host, wrong in harness) | open |
+| A-15 | S3 | math_thunks.inc:268, 1846 | __fpclassifyd/sysconf pass host constants (ok on bionic host, wrong in harness) | open for __fpclassifyd; the page size is 4096 for the guest everywhere since 2026-11-10 (cleanup batch 6) |
 | A-16 | S3 | 641 calloc | calloc(0,x) returns NULL (should return a unique pointer) | fixed 68d7bda |
 | A-17 | S3 | 1550 printf %s | NULL prints ELF header (VA 0 mapped); want "(null)" | open |
-| A-18 | S3 | 3311 snprintf | unmapped dst silently skipped, full length returned | open |
-| A-19 | S3 | 3175, 3200 localtime | TIMEWARP applied twice (diag); tm_zone NULL | open |
+| A-18 | S3 | 3311 snprintf | unmapped dst silently skipped, full length returned | fixed 2026-11-10 (6295644): an unmapped destination halts LOUD |
+| A-19 | S3 | 3175, 3200 localtime | TIMEWARP applied twice (diag; knob removed 2856fd2); tm_zone NULL | open |
 | A-20 | S3 | 2070 syscall | returns -ENOSYS raw instead of -1+errno; tgkill fakes success | open |
 | A-21 | S3 | 1361-1472 ExpandPrintf | trailing %/bad spec not counted; 1 MiB loop guard stops counting; %10p width placement; %*d INT_MIN | open |
 | A-22 | S4 | math_thunks.inc:290,371 | __signbitl/nanl treat long double as float (dead) | open |
@@ -269,7 +269,7 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | F-01..03 | S4 | relocations | REL32 lacks -P (unused), weak undefined -> trampoline, GLOB_DAT addend applied (all 0 in these guests) | open |
 | F-06 | S3 | Find_exidx | exidx table returned for trampoline pcs; nest guard state shared across threads | open |
 | F-12..21 | S3 | elf parsing | unbounded table reads / uint32 wraps on malformed ELF (low risk: guest SHA is checked first) | open |
-| F-26 | S4 | ExceptionRaised | add-pc emulation dead (Dynarmic handles add pc natively) | open |
+| F-26 | S4 | ExceptionRaised | add-pc emulation dead (Dynarmic handles add pc natively) | fixed d5404b0 |
 | F-29 | S3 | Runtime::jit_ | still points at the OnLoad Jit after its thread exits (= C-32) | open |
 | F-35 | S3 | gate | harness runs with fastmem off, unlike shipping | open |
 | F-36 | S3 | cbnz_test | always returns 0, checks nothing | open |
@@ -284,12 +284,12 @@ forwarder AAPCS layout; no 64-bit host pointer reaches guest memory.
 | G-04 | S3 | harness.cpp | bool skip[128] read for 143/144 inits (out of bounds) | open |
 | G-05/11 | S3 | diag / FUNCTORAT / TAPBEAT | Rio VAs armed for every title | fixed: the probes were gone from the code; the last Rio-only VAs (loader relaudit, harness snapshots/death words) removed 2026-11-09 |
 | G-06 | S3 | apphost nativeDeinit | Java-stack forensics ran ungated on every exit (FindClass/NewObject/3000-char log, leaked refs) | fixed dbcb76c |
-| G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | open |
+| G-08 | S3 | __page_size | fixed 4096 while sysconf/AT_PAGESZ return the host's 16384 on 16 KB devices (SUSPECTED) | fixed 2026-11-10: sysconf and getauxval(AT_PAGESZ) answer 4096 |
 | G-09 | S3 | unwind nest guard | leftover racy crutch | open |
 | G-10 | S3 | fake GL shim | still reachable on device (context-less threads, names RealGL doesn't handle) | fixed dbcb76c: shim is PC-only; Android sends every gl* to the driver, with or without a context |
 | G-12 | S3 | TLS ClientHello rewrite | on by default, edits the guest buffer in place, also downgrades TLS 1.1 (= B-14) | fixed with R-005 (offline policy, rewrite removed) |
 | G-13 | S4 | apphost | only FASTMEM and REALGL are set in shipping: make them config, not knobs | fixed dbcb76c: fastmem and RealGL hardwired on Android (JitFastmemOn), env only on the PC |
-| G-14 | S3 | fcntl | lock commands report success without doing anything | open |
+| G-14 | S3 | fcntl | lock commands report success without doing anything | fixed 2026-11-10: F_GETLK/F_SETLK/F_SETLKW go to the host with struct flock converted; other unhandled commands are EINVAL + LOUD |
 | G-dead | S3 | whole tree | ~4000 removable lines (TEMP-DIAG, probes, pokes, redirects, unwinder experiments) | fixed 850c027..6f762fd (-4168 lines; shipping-path TEMP-DIAG/fake GL/nativeDeinit forensics remain) |
 
 ## 2026-11-09: code review of the perf branch and of the MCSM work (0d1c81b..master)

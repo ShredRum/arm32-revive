@@ -172,6 +172,14 @@ struct RuntimeTestAccess {
         rt.mem().Map(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
         rt.AddMapping(a, n, PROT_READ | PROT_WRITE | PROT_EXEC);
     }
+    static void MapRw(Runtime& rt, std::uint32_t a, std::uint32_t n) {
+        rt.mem().Map(a, n, PROT_READ | PROT_WRITE);
+        rt.AddMapping(a, n, PROT_READ | PROT_WRITE);
+    }
+    static bool HasThread(Runtime& rt, std::uint32_t tid) {
+        std::lock_guard<std::recursive_mutex> l(rt.mutex_);
+        return rt.threads_.count(tid) != 0;
+    }
     static bool TakeStopped(Runtime& rt) {
         const bool s = rt.stop_step_;
         rt.stop_step_ = false;
@@ -507,6 +515,16 @@ int main() {
     mod.imports.push_back(abr::Import{"rename", true, 0, 0, 0});        // 125
     mod.imports.push_back(abr::Import{"rmdir", true, 0, 0, 0});         // 126
     mod.imports.push_back(abr::Import{"slCreateEngine", true, 0, 0, 0});  // 127
+    mod.imports.push_back(abr::Import{"strncmp", true, 0, 0, 0});       // 128
+    mod.imports.push_back(abr::Import{"strcasecmp", true, 0, 0, 0});    // 129
+    mod.imports.push_back(abr::Import{"strtok", true, 0, 0, 0});        // 130
+    mod.imports.push_back(abr::Import{"strtok_r", true, 0, 0, 0});      // 131
+    mod.imports.push_back(abr::Import{"strchr", true, 0, 0, 0});        // 132
+    mod.imports.push_back(abr::Import{"strstr", true, 0, 0, 0});        // 133
+    mod.imports.push_back(abr::Import{"fcntl", true, 0, 0, 0});         // 134
+    mod.imports.push_back(abr::Import{"pthread_create", true, 0, 0, 0});  // 135
+    mod.imports.push_back(abr::Import{"pthread_join", true, 0, 0, 0});    // 136
+    mod.imports.push_back(abr::Import{"pthread_attr_setdetachstate", true, 0, 0, 0});  // 137
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -969,10 +987,11 @@ int main() {
             Expect("memmem missing", std::to_string(call(2, args)), "0");
         }
         {
-            // _SC_PAGESIZE is 30 in Linux.
-            const std::uint32_t args[4] = {30, 0, 0, 0};
-            const std::uint32_t r = call(3, args);
-            Expect("sysconf _SC_PAGESIZE", std::to_string(r != 0 ? 1 : 0), "1");
+            // The guest's pages are 4 KiB on any host: bionic's _SC_PAGESIZE
+            // (0x27) and _SC_PAGE_SIZE (0x28), also with HARNESS_PAGESIZE.
+            const std::uint32_t a27[4] = {0x27, 0, 0, 0}, a28[4] = {0x28, 0, 0, 0};
+            Expect("sysconf _SC_PAGESIZE / _SC_PAGE_SIZE",
+                   std::to_string(call(3, a27)) + " " + std::to_string(call(3, a28)), "4096 4096");
         }
         {
             const std::uint32_t args[4] = {0, 0, 0, 0};
@@ -1343,8 +1362,8 @@ int main() {
         Expect("getauxval(AT_HWCAP) excludes VFPv4",
                std::to_string(hwcap & abr::kHwcapVfpv4), "0");
         const std::uint32_t ps[4] = {kAtPagesz, 0, 0, 0};
-        Expect("getauxval(AT_PAGESZ) is the page size",
-               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps) > 0 ? 1 : 0), "1");
+        Expect("getauxval(AT_PAGESZ) is the guest's 4 KiB",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps)), "4096");
         const std::uint32_t h2[4] = {kAtHwcap2, 0, 0, 0};
         Expect("getauxval(AT_HWCAP2) is zero",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, h2)), "0");
@@ -2334,6 +2353,107 @@ int main() {
                static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 48, a_cmp)) > 0 ? "1" : "0", "1");
     }
 
+    // --- strcmp family, strchr/strstr, strtok: results as libc's, also for
+    //     strings that end at a mapping's last bytes or cross into the next
+    //     mapping; an unterminated string at the end of memory halts.
+    {
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0) {
+            const std::uint32_t a[4] = {x, y, z, 0};
+            return static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, idx, a));
+        };
+        auto sign = [](std::int32_t v) { return v < 0 ? "<" : v > 0 ? ">" : "="; };
+        const std::uint32_t kA = 0x10103000, kB = 0x10103100;
+        std::string got;
+        const char* pairs[][2] = {{"", ""}, {"a", ""}, {"", "a"}, {"abc", "abc"}, {"abc", "abd"},
+                                  {"abc", "ab"}, {"ab", "abc"}, {"\xff", "a"}};
+        for (auto& pr : pairs) {
+            put(kA, pr[0]);
+            put(kB, pr[1]);
+            got += sign(call(48, kA, kB));
+        }
+        Expect("strcmp signs", got, "=><=<><>");
+        put(kA, "abcdef");
+        put(kB, "abcxyz");
+        got = sign(call(128, kA, kB, 3));
+        got += sign(call(128, kA, kB, 4));
+        got += sign(call(128, kA, kB, 0));
+        put(kB, "abc");
+        got += sign(call(128, kA, kB, 3));
+        got += sign(call(128, kA, kB, 9));
+        Expect("strncmp signs", got, "=<==>");
+        put(kA, "HeLLo");
+        put(kB, "hello");
+        got = sign(call(129, kA, kB));
+        put(kB, "help");
+        got += sign(call(129, kA, kB));
+        Expect("strcasecmp signs", got, "=<");
+        Expect("strcmp ok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+
+        // Two mappings side by side in the mmap arena (different protection,
+        // so two extents); the string crosses from the first into the
+        // second, its twin lies in the heap.
+        const std::uint32_t kM = 0x7A000000u;
+        abr::RuntimeTestAccess::MapRwx(rt, kM, 0x1000);
+        abr::RuntimeTestAccess::MapRw(rt, kM + 0x1000, 0x1000);
+        const std::uint32_t kX = kM + 0x1000 - 4;
+        put(kX, "crossing");
+        put(kA, "crossing");
+        got = sign(call(48, kX, kA));
+        put(kA, "crossinh");
+        got += sign(call(48, kX, kA));
+        got += sign(call(48, kA, kX));
+        put(kA, "cross");
+        got += sign(call(48, kX, kA));
+        got += sign(call(128, kX, kA, 5));
+        Expect("strcmp across two mappings", got, "=<>>=");
+        Expect("strstr across two mappings",
+               std::to_string(call(133, kX, kB) == 0) + std::to_string(call(132, kX, 'i') - kX), "15");
+        Expect("cross-mapping compares do not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0",
+               "0");
+        // "ab" + NUL in the heap's last 3 bytes: equal strings stop there.
+        const std::uint32_t kTail = 0x50000000u - 3;
+        put(kTail, "ab");
+        put(kA, "ab");
+        Expect("strcmp at the mapping end", sign(call(48, kTail, kA)), "=");
+        Expect("strcmp at the mapping end does not halt",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        // No NUL before the end of the mapping: a real libc faults.
+        std::memcpy(rt.H(kTail), "abc", 3);
+        put(kA, "abc");
+        call(48, kTail, kA);
+        Expect("strcmp(unterminated at mapping end) halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+        call(132, kTail, 'z');
+        Expect("strchr(unterminated at mapping end) halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+        put(kTail, "ab");
+
+        // strtok / strtok_r: tokens, NULs written, NULL at the end and after.
+        put(kA, ",,ab,cd;;e");
+        put(kB, ",;");
+        got.clear();
+        for (std::uint32_t first = kA, i = 0; i < 5; i++, first = 0) {
+            const std::uint32_t t = static_cast<std::uint32_t>(call(130, first, kB));
+            got += t ? std::string(rt.H<const char>(t)) + "@" + std::to_string(t - kA) : "null";
+            got += " ";
+        }
+        Expect("strtok tokens", got, "ab@2 cd@5 e@9 null null ");
+        const std::uint32_t kSave = 0x10103200;
+        put(kA, "x  y");
+        put(kB, " ");
+        got.clear();
+        for (std::uint32_t first = kA, i = 0; i < 3; i++, first = 0) {
+            const std::uint32_t t = static_cast<std::uint32_t>(call(131, first, kB, kSave));
+            got += t ? std::string(rt.H<const char>(t)) : "null";
+        }
+        Expect("strtok_r tokens", got, "xynull");
+        Expect("strtok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        put(kA, "a b");
+        call(131, kA, kB, 0xE0000000u);
+        Expect("strtok_r with a wild save pointer halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+    }
+
     // --- LDREX/STREX are atomic across threads: 4 Jits on the shared monitor,
     //     each with its own processor id, increment one counter 200000 times
     //     (ldrex/add/strex/bne loop, assembled with the NDK clang). A lost
@@ -2440,6 +2560,12 @@ int main() {
         // mcr p15 dmb; movs r0,#7; mcr p3,0,r0,c1,c0,0; movs r1,#9
         const std::uint16_t thumb[] = {0xee07, 0x0fba, 0x2007, 0xee01, 0x0310, 0x2109};
         std::memcpy(rt.H(kPage + 0x100), thumb, sizeof(thumb));
+        // The switch idiom `add pc, r0, pc` (ADD register, Rd = PC, S = 0) is
+        // a plain branch to r0 + its address + 8 that Dynarmic runs itself:
+        // mov r0,#4; add pc,r0,pc; mov r1,#1; mov r1,#2; mov r1,#3; mcr p3
+        const std::uint32_t addpc[] = {0xe3a00004, 0xe080f00f, 0xe3a01001,
+                                       0xe3a01002, 0xe3a01003, 0xee010310};
+        std::memcpy(rt.H(kPage + 0x200), addpc, sizeof(addpc));
         abr::GuestCallbacks cb4(&rt);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = &cb4;
@@ -2460,6 +2586,30 @@ int main() {
         };
         Expect("ARM: barriers run, an unattached coprocessor halts", run(kPage, 0x10), "7,0,stopped");
         Expect("Thumb: the same", run(kPage + 0x100, 0x30), "7,0,stopped");
+        Expect("ARM: add pc, r0, pc branches to r0 + pc", run(kPage + 0x200, 0x10), "4,3,stopped");
+        // A store into a write-guarded range (RELRO after relocation) is not
+        // done and halts the guest (it used to be dropped while the guest
+        // ran on): mov r1,#0x77; str r1,[r0]; mcr p3. r0 is set below.
+        const std::uint32_t store[] = {0xe3a01077, 0xe5801000, 0xee010310};
+        std::memcpy(rt.H(kPage + 0x300), store, sizeof(store));
+        const std::uint32_t kGuarded = kPage + 0x800;
+        std::memset(rt.H(kGuarded), 0, 8);
+        rt.AddWriteGuard(kGuarded, 4, "TEST");
+        const auto store_to = [&](std::uint32_t at) {
+            jit.ClearHalt(Dynarmic::HaltReason::UserDefined2);
+            jit.Regs().fill(0);
+            jit.Regs()[0] = at;
+            jit.Regs()[15] = kPage + 0x300;
+            jit.SetCpsr(0x10);
+            jit.Run();
+            std::uint32_t v = 0;
+            std::memcpy(&v, rt.H(at), 4);
+            return std::to_string(v);
+        };
+        Expect("a store next to the guard is done", store_to(kGuarded + 4), "119");
+        abr::RuntimeTestAccess::TakeStopped(rt);  // the mcr that ends the program
+        Expect("a store into the guard is not done", store_to(kGuarded), "0");
+        Expect("a store into the guard halts", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
         rt.ThreadEnter(nullptr, 0);
         rt.ReleaseCpuId(id);
     }
@@ -3178,6 +3328,89 @@ int main() {
                std::to_string(static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 63, aargs))), "-1");
         Expect("access(unmapped path) errno ENOENT", std::to_string(guest_errno()), std::to_string(ENOENT));
         Expect("unmapped path does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        // A write-open into a directory that does not exist makes it (the
+        // guests rely on that); a read-open there makes nothing.
+        {
+            put(kP, "/data/data/abr.errno/files/p1/p2/new.txt");
+            put(kBuf, "r");
+            const std::uint32_t fr[4] = {kP, kBuf, 0, 0};
+            const std::uint32_t r1 = abr::RuntimeTestAccess::Call(rt, 21, fr);
+            const bool made_by_read = std::filesystem::exists(host_dir + "/p1");
+            const std::uint32_t e1 = guest_errno();
+            put(kBuf, "w");
+            const std::uint32_t w1 = abr::RuntimeTestAccess::Call(rt, 21, fr);
+            Expect("fopen r / w in a missing directory",
+                   std::to_string(r1) + " " + std::to_string(e1) + " " + (made_by_read ? "1" : "0") + " " +
+                       (w1 != 0 ? "open" : "NULL") + " " +
+                       (std::filesystem::exists(host_dir + "/p1/p2/new.txt") ? "1" : "0"),
+                   "0 " + std::to_string(ENOENT) + " 0 open 1");
+            const std::uint32_t fc[4] = {w1, 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 22, fc);
+            put(kP, "/data/data/abr.errno/files/q1/q2/new.bin");
+            const std::uint32_t oa[4] = {kP, O_WRONLY | O_CREAT, 0644, 0};
+            const std::int32_t fd = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 54, oa));
+            Expect("open(O_CREAT) in a missing directory",
+                   std::string(fd >= 0 ? "fd" : "-1") + " " +
+                       (std::filesystem::exists(host_dir + "/q1/q2/new.bin") ? "1" : "0"),
+                   "fd 1");
+            // fread with a count far beyond the buffer's memory: the file
+            // ends first, so it reads what there is (a real libc touches only
+            // those bytes). A file longer than the memory left is the fault.
+            {
+                put(kP, "/data/data/abr.errno/files/small.bin");
+                put(kBuf, "w");
+                const std::uint32_t fo[4] = {kP, kBuf, 0, 0};
+                const std::uint32_t wf = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                put(kBuf + 0x10, "0123456789");
+                const std::uint32_t wa[4] = {kBuf + 0x10, 1, 10, wf};
+                abr::RuntimeTestAccess::Call(rt, 32, wa);
+                const std::uint32_t wc[4] = {wf, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, wc);
+                put(kBuf, "r");
+                const std::uint32_t rf = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                const std::uint32_t kTailBuf = 0x50000000u - 64;  // 64 bytes to the heap's end
+                const std::uint32_t ra[4] = {kTailBuf, 1, 0x7FFFFFFFu, rf};
+                const std::uint32_t got = abr::RuntimeTestAccess::Call(rt, 120, ra);
+                Expect("fread(count beyond the mapping) of a 10-byte file",
+                       std::to_string(got) + " " + std::string(rt.H<const char>(kTailBuf), 10) + " " +
+                           (abr::RuntimeTestAccess::TakeStopped(rt) ? "halted" : "ran on"),
+                       "10 0123456789 ran on");
+                const std::uint32_t rc[4] = {rf, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, rc);
+                const std::uint32_t rf2 = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                const std::uint32_t rb[4] = {0x50000000u - 4, 1, 100, rf2};  // 4 bytes left, 10 in the file
+                abr::RuntimeTestAccess::Call(rt, 120, rb);
+                Expect("fread of more than the memory left halts",
+                       abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+                const std::uint32_t rc2[4] = {rf2, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, rc2);
+            }
+            // Record locks reach the host with the guest's 32-bit struct
+            // flock converted; an unknown command is EINVAL, not "success".
+            const std::uint32_t kFl = kBuf + 0x40;
+            const std::int16_t wr_lock[2] = {1 /*F_WRLCK*/, 0 /*SEEK_SET*/};
+            const std::int32_t range[3] = {0, 10, 0};
+            std::memcpy(rt.H(kFl), wr_lock, 4);
+            std::memcpy(rt.H(kFl + 4), range, 12);
+            const std::uint32_t lk[4] = {static_cast<std::uint32_t>(fd), 6 /*F_SETLK*/, kFl, 0};
+            const std::int32_t set = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, lk));
+            const std::uint32_t gk[4] = {static_cast<std::uint32_t>(fd), 5 /*F_GETLK*/, kFl, 0};
+            const std::int32_t get = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, gk));
+            std::int16_t got_type = -1;
+            std::memcpy(&got_type, rt.H(kFl), 2);  // our own lock never conflicts: F_UNLCK (2)
+            const std::uint32_t bad[4] = {static_cast<std::uint32_t>(fd), 999, 0, 0};
+            const std::int32_t unk = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, bad));
+            Expect("fcntl F_SETLK / F_GETLK / unknown command",
+                   std::to_string(set) + " " + std::to_string(get) + " " + std::to_string(got_type) + " " +
+                       std::to_string(unk) + " " + std::to_string(guest_errno()),
+                   "0 0 2 -1 " + std::to_string(EINVAL));
+            const std::uint32_t bp[4] = {static_cast<std::uint32_t>(fd), 6, 0xE0000000u, 0};
+            abr::RuntimeTestAccess::Call(rt, 134, bp);
+            Expect("fcntl F_SETLK with a wild struct is EFAULT", std::to_string(guest_errno()),
+                   std::to_string(EFAULT));
+            const std::uint32_t ca[4] = {static_cast<std::uint32_t>(fd), 0, 0, 0};
+            abr::RuntimeTestAccess::Call(rt, 36, ca);
+        }
         // mkstemp writes the suffix at the end of the GUEST template
         const std::string tmpl = "/data/data/abr.errno/files/tXXXXXX";
         put(kP, tmpl);
@@ -3357,6 +3590,50 @@ int main() {
         Expect("attr: stack size 8192 accepted", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, ok)), "0");
         Expect("attr: below 8192 refused", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, small)),
                std::to_string(EINVAL));
+    }
+
+    // --- pthread_create honours its attributes: a thread created detached
+    //     leaves no entry behind when it ends; a joinable one hands its
+    //     return value to pthread_join and is gone after it.
+    {
+        const std::uint32_t kPage = 0x61020000u, kAttr = 0x10008F40, kTid = 0x10008F60, kRet = 0x10008F64;
+        abr::RuntimeTestAccess::MapRwx(rt, kPage, 0x1000);
+        // mov r0,#42; bx lr ... and the return trampoline `svc #0`.
+        const std::uint32_t code[] = {0xe3a0002a, 0xe12fff1e, 0, 0, 0xef000000};
+        std::memcpy(rt.H(kPage), code, sizeof(code));
+        const std::uint32_t old_halt = mod.halt_va;
+        mod.halt_va = kPage + 0x10;
+        abr::GuestCallbacks cbt(&rt);
+        rt.set_callbacks(&cbt);
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0,
+                        std::uint32_t w = 0) {
+            const std::uint32_t a[4] = {x, y, z, w};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        call(112, kAttr);
+        call(137, kAttr, 1);  // PTHREAD_CREATE_DETACHED
+        const std::uint32_t rc = call(135, kTid, kAttr, kPage, 0);
+        std::uint32_t tid = 0;
+        std::memcpy(&tid, rt.H(kTid), 4);
+        bool gone = false;
+        for (int i = 0; i < 2000 && !gone; i++) {
+            gone = !abr::RuntimeTestAccess::HasThread(rt, tid);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        Expect("pthread_create(detached attr): the thread leaves no entry",
+               std::to_string(rc) + (gone ? " gone" : " still there"), "0 gone");
+        const std::uint32_t rc2 = call(135, kTid, 0, kPage, 0);
+        std::memcpy(&tid, rt.H(kTid), 4);
+        const std::uint32_t jr = call(136, tid, kRet);
+        std::uint32_t retval = 0;
+        std::memcpy(&retval, rt.H(kRet), 4);
+        Expect("pthread_create + pthread_join: return value, entry gone",
+               std::to_string(rc2) + " " + std::to_string(jr) + " " + std::to_string(retval) + " " +
+                   (abr::RuntimeTestAccess::HasThread(rt, tid) ? "there" : "gone"),
+               "0 0 42 gone");
+        rt.set_callbacks(nullptr);
+        mod.halt_va = old_halt;
+        abr::RuntimeTestAccess::TakeStopped(rt);
     }
 
     // --- cond wakes: a signal with nobody waiting is not kept, and a signal
@@ -3742,6 +4019,18 @@ int main() {
                     abr::JitCallbacksOn() ? "on" : "off");
         std::printf("bench strlen call: %.1f ns per call\n", bench("strlen", kData, 0));
         std::printf("bench strcmp call: %.1f ns per call\n", bench("strcmp", kData, kData + 0x20));
+        // What one pointer check costs inside those handlers: CheckRange on
+        // two mappings in turn (the code page and the scratch page).
+        {
+            unsigned okc = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (std::uint32_t i = 0; i < (1u << 24); i++) {
+                okc += abr::RuntimeTestAccess::InMapping(rt, (i & 1) ? kData + (i & 0xFF) : kScratch + (i & 0xFF), 16);
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+            std::printf("bench range check: %.2f ns per check (%u ok)\n",
+                        std::chrono::duration<double, std::nano>(t1 - t0).count() / double(1u << 24), okc);
+        }
     }
 
     // --- packed files (apk_vfs.h): files under assets/abport/<root>/ of

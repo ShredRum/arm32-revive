@@ -37,18 +37,12 @@ class RealGL {
     Runtime* rt_;
     bool ok_ = false;
     bool tried_ = false;
-    // EGL objects for swap-before-readback experiments.
+    // EGL objects of the PC harness (present after a screenshot).
     void* disp_ = nullptr;
     void* surf_ = nullptr;
     // X window surface (transient window, no system changes).
     void* xdisp_ = nullptr;
     std::uint64_t xwin_ = 0;
-    // HARNESS_EGLDEV=N: force EGL device index (default: first that reads
-    // back correctly; device list via eglQueryDevicesEXT).
-    std::uint32_t active_tex_ = 0;  // (informational logging only)
-    std::uint32_t bound_tex2d_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    // TEMP-DIAG: uploaded texture sizes (w | h<<16) by real handle.
-    std::unordered_map<std::uint32_t, std::uint32_t> tex_size_;
     // G2.4: one stable guest slot per glGetString enum (the guest holds the
     // returned pointer; allocating a fresh copy per call leaked it).
     std::unordered_map<std::uint32_t, std::uint32_t> glstr_slots_;

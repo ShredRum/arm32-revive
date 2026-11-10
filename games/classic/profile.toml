@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds (the original, "Classic")
+# VERIFIED data only (aapt / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "classic"
+title        = "Angry Birds"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
+
+[apk]
+package      = "com.rovio.angrybirds"
+version_name = "8.0.3"
+version_code = 22680302
+min_sdk      = 16
+target_sdk   = 26
+original     = "original/com.rovio.angrybirds.8.0.3.apk"
+# apk sha256 3c86364e7052deb2b5ef258f24884e42f9b0fe78ef6dd42be95e7d62cbc82b1f
+signer_dn    = "O=Rovio Mobile Ltd, L=Helsinki, C=FI"
+signer_sha256 = "3bf281705398004c6f8e4ba8426c3ba2490385c3aeaf6b05b6440396c6a1a50d"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsClassic.so"
+size   = 11248680
+sha256 = "049fc3739ff9075b3ad1557597fa6a40e5f242c4fb761855ce50b4ff2a67df84"
+md5    = "1fb4dad32c5f5e3b9289c6aa1fd3d071"
+imports  = 351      # undefined dynamic symbols
+init     = 126      # DT_INIT_ARRAY entries (504 B / 4)
+# GNU build-id 5e7090f320931ec518ef34e26a9a2e35ab0ff2c9
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"   # framework shared by the whole series
+jni_exports  = 72                   # 31 com.rovio.fusion + 41 com.rovio.rcs
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+
+[strip]
+# As the regular Star Wars II build: AdColony and SpiderMonkey natives whose
+# Java loaders tolerate their absence.
+libs = ["libjs.so", "libadcolony.so"]
+
+[tree]
+smali_lib_name_orig = "AngryBirdsClassic"   # to verify at the decode

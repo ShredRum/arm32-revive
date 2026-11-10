@@ -140,21 +140,6 @@ void* mspace_calloc(dl_mspace, size_t, size_t);
 size_t mspace_usable_size(const void*);
 }  // extern "C"
 
-
-
-// HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
-// goto bad_ptr initializations inside CallImport).
-static std::int64_t TimeWarp() {
-    static std::int64_t w = -2;
-    if (w == -2) {
-        w = 0;
-        if (const char* e = std::getenv("HARNESS_TIMEWARP")) {
-            w = (std::int64_t)std::strtoll(e, nullptr, 0);
-        }
-    }
-    return w;
-}
-
 // Honest guest sleep (2026-10-19, PLAN item 8). bionic blocks the calling
 // thread for the requested time; the old 5 ms clamp was a bring-up guard
 // against delay loops hanging the emulator. Neither shipped guest sleeps on a
@@ -228,26 +213,17 @@ bool DiagOn() {
     return on;
 }
 
-// Real GLES backend instance (created on first gl* import).
+// The real GLES backend (made with the Runtime: a lazy first-call creation
+// raced between two guest threads).
 RealGL* Runtime::RealGLBackend() {
-    if (!realgl_) {
-        realgl_ = new RealGL(this);
-    }
     return realgl_;
 }
 
-// TEMP-DIAG (registry ParseError): registry FILE* set + dump counter.
-static std::set<FILE*> g_regfiles;
-static int g_regdump_n = 0;
-
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
+    realgl_ = new RealGL(this);
     // Room for imports made at run time (RuntimeImport): the table must not
     // move while other threads index it.
     mod_.imports.reserve(mod_.imports.size() + 512);
-    // HARNESS_HEAPBASE=hex: relocate heap start (address-sensitivity probe).
-    if (const char* e = std::getenv("HARNESS_HEAPBASE")) {
-        heap_base_ = static_cast<std::uint32_t>(std::strtoul(e, nullptr, 16));
-    }
     // Heap + stacks + trampolines + tables + guest data are all committable.
     mem_.Map(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
     AddMapping(heap_base_, kHeapSize, PROT_READ | PROT_WRITE);
@@ -421,70 +397,14 @@ static void Hex64(char*& p, std::uint64_t v) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// D2 (2026-10-18): live-block index surface.
-// The old structure was a std::map<base, usable>: exact base lookups PLUS
-// ORDERED interval containment for interior pointers. The new index (live_heap.h)
-// is flat and allocation-free per operation and exact for bases; containment is
-// answered EXACTLY by two tiers: an ordered side-index of blocks larger than the
-// probe's reach (big_live_) plus a bounded back-probe for every smaller block.
-// Why not the probe alone: a real session showed every in-arena containment
-// query is either an exact base or an interior farther than 512 B back
-// (contain_ok=0), so a probe-only answer silently dropped the sscanf field clamp
-// on 1218 boot-path destinations -- a bounded probe is not containment. The
-// two-tier answer was then PROVEN equal to the old full ordered map on that same
-// workload (temporary DiagOn oracle: contain_diff=0 over 1242 interior queries +
-// boot, big==bigscan each report), which is why the oracle is gone and only the
-// plain counters below remain.
-// Containment is still only ever asked by cold consumers (the diagnostic
-// firewall, heapwatch, sscanf's %s/%[/%c destination, the two JNI region bounds).
-// Every call site already holds mutex_.
-// ---------------------------------------------------------------------------
-
-// Ordered containment over a map<base, usable>: an exact base hit, else the
-// interval of the immediately preceding live block if the address falls inside
-// it. This is the probe's tier-1 replacement (see the D2 block above): the only
-// blocks whose interiors a hash cannot reach, ordered because ordering is
-// exactly what containment needs.
-static bool MapContaining(const std::map<std::uint32_t, std::uint32_t>& m, std::uint32_t addr,
-                          std::uint32_t* base, std::uint32_t* size) {
-    const auto it = m.find(addr);
-    if (it != m.end()) {
-        *base = addr;
-        *size = it->second;
-        return true;
-    }
-    auto jt = m.upper_bound(addr);
-    if (jt != m.begin()) {
-        --jt;
-        if ((std::uint64_t)addr - jt->first < jt->second) {
-            *base = jt->first;
-            *size = jt->second;
-            return true;
-        }
-    }
-    return false;
-}
-
+// Live-block index (live_heap.h): exact for block bases, which is what
+// free/realloc ask.
 void Runtime::LiveIdxInsert(std::uint32_t base, std::uint32_t size) {
     live_idx_.Insert(base, size);
-    // Large-block side-index (exact containment tier). Safe to insert without
-    // checking for a previous entry: callers only insert a base that is not live
-    // (fresh malloc/calloc, or realloc right after its erase). Small blocks pay
-    // nothing here -- and that is the hot path.
-    if (size > kProbeReach) {
-        big_live_[base] = size;
-        ++big_ins_n_;
-    }
 }
 
 std::uint32_t Runtime::LiveIdxErase(std::uint32_t base) {
-    const std::uint32_t got = live_idx_.Erase(base);
-    if (got > kProbeReach) {
-        big_live_.erase(base);
-        ++big_del_n_;
-    }
-    return got;
+    return live_idx_.Erase(base);
 }
 
 std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
@@ -492,208 +412,61 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
     return live_idx_.Find(base);
 }
 
-bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);
-    // EXACT, two tiers, cheapest first:
-    //   1. a live block whose base is this very address (one hash lookup);
-    //   2. a block LARGER than the probe's reach -- the only blocks whose
-    //      interiors the probe below cannot reach (one ordered lookup, small map);
-    //   3. a block at most kProbeReach payload: its base is at most 64 x 8 B
-    //      behind the 8-aligned address (bounded back-probe).
-    // Cost note: only the cold consumers ask this (sscanf's %s/%[/%c bound, the
-    // JNI region bounds, the diagnostic firewall/heapwatch) -- never the
-    // alloc/free hot path.
-    std::uint32_t b = 0, s = 0;
-    bool found = false;
-    const std::uint32_t exact = live_idx_.Find(addr);
-    if (exact) {
-        b = addr;
-        s = exact;
-        found = true;
-    } else if (addr >= heap_base_ && (std::uint64_t)addr < (std::uint64_t)heap_base_ + kHeapSize) {
-        // Interior pointer. Only an in-arena address can be inside a live block,
-        // so the common non-heap destination (guest stack, module) costs one
-        // range check and nothing else.
-        if (MapContaining(big_live_, addr, &b, &s)) {
-            found = true;
-            ++hx_contain_big_;
-        }
-        if (!found) {
-            const std::uint32_t a8 = addr & ~std::uint32_t(7);
-            for (unsigned k = 1; k <= 64; ++k) {
-                const std::uint32_t off = k * 8u;
-                if (a8 < heap_base_ + off) {
-                    break;  // walked past the start of the arena
-                }
-                const std::uint32_t cand = a8 - off;
-                const std::uint32_t cs = live_idx_.Find(cand);
-                if (cs && (std::uint64_t)addr - cand < cs) {
-                    b = cand;
-                    s = cs;
-                    found = true;
-                    ++hx_contain_ok_;
-                    break;
-                }
-            }
-        }
-        if (!found) {
-            ++hx_contain_miss_;
-        }
-    }
-    if (found) {
-        *base = b;
-        *size = s;
-    }
-    return found;
-}
+// The mapping that holds [addr, end) and its protection, from the thread's
+// last two lookups while the table's epoch is unchanged (it moves when a
+// protection changes or arena pages come or go). Two slots: a copy or a
+// compare works on two mappings at once (heap and a module's data), and one
+// slot would send every other lookup to the table. *ext_end = how far the
+// answer reaches past addr (at least `end`).
+namespace {
+struct MapHit {
+    std::uint32_t s = 1, e = 0, epoch = 0;
+    int p = 0;
+};
+struct MapCache {
+    MapHit h[2];
+    unsigned victim = 0;
+};
+thread_local MapCache t_map_cache;
+}  // namespace
 
-void Runtime::PrintHeapIdx() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
-    // bigscan= walks the flat table independently: it must equal big= (the
-    // ordered side-index size) or the two tiers have drifted apart.
-    const std::size_t bigscan = live_idx_.CountLargerThan(kProbeReach);
-    std::printf(
-        "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
-        "contain_ok=%llu contain_big=%llu contain_miss=%llu free_unk=%llu "
-        "realloc_unk=%llu pool_stale=%llu big=%zu bigscan=%zu "
-        "big_ins=%llu big_del=%llu usedKB=%llu\n",
-        live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
-        live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_contain_ok_,
-        hx_contain_big_, hx_contain_miss_, hx_free_unknown_,
-        hx_realloc_unknown_, hx_pool_stale_, big_live_.size(),
-        bigscan, big_ins_n_, big_del_n_,
-        (unsigned long long)(heap_used_ >> 10));
-}
-
-std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
-                                      bool force) {
-    // D1: OFF by default (see dispatch.h). Bypass before the lock so the hot
-    // memory/string paths pay nothing, not even an uncontended lock. force=true
-    // is used only by the JNI region paths, whose return value is a functional
-    // bound.
-    if (!force && !ClampWriteOn()) {
-        return len;
-    }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // Find the containing live block (exact base, else an interior resolved by
-    // the large-block side-index or the bounded back-probe). Not inside one ->
-    // unclamped, same as before.
-    std::uint32_t base = 0, size = 0;
-    if (!LiveIdxContaining(dst, &base, &size)) {
-        // Not inside any LIVE allocation. Inside the arena this means a dlmalloc
-        // header word, a free chunk, the top chunk or a quarantined (freed)
-        // block -- i.e. exactly the bump-era overflow/UAF-write that bump
-        // tolerated (never reused) and dlmalloc cannot (that memory is metadata
-        // now). The write goes through UNCLAMPED (host-side: heapwatch only sees
-        // guest stores). Log it (capped) so the writer is named before the
-        // metadata detonates. NOTE (D2): `base=0` means "no containing live
-        // block"; it replaced the old `nxt=` successor head, which a hash index
-        // cannot cheaply produce (and whose only consumer was this log line).
-        if (dst >= heap_base_ && (std::uint64_t)dst < (std::uint64_t)heap_base_ + kHeapSize) {
-            static int gn = 0;
-            if (gn < 40) {
-                gn++;
-                std::uint32_t lr = 0, pc = 0;
-                Dynarmic::A32::Jit* aj = ActiveJit();
-                if (aj) {
-                    lr = aj->Regs()[14];
-                    pc = aj->Regs()[15];
-                }
-                std::printf("[heap] GAPWRITE %s dst=%08x len=%u base=%08x pc=%08x lr=%08x\n", n,
-                            dst, len, 0, pc, lr);
-            }
+bool Runtime::FindMapping(std::uint32_t addr, std::uint64_t end, int* prot, std::uint32_t* ext_end) {
+    MapCache& c = t_map_cache;  // one TLS lookup
+    const std::uint32_t ep = mappings_.epoch();
+    for (const MapHit& h : c.h) {
+        if (ep == h.epoch && addr >= h.s && end <= h.e) {
+            *prot = h.p;
+            *ext_end = h.e;
+            return true;
         }
-        return len;  // gap/quarantine/module: not ours
     }
-    const std::uint64_t lim = (std::uint64_t)base + size;
-    const std::uint64_t end = (std::uint64_t)dst + len;
-    if (end > lim) {
-        static int ocn = 0;
-        if (ocn < 10) {
-            ocn++;
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::printf("[heap] LOUD %s overflow dst=%08x len=%u base=%08x size=%u lr=%08x\n", n,
-                        dst, len, base, size, lr);
-        }
-        return (std::uint32_t)(lim > dst ? lim - dst : 0);
+    const MappingTable::Hit f = mappings_.Find(addr, end - addr);
+    if (f.end == 0) {
+        return false;
     }
-    return len;
+    *prot = f.prot;
+    if (!f.uniform) {
+        // Pages that differ: the answer is for this range only.
+        *ext_end = static_cast<std::uint32_t>(end);
+        return true;
+    }
+    *ext_end = f.end;
+    MapHit& v = c.h[c.victim];
+    c.victim ^= 1u;
+    v.s = f.start;
+    v.e = f.end;
+    v.p = f.prot;
+    v.epoch = ep;
+    return true;
 }
 
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
-    const std::uint64_t end = std::uint64_t(addr) + size;
-    // Last-hit cache (perf): string/scan loops probe per byte. The cached
-    // extent is valid while the table's epoch is unchanged (it moves when an
-    // entry's protection changes, e.g. munmap).
-    // One thread_local (one TLS lookup), not four.
-    thread_local struct {
-        std::uint32_t s = 1, e = 0, epoch = 0;
-        int p = 0;
-    } hit;
-    const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit.epoch || !(addr >= hit.s && end <= hit.e)) {
-        const MappingTable::Hit h = mappings_.Find(addr, size);
-        if (h.end == 0) {
-            return false;
-        }
-        if (!h.uniform) {
-            // Pages that differ: the answer is for this range only.
-            const int p = h.prot;
-            return exec ? (p & PROT_EXEC) != 0 : write ? (p & PROT_WRITE) != 0 : (p & PROT_READ) != 0;
-        }
-        hit.s = h.start;
-        hit.e = h.end;
-        hit.p = h.prot;
-        hit.epoch = ep;
+    int p = 0;
+    std::uint32_t ext = 0;
+    if (!FindMapping(addr, std::uint64_t(addr) + size, &p, &ext)) {
+        return false;
     }
-    if (exec) {
-        return (hit.p & PROT_EXEC) != 0;
-    }
-    if (write) {
-        return (hit.p & PROT_WRITE) != 0;
-    }
-    return (hit.p & PROT_READ) != 0;
-}
-
-static std::uint32_t PadGlobal() {
-    // Parsed once (getenv per call = linear environ scan on hot paths).
-    static std::int64_t v = -1;
-    if (v < 0) {
-        v = 0;
-        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
-            v = (std::int64_t)std::strtoul(pe, nullptr, 0);
-            if (v > 4096) {
-                v = 4096;
-            }
-        }
-    }
-    return (std::uint32_t)v;
-}
-
-// Zero-fill policy (bump parity). The bump allocator only ever handed out
-// virgin arena, so a fresh block read as zeros. dlmalloc reuses freed chunks,
-// so a fresh block can contain stale bytes -- and a stale pointer-shaped value
-// read as a pointer is a wild dereference. HARNESS_ZEROFILL=<bytes>|all zeroes
-// every request up to <bytes> ("all" = no limit). Default off (dlmalloc
-// semantics, fastest); parsed once.
-static std::uint32_t ZeroFillLimit() {
-    static std::int64_t v = -2;
-    if (v == -2) {
-        v = 0;
-        if (const char* ze = std::getenv("HARNESS_ZEROFILL")) {
-            if (std::strcmp(ze, "all") == 0) {
-                v = 0xFFFFFFFFLL;
-            } else {
-                v = (std::int64_t)std::strtoul(ze, nullptr, 0);
-            }
-        }
-    }
-    return (std::uint32_t)v;
+    return ((exec ? PROT_EXEC : write ? PROT_WRITE : PROT_READ) & p) != 0;
 }
 
 std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0, size); }
@@ -702,40 +475,24 @@ std::uint32_t Runtime::GuestMalloc(std::uint32_t size) { return GuestMemalign(0,
 // the block is a normal heap block for free/realloc/usable_size.
 // The heap's debug knobs, read once (EnvOn scans its table on every call,
 // and malloc/free are hot). The environment is final before guest code runs.
-enum HeapKnobId { kMallocLog, kNoRelease };
+enum HeapKnobId { kMallocLog };
 static bool HeapKnob(HeapKnobId k) {
-    static const bool on[2] = {EnvOn("HARNESS_MALLOCLOG"), EnvOn("HARNESS_NORELEASE")};
+    static const bool on[1] = {EnvOn("HARNESS_MALLOCLOG")};
     return on[k];
 }
 
 std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
     RtLock lock(*this, 1, &heap_mu_);
-    // HARNESS_MALLOCPAD=N: extra deterministic slack per allocation (layout
-    // disease test for wall4: game memsets 255B into 144B objects; dense bump
-    // packing puts live neighbors in the blast radius, dlmalloc may not).
-    // Parsed once (getenv per malloc = linear environ scan on the hot path).
-    static std::int64_t mallocpad = -1;
-    if (mallocpad < 0) {
-        mallocpad = 0;
-        if (const char* pe = std::getenv("HARNESS_MALLOCPAD")) {
-            mallocpad = (std::int64_t)std::strtoul(pe, nullptr, 0);
-            if (mallocpad > 4096) {
-                mallocpad = 4096;
-            }
-        }
-    }
-    const std::uint32_t pad = (std::uint32_t)mallocpad;
     // Round in 64 bits: (size + 7) used to wrap for sizes >= 0xFFFFFFF9 and
     // hand back an 8-byte block for a near-4 GB request. Anything larger
     // than the whole arena fails like a real malloc (NULL).
     const std::uint64_t rounded =
         std::max<std::uint64_t>((std::uint64_t(size) + 7) & ~std::uint64_t(7), 8);
-    if (rounded + pad > kHeapSize) {
+    if (rounded > kHeapSize) {
         return 0;
     }
     size = static_cast<std::uint32_t>(rounded);
-    const std::uint32_t total =
-        size + pad;  // pad kept: MALLOCPAD layout probe stays available
+    const std::uint32_t total = size;
     void* hp = !heap_ms_ ? nullptr
                : align > 8 ? mspace_memalign(heap_ms_, align, total)
                            : mspace_malloc(heap_ms_, total);
@@ -782,7 +539,7 @@ std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
             usable = size;  // paranoia: never below the request
         }
         LiveIdxInsert(out, usable);
-        heap_used_ += total;
+        heap_used_ += usable;  // the size free takes off again
 #ifdef ABR_DIAG_COUNTERS
         if (heap_used_ > diag_.heap_peak) {
             diag_.heap_peak = heap_used_;
@@ -794,17 +551,6 @@ std::uint32_t Runtime::GuestMemalign(std::uint32_t align, std::uint32_t size) {
         // thunk into terminate -> silent SIGABRT.
         mspace_free(heap_ms_, hp);
         return 0;
-    }
-    // NOTE (2026-10-16): blanket zero-fill was removed here (a full memset per
-    // malloc incl. multi-MB textures cost 1fps + audio lag). It is back behind
-    // HARNESS_ZEROFILL (see ZeroFillLimit) so the "fresh memory must read as
-    // zeros (bump parity)" hypothesis can be tested without a rebuild; the
-    // shipping default stays off.
-    {
-        const std::uint32_t zl = ZeroFillLimit();
-        if (zl && size <= zl) {
-            std::memset(H(out), 0, size);
-        }
     }
     // HARNESS_MALLOCLOG=1: ring (addr,size,caller-lr), no cap needed (fixed
     // RAM, last 200k kept). Zero steady-state I/O; dumped on crash/hang.
@@ -858,7 +604,7 @@ std::uint32_t Runtime::GuestCalloc(std::uint32_t n, std::uint32_t size) {
         usable = (std::uint32_t)total;
     }
     LiveIdxInsert(out, usable);
-    heap_used_ += total;
+    heap_used_ += usable;  // the size free takes off again
 #ifdef ABR_DIAG_COUNTERS
     if (heap_used_ > diag_.heap_peak) {
         diag_.heap_peak = heap_used_;
@@ -887,7 +633,6 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         known = (old != 0);
     }
     if (!known) {
-        ++hx_realloc_unknown_;
         std::uint32_t lr = 0;
         Dynarmic::A32::Jit* aj = ActiveJit();
         if (aj) {
@@ -898,25 +643,11 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         return 0;
     }
     // dlmalloc copies min(old,new) itself; migrate our size map + used
-    // counter. Also drop any audio-pool reference: the block may move.
-    // Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
-    // Pre-dump chunk header zone (writers smash here; names the content).
-    {
-        static int rhd = 0;
-        if (DiagOn() && rhd < 30 && addr >= 32 && CheckRange(addr - 32, 32, false)) {
-            rhd++;
-            const std::uint8_t* hp = H<const std::uint8_t>(addr - 32);
-            std::printf("[realloc] pre %08x:", addr);
-            for (int i = 0; i < 32; i++) {
-                std::printf(" %02x", hp[i]);
-            }
-            std::printf("\n");
-        }
-    }
-    if (std::uint64_t(size) + PadGlobal() > kHeapSize) {
+    // counter. Lock held across (USE_LOCKS=0: no internal dlmalloc lock).
+    if (size > kHeapSize) {
         return 0;  // too large: the old block stays valid (realloc contract)
     }
-    const std::uint32_t rtotal = size + PadGlobal();
+    const std::uint32_t rtotal = size;
     void* hp = heap_ms_ ? mspace_realloc(heap_ms_, H(addr), rtotal) : nullptr;
     if (!hp) {
         return 0;  // old block stays valid (realloc contract), LOUD via OOM path next
@@ -929,6 +660,7 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
         // quarantining it would later mspace_free a moved chunk (double-free).
         std::printf("[heap] LOUD realloc escaped arena addr=%08x size=%u\n", addr, size);
         LiveIdxErase(addr);
+        heap_used_ = heap_used_ >= old ? heap_used_ - old : 0;
         return 0;
     }
     const std::uint32_t out = heap_base_ + (std::uint32_t)off;
@@ -940,30 +672,13 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
             usable = rtotal;
         }
         LiveIdxInsert(out, usable);
-        heap_used_ += (std::uint64_t)rtotal > old ? (std::uint64_t)rtotal - old : 0;
-        if ((std::uint64_t)old > rtotal) {
-            heap_used_ -= (std::uint64_t)old - rtotal;
-        }
+        // Both are the sizes the index holds (the old block's and the new).
+        heap_used_ = heap_used_ + usable >= old ? heap_used_ + usable - old : 0;
 #ifdef ABR_DIAG_COUNTERS
         if (heap_used_ > diag_.heap_peak) {
             diag_.heap_peak = heap_used_;
         }
 #endif
-        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-            if (it->first == addr) {
-                array_pool_.erase(it);
-                break;
-            }
-        }
-    }
-    // Zero-fill policy: the bytes past the old size are fresh to the guest.
-    // Bump parity says they read as zeros; dlmalloc's copy leaves whatever the
-    // destination chunk held. Zero only the grown tail (never the payload).
-    {
-        const std::uint32_t zl = ZeroFillLimit();
-        if (zl && size <= zl && (std::uint64_t)size > old) {
-            std::memset(H(out) + old, 0, size - old);
-        }
     }
     return out;
 }
@@ -972,7 +687,8 @@ void Runtime::GuestFree(std::uint32_t addr) {
     // The block goes straight back to dlmalloc. No quarantine (REVIEW R-013:
     // a delay before reuse only hides a use-after-free; the owner ruled it
     // out). A free of an address the heap never handed out (or freed twice)
-    // is ignored and counted, as before.
+    // is ignored, with a LOUD line (the first 10): the heap never gets a
+    // pointer it does not own, and the guest's bug is on the record.
     if (!addr) {
         return;
     }
@@ -984,10 +700,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
         ~InLock() { acc.fetch_add(DiagTicks() - t0, std::memory_order_relaxed); }
     } in_lock{diag_.free_in_lock};
 #endif
-    if (!norelease_set_.empty() && norelease_set_.count(addr)) {
-        std::printf("[heap] LOUD double free of a held block %08x (NORELEASE)\n", addr);
-        return;
-    }
     // One hash lookup yields the size and removes the entry. 0 = "never
     // handed out" (or already freed) -> ignored, counted.
 #ifdef ABR_DIAG_COUNTERS
@@ -1007,27 +719,22 @@ void Runtime::GuestFree(std::uint32_t addr) {
         RingPush(tmp);
     };
     if (!size) {
-        ++hx_free_unknown_;
         if (HeapKnob(kMallocLog)) {
             log_free(0xFFFFFFFFu);
         }
-        return;
-    }
-    // Drop any audio-pool reference (stale reuse would alias).
-    for (auto pit = array_pool_.begin(); pit != array_pool_.end(); ++pit) {
-        if (pit->first == addr) {
-            array_pool_.erase(pit);
-            break;
+        static std::atomic<int> unknown{0};
+        if (unknown.fetch_add(1, std::memory_order_relaxed) < 10) {
+            std::uint32_t lr = 0;
+            if (Dynarmic::A32::Jit* aj = ActiveJit()) {
+                lr = aj->Regs()[14];
+            }
+            std::printf("[heap] LOUD free of %08x: not a live block (double free or a foreign "
+                        "pointer) lr=%08x -- ignored\n", addr, lr);
         }
+        return;
     }
     if (HeapKnob(kMallocLog)) {
         log_free(size);
-    }
-    // HARNESS_NORELEASE=1 (triage): hold every freed block for good.
-    if (HeapKnob(kNoRelease)) {
-        norelease_held_.push_back({addr, size});
-        norelease_set_.insert(addr);
-        return;
     }
     g_last_free_addr = addr;
     g_last_free_size = size;
@@ -1501,14 +1208,13 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
         }
         // Readable extent that contains cur (same first-match rule as
         // CheckRange).
-        const MappingTable::Hit h = mappings_.Find(cur, 1);
-        if (h.end == 0 || (h.prot & PROT_READ) == 0) {
+        int prot = 0;
+        std::uint32_t ext_end = 0;
+        if (!FindMapping(cur, std::uint64_t(cur) + 1, &prot, &ext_end) || (prot & PROT_READ) == 0) {
             return false;
         }
-        const std::uint64_t ext_end = h.end;
-        const std::uint64_t avail = ext_end - cur;
-        const std::uint32_t chunk =
-            static_cast<std::uint32_t>(std::min<std::uint64_t>(avail, max - done));
+        const std::uint32_t avail = ext_end - cur;
+        const std::uint32_t chunk = std::min(avail, max - done);
         const void* hit = std::memchr(H<const char>(cur), 0, chunk);
         if (hit) {
             *len = done + static_cast<std::uint32_t>(static_cast<const char*>(hit) -
@@ -1518,6 +1224,70 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
         done += chunk;
     }
     *len = max;
+    return true;
+}
+
+// strlen of a guest string, or kBadLen when a byte before its NUL is not
+// readable (the caller halts the guest).
+std::uint32_t Runtime::GuestStrlenOrBad(std::uint32_t p) {
+    std::uint32_t l = 0;
+    return GuestStrnlen(p, kBadLen, &l) ? l : kBadLen;  // l == kBadLen: no NUL in 4 GB
+}
+
+// How many bytes from addr on are readable (writable) guest memory, up to
+// max: across neighbouring mappings, as a host access would run.
+std::uint64_t Runtime::GuestExtent(std::uint32_t addr, std::uint64_t max, bool write) {
+    std::uint64_t done = 0;
+    while (done < max) {
+        const std::uint64_t cur = std::uint64_t(addr) + done;
+        if (cur > 0xFFFFFFFFull) {
+            break;
+        }
+        int prot = 0;
+        std::uint32_t ext_end = 0;
+        if (!FindMapping(static_cast<std::uint32_t>(cur), cur + 1, &prot, &ext_end) ||
+            !(prot & (write ? PROT_WRITE : PROT_READ))) {
+            break;
+        }
+        done += ext_end - static_cast<std::uint32_t>(cur);
+    }
+    return std::min(done, max);
+}
+
+// strcmp / strncmp (lim = n) / strcasecmp / strncasecmp over guest memory.
+// False when a byte the compare needs is not readable.
+bool Runtime::GuestStrCompare(std::uint32_t a0, std::uint32_t a1, std::uint32_t lim, bool nocase,
+                              int* out) {
+    // One pass in the common case: the host compare is bounded by what is
+    // readable after both pointers, so it stops at the first difference or
+    // NUL and cannot leave a mapping (also when another guest thread
+    // rewrites a terminator meanwhile).
+    if (lim == 0) {
+        *out = 0;
+        return true;
+    }
+    const char* pa = H<const char>(a0);
+    const char* pb = H<const char>(a1);
+    int pra = 0, prb = 0;
+    std::uint32_t ea = 0, eb = 0;
+    if (!FindMapping(a0, std::uint64_t(a0) + 1, &pra, &ea) || !(pra & PROT_READ) ||
+        !FindMapping(a1, std::uint64_t(a1) + 1, &prb, &eb) || !(prb & PROT_READ)) {
+        return false;
+    }
+    const std::uint32_t n = std::min(lim, std::min(ea - a0, eb - a1));
+    int r = nocase ? strncasecmp(pa, pb, n) : std::strncmp(pa, pb, n);
+    if (r == 0 && n < lim && std::memchr(pa, 0, n) == nullptr) {
+        // n equal bytes and no NUL: a string runs into the next mapping.
+        // The lengths mapping by mapping, then the compare over them.
+        std::uint32_t la = 0, lb = 0;
+        if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
+            return false;
+        }
+        // Up to and with the shorter string's NUL, never past lim.
+        const std::uint32_t m = std::min(lim, std::min(la, lb) + (la != lb || la < lim ? 1u : 0u));
+        r = nocase ? strncasecmp(pa, pb, m) : std::memcmp(pa, pb, m);
+    }
+    *out = r;
     return true;
 }
 
@@ -1531,28 +1301,12 @@ bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (end > 0x100000000ULL) {
         return false;
     }
-    // Same epoch-checked last-hit cache as CheckAccess.
-    // One thread_local (one TLS lookup), not four.
-    thread_local struct {
-        std::uint32_t s = 1, e = 0, epoch = 0;
-        int p = 0;
-    } hit;
-    const std::uint32_t ep = mappings_.epoch();
-    if (ep != hit.epoch || !(guest >= hit.s && end <= hit.e)) {
-        const MappingTable::Hit h = mappings_.Find(guest, size);
-        if (h.end == 0) {
-            return false;
-        }
-        if (!h.uniform) {
-            // Pages that differ: the answer is for this range only.
-            return write ? ((h.prot & PROT_WRITE) != 0) : ((h.prot & PROT_READ) != 0);
-        }
-        hit.s = h.start;
-        hit.e = h.end;
-        hit.p = h.prot;
-        hit.epoch = ep;
+    int p = 0;
+    std::uint32_t ext = 0;
+    if (!FindMapping(guest, end, &p, &ext)) {
+        return false;
     }
-    return write ? ((hit.p & PROT_WRITE) != 0) : ((hit.p & PROT_READ) != 0);
+    return ((write ? PROT_WRITE : PROT_READ) & p) != 0;
 }
 
 void Runtime::Ret(Regs& regs, std::uint32_t r0, std::uint32_t r1) {
@@ -1594,34 +1348,6 @@ bool Runtime::IsCodeAddress(std::uint32_t va) {
     }
     const MappingTable::Hit h = mappings_.Find(va, 1);
     return h.end != 0 && (h.prot & PROT_EXEC) != 0;
-}
-
-// Bulk-write watchpoint: scan a just-written guest range for the WP value.
-static std::int64_t WriteWP() {
-    static std::int64_t wp = -2;
-    if (wp == -2) {
-        wp = -1;
-        if (const char* e = std::getenv("HARNESS_WP")) {
-            wp = static_cast<std::int64_t>(std::strtoul(e, nullptr, 16));
-        }
-    }
-    return wp;
-}
-void ScanWP(Runtime* rt, std::uint32_t guest, std::size_t len, const char* what) {
-    const std::int64_t wp = WriteWP();
-    if (wp < 0 || len < 4) {
-        return;
-    }
-    const std::uint32_t w = static_cast<std::uint32_t>(wp);
-    for (std::size_t i = 0; i + 4 <= len; i++) {
-        std::uint32_t v = 0;
-        std::memcpy(&v, rt->H(guest + static_cast<std::uint32_t>(i)), 4);
-        if (v == w) {
-            std::printf("[wp-bulk] %08x now at %08x via %s guest-pc=%08x\n", w,
-                        guest + static_cast<std::uint32_t>(i), what, rt->jit()->Regs()[15]);
-            return;
-        }
-    }
 }
 
 std::uint64_t Runtime::JitSvcCount(Dynarmic::A32::Jit* jit) {
@@ -2249,30 +1975,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const ImportId id = imp.import_id;
     using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
-    // GL fast path. gl* calls are the hottest imports (12-20 per draw): send
-    // them to the real driver before the long name chain below, and without
-    // the runtime's mutex_ (RealGL has its own lock). Unhandled names and
-    // threads without a GL context fall through to the fake shim.
-    if (n.size() > 2 && n[0] == 'g' && n[1] == 'l' &&
-        RealGLBackend()->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
-        return;
-    }
-    // OpenSL ES (opensl.cpp): slCreateEngine and the "SL:" interface methods,
-    // names outside the import id table.
-    if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
-        return;
-    }
-    // TEMP-DIAG (worker hang): unthrottled socket-family logging (global
-    // budgets hide worker calls). Diagnostic layer (PLAN.md A3): gated; with
-    // DIAG off this also stops paying the ~17 string compares per call.
-    if (DiagOn() &&
-        (id == I::socket_ || id == I::connect_ || id == I::send_ || id == I::sendto_ || id == I::recv_ ||
-         id == I::recvfrom_ || id == I::bind_ || id == I::listen_ || id == I::setsockopt_ ||
-         id == I::shutdown_)) {
-        std::printf("[netsock][t%u]%s %s(%08x %08x %08x %08x) lr=%08x\n", GuestTid(),
-                    GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, a1, a2, a3, regs[14]);
-    }
-
     // DIAG-only audit: record every distinct guest import actually CALLED.
     // Used to find host-side service gaps of the kind that broke Space (a
     // missing strtod left luaO_str2d's endptr uninitialised, so Lua's
@@ -2293,15 +1995,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
 
-    // Fast path first (after the diagnostic bookkeeping above, so the
-    // "first call" audit still sees these imports): the math functions the
-    // guest hammers in loops are dispatched by their load-time id instead of
-    // the import-name chain below.
-    if (imp.fast_math != 0) {
-        CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
-        return;
-    }
+    // The imports a frame calls by the thousand come first, by the kind the
+    // loader gave them (HotImportForName): nothing before them but the
+    // audit's test above.
     switch (imp.hot) {
+        case HotImport::MemCmp:
+            if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
+                goto bad_ptr;
+            }
+            Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
+            return;
+        case HotImport::StrLen: {
+            std::uint32_t len = 0;
+            if (!GuestStrnlen(a0, 0xFFFFFFFFu, &len)) {
+                goto bad_ptr;
+            }
+            Ret(regs, len);
+            return;
+        }
+        case HotImport::StrCmp: {
+            int r = 0;
+            if (!GuestStrCompare(a0, a1, 0xFFFFFFFFu, false, &r)) {
+                goto bad_ptr;
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
         case HotImport::TlsGet:
             BindTls();
             Ret(regs, PthreadGetSpecific(a0));
@@ -2317,28 +2036,44 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!CheckRange(a0, a2, true) || !CheckRange(a1, a2, false)) {
                 goto bad_ptr;
             }
-            GuestMemCopy(id, regs, n, a0, a1, a2);
+            GuestMemCopy(regs, a0, a1, a2);
             return;
         case HotImport::MemSet:
             if (!CheckRange(a0, a2, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, static_cast<int>(a1 & 0xFF), a2);
+            GuestMemSet(regs, a0, static_cast<int>(a1 & 0xFF), a2);
             return;
         case HotImport::MemSetAeabi:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, static_cast<int>(a2 & 0xFF), a1);
+            GuestMemSet(regs, a0, static_cast<int>(a2 & 0xFF), a1);
             return;
         case HotImport::MemClr:
             if (!CheckRange(a0, a1, true)) {
                 goto bad_ptr;
             }
-            GuestMemSet(id, regs, n, a0, 0, a1);
+            GuestMemSet(regs, a0, 0, a1);
             return;
         case HotImport::None:
             break;
+    }
+    // The math functions the guest hammers in loops, by their load-time id.
+    if (imp.fast_math != 0) {
+        CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
+        return;
+    }
+    // GL calls (12-20 per draw) go to the real driver by their load-time id
+    // (gl_ids.h), without the runtime's mutex_. A thread without a GL
+    // context falls through to the fake shim (PC) or the generic stub.
+    if (imp.gl_id != GlId::None && realgl_->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
+        return;
+    }
+    // OpenSL ES (opensl.cpp): slCreateEngine and the "SL:" interface methods,
+    // names outside the import id table.
+    if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
+        return;
     }
 
     // --- memory management ---
@@ -2390,7 +2125,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (::sysconf(_SC_PAGESIZE) != 4096 || ::madvise(H(a0), len, MADV_DONTNEED) != 0) {
+            if (GuestMemory::HostPageSize() != 4096 || ::madvise(H(a0), len, MADV_DONTNEED) != 0) {
                 std::memset(H(a0), 0, len);
             }
         }
@@ -2610,9 +2345,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::sysconf_:
     if (id == I::sysconf_) {
-        // The guest asks for the page size and friends. The _SC_* values
-        // are the Linux ones on both ABIs, so the host's answer is the
-        // guest's.
+        // The guest's pages are 4 KiB whatever the host's are (its segments
+        // are 4 KiB aligned and its __page_size says 4096; a 16 KiB host is
+        // the bridge's concern): bionic's _SC_PAGESIZE (0x27) and
+        // _SC_PAGE_SIZE (0x28, bits/sysconf.h). The other _SC_* numbers are
+        // bionic's on both ABIs, so the host's answer is the guest's.
+        if (a0 == 0x27u || a0 == 0x28u) {
+            Ret(regs, 4096);
+            return;
+        }
         Ret(regs, static_cast<std::uint32_t>(::sysconf(static_cast<int>(a0))));
         return;
     }
@@ -2783,7 +2524,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         case 6:   // AT_PAGESZ
         case 30:  // AT_PAGESIZE (the arm64 name for the same thing)
-            Ret(regs, static_cast<std::uint32_t>(::sysconf(_SC_PAGESIZE)));
+            Ret(regs, 4096);  // the guest's page size, as sysconf and __page_size
             return;
         case 11:  // AT_UID
             Ret(regs, static_cast<std::uint32_t>(::getuid()));
@@ -2930,50 +2671,25 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host. memcpy/memmove/memset and their
     // __aeabi_ forms: HotImport.
-    case I::bcmp_:
-    case I::memcmp_:
-    if (id == I::memcmp_ || id == I::bcmp_) {
-        if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
-            goto bad_ptr;
-        }
-        Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
-        return;
-    }
-    case I::strlen_:
+    // memcmp, bcmp, strlen and strcmp too (the hot switch above).
     case I::strnlen_:
-    if (id == I::strlen_ || id == I::strnlen_) {
+    if (id == I::strnlen_) {
         std::uint32_t len = 0;
-        if (!GuestStrnlen(a0, id == I::strnlen_ ? a1 : 0xFFFFFFFFu, &len)) {
+        if (!GuestStrnlen(a0, a1, &len)) {
             goto bad_ptr;
         }
         Ret(regs, len);
         return;
     }
     case I::strcasecmp_:
-    case I::strcmp_:
     case I::strncasecmp_:
     case I::strncmp_:
-    if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
-        // Compare in guest memory. Both strings are validated up to their NUL
-        // (or up to n for the n-variants), so the host compare never reads an
-        // unmapped byte.
+    if (id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
         const bool bounded = (id == I::strncmp_ || id == I::strncasecmp_);
-        const std::uint32_t lim = bounded ? a2 : 0xFFFFFFFFu;
-        std::uint32_t la = 0, lb = 0;
-        if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
-            goto bad_ptr;
-        }
-        const char* pa = H<const char>(a0);
-        const char* pb = H<const char>(a1);
         int r = 0;
-        if (id == I::strcmp_) {
-            r = std::strcmp(pa, pb);
-        } else if (id == I::strncmp_) {
-            r = std::strncmp(pa, pb, a2);
-        } else if (id == I::strcasecmp_) {
-            r = strcasecmp(pa, pb);
-        } else {
-            r = strncasecmp(pa, pb, a2);
+        if (!GuestStrCompare(a0, a1, bounded ? a2 : 0xFFFFFFFFu,
+                             id == I::strcasecmp_ || id == I::strncasecmp_, &r)) {
+            goto bad_ptr;
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
@@ -2990,8 +2706,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         //   strncpy: src up to NUL or n; dst [0, n) (zero padded, no NUL
         //            added when src has >= n bytes)
         //   strncat: src up to NUL or n; dst [dlen, dlen+min(slen,n)] + NUL
-        // ClampHeapWrite is the optional overflow firewall (off by default);
-        // when it shortens a write the result is still NUL terminated.
         const bool cat = (id == I::strcat_ || id == I::strncat_);
         const bool bounded = (id == I::strncpy_ || id == I::strncat_);
         std::uint32_t slen = 0, dlen = 0;
@@ -3008,21 +2722,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (want > 0xFFFFFFFFu || !CheckRange(dst, static_cast<std::size_t>(want), true)) {
             goto bad_ptr;
         }
-        const std::uint32_t room =
-            ClampHeapWrite(dst, static_cast<std::uint32_t>(want), n.c_str());
         if (id == I::strncpy_) {
-            const std::uint32_t copy = std::min(slen, room);
+            const std::uint32_t copy = std::min(slen, a2);
             std::memmove(H(dst), H<const void>(a1), copy);
-            if (room > copy) {
-                std::memset(H(dst + copy), 0, room - copy);
+            if (a2 > copy) {
+                std::memset(H(dst + copy), 0, a2 - copy);
             }
-            if (room < want && room > 0) {
-                *H<char>(dst + room - 1) = '\0';  // firewall truncation
-            }
-        } else if (room > 0) {
-            const std::uint32_t copy = std::min(slen, room - 1);
-            std::memmove(H(dst), H<const void>(a1), copy);
-            *H<char>(dst + copy) = '\0';
+        } else {
+            std::memmove(H(dst), H<const void>(a1), slen);
+            *H<char>(dst + slen) = '\0';
         }
         Ret(regs, a0);
         return;
@@ -3033,35 +2741,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (id == I::memchr_ || id == I::memrchr_) {
         if (!CheckRange(a0, a2, false)) {
             goto bad_ptr;
-        }
-        // HARNESS_MEMDUMP=<hexlr>: hex+ascii dump of the scanned buffer when
-        // the caller's lr matches (JSON-parse forensics: input lives on the
-        // heap and drifts between runs due to worker-thread racing, so
-        // post-mortem dumps are unreliable — capture at call time).
-        // Read once: memchr is hot (JSON/string parsing) and getenv is a
-        // linear scan of environ.
-        static const std::int64_t memdump_lr = [] {
-            const char* e = std::getenv("HARNESS_MEMDUMP");
-            return e ? static_cast<std::int64_t>(std::strtoul(e, nullptr, 16)) : std::int64_t(-1);
-        }();
-        if (memdump_lr >= 0) {
-            const std::uint32_t mlr = static_cast<std::uint32_t>(memdump_lr);
-            if (regs[14] == mlr && a2 <= 0x10000) {
-                std::printf("[memdump] %s(%08x,'%c',%u) lr=%08x:\n", n.c_str(), a0,
-                            (a1 & 0xFF) >= 32 ? (char)(a1 & 0xFF) : '?', a2, regs[14]);
-                const std::uint8_t* bp = H<const std::uint8_t>(a0);
-                for (std::uint32_t i = 0; i < a2; i += 16) {
-                    std::printf("[memdump] %08x:", a0 + i);
-                    for (std::uint32_t j = i; j < i + 16 && j < a2; j++) {
-                        std::printf(" %02x", bp[j]);
-                    }
-                    std::printf("  |");
-                    for (std::uint32_t j = i; j < i + 16 && j < a2; j++) {
-                        std::printf("%c", (bp[j] >= 32 && bp[j] < 127) ? (char)bp[j] : '.');
-                    }
-                    std::printf("|\n");
-                }
-            }
         }
         const char* p = H<const char>(a0);
         const char* f = (id == I::memchr_)
@@ -3087,18 +2766,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strstr_:
     if (id == I::strchr_ || id == I::strrchr_ || id == I::strstr_ || id == I::strpbrk_ || id == I::strspn_ ||
         id == I::strcspn_) {
-        // Bounded guest strlen for the haystack (and needle where needed).
-        auto gstrlen = [&](std::uint32_t s) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(s + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(s + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
-        };
+        // Both strings are checked up to their NUL first (GuestStrnlen).
+        auto gstrlen = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         const std::uint32_t hl = gstrlen(a0);
         if (hl == 0xFFFFFFFFu) {
             goto bad_ptr;
@@ -3139,8 +2808,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         thread_local std::uint32_t strtok_state = 0;
         std::uint32_t state = 0;
         if (id == I::strtok_r_) {
-            if (!CheckRange(a2, 4, false)) {
-                goto bad_ptr;
+            if (!CheckRange(a2, 4, true)) {
+                goto bad_ptr;  // the save pointer is read here and written below
             }
             std::memcpy(&state, H(a2), 4);
             if (a0 != 0) {
@@ -3152,89 +2821,53 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             state = strtok_state;
         }
-        auto gstrlen2 = [&](std::uint32_t p) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(p + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(p + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
-        };
+        auto gstrlen2 = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         const std::uint32_t dl = gstrlen2(a1);
-        if (dl == 0xFFFFFFFFu || state == 0) {
-            if (id == I::strtok_r_ && state == 0) {
-                Ret(regs, 0);
-                return;
-            }
+        if (dl == 0xFFFFFFFFu) {
             goto bad_ptr;
         }
-        std::string delim(H<const char>(a1), dl);
-        // Skip leading delimiters (needs write access: we NUL-terminate).
-        std::uint32_t cur = state;
-        for (;;) {
-            if (!CheckRange(cur, 1, false)) {
-                goto bad_ptr;
-            }
-            char c = *H<const char>(cur);
-            if (c == '\0') {
-                if (id == I::strtok_r_) {
-                    std::uint32_t z = 0;
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &z, 4);
-                    }
-                } else {
-                    strtok_state = 0;
-                }
-                Ret(regs, 0);
-                return;
-            }
-            if (delim.find(c) == std::string::npos) {
-                break;
-            }
-            if (!CheckRange(cur, 1, true)) {
-                goto bad_ptr;
-            }
-            cur++;
+        if (state == 0) {
+            Ret(regs, 0);  // no string left (bionic: strtok(NULL) after the end)
+            return;
         }
-        const std::uint32_t tok = cur;
-        // Scan to next delimiter/NUL.
-        for (;;) {
-            if (!CheckRange(cur, 1, false)) {
+        const std::string delim(H<const char>(a1), dl);
+        // The rest of the string is checked once, up to its NUL.
+        const std::uint32_t sl = gstrlen2(state);
+        if (sl == 0xFFFFFFFFu) {
+            goto bad_ptr;
+        }
+        const char* base = H<const char>(state);
+        auto save = [&](std::uint32_t v) {
+            if (id == I::strtok_r_) {
+                std::memcpy(H(a2), &v, 4);  // checked writable above
+            } else {
+                strtok_state = v;
+            }
+        };
+        std::uint32_t i = 0;
+        while (i < sl && delim.find(base[i]) != std::string::npos) {
+            i++;  // leading delimiters
+        }
+        if (i == sl) {
+            save(0);
+            Ret(regs, 0);
+            return;
+        }
+        const std::uint32_t tok = state + i;
+        while (i < sl && delim.find(base[i]) == std::string::npos) {
+            i++;
+        }
+        if (i == sl) {
+            save(state + sl);  // at the NUL: the next call finds no token
+        } else {
+            if (!CheckRange(state + i, 1, true)) {
                 goto bad_ptr;
             }
-            char c = *H<const char>(cur);
-            if (c == '\0') {
-                if (id == I::strtok_r_) {
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &cur, 4);
-                    }
-                } else {
-                    strtok_state = cur;
-                }
-                Ret(regs, tok);
-                return;
-            }
-            if (delim.find(c) != std::string::npos) {
-                if (!CheckRange(cur, 1, true)) {
-                    goto bad_ptr;
-                }
-                *H<char>(cur) = '\0';
-                const std::uint32_t next = cur + 1;
-                if (id == I::strtok_r_) {
-                    if (CheckRange(a2, 4, true)) {
-                        std::memcpy(H(a2), &next, 4);
-                    }
-                } else {
-                    strtok_state = next;
-                }
-                Ret(regs, tok);
-                return;
-            }
-            cur++;
+            *H<char>(state + i) = '\0';
+            save(state + i + 1);
         }
+        Ret(regs, tok);
+        return;
     }
     case I::fscanf_:
     case I::sscanf_:
@@ -3278,16 +2911,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         const std::string inp(from_stream ? stream_text : std::string(GuestStr(a0)));
         const std::string fmt(GuestStr(a1));
-        // TEMP-DIAG (worker jobs): log parsed inputs (URL flows).
-        if (DiagOn()) {  // PLAN.md A: diagnostic layer
-            static int sc = 0;
-            if (sc < 30) {
-                sc++;
-                std::printf("[sscanf][t%u]%s \"%s\" fmt \"%s\"\n", GuestTid(),
-                            GuestTid() == 1 ? "" : "(T2+)",
-                            inp.c_str(), fmt.c_str());
-            }
-        }
         std::uint32_t gargs[4] = {a0, a1, a2, a3};
         std::uint32_t ai = 2;  // first vararg: r2
         std::uint32_t stack = regs[13];
@@ -3425,7 +3048,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::uint32_t dp = suppress ? 0 : next_ptr();
                 // %n writes 4B: route through the firewall (interior dp near
                 // an allocation end would smash neighbor headers).
-                if (dp && ClampHeapWrite(dp, 4, "sscanf-%n") >= 4 && CheckRange(dp, 4, true)) {
+                if (dp && CheckRange(dp, 4, true)) {
                     std::int32_t c = (std::int32_t)ii;
                     std::memcpy(H(dp), &c, 4);
                 }
@@ -3446,35 +3069,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::uint32_t dp = suppress ? 0 : next_ptr();
             int maxw = width > 0 ? width : 1000000;
-            // Overflow firewall: clamp the field to the remaining heap
-            // allocation at dp (mapping checks pass arena-wide; without this
-            // %s/%[/%c smash chunk neighbors -> silent dlmalloc death).
-            // Non-heap dp (stack/module) keeps legacy boundless behavior.
-            // %c writes no NUL; %s/%[ need room for it.
-            if (dp && !suppress) {
-                std::lock_guard<std::recursive_mutex> flock(mutex_);
-                bool in_heap = false;
-                std::uint64_t rem = 0;
-                // D2: one containment query instead of find + upper_bound.
-                std::uint32_t cbase = 0, csize = 0;
-                if (LiveIdxContaining(dp, &cbase, &csize)) {
-                    in_heap = true;
-                    rem = (std::uint64_t)cbase + csize - dp;
-                }
-                if (in_heap) {
-                    if (conv == 'c') {
-                        // No NUL appended: cap chars at remaining bytes.
-                        if ((std::uint64_t)maxw > rem) {
-                            maxw = (int)rem;
-                        }
-                    } else if (rem == 0) {
-                        maxw = 0;  // no room even for NUL: convert nothing
-                    } else if ((std::uint64_t)maxw + 1 > rem) {
-                        // Chars + NUL must fit rem.
-                        maxw = (int)(rem - 1);
-                    }
-                }
-            }
             if (conv == 'c') {
                 int want = (width > 0) ? width : 1;
                 int k = 0;
@@ -3650,43 +3244,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             // long long / intmax_t: the guest's slot is 8 bytes.
                             if (is_signed) {
                                 long long w64 = sv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                if (dp && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
                                     }
                             } else {
                                 unsigned long long w64 = uv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                if (dp && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
                                     }
                             }
                         } else if (len == 1) {
                             std::int8_t w8 =
                                 is_signed ? (std::int8_t)sv : (std::int8_t)(std::uint8_t)uv;
-                            if (dp && ClampHeapWrite(dp, 1, "sscanf-num") >= 1 && CheckRange(dp, 1, true)) {
+                            if (dp && CheckRange(dp, 1, true)) {
                                 std::memcpy(H(dp), &w8, 1);
                                 }
                         } else if (len == 2) {
                             std::int16_t w16 =
                                 is_signed ? (std::int16_t)sv : (std::int16_t)(std::uint16_t)uv;
-                            if (dp && ClampHeapWrite(dp, 2, "sscanf-num") >= 2 && CheckRange(dp, 2, true)) {
+                            if (dp && CheckRange(dp, 2, true)) {
                                 std::memcpy(H(dp), &w16, 2);
                                 }
                         } else if (!is_signed && conv == 'p') {
                             // %p writes an int*.
                             std::int32_t w32 = (std::int32_t)uv;
-                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                            if (dp && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &w32, 4);
                                 }
                         } else {
                             // int / long / size_t / ptrdiff_t: 4 bytes.
                             if (is_signed) {
                                 std::int32_t w32 = (std::int32_t)sv;
-                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                                if (dp && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &w32, 4);
                                     }
                             } else {
                                 std::uint32_t wu = (std::uint32_t)uv;
-                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                                if (dp && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &wu, 4);
                                     }
                             }
@@ -3725,12 +3319,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     if (!suppress) {
                         if (flen == 8) {
                             // %lf / %Lf: the guest's slot is a double (8B).
-                            if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                            if (dp && CheckRange(dp, 8, true)) {
                                 std::memcpy(H(dp), &dv, 8);
                                 }
                         } else {
                             float fv = (float)dv;
-                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                            if (dp && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &fv, 4);
                                 }
                         }
@@ -3939,14 +3533,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
-    // HARNESS_TIMEWARP=<sec>: shift all guest clocks forward (timer-gate
-    // tests: loading/menu timeouts expire without wall waiting).
     case I::clock_gettime_:
     if (id == I::clock_gettime_) {
         struct timespec ts {};
         const int r = clock_gettime(a0, &ts);
         if (r == 0) {
-            ts.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(ts.tv_sec);
             const std::uint32_t nsec = static_cast<std::uint32_t>(ts.tv_nsec);
             if (CheckRange(a1, 8, true)) {
@@ -3962,7 +3553,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         struct timeval tv {};
         const int r = gettimeofday(&tv, nullptr);
         if (r == 0 && a0 != 0) {
-            tv.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(tv.tv_sec);
             const std::uint32_t usec = static_cast<std::uint32_t>(tv.tv_usec);
             if (CheckRange(a0, 8, true)) {
@@ -3977,10 +3567,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::clock_:
     case I::time_:
     if (id == I::time_ || id == I::clock_) {
-        std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
-        if (id == I::time_) {
-            t += (time_t)TimeWarp();
-        }
+        const std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
         if (id == I::time_ && a0 != 0 && CheckRange(a0, 4, true)) {
             const std::uint32_t w = static_cast<std::uint32_t>(t & 0xFFFFFFFFu);
             std::memcpy(H(a0), &w, 4);
@@ -4006,9 +3593,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::memcpy(&gt, H(a0), 4);
         }
         std::time_t tt = (std::time_t)gt;
-        if (is_local) {
-            tt += (time_t)TimeWarp();
-        }
         thread_local struct tm scratch {};
         struct tm* ht = is_local ? localtime_r(&tt, &scratch) : gmtime_r(&tt, &scratch);
         std::uint32_t out = a1;
@@ -4524,6 +4108,40 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadAttr(id, n, a0, a1, a2));
         return;
     }
+    case I::pthread_condattr_destroy_:
+    case I::pthread_condattr_init_:
+    if (id == I::pthread_condattr_init_ || id == I::pthread_condattr_destroy_) {
+        // bionic's pthread_condattr_t is one long of flags (shared bit, clock
+        // bits); init clears it. No title imports a condattr setter, so a
+        // cond made with one is a default cond (PthreadCond's note on clocks).
+        if (!CheckRange(a0, 4, true)) {
+            goto bad_ptr;
+        }
+        std::memset(H(a0), 0, 4);
+        Ret(regs, 0);
+        return;
+    }
+    case I::pthread_setname_np_:
+    if (id == I::pthread_setname_np_) {
+        // (thread, name): bionic refuses a name of 16 bytes or more (ERANGE).
+        // The calling thread's host thread takes the name (it shows in ps
+        // and in crash reports); another thread's is accepted and not set.
+        std::uint32_t len = 0;
+        if (!GuestStrnlen(a1, 0xFFFFFFFFu, &len)) {
+            goto bad_ptr;
+        }
+        if (len >= 16) {
+            Ret(regs, ERANGE);
+            return;
+        }
+        if (a0 == GuestTid()) {
+            char name[16] = {0};
+            std::memcpy(name, H<const char>(a1), len);
+            pthread_setname_np(pthread_self(), name);
+        }
+        Ret(regs, 0);
+        return;
+    }
     case I::__pthread_cleanup_pop_:
     case I::__pthread_cleanup_push_:
     if (id == I::__pthread_cleanup_push_ || id == I::__pthread_cleanup_pop_) {
@@ -4751,19 +4369,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         st.stack = via_va ? (sized ? a3 : a2) : regs[13];   // va_list or stack args
         std::size_t total = 0;
         const std::string out = ExpandPrintf(fmt, st, &total);
-        if (cap > 0 && CheckRange(dst, 1, true)) {
-            // The write goes through the overflow firewall (like memcpy and
-            // sscanf do): a guest buffer too small for the result must not
-            // smash its neighbour in the heap arena -- the class of the
-            // 2026-10-18 "GOT slot zeroed" incident.
-            const std::size_t want =
-                std::min<std::size_t>(out.size(), (std::size_t)cap - 1) + 1;  // + NUL
-            const std::uint32_t allowed = ClampHeapWrite(dst, (std::uint32_t)want, "printf");
-            if (allowed > 0 && CheckRange(dst, allowed, true)) {
-                const std::size_t w = std::min<std::size_t>(out.size(), allowed - 1);
-                std::memcpy(H(dst), out.data(), w);
-                H(dst)[w] = 0;
+        if (cap > 0) {
+            const std::size_t w = std::min<std::size_t>(out.size(), (std::size_t)cap - 1);
+            if (!CheckRange(dst, w + 1, true)) {  // a wild destination halts (A-18)
+                goto bad_ptr;
             }
+            std::memcpy(H(dst), out.data(), w);
+            H(dst)[w] = 0;
         }
         // C99: the return value is the length that WOULD have been written,
         // not the number of characters that fit.
@@ -4918,8 +4530,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // (absolute CLOCK_MONOTONIC deadline).
         const bool mono = (id == I::pthread_cond_timedwait_monotonic_ ||
                            id == I::pthread_cond_timedwait_monotonic_np_);
-        std::string base = mono ? "pthread_cond_timedwait" : n;
-        Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, base, a0, a1, a2, mono));
+        Ret(regs, PthreadCond(mono ? I::pthread_cond_timedwait_ : id, n, a0, a1, a2, mono));
         return;
     }
     case I::pthread_key_create_:
@@ -4986,66 +4597,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::pthread_create_:
     if (id == I::pthread_create_) {
-        // HARNESS_NOWORKER=1: skip thread creation (return 0, no thread).
-        // Diagnosis-only: removes worker/main interleaving nondeterminism
-        // (shared bump-heap addresses -> hash orders -> path variance).
-        // Joins will hang if reached; the font wall dies long before.
-        // NOTE: any value (even empty) counts as set; use env -u to run real
-        // worker threads.
-        if (EnvOn("HARNESS_NOWORKER")) {
-            std::printf("[thread] NOWORKER: skip create start=%08x\n", a2);
-            if (a0 && CheckRange(a0, 4, true)) {
-                std::uint32_t zero = 0;
-                std::memcpy(H(a0), &zero, 4);
-            }
-            Ret(regs, 0);
-            return;
-        }
-        // TEMP-DIAG (worker hang): log the job name (inline C string at
-        // [arg+0x20], seen as "Configuration") so runs inventory jobs.
-        // Also scan [arg,arg+0x200] for an http URL (job identity).
-        if (DiagOn()) {  // job-name / URL sniffing is diagnostics only
-            std::string jn = "?";
-            if (CheckRange(a3 + 0x20, 32, false)) {
-                char tmp[33] = {0};
-                for (int i = 0; i < 32; i++) {
-                    char c = 0;
-                    std::memcpy(&c, H(a3 + 0x20 + (std::uint32_t)i), 1);
-                    if (!c) {
-                        break;
-                    }
-                    tmp[i] = (c >= 32 && c < 127) ? c : '?';
-                }
-                if (tmp[0]) {
-                    jn = tmp;
-                }
-            }
-            std::string surl = "-";
-            if (CheckRange(a3, 0x200, false)) {
-                for (std::uint32_t k = 0; k + 8 < 0x200; k++) {
-                    char c4[5] = {0};
-                    std::memcpy(c4, H(a3 + k), 4);
-                    if (!std::strcmp(c4, "http")) {
-                        char ub[81] = {0};
-                        for (int j = 0; j < 80; j++) {
-                            char c = 0;
-                            if (!CheckRange(a3 + k + j, 1, false)) {
-                                break;
-                            }
-                            std::memcpy(&c, H(a3 + k + j), 1);
-                            if (!c) {
-                                break;
-                            }
-                            ub[j] = (c >= 32 && c < 127) ? c : '?';
-                        }
-                        surl = ub;
-                        break;
-                    }
-                }
-            }
-            std::printf("[thread] create start=%08x arg=%08x job=\"%s\" url=\"%s\"\n", a2, a3,
-                        jn.c_str(), surl.c_str());
-        }
         Ret(regs, PthreadCreate(a0, a1, a2, a3));
         return;
     }
@@ -5151,69 +4702,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // unwinder that defines its own __gnu_Unwind_Find_exidx calls it
     // (Angry Birds Stella).
     if (id == I::__gnu_Unwind_Find_exidx_ || id == I::dl_unwind_find_exidx_) {
-        // Nest guard (subagent #6): the phase driver can re-present the same
-        // handler frame forever (pad transfer never happens) — 131K nested
-        // throws, 64B/level, 8MB stack blow. Legit retry loops REUSE stack;
-        // nesting marches sp down monotonically. Break on same-pc + strictly
-        // descending sp past the threshold: return can't-unwind (0) so the
-        // run terminates with the ORIGINAL exception visible instead of a
-        // silent overflow. Matches device semantics (uncaught -> terminate).
-        // a0 = pc; the caller's sp (r13) is the frame (a1 is the int* count,
-        // which need not be on the stack). Tracked per stack range (main vs
-        // workers).
-        struct NestTrack {
-            std::uint32_t pc = 0xFFFFFFFFu;
-            std::uint32_t sp = 0xFFFFFFFFu;
-            unsigned depth = 0;
-        };
-        static NestTrack tracks[2];
-        const std::uint32_t fsp = regs[13];
-        NestTrack& tr = (fsp >= abr::kStackBase && fsp < abr::kStackTop) ? tracks[0] : tracks[1];
-        if (a0 == tr.pc && fsp < tr.sp) {
-            tr.depth++;
-        } else {
-            tr.depth = 0;
-            tr.pc = a0;
-        }
-        tr.sp = fsp;
-        // HARNESS_NESTMAX overrides the abort depth (default 512) to test
-        // whether a deeper handler catches (fallback paths) vs true spiral.
-        static std::int64_t nestmax = -2;
-        if (nestmax == -2) {
-            nestmax = 512;
-            if (const char* ne = std::getenv("HARNESS_NESTMAX")) {
-                nestmax = (std::int64_t)std::strtoul(ne, nullptr, 0);
-            }
-        }
-        if ((std::int64_t)tr.depth > nestmax) {
-            // Returning 0 does NOT stop this driver (it takes the NULL path
-            // and re-presents). Halt loud: the stack holds the whole spiral
-            // and the original throw is ~512 levels up, intact for forensics.
-            std::printf("[unwind] LOUD nesting %u deep at pc=%08x sp=%08x -- halting\n", tr.depth,
-                        a0, fsp);
-            // Forensics for this fatal halt: R7 and the words the SU16
-            // pop-frame reads ([R7-12..R7+8]).
-            {
-                std::uint32_t r7v = regs[7];
-                std::printf("[unwind] R7=%08x SP=%08x LR=%08x : ", r7v, regs[13], regs[14]);
-                for (int k = -12; k <= 8; k += 4) {
-                    std::uint32_t w = 0xDEADBEEFu;
-                    if (CheckRange(r7v + k, 4, false)) {
-                        std::memcpy(&w, H<const std::uint8_t>(r7v + k), 4);
-                    }
-                    std::printf("[%+d]=%08x ", k, w);
-                }
-                std::printf("\n");
-            }
-            stop_step_ = true;
-            ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
-            return;
-        }
-        // HARNESS_EXIDXLOG=1: temp-diag (unwinder spiral): log every lookup.
-        if (EnvOn("HARNESS_EXIDXLOG")) {
-            std::printf("[exidxlog] pc=%08x -> entry=%08x R7=%08x SP=%08x LR=%08x\n", a0,
-                        FindExidx(a0), regs[7], regs[13], regs[14]);
-        }
         // The imported ABI is (pc, int* count) -> the exidx TABLE BASE of the
         // module holding pc, with *count = number of 8-byte entries; the caller
         // (the guest's own statically linked libgcc) then binary-searches that
@@ -5226,7 +4714,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // FATAL before any descriptor runs, and the first main-thread throw
         // wedges the updater (black screen). The ABI answer is correct for
         // every image: frame #1 then pops its saved LR (0x457FE7) and the walk
-        // continues into __cxa_throw and the game's own handler.
+        // continues into __cxa_throw and the game's own handler. (A nest guard
+        // that halted 512 identical nested lookups lived here; the spiral it
+        // stopped was this wrong answer, fixed in 6de206a / 4af8d8a.)
         const std::uint32_t pc = a0 & ~std::uint32_t(1);
         std::uint32_t base = 0, count = 0;
         if (IsCodeAddress(pc)) {
@@ -5362,12 +4852,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, ptr_result ? 0u : 0xFFFFFFFFu);
             return false;
         };
-        auto ensure_parent = [&](const std::string& hp) {
+        // The guests write files into directories they never make (the owner
+        // kept this behaviour in 96acf7f). The write-open is tried first; only
+        // when it fails with ENOENT are the parents made and the open tried
+        // again, so an open into an existing directory costs nothing extra.
+        // Called after an ENOENT. True when the parent directory exists now,
+        // made here or by another guest thread meanwhile: the caller tries
+        // again. False leaves errno at ENOENT for the caller's answer.
+        auto ensure_parent = [&](const std::string& hp) -> bool {
             const std::size_t slash = hp.rfind('/');
+            bool there = false;
             if (slash != std::string::npos && slash > 0) {
+                const std::string dir = hp.substr(0, slash);
                 std::error_code ec;
-                std::filesystem::create_directories(hp.substr(0, slash), ec);
+                std::filesystem::create_directories(dir, ec);
+                there = std::filesystem::is_directory(dir, ec);
             }
+            if (!there) {
+                errno = ENOENT;
+            }
+            return there;
         };
         // Packed files (apk_vfs.h): the packed file at host path hp when
         // there is no real one (a real file, even a dangling link, wins).
@@ -5691,10 +5195,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
             }
-            if (mode.find_first_of("wax+") != std::string::npos) {
-                ensure_parent(hp);
-            }
             FILE* f = std::fopen(hp.c_str(), mode.c_str());
+            if (!f && errno == ENOENT && mode.find_first_of("wax+") != std::string::npos &&
+                ensure_parent(hp)) {
+                f = std::fopen(hp.c_str(), mode.c_str());
+            }
+            const int fopen_errno = errno;  // before the logs: printf may change it
             if (EnvOn("HARNESS_PATHLOG")) {
                 std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %s\n", GuestTid(), hp.c_str(),
                             mode.c_str(), f ? "ok" : "NULL");
@@ -5702,9 +5208,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!f) {
                 if (DiagOn()) {
                     std::printf("[files] fopen(\"%s\",\"%s\") -> NULL (errno %d)\n", hp.c_str(),
-                                mode.c_str(), errno);
+                                mode.c_str(), fopen_errno);
                 }
-                SetGuestErrno(errno);
+                SetGuestErrno(fopen_errno);
                 Ret(regs, 0);
                 return;
             }
@@ -5723,13 +5229,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (DiagOn()) {
                 std::printf("[files][t%u] fopen(\"%s\",\"%s\") -> %08x\n", GuestTid(), hp.c_str(),
                             mode.c_str(), h);
-            }
-            // TEMP-DIAG (registry ParseError): track registry handles to dump
-            // their exact bytes on fread/fwrite below.
-            // Diagnostics only: in shipping this dumped save-file bytes to the log.
-            if (DiagOn() && hp.find("registry") != std::string::npos) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                g_regfiles.insert(f);
             }
             Ret(regs, h);
             return;
@@ -5757,10 +5256,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-            }
-            if (id == I::fclose_ && DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                g_regfiles.erase(f);  // a reused FILE* must not inherit the tag
             }
             int r = (id == I::fclose_) ? std::fclose(f) : std::fflush(f);
             if (id == I::fclose_) {
@@ -5791,86 +5286,45 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // (An earlier revision keyed on a0 and silently returned 0 — every
             // file read was empty; empty seed files masked it.)
             FILE* f = file_of(a3);
-            if (!f || !CheckRange(a0, 1, false) || a1 == 0 || a2 == 0) {
+            if (!f || a1 == 0 || a2 == 0) {
                 Ret(regs, 0);
                 return;
             }
-            // Clamp absurd sizes (guest bug shield; host fread would try).
-            if (std::uint64_t(a1) * a2 > 0x1000000u && !CheckRange(a0, (std::size_t)a1 * a2, true)) {
-                Ret(regs, 0);
-                return;
+            // A real libc writes only the bytes the file gives, so a count
+            // larger than the buffer's memory is fine while the file ends
+            // first. The read is bounded by the writable memory after ptr; a
+            // file that fills all of it and has more is the fault a device
+            // gives (it used to answer 0 items, silently).
+            const std::uint64_t want = std::uint64_t(a1) * a2;
+            const std::uint64_t room = GuestExtent(a0, want, true);
+            if (room == 0) {
+                goto bad_ptr;
             }
-            if (!CheckRange(a0, (std::size_t)a1 * a2, true)) {
-                Ret(regs, 0);
-                return;
+            errno = 0;
+            const std::size_t got_bytes = std::fread(H(a0), 1, static_cast<std::size_t>(room), f);
+            if (got_bytes < room && std::ferror(f)) {
+                SetGuestErrno(errno ? errno : EIO);  // an error, not the end of the file
             }
-            // Overflow firewall (same class as memcpy): the arena-wide
-            // CheckRange above passes short game buffers; clamp the item
-            // count to the mapped allocation so ::fread can't smash chunk
-            // neighbors (silent host SIGSEGV in dlmalloc metadata).
-            const std::uint64_t want64 = (std::uint64_t)a1 * a2;
-            const std::uint32_t wbytes =
-                ClampHeapWrite(a0, want64 > 0xFFFFFFFFu ? 0xFFFFFFFFu : (std::uint32_t)want64,
-                               "fread");
-            const std::uint32_t wn = a1 ? wbytes / a1 : 0;
-            std::size_t got = std::fread(H(a0), a1, wn, f);
-            if (got < wn && wn == a2) {
-                SetGuestErrno(errno ? errno : EIO);
-            }
-            if (wn < a2) {
-                static int frc = 0;
-                if (frc < 10) {
-                    frc++;
-                    std::printf("[heap] LOUD fread short items=%u want=%u\n", wn, a2);
+            if (room < want && got_bytes == room && !std::feof(f)) {
+                int c = std::fgetc(f);  // is there really more to read?
+                if (c != EOF) {
+                    std::ungetc(c, f);
+                    goto bad_ptr;
                 }
             }
-            // TEMP-DIAG (registry ParseError): dump exact bytes read.
-            bool regdump = false;
-            if (DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                regdump = g_regfiles.count(f) && g_regdump_n < 60;
-            }
-            if (regdump) {
-                g_regdump_n++;
-                std::size_t nb = got * a1;
-                if (nb > 192) {
-                    nb = 192;
-                }
-                const std::uint8_t* p = H<const std::uint8_t>(a0);
-                std::printf("[regio] fread #%d %zu items(%zuB):", g_regdump_n, static_cast<std::size_t>(got),
-                            static_cast<std::size_t>(got) * a1);
-                for (std::size_t i = 0; i < nb; i++) {
-                    std::printf(" %02x", p[i]);
-                }
-                std::printf("\n");
-            }
-            Ret(regs, static_cast<std::uint32_t>(got));
+            Ret(regs, static_cast<std::uint32_t>(got_bytes / a1));
             return;
         }
         if (id == I::fwrite_) {
             // fwrite(ptr=a0, size=a1, nmemb=a2, stream=a3): handle is LAST
             // (same a0-keying bug as fread had — fixed together).
             FILE* f = file_of(a3);
-            if (!f || a1 == 0 || a2 == 0 || !CheckRange(a0, (std::size_t)a1 * a2, false)) {
+            if (!f || a1 == 0 || a2 == 0) {
                 Ret(regs, 0);
                 return;
             }
-            // TEMP-DIAG (registry ParseError): dump exact bytes written.
-            bool regdump = false;
-            if (DiagOn()) {
-                std::lock_guard<std::mutex> io(io_mutex_);
-                regdump = g_regfiles.count(f) && g_regdump_n < 60;
-            }
-            if (regdump) {
-                g_regdump_n++;
-                std::size_t nb = (std::size_t)a1 * a2;
-                std::size_t show = nb > 192 ? 192 : nb;
-                const std::uint8_t* p = H<const std::uint8_t>(a0);
-                std::printf("[regio] fwrite #%d %uB:", g_regdump_n, (unsigned)nb);
-                for (std::size_t i = 0; i < show; i++) {
-                    std::printf(" %02x", p[i]);
-                }
-                std::printf("%s\n", nb > show ? " ..." : "");
+            if (!CheckRange(a0, (std::size_t)a1 * a2, false)) {
+                goto bad_ptr;  // as fread: a real libc faults on a wild source
             }
             const std::size_t wrote = std::fwrite(H(a0), a1, a2, f);
             if (wrote < a2) {
@@ -5934,13 +5388,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-                // Same overflow firewall as fread (short line buffer).
-                const std::uint32_t wlen = ClampHeapWrite(a0, a1, "fgets");
-                if (wlen == 0) {
-                    Ret(regs, 0);
-                    return;
-                }
-                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)wlen, f);
+                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)std::min<std::uint32_t>(a1, 0x7FFFFFFFu), f);
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
@@ -6124,13 +5572,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
             }
-            if ((a1 & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0) {
-                ensure_parent(hp);
-            }
             int fd = ::open(hp.c_str(), (int)a1, (mode_t)a2);
+            if (fd < 0 && errno == ENOENT && (a1 & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0 &&
+                ensure_parent(hp)) {
+                fd = ::open(hp.c_str(), (int)a1, (mode_t)a2);
+            }
             if (fd < 0) {
-                std::printf("[files] open(\"%s\",%o) -> -1 (errno %d)\n", hp.c_str(), a1, errno);
-                SetGuestErrno(errno);
+                const int e = errno;  // before the log: printf may change it
+                // Engines probe for files that are not there: the first
+                // failures are logged, the rest only under diagnostics.
+                static std::atomic<int> logged{0};
+                if (DiagOn() || logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+                    std::printf("[files] open(\"%s\",%o) -> -1 (errno %d)\n", hp.c_str(), a1, e);
+                }
+                SetGuestErrno(e);
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
@@ -6154,10 +5609,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (!need_host(hp, "mkstemp")) {
                 return;
             }
-            ensure_parent(hp);
             std::vector<char> tmpl(hp.begin(), hp.end());
             tmpl.push_back('\0');
-            const int fd = ::mkstemp(tmpl.data());
+            int fd = ::mkstemp(tmpl.data());
+            if (fd < 0 && errno == ENOENT && ensure_parent(hp)) {
+                tmpl.assign(hp.begin(), hp.end());  // a failed mkstemp may have changed it
+                tmpl.push_back('\0');
+                fd = ::mkstemp(tmpl.data());
+            }
             if (fd < 0) {
                 SetGuestErrno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -6510,45 +5969,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // blocks exactly as long as the real one would (a 5 s FIFO cap
             // that returned EAGAIN on a blocking fd is gone).
             const std::shared_ptr<abvfs::Slice> sl = id == I::read_ ? std::move(sl_of) : nullptr;
-            ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
-                           : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
-            // TEMP-DIAG (worker hang): log pipe traffic (fds >= 100 that are
-            // pipes show up here via fd_map_; files too, capped). Skip
-            // regular files (/proc/cpuinfo floods the cap): pipes+sockets.
-            // Diagnostic layer (PLAN.md B7): with DIAG off skip the per-I/O
-            // fstat + io_mutex + fd_map probe that only fed this capped log.
-            if (DiagOn() && (id == I::write_ || id == I::read_) && r > 0) {
-                static int wlog = 0;
-                bool interesting = false;
-                {
-                    std::lock_guard<std::mutex> io(io_mutex_);
-                    const auto it = fd_map_.find(a0);
-                    if (it != fd_map_.end()) {
-                        struct stat fs {};
-                        if (::fstat(it->second, &fs) == 0 &&
-                            (S_ISFIFO(fs.st_mode) || S_ISSOCK(fs.st_mode))) {
-                            interesting = true;
-                        }
-                    } else if (a0 <= 2) {
-                        interesting = true;
-                    }
-                }
-                if (interesting && wlog < 200) {
-                    wlog++;
-                    const std::uint8_t* p = H<const std::uint8_t>(a1);
-                    std::string hex;
-                    char b[8];
-                    ssize_t show = r > 32 ? 32 : r;
-                    for (ssize_t i = 0; i < show; i++) {
-                        std::snprintf(b, sizeof(b), "%02x", p[i]);
-                        hex += b;
-                    }
-                    // Thread marker: GuestTid directly (1=main, else worker).
-                    std::printf("[pipelog][t%u]%s %s gfd=%u %zdB: %s%s\n", GuestTid(),
-                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
-                                r > show ? "..." : "");
-                }
-            }
+            const ssize_t r = sl ? abvfs::SliceRead(*sl, hfd, H(a1), a2)
+                                 : (id == I::read_) ? ::read(hfd, H(a1), a2) : ::write(hfd, H(a1), a2);
             if (r < 0) {
                 set_guest_errno(errno);
                 Ret(regs, 0xFFFFFFFFu);
@@ -7178,33 +6600,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                                  addr ? &sl : nullptr);
             if (r < 0) {
                 set_guest_errno(errno);
-                if (EnvOn("HARNESS_POLLDBG")) {
-                    std::printf("[recv-dbg] %s(gfd %u) r=-1 errno=%d\n", n.c_str(), a0, errno);
-                }
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
-            }
-            if (r == 0 && EnvOn("HARNESS_POLLDBG")) {
-                std::printf("[recv-dbg] %s(gfd %u) r=0 (EOF)\n", n.c_str(), a0);
-            }
-            // TEMP-DIAG (network bring-up): inbound bytes are the signal
-            // (DNS replies, HTTP bodies). Capped hex.
-            {
-                static int nlog = 0;
-                if (DiagOn() && nlog < 40 && r > 0) {
-                    nlog++;
-                    const std::uint8_t* p = H<const std::uint8_t>(a1);
-                    std::string hex;
-                    char b[8];
-                    ssize_t show = r > 32 ? 32 : r;
-                    for (ssize_t i = 0; i < show; i++) {
-                        std::snprintf(b, sizeof(b), "%02x", p[i]);
-                        hex += b;
-                    }
-                    std::printf("[netsock]%s %s(gfd %u) %zdB: %s%s\n",
-                                GuestTid() == 1 ? "" : "(T2+)", n.c_str(), a0, r, hex.c_str(),
-                                r > show ? "..." : "");
-                }
             }
             if (addr && (std::uint32_t)sl <= addrlen) {
                 std::memcpy(H(addr), &ss, sl);
@@ -7262,17 +6659,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // fcntl: the TLS state machine needs REAL O_NONBLOCK (fake-success
         // stub kept fds blocking -> handshake breakage -> HttpRequestException).
         if (id == I::fcntl_) {
-            // TEMP-DIAG (stuck workers): pinpoint the parking line.
-            static int fcl = 0;
-            const int fldiag = (DiagOn() && fcl < 40) ? fcl++ : -1;
-            if (fldiag >= 0) {
-                std::printf("[fcntl] #%d enter tid=%u fd=%d cmd=%d arg=%d\n", fldiag, GuestTid(),
-                            (int)a0, (int)a1, (int)a2);
-            }
             const int hfd = host_fd_of(a0);
-            if (fldiag >= 0) {
-                std::printf("[fcntl] #%d mapped tid=%u hfd=%d\n", fldiag, GuestTid(), hfd);
-            }
             if (hfd < 0) {
                 set_guest_errno(EBADF);
                 Ret(regs, static_cast<std::uint32_t>(-1));
@@ -7316,9 +6703,83 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, g);
                 return;
             }
-            // File locks etc.: success-lie (single-process bring-up; revisit
-            // if a game path depends on lock contention).
-            Ret(regs, 0);
+            // Record locks, by the guest's command numbers (arm
+            // asm-generic/fcntl.h): F_GETLK 5, F_SETLK 6, F_SETLKW 7 with the
+            // 16-byte struct flock {short type, whence; long start, len; pid},
+            // and 12, 13, 14 with the 32-byte struct flock64 {short type,
+            // whence; pad; long long start, len; pid}. The host does the lock
+            // with its own 64-bit struct. (They answered "success" unasked.)
+            if ((cmd >= 5 && cmd <= 7) || (cmd >= 12 && cmd <= 14)) {
+                const bool wide = cmd >= 12;
+                const int op = wide ? cmd - 12 : cmd - 5;  // 0 get, 1 set, 2 set and wait
+                const std::uint32_t gsize = wide ? 32u : 16u;
+                if (!CheckRange(a2, gsize, op == 0)) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                std::int16_t type = 0, whence = 0;
+                std::int32_t pid = 0;
+                std::int64_t start = 0, len = 0;
+                std::memcpy(&type, H(a2), 2);
+                std::memcpy(&whence, H(a2 + 2), 2);
+                if (wide) {
+                    std::memcpy(&start, H(a2 + 8), 8);
+                    std::memcpy(&len, H(a2 + 16), 8);
+                } else {
+                    std::int32_t s32 = 0, l32 = 0;
+                    std::memcpy(&s32, H(a2 + 4), 4);
+                    std::memcpy(&l32, H(a2 + 8), 4);
+                    start = s32;
+                    len = l32;
+                }
+                struct flock fl {};
+                fl.l_type = type;
+                fl.l_whence = whence;
+                fl.l_start = static_cast<off_t>(start);
+                fl.l_len = static_cast<off_t>(len);
+                const int r = ::fcntl(hfd, op == 0 ? F_GETLK : op == 1 ? F_SETLK : F_SETLKW, &fl);
+                if (r < 0) {
+                    set_guest_errno(errno);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (op == 0) {
+                    type = static_cast<std::int16_t>(fl.l_type);
+                    whence = static_cast<std::int16_t>(fl.l_whence);
+                    pid = static_cast<std::int32_t>(fl.l_pid);
+                    std::memcpy(H(a2), &type, 2);
+                    std::memcpy(H(a2 + 2), &whence, 2);
+                    if (wide) {
+                        start = fl.l_start;
+                        len = fl.l_len;
+                        std::memcpy(H(a2 + 8), &start, 8);
+                        std::memcpy(H(a2 + 16), &len, 8);
+                        std::memcpy(H(a2 + 24), &pid, 4);
+                    } else {
+                        const std::int32_t s32 = static_cast<std::int32_t>(fl.l_start);
+                        const std::int32_t l32 = static_cast<std::int32_t>(fl.l_len);
+                        std::memcpy(H(a2 + 4), &s32, 4);
+                        std::memcpy(H(a2 + 8), &l32, 4);
+                        std::memcpy(H(a2 + 12), &pid, 4);
+                    }
+                }
+                Ret(regs, 0);
+                return;
+            }
+            // Anything else is not implemented: EINVAL, as the kernel answers
+            // a command it does not know, and one LOUD line per command.
+            {
+                static std::mutex seen_mu;
+                static std::set<int> seen;
+                std::lock_guard<std::mutex> l(seen_mu);
+                if (seen.insert(cmd).second) {
+                    std::printf("[fcntl] LOUD unimplemented command %d (fd %u, arg %08x) -> EINVAL\n", cmd,
+                                a0, a2);
+                }
+            }
+            set_guest_errno(EINVAL);
+            Ret(regs, static_cast<std::uint32_t>(-1));
             return;
         }
         if (id == I::ioctl_ && IsAlarmFd(a0)) {
@@ -7387,7 +6848,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
         if (id == I::inet_addr_ || id == I::inet_aton_ || id == I::inet_pton_ || id == I::inet_ntoa_ ||
             id == I::inet_ntop_) {
-            InetThunk(id, regs, n, a0, a1, a2, a3);
+            InetThunk(id, regs, a0, a1, a2, a3);
             return;
         }
         if (id == I::stat_ || id == I::access_ || id == I::mkdir_ || id == I::unlink_ || id == I::remove_ ||
@@ -7653,8 +7114,10 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 if (!need_host(hp2, "rename-dst")) {
                     return;
                 }
-                ensure_parent(hp2);
-                const int r = ::rename(hp.c_str(), hp2.c_str());
+                int r = ::rename(hp.c_str(), hp2.c_str());
+                if (r != 0 && errno == ENOENT && ensure_parent(hp2)) {
+                    r = ::rename(hp.c_str(), hp2.c_str());
+                }
                 if (r != 0) {
                     SetGuestErrno(errno);
                 } else if (vfs_on_) {
@@ -7705,15 +7168,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const std::string hp = map_path(a0);
             if (!need_host(hp, "opendir")) {
                 return;
-            }
-            // TEMP-DIAG (worker dir scans): which trees does it list?
-            {
-                static int odlog = 0;
-                if (odlog < 15 && DiagOn()) {
-                    odlog++;
-                    std::printf("[files]%s opendir(\"%s\")%s\n", GuestTid() == 1 ? "" : "(T2+)",
-                                hp.c_str(), odlog == 15 ? " (quiet henceforth)" : "");
-                }
             }
             DIR* d = ::opendir(hp.c_str());
             if (!d) {
@@ -8325,65 +7779,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (id == I::glTexImage2D_ || id == I::glTexSubImage2D_ || id == I::glCompressedTexImage2D_ ||
             id == I::glCopyTexImage2D_ || id == I::glReadPixels_ || id == I::glBufferData_ ||
             id == I::glVertexAttribPointer_ || id == I::glShaderSource_) {
-            // Accepted and ignored (no real GL yet): fake upload succeeds.
-            // Bulk-pointer args are range-checked but not consumed.
-            // TEMP-DIAG (real-GLES prep): log call signatures to learn what
-            // the host GPU must accept (formats, sizes, shader sources).
-            if (id == I::glShaderSource_ && a1 > 0 && a1 < 16 && CheckRange(a2, 4 * a1, false)) {
-                std::printf("[glsrc] shader=%u count=%u\n", a0, a1);
-                for (std::uint32_t i = 0; i < a1; i++) {
-                    std::uint32_t sp = 0;
-                    std::memcpy(&sp, H(a2 + i * 4), 4);
-                    std::int32_t slen = -1;
-                    if (a3 && CheckRange(a3 + i * 4, 4, false)) {
-                        std::memcpy(&slen, H(a3 + i * 4), 4);
-                    }
-                    if (!sp || !CheckRange(sp, 1, false)) {
-                        std::printf("[glsrc] #%u NULL\n", i);
-                        continue;
-                    }
-                    std::size_t L = 0;
-                    const char* s = reinterpret_cast<const char*>(H(sp));
-                    if (slen < 0) {
-                        while (L < 4096 && CheckRange(sp + (std::uint32_t)L, 1, false) && s[L]) {
-                            L++;
-                        }
-                    } else {
-                        L = (std::size_t)slen > 65536 ? 65536 : (std::size_t)slen;
-                    }
-                    std::printf("[glsrc] #%u ptr=%08x slen=%d : %.200s\n", i, sp, slen,
-                                std::string(s, L > 200 ? 200 : L).c_str());
-                    // TEMP-DIAG (real-GLES prep): stash full source for
-                    // offline compile tests (host FS, harness-only).
-#ifndef __ANDROID__
-                    if (L > 16 && L <= 65536) {
-                        std::filesystem::create_directories("work/shaders");
-                        char fn[64];
-                        std::snprintf(fn, sizeof(fn), "work/shaders/src_%u_%u.glsl", a0, i);
-                        FILE* f = std::fopen(fn, "wb");
-                        if (f) {
-                            std::fwrite(s, 1, L, f);
-                            std::fclose(f);
-                        }
-                    }
-#endif
-                }
-            }
-            if ((id == I::glTexImage2D_ || id == I::glCompressedTexImage2D_) && a1 <= 8) {
-                // APCS: (target,level,intfmt,width) in regs; the rest on guest
-                // stack: height,border,format,type,data.
-                std::uint32_t stk[5] = {0};
-                for (int i = 0; i < 5; i++) {
-                    if (CheckRange(regs[13] + (std::uint32_t)(i * 4), 4, false)) {
-                        std::memcpy(&stk[i], H(regs[13] + (std::uint32_t)(i * 4)), 4);
-                    }
-                }
-                std::printf("[gltex] %s tgt=%04x lvl=%u ifmt=%04x %ux%u fmt=%04x typ=%04x data=%08x\n",
-                            n.c_str(), a0, a1, a2, a3, stk[0], stk[2], stk[3], stk[4]);
-            }
-#ifndef __ANDROID__
+            // Accepted and ignored (the harness has no GL): the fake upload
+            // succeeds; bulk-pointer args are not consumed.
             std::printf("[gl] %s accepted (fake)\n", n.c_str());
-#endif
             Ret(regs, 0);
             return;
         }
@@ -8396,7 +7794,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // length; a missing property gives "" and 0. On the device the real
         // property service answers (it used to be a table of invented values:
         // sdk 21, model "izan", DNS 8.8.8.8). The native harness has no
-        // property service and keeps a small table (HARNESS_DNS1/2 override).
+        // property service and keeps a small table.
         if (!CheckRange(a1, kGuestPropValueMax, true)) {
             goto bad_ptr;
         }
@@ -8417,9 +7815,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
 #else
         if (key == "net.dns1" || key == "net.dns2") {
             val = (key == "net.dns1") ? "8.8.8.8" : "8.8.4.4";
-            if (const char* e = std::getenv(key == "net.dns1" ? "HARNESS_DNS1" : "HARNESS_DNS2")) {
-                val = e;
-            }
         } else if (key == "ro.build.version.sdk") {
             val = "21";
         }
@@ -8572,8 +7967,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         const std::uint64_t total = (std::uint64_t)cnt * sz;
-        if (!base || !compar || total == 0 || total > 0x4000000u ||
-            !CheckRange(base, (std::size_t)total, false)) {
+        // The array is sorted in place: it must be writable guest memory
+        // (64-bit product, so no overflow; any size a mapping holds).
+        if (!base || !compar || !CheckRange(base, (std::size_t)total, true)) {
             goto bad_ptr;
         }
         std::vector<std::uint8_t> buf((std::size_t)total);
@@ -8627,8 +8023,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         const std::uint64_t total = (std::uint64_t)cnt * sz;
-        if (!base || !key || total == 0 || total > 0x4000000u ||
-            !CheckRange(key, sz, false) || !CheckRange(base, (std::size_t)total, false)) {
+        if (!base || !key || !CheckRange(key, sz, false) ||
+            !CheckRange(base, (std::size_t)total, false)) {
             goto bad_ptr;
         }
         std::uint32_t lo = 0, hi = cnt, found = 0;
@@ -8942,17 +8338,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strxfrm_:
     {
         // Bounded guest strlen; 0xFFFFFFFF = unreadable or unterminated.
-        auto guest_strlen = [&](std::uint32_t s) -> std::uint32_t {
-            for (std::uint32_t i = 0; i < 0x100000u; i++) {
-                if (!CheckRange(s + i, 1, false)) {
-                    return 0xFFFFFFFFu;
-                }
-                if (*H<const char>(s + i) == '\0') {
-                    return i;
-                }
-            }
-            return 0xFFFFFFFFu;
-        };
+        auto guest_strlen = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         if (id == I::strcasestr_) {
             const std::uint32_t hl = guest_strlen(a0), nl = guest_strlen(a1);
             if (hl == 0xFFFFFFFFu || nl == 0xFFFFFFFFu) {
@@ -9296,26 +8682,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     {
-        // Locked: worker threads share stub_hits_ with main. Diagnostic layer
-        // (PLAN.md A5/B13): with DIAG off this skips the per-call map probe on
-        // An import the harness does not implement: answer 0 (the guest gets
-        // a plausible "success") and SAY SO -- exactly what a port needs
-        // to see, so this is NOT behind HARNESS_DIAG. The log stays capped
-        // at 5 lines per import name: a run adds a few dozen lines
-        // (measured: 69 [stub] lines in a DIAG run), not a flood.
+        // An import nobody implemented: the guest gets 0, which may or may
+        // not be an answer it can live with. The first call of each name
+        // says so with LOUD, from any thread, so the device gate sees it and
+        // the import gets implemented; the next four calls are plain lines.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
-        // Enriched logging for environment queries: names matter.
-        if (id == I::__system_property_get_ || id == I::dlopen_ || id == I::open_ ||
-            id == I::fopen_ || id == I::stat_ || id == I::access_) {
-            std::printf("[env]%s %s(\"%s\") lr=%08x\n", GuestTid() == 1 ? "" : "(T2+)", n.c_str(),
-                        GuestStr(a0), regs[14]);
-        }
         hits++;
-        static bool threadlog = std::getenv("HARNESS_THREADLOG") != nullptr;
-        if (hits <= 5 && (GuestTid() == 1 || threadlog)) {
-            std::printf("[stub]%s %s(%08x %08x lr=%08x) -> 0%s\n", GuestTid() == 1 ? "" : "(T2+)",
-                        n.c_str(), a0, a1, regs[14], hits == 5 ? " (quiet henceforth)" : "");
+        if (hits <= 5) {
+            std::printf("[stub][t%u] %s%s(%08x %08x %08x %08x lr=%08x) -> 0%s\n", GuestTid(),
+                        hits == 1 ? "LOUD unimplemented import " : "", n.c_str(), a0, a1, a2, a3,
+                        regs[14], hits == 5 ? " (quiet henceforth)" : "");
         }
     }
     }  // switch (id)
@@ -9571,26 +8948,34 @@ static std::shared_ptr<pthread_rwlock_t> NewHostRwlock() {
 
 std::uint32_t Runtime::PthreadRwlock(ImportId id, const std::string& n, std::uint32_t obj) {
     using I = ImportId;
-    // Same discipline as PthreadMutex: resolve under guard (taking a
-    // reference), operate outside. Lazy-creates static initializers
-    // (PTHREAD_RWLOCK_INITIALIZER).
+    // Same discipline as PthreadMutex: resolve under the map's own lock
+    // (taking a reference), operate outside. Lazy-creates static
+    // initializers (PTHREAD_RWLOCK_INITIALIZER).
     std::shared_ptr<pthread_rwlock_t> rw;
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (id == I::pthread_rwlock_init_ || id == I::pthread_rwlock_destroy_) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         if (id == I::pthread_rwlock_init_) {
             rwlock_map_[obj] = NewHostRwlock();
-            return 0;
-        }
-        if (id == I::pthread_rwlock_destroy_) {
+        } else {
             rwlock_map_.erase(obj);  // freed when the last user lets go
-            return 0;
         }
+        return 0;
+    }
+    {
+        std::shared_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        const auto it = rwlock_map_.find(obj);
+        if (it != rwlock_map_.end()) {
+            rw = it->second;
+        }
+    }
+    if (!rw) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         auto it = rwlock_map_.find(obj);
         if (it == rwlock_map_.end()) {
             it = rwlock_map_.emplace(obj, NewHostRwlock()).first;
         }
         rw = it->second;
-    }  // guard released: blocking rdlock/wrlock below must not hold mutex_.
+    }
     pthread_rwlock_t* r = rw.get();
     if (id == I::pthread_rwlock_rdlock_) {
         return static_cast<std::uint32_t>(pthread_rwlock_rdlock(r));
@@ -9623,8 +9008,11 @@ static std::shared_ptr<Runtime::HostCond> NewHostCond() {
 std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint32_t cond, std::uint32_t arg1,
                                    std::uint32_t arg2, bool monotonic) {
     using I = ImportId;
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // The cond map has its own reader/writer lock (sync_map_mu_), not the
+    // runtime's mutex_: a signal or a wait only reads the map, and what
+    // orders a wake against a wait is the cond's own lock (hc->m).
     if (id == I::pthread_cond_init_ || id == I::pthread_cond_destroy_) {
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
         if (id == I::pthread_cond_init_) {
             if (cond_map_.count(cond) != 0) {
                 std::printf("[cond] re-init obj=%08x (t%u)\n", cond, GuestTid());
@@ -9635,15 +9023,27 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         }
         return 0;
     }
-    auto it = cond_map_.find(cond);
-    if (it == cond_map_.end()) {
-        // Lazy creation for statically-initialized condvars
-        // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
-        it = cond_map_.emplace(cond, NewHostCond()).first;
-    }
     // Own references: the cond and mutex stay alive while this thread waits,
     // even if another thread destroys them meanwhile.
-    const std::shared_ptr<HostCond> hc = it->second;
+    std::shared_ptr<HostCond> found;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        const auto it = cond_map_.find(cond);
+        if (it != cond_map_.end()) {
+            found = it->second;
+        }
+    }
+    if (!found) {
+        // Lazy creation for statically-initialized condvars
+        // (PTHREAD_COND_INITIALIZER is all zeros on bionic).
+        std::unique_lock<std::shared_mutex> map_lock(sync_map_mu_);
+        auto it = cond_map_.find(cond);
+        if (it == cond_map_.end()) {
+            it = cond_map_.emplace(cond, NewHostCond()).first;
+        }
+        found = it->second;
+    }
+    const std::shared_ptr<HostCond> hc = found;
     using Waiter = HostCond::Waiter;
     auto unlink = [&](Waiter* w) {
         (w->prev ? w->prev->next : hc->head) = w->next;
@@ -9717,7 +9117,6 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
             t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
             t_sig->wait_cv.store(hc.get());
         }
-        mutex_.unlock();
         // The guest mutex is let go for the wait: its holder book too (as an
         // unlock by its owner would), restored after the relock below.
         const std::int32_t held_depth = mx->depth.exchange(0, std::memory_order_relaxed);
@@ -9771,7 +9170,6 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         relock();
         mx->holder.store(GuestTid(), std::memory_order_relaxed);
         mx->depth.store(held_depth > 0 ? held_depth : 1, std::memory_order_relaxed);
-        mutex_.lock();
         return r;
     };
     if (id == I::pthread_cond_wait_) {
@@ -9943,46 +9341,32 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
 }
 
 // memcpy too: a copy with overlapping ranges works, as on bionic.
-void Runtime::GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
-                           std::uint32_t len) {
-    using I = ImportId;
-    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
-    std::memmove(H(dst), H<const void>(src), wlen);
-    ScanWP(this, dst, wlen, n.c_str());
+void Runtime::GuestMemCopy(Regs& regs, std::uint32_t dst, std::uint32_t src, std::uint32_t len) {
+    std::memmove(H(dst), H<const void>(src), len);
     Ret(regs, dst);
 }
 
-void Runtime::GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, int fill,
-                          std::uint32_t len) {
-    using I = ImportId;
-    // TEMP-DIAG (wall4 second filler): log non-clr memset traffic.
-    // Diagnostic layer (PLAN.md A4): off in shipping.
-    if (DiagOn()) {
-        static int mcount = 0;
-        if (n.compare(0, 14, "__aeabi_memclr") != 0 && mcount < 400) {
-            mcount++;
-            std::uint32_t lr = ActiveJit() ? ActiveJit()->Regs()[14] : 0;
-            std::printf("[memset] %s dst=%08x len=%u fill=%02x lr=%08x\n", n.c_str(), dst, len,
-                        fill & 0xFF, lr);
-        }
-    }
-    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
-    std::memset(H(dst), fill, wlen);
-    ScanWP(this, dst, wlen, n.c_str());
+void Runtime::GuestMemSet(Regs& regs, std::uint32_t dst, int fill, std::uint32_t len) {
+    std::memset(H(dst), fill, len);
     Ret(regs, dst);
 }
 
 bool Runtime::PthreadOnce(std::uint32_t control, std::uint32_t routine,
                           std::array<std::uint32_t, 16>& regs) {
-    // unique_lock (not lock_guard): the state==1 case below has to release the
-    // dispatcher lock while it waits.
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (!CheckRange(control, 4, false)) {
-        std::printf("[once] BAD control %08x -- halting\n", control);
+        std::printf("[once] LOUD BAD control %08x -- halting\n", control);
         stop_step_ = true;
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return false;
     }
+    // Done already (the usual call): one load and no lock, as bionic's fast
+    // path. Not started (0) and in progress (1) take the dispatcher lock.
+    if (__atomic_load_n(H<std::uint32_t>(control), __ATOMIC_ACQUIRE) > 1u) {
+        return false;
+    }
+    // unique_lock (not lock_guard): the state==1 case below has to release the
+    // dispatcher lock while it waits.
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     // Same control already held by THIS thread => pathological recursion (break
     // it). This must be decided before the wait below: waiting on our own init
     // would never end. A DIFFERENT control while one is in progress is
@@ -10132,45 +9516,6 @@ void Runtime::ExidxFor(std::uint32_t pc, std::uint32_t* base, std::uint32_t* cou
             return;
         }
     }
-}
-
-std::uint32_t Runtime::FindExidx(std::uint32_t pc) {
-    std::uint32_t base = 0, count = 0;
-    ExidxFor(pc & ~std::uint32_t(1), &base, &count);
-    if (base == 0 || count == 0) {
-        return 0;
-    }
-    pc &= ~std::uint32_t(1);  // exidx function addresses exclude the Thumb bit
-    // Table sorted by function address ascending. prel31: bit30 is the sign
-    // (verified: exact fn matches for 0x2F91B0/0x45A758/0xC1550, 0 violations).
-    auto fn_of = [&](std::uint32_t idx) -> std::uint32_t {
-        std::uint32_t w = 0;
-        std::memcpy(&w, H(base + idx * 8), 4);
-        std::int32_t off;
-        if (w & 0x40000000u) {
-            off = -static_cast<std::int32_t>(0x40000000u - (w & 0x3FFFFFFFu));
-        } else {
-            off = static_cast<std::int32_t>(w & 0x3FFFFFFFu);
-        }
-        return (base + idx * 8) + static_cast<std::uint32_t>(off);
-    };
-    // Bounds-check the whole table first (host-side bulk access discipline).
-    if (!CheckRange(base, count * 8, false)) {
-        return 0;
-    }
-    std::uint32_t lo = 0, hi = count;
-    while (lo < hi) {
-        const std::uint32_t mid = lo + (hi - lo) / 2;
-        if (fn_of(mid) <= pc) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    if (lo == 0) {
-        return 0;  // pc below the first entry
-    }
-    return base + (lo - 1) * 8;
 }
 
 void Runtime::InitDataImports() {
@@ -10760,63 +10105,26 @@ unsigned Runtime::HeapCorruptionCount() {
     return g_heap_corrupt_n.load(std::memory_order_relaxed);
 }
 
-bool Runtime::HeapWatchViolation(std::uint32_t addr, std::size_t size) {
-    // Cheap prefilter (no lock): outside the heap arena entirely.
-    const std::uint64_t a = addr;
-    if (a < heap_base_ || a + size > (std::uint64_t)heap_base_ + kHeapSize) {
-        return false;
-    }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
-    // D2: one containment query covers both old branches (an exact base hit is
-    // just containment with base == addr).
-    std::uint32_t cbase = 0, csize = 0;
-    if (LiveIdxContaining(addr, &cbase, &csize) &&
-        (std::uint64_t)addr + size <= (std::uint64_t)cbase + csize) {
-        return false;  // fully inside a live allocation
-    }
-    // Quarantined (freed, held)? Distinct verdict: UAF write.
-    for (const auto& q : norelease_held_) {
-        if (a >= q.addr && a + size <= (std::uint64_t)q.addr + q.size) {
-            static int qn = 0;
-            if (qn < 30) {
-                qn++;
-                std::printf("[heapwatch] UAF-WRITE addr=%08x size=%zu q=%08x+%u\n", addr, size,
-                            q.addr, q.size);
-            }
-            return true;
-        }
-    }
-    {
-        static int wn = 0;
-        if (wn < 30) {
-            wn++;
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::uint32_t pc = 0;
-            if (aj) {
-                pc = aj->Regs()[15];
-            }
-            std::printf("[heapwatch] WILD-WRITE addr=%08x size=%zu pc=%08x lr=%08x\n", addr, size,
-                        pc, lr);
-        }
-    }
-    return true;
-}
-
 std::uint32_t Runtime::HeapCorruptionPc() {
     return g_heap_corrupt_pc.load(std::memory_order_relaxed);
 }
 
 void Runtime::ThreadEnter(Dynarmic::A32::Jit* jit, std::uint32_t tid) {
+    // Every Java -> native call comes through here. A thread that is
+    // registered already (t_sig is the entry of t_hot.tid; entries are never
+    // removed) only publishes the Jit it runs on now: no lock, no map, no
+    // gettid. A signal sender that still reads the previous Jit halts a Jit
+    // that is alive and stopped, which is harmless.
+    const bool registered = t_sig && t_rt == this && t_hot.tid == tid && !t_hot.is_proxy;
     t_hot.active_jit = jit;
     t_hot.tid = tid;
     if (jit) {
         jit->SetTpidruro(0);  // BindTls
-        RegisterSigThread(tid, jit);
+        if (registered) {
+            t_sig->jit.store(jit, std::memory_order_release);
+        } else {
+            RegisterSigThread(tid, jit);
+        }
         sampler::ThreadUses();  // the profiler's timer for this thread, when on
     } else if (t_sig) {
         std::lock_guard<std::mutex> l(sig_mu_);  // see GuestSendSignal
@@ -13289,8 +12597,27 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return 0xFFFFFFFFu;
     }
+    // The attributes (PthreadAttr's layout): a thread created detached is
+    // gone when it ends, as after pthread_detach (it used to stay in
+    // threads_ for good), and a stack larger than ours is given. A smaller
+    // request still gets kThreadStackSize: these stacks come from the guest
+    // heap without a guard page, so a smaller one would turn an overflow
+    // into silent heap damage instead of the fault a device gives.
+    bool detached = false;
+    std::uint32_t stack_size = kThreadStackSize;
     if (attr != 0) {
-        std::printf("[thread] NOTE non-null attr %08x (ignored)\n", attr);
+        if (!CheckRange(attr, 24, false)) {
+            std::printf("[thread] LOUD pthread_create: bad attr %08x -- halting\n", attr);
+            HaltGuest();
+            return 0xFFFFFFFFu;
+        }
+        std::uint32_t f[6];
+        std::memcpy(f, H(attr), sizeof f);
+        detached = (f[0] & 1u) != 0;
+        constexpr std::uint32_t kMaxStack = 64u << 20;
+        if (f[2] > stack_size) {
+            stack_size = (std::min(f[2], kMaxStack) + 0xFFFu) & ~0xFFFu;
+        }
     }
     if (!cb_) {
         std::printf("[thread] LOUD no callbacks registered -- halting\n");
@@ -13300,9 +12627,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // 8MB guest stack from the heap. Stack-overflow smash guard (triage
     // 2026-10-16). The block is owned by the ThreadState now and handed back by
     // ReapThreadStack (2026-10-18: it used to be leaked outright).
-    const std::uint32_t stack = GuestMalloc(kThreadStackSize);
+    const std::uint32_t stack = GuestMalloc(stack_size);
     if (!stack) {
-        return ENOMEM;
+        return EAGAIN;  // POSIX: no resources for another thread
     }
     std::size_t cpu_id = 0;
     if (!AcquireCpuId(&cpu_id)) {
@@ -13315,8 +12642,10 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         tid = AllocTid();
         st->stack = stack;
+        st->stack_size = stack_size;
+        st->detached = detached;
         thr_stacks_++;
-        thr_stack_bytes_ += kThreadStackSize;
+        thr_stack_bytes_ += stack_size;
         threads_[tid] = st;
     }
     if (!CheckRange(tid_out, 4, true)) {
@@ -13332,9 +12661,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // std::thread throws std::system_error when the host cannot create a
     // thread; that must become EAGAIN for the guest, not std::terminate.
     try {
-    st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
+    st->th = std::thread([this, st, tid, start, arg, stack, stack_size, cpu_id]() {
         t_hot.tid = tid;
-        SetThreadStack(stack, kThreadStackSize);
+        SetThreadStack(stack, stack_size);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
         cfg.optimizations =
@@ -13353,29 +12682,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         RegisterSigThread(tid, &jit);
         sampler::ThreadUses();  // the profiler's timer for a guest-created thread, when on
         PushLocalFrame();  // real handles made here go with the thread, as on a JVM
-        // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
-        // workers; racy values, liveness only — same caveat as main beat).
-        if (std::getenv("HARNESS_WBEAT")) {
-            std::thread([st, tid, &jit]() {
-                for (int i = 0; i < 60; i++) {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    bool dd = false;
-                    {
-                        std::lock_guard<std::mutex> l(st->m);
-                        dd = st->done;
-                    }
-                    if (dd) {
-                        break;
-                    }
-                    auto& rr = jit.Regs();
-                    std::printf("[wbeat] tid=%u pc=%08x lr=%08x sp=%08x\n", tid, rr[15],
-                                rr[14], rr[13]);
-                }
-            }).detach();
-        }
         auto& regs = jit.Regs();
         regs.fill(0);
-        regs[13] = stack + kThreadStackSize - 8;  // 8-aligned top
+        regs[13] = stack + stack_size - 8;  // 8-aligned top
         regs[14] = mod_.halt_va;           // routine return ends the thread
         regs[0] = arg;
         if (start & 1u) {
@@ -13499,7 +12808,7 @@ void Runtime::DumpGuestThreads() {
             const char* same = "?";
             std::uint64_t wakes = 0;
             std::uint32_t last_by = 0;
-            std::unique_lock<std::recursive_mutex> g(mutex_, std::try_to_lock);
+            std::shared_lock<std::shared_mutex> g(sync_map_mu_, std::try_to_lock);
             if (g.owns_lock()) {
                 const auto it = cond_map_.find(gc);
                 same = it == cond_map_.end() ? "unmapped" : it->second.get() == wcv ? "yes" : "NO";
@@ -13785,7 +13094,7 @@ void Runtime::ReapThreadStack(std::uint32_t tid) {
     const std::uint32_t s = it->second->stack;
     it->second->stack = 0;
     thr_stacks_--;
-    thr_stack_bytes_ -= kThreadStackSize;
+    thr_stack_bytes_ -= it->second->stack_size;
     if (DiagOn()) {
         static int rn = 0;
         if (rn < 40) {
@@ -15514,8 +14823,33 @@ std::uint32_t Runtime::NewByteArray(std::uint32_t len) {
     return out;  // opaque jbyteArray handle == buffer VA
 }
 
+// JNI functions (jni.h JNINativeInterface index) that cannot run Java code:
+// references, pending-exception queries, field access, strings, arrays,
+// monitors. Everything else may (calls, constructors, class lookup and the
+// ID getters that initialise a class, Throw, the JavaVM table).
+static bool JniRunsNoJava(std::uint32_t fn) {
+    // Not 16: ExceptionDescribe runs Throwable.printStackTrace(). Not 18: FatalError.
+    return fn == 15 || fn == 17 || (fn >= 19 && fn <= 26) || fn == 31 || fn == 32 ||
+           (fn >= 95 && fn <= 112) ||
+           (fn >= 145 && fn <= 214) || (fn >= 217 && fn <= 228) || (fn >= 230 && fn <= 232);
+}
+
+// A guest JNI call of a Java method that could not be made real: LOUD, once
+// per method.
+void Runtime::NoteFailedJavaCall(std::uint32_t fn, std::uint32_t method, const std::string& mdesc) {
+    static std::mutex mu;
+    static std::set<std::uint32_t> seen;
+    std::lock_guard<std::mutex> l(mu);
+    if (seen.size() < 200 && seen.insert(method).second) {
+        std::printf("[jni] LOUD Java call fn#%u %s could not be made -- the guest gets 0 / an "
+                    "empty result\n", fn, mdesc.empty() ? "(unknown method id)" : mdesc.c_str());
+    }
+}
+
 void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
-    ForgetGlBindings();  // Java code may run: its GL context may change
+    if (!JniRunsNoJava(fn)) {
+        ForgetGlBindings();  // Java code may run: its GL context may change
+    }
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
 #ifdef __ANDROID__
     JavaCopies java_copies;
@@ -15569,7 +14903,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         if (jfn == 6 || jfn == 4 || jfn == 7) {  // GetEnv / Attach / AttachAsDaemon
             if (!CheckRange(a1, 4, true)) {
-                std::printf("[jvm] fn#%u BAD env_out %08x -- halting\n", jfn, a1);
+                std::printf("[jvm] LOUD fn#%u BAD env_out %08x -- halting\n", jfn, a1);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
@@ -15586,13 +14920,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         return;
     }
 #ifdef __ANDROID__
-    // Every Call<T>Method / CallStatic<T>Method family goes to the real Java
-    // method first (the Object families 34-36/114-116 already did); the mock
-    // answers below are only the fallback when the call cannot be made real
-    // (no JVM on this thread, a mock-only class/object). The mocks were
-    // device answers from 2014 (API 21, 800x480, density group 1...) and
-    // dropped every void call, e.g. App.quitRequested (which only calls
-    // stopLockTask() in all six titles).
+    // Every Call<T>Method / CallStatic<T>Method family is the real Java
+    // method on a device (the Object families 34-36/114-116 below too).
+    // When the call cannot be made (the method threw, the receiver is not a
+    // real object) the answer is 0 / false / nothing and one LOUD line per
+    // method. The switch cases of these families answer for the PC harness
+    // only, which has no JVM: a phone of 2014 (API 21, 800x480, 240 PPI,
+    // startOutput = true). A device must never be told those.
     if ((fn >= 37 && fn <= 63) || (fn >= 117 && fn <= 143)) {
         std::string mdesc;
         {
@@ -15605,6 +14939,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (!mdesc.empty() && RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
             return;
         }
+        NoteFailedJavaCall(fn, a2, mdesc);
+        Ret(regs, 0, 0);
+        return;
     }
 #endif
     switch (fn) {
@@ -15728,7 +15065,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         // 5th arg (buf) rides the guest stack at [sp].
         std::uint32_t buf = 0;
         if (!CheckRange(regs[13], 4, false)) {
-            std::printf("[jni] region BAD sp %08x -- halting\n", regs[13]);
+            std::printf("[jni] LOUD region BAD sp %08x -- halting\n", regs[13]);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
@@ -15771,31 +15108,22 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (fn == 220) {
             const std::uint32_t want = a3 * 2;
             if (!CheckRange(buf, want, true)) {
-                std::printf("[jni] region BAD buf %08x -- halting\n", buf);
+                std::printf("[jni] LOUD region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            // BOUND THE WRITE BY THE DESTINATION ALLOCATION (2026-10-17; kept
-            // under D1 as force=true because it is a functional bound, not a
-            // firewall): the game sizes `buf` from its own length bookkeeping,
-            // so an unchecked UTF-16 widen overran a 24 B block into the next
-            // chunk's head -- exactly the metadata smear that detonated in
-            // mspace_free (ok_inuse failed on a head overwritten by wide
-            // chars). CheckRange only proves the mapping is writable (the whole
-            // arena is).
-            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion", true);
             std::u16string units;
 #ifdef __ANDROID__
             if (js) {
-                units.resize(wlen / 2);
+                units.resize(a3);
                 re->GetStringRegion(js, static_cast<jsize>(a2), static_cast<jsize>(units.size()),
                                     reinterpret_cast<jchar*>(&units[0]));
                 re->ExceptionClear();
             } else
 #endif
             {
-                units = Utf16OfMutf8(it->second).substr(a2, wlen / 2);
+                units = Utf16OfMutf8(it->second).substr(a2, a3);
             }
             std::memcpy(H(buf), units.data(), units.size() * 2);
         } else {
@@ -15813,25 +15141,12 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
             const std::uint32_t want = static_cast<std::uint32_t>(bytes.size());
             if (!CheckRange(buf, want, true)) {
-                std::printf("[jni] region BAD buf %08x -- halting\n", buf);
+                std::printf("[jni] LOUD region BAD buf %08x -- halting\n", buf);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringUTFRegion", true);
-            std::memcpy(H(buf), bytes.data(), wlen);
-        }
-        {
-            // Triage (capped): name the string, the destination and the size we
-            // believe the destination allocation has. alloc=0 = not a heap
-            // block (jni arena / static) -> ClampHeapWrite left it unclamped.
-            static int rn = 0;
-            if (DiagOn() && rn < 8) {
-                rn++;
-                std::uint32_t asz = LiveIdxFind(buf);
-                std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",
-                            fn == 220 ? "U" : "", a1, a2, a3, buf, asz);
-            }
+            std::memcpy(H(buf), bytes.data(), want);
         }
         Ret(regs, 0);
         return;
@@ -16725,71 +16040,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 mdesc = it->second;
             }
         }
-        // AudioOutput.startOutput()Z: our mixer is live (mixdata proven) —
-        // report started, as on device. Everything else defaults to false
-        // (logged-out services etc.).
-#ifdef __ANDROID__
-        // Product host: real startOutput on real objects (starts real
-        // audio -> real callbacks -> mixdata). No-arg boolean only; other
-        // shapes stay mocked below.
-        if (mdesc.find("startOutput()Z") != std::string::npos) {
-            JNIEnv* re = GuestCallbacks::g_real_env_hook
-                             ? static_cast<JNIEnv*>(GuestCallbacks::g_real_env_hook())
-                             : nullptr;
-            void* robj = UnwrapObject(a1);
-            if (re && robj) {
-                std::string d = mdesc;
-                const std::size_t dot = d.rfind('.');
-                const std::size_t par = d.find('(');
-                if (dot != std::string::npos && par != std::string::npos && dot < par) {
-                    const std::string cls = d.substr(0, dot);
-                    jclass rclazz = nullptr;
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(mutex_);
-                        const auto it = real_classes_.find(cls);
-                        if (it != real_classes_.end()) {
-                            rclazz = static_cast<jclass>(it->second);
-                        }
-                    }
-                    if (!rclazz) {
-                        rclazz = static_cast<jclass>(RealClass(re, cls));  // + the app loader fallback
-                    }
-                    if (!rclazz) {
-                        jclass lc = re->FindClass(cls.c_str());
-                        if (lc && !re->ExceptionCheck()) {
-                            rclazz = static_cast<jclass>(re->NewGlobalRef(lc));
-                            re->DeleteLocalRef(lc);
-                            if (rclazz) {
-                                std::lock_guard<std::recursive_mutex> lock(mutex_);
-                                real_classes_[cls] = rclazz;
-                            }
-                        } else {
-                            re->ExceptionClear();
-                        }
-                    }
-                    jmethodID rmid = nullptr;
-                    if (rclazz) {
-                        rmid = re->GetMethodID(rclazz, "startOutput", "()Z");
-                        if (!rmid || re->ExceptionCheck()) {
-                            re->ExceptionClear();
-                            rmid = nullptr;
-                        }
-                    }
-                    if (rmid) {
-                        jboolean rr = re->CallBooleanMethodA(static_cast<jobject>(robj),
-                                                             rmid, nullptr);
-                        if (!re->ExceptionCheck()) {
-                            std::printf("[jni] CallBooleanMethod startOutput -> %u (real)\n",
-                                        (unsigned)rr);
-                            Ret(regs, rr ? 1u : 0u);
-                            return;
-                        }
-                        re->ExceptionClear();
-                    }
-                }
-            }
-        }
-#endif
+        // PC harness only (a device made the real call in the prologue):
+        // AudioOutput.startOutput()Z reports started, everything else false.
         const std::uint32_t rv =
             (mdesc.find("startOutput") != std::string::npos) ? 1 : 0;
         if (DiagOn()) {
@@ -16813,25 +16065,6 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (DiagOn()) {
             std::printf("[jni] CallVoidMethod%s %s\n", vtag, mdesc.c_str());
         }
-#ifdef __ANDROID__
-        // Product host: the guest's audio engine calls AudioOutput.stopOutput()
-        // on pause and AudioOutput.requestExclusiveAudio(Z) on focus changes.
-        // Java never calls stopOutput (no caller in the dex); the only caller
-        // is the native side, so the generic void mock below would drop it and
-        // leave the AudioTrack playing after the app is backgrounded. Forward
-        // exactly these two to the real object; every other void call stays
-        // mocked (services/analytics are intentionally inert).
-        if (mdesc.find("AudioOutput.stopOutput") != std::string::npos ||
-            mdesc.find("AudioOutput.requestExclusiveAudio") != std::string::npos) {
-            if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
-                return;
-            }
-            // A real AudioOutput that cannot take its own method is an anomaly,
-            // not a mock path. The old silent drop WAS the background-audio bug.
-            std::printf("[jni] LOUD %s real call failed -- audio state not applied\n",
-                        mdesc.c_str());
-        }
-#endif
         Ret(regs, 0);  // void JNI: zero r0
         return;
     }
@@ -16860,14 +16093,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (RealCallObject(fn, a0, a1, a2, a3, regs, mdesc)) {
             return;
         }
-        {
-            // A mock answer where the real call was meant to run: the guest
-            // gets "" or an inert object, so name the method.
-            static std::atomic<int> mock_logs{0};
-            if (mock_logs.fetch_add(1) < 40) {
-                std::printf("[jni] Call%sObject %s: no real call, a mock result\n",
-                            is_static ? "Static" : "", mdesc.c_str());
-            }
+        // The real call could not be made: the guest gets "" (a String
+        // method) or an inert object, never NULL (the engines do not check),
+        // and the method is named with LOUD. The one expected case is the
+        // offline policy: networkType() of an offline title is refused by
+        // RealCallObject on purpose and answers "" below.
+        if (mdesc.find("networkType") == std::string::npos || network_allowed_) {
+            NoteFailedJavaCall(fn, a2, mdesc);
         }
 #endif
         if (mdesc.size() >= 20 &&
@@ -16876,31 +16108,22 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             if (mdesc.find("getPathToFileCacheDirectory") != std::string::npos) {
                 content = GuestFilesPrefix();
             }
-            // HARNESS_DEVID=<hex16> overrides the mock device ID (default: a
-            // fixed plausible ANDROID_ID; empty broke key-derivation paths).
+#ifndef __ANDROID__
+            // PC harness (no JVM): a fixed plausible ANDROID_ID and locale
+            // (empty ones broke key-derivation and locale-dependent paths).
             if (mdesc.find("getUniqueId") != std::string::npos) {
                 content = "0123456789abcdef";
-                if (const char* d = std::getenv("HARNESS_DEVID")) {
-                    content = d;
-                }
             }
-            // HARNESS_LOCALE=<tag> overrides the mock locale (default en_US;
-            // empty broke locale-dependent paths). Real tag: e.g. en_US.
             if (mdesc.find("systemLocale") != std::string::npos) {
                 content = "en_US";
-                if (const char* d = std::getenv("HARNESS_LOCALE")) {
-                    content = d;
-                }
             }
+#endif
             // rcs.core.Utils.networkType() of an offline title (an online
             // one asks the real method): "" is what the real method returns
             // without network (getActiveNetworkInfo() == null -> exception
-            // -> ""), next to "wifi" and "cellular". HARNESS_NETTYPE overrides.
+            // -> ""), next to "wifi" and "cellular".
             if (mdesc.find("networkType") != std::string::npos) {
                 content = "";
-                if (const char* d = std::getenv("HARNESS_NETTYPE")) {
-                    content = d;
-                }
             }
             // UUID.toString() must be a valid UUID (empty string stalled the
             // installation-ID flow into a forever poll-wait; device always
@@ -17247,28 +16470,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             if (re && rarr) {
                 jsize len = re->GetArrayLength(static_cast<jarray>(rarr));
                 if (!re->ExceptionCheck() && len > 0 && len < 10000000) {
-                    // Pool first (exact len): kills the per-callback orphan
-                    // leak without changing copy semantics (fresh bytes are
-                    // always memcpied in below).
-                    std::uint32_t gb = 0;
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
-                        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-                            if (it->second == (std::uint32_t)len) {
-                                if (LiveIdxFind(it->first)) {
-                                    gb = it->first;
-                                    array_pool_.erase(it);
-                                    break;
-                                }
-                                // Stale pool entry (its block was freed): counted,
-                                // then skipped -- a fresh block is allocated below.
-                                ++hx_pool_stale_;
-                            }
-                        }
-                    }
-                    if (!gb) {
-                        gb = GuestMalloc((std::uint32_t)len);
-                    }
+                    // A guest copy of the elements, freed by the Release.
+                    const std::uint32_t gb = GuestMalloc((std::uint32_t)len);
                     jbyte* hp = gb ? re->GetByteArrayElements(static_cast<jbyteArray>(rarr),
                                                               nullptr)
                                    : nullptr;
@@ -17291,6 +16494,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     if (hp) {
                         re->ReleaseByteArrayElements(static_cast<jbyteArray>(rarr), hp,
                                                      JNI_ABORT);
+                    }
+                    if (gb) {
+                        GuestFree(gb);
                     }
                     re->ExceptionClear();
                 } else {
@@ -17498,15 +16704,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         re->ExceptionClear();
                     }
                 }
-                // Recycle the guest copy (cap 8; overflow leaks as before).
-                // Only properly-Released buffers: the guest cannot hold them
-                // (it must Release before the next Get on the same array).
-                // After JNI_COMMIT the guest still owns the buffer.
-                if (!commit_only && pin.guest_buf && pin.len) {
-                    std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
-                    if (array_pool_.size() < 8) {
-                        array_pool_.push_back({pin.guest_buf, pin.len});
-                    }
+                // The guest copy goes with the release; after JNI_COMMIT the
+                // guest still owns it.
+                if (!commit_only && pin.guest_buf) {
+                    GuestFree(pin.guest_buf);
                 }
                 Ret(regs, 0);
                 return;
@@ -17585,7 +16786,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     }
     case 6: {  // FindClass(env, name) -> jclass (interned mock)
         if (!CheckRange(a1, 1, false)) {
-            std::printf("[jni] FindClass BAD name %08x -- halting\n", a1);
+            std::printf("[jni] LOUD FindClass BAD name %08x -- halting\n", a1);
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
             return;
@@ -17616,7 +16817,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
     case 144:  // GetStaticFieldID(env, class, name, sig) -> jfieldID cookie
     {
         if (!CheckRange(a2, 1, false) || !CheckRange(a3, 1, false)) {
-            std::printf("[jni] Get%sMethodID BAD name/sig -- halting\n",
+            std::printf("[jni] LOUD Get%sMethodID BAD name/sig -- halting\n",
                         fn == 33 ? "" : "Static");
             stop_step_ = true;
             ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
@@ -17818,23 +17019,6 @@ void Runtime::SvcHistDump() {
 
 // ---- memory callbacks ----
 
-// Value watchpoints (HARNESS_WP=hexvalue): trace where a value is written/loaded.
-static std::int64_t ReadWP() {
-    return WriteWP();
-}
-
-// Address watchpoint (HARNESS_WPA=hexaddr): log every data read from addr.
-static std::int64_t WatchAddr() {
-    static std::int64_t wa = -2;
-    if (wa == -2) {
-        wa = -1;
-        if (const char* e = std::getenv("HARNESS_WPA")) {
-            wa = static_cast<std::int64_t>(std::strtoul(e, nullptr, 16));
-        }
-    }
-    return wa;
-}
-
 template <typename T>
 T GuestCallbacks::Read(VAddr addr, bool exec) {
     if (prof::g_enabled) {
@@ -17842,7 +17026,7 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
     }
     if (!rt_->CheckAccess(addr, sizeof(T), false, exec)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem][t%u] BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x\n",
+            std::printf("[mem][t%u] LOUD BAD %s @ %08x size %zu guest-pc=%08x lr=%08x r4=%08x -- halting\n",
                         t_hot.tid, exec ? "exec" : "read", addr, sizeof(T),
                         rt_->ActiveJit()->Regs()[15], rt_->ActiveJit()->Regs()[14],
                         rt_->ActiveJit()->Regs()[4]);
@@ -17865,36 +17049,6 @@ T GuestCallbacks::Read(VAddr addr, bool exec) {
             v |= T(p[i]) << (8 * i);
         }
     }
-    // Data-load trace (HARNESS_TRACELOADS=1, step mode): every data read.
-    static std::int64_t tl = -2;
-    if (tl == -2) {
-        tl = -1;
-        if (std::getenv("HARNESS_TRACELOADS")) {
-            tl = 1;
-        }
-    }
-    if (tl > 0 && !exec && addr >= 0x650000u) {
-        std::printf("[ld] pc=%08x [%08x] = %08x\n", rt_->ActiveJit()->Regs()[15], addr,
-                    static_cast<std::uint32_t>(v));
-    }
-    if (sizeof(T) == 4) {
-        const std::int64_t wp = ReadWP();
-        if (wp >= 0 && v == static_cast<T>(wp)) {
-            auto& regs = rt_->ActiveJit()->Regs();
-            std::printf("[wpr] %08x loaded from %08x guest-pc=%08x\n", static_cast<std::uint32_t>(v),
-                        addr, regs[15]);
-            std::printf("[wpr] regs:");
-            for (int r = 0; r < 16; r++) {
-                std::printf(" r%d=%08x", r, regs[r]);
-            }
-            std::printf("\n");
-        }
-        const std::int64_t wa = WatchAddr();
-        if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
-            std::printf("[wpa] read from %08x = %08x guest-pc=%08x\n", addr,
-                        static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
-        }
-    }
     return v;
 }
 
@@ -17903,74 +17057,29 @@ void GuestCallbacks::Write(VAddr addr, T v) {
     if (prof::g_enabled) {
         prof::t_slow_mem++;
     }
-    {
-        const char* gwhat = nullptr;
-        if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat)) {
-            // RELRO after relocation: the real loader makes these pages
-            // read-only, so this write cannot be legitimate. Refuse it (a
-            // zeroed GOT slot turns the next PLT call into `pc = 0`), and name
-            // the writer: pc + caller LR + the args that name the victim/source.
-            if (rt_->NoteWriteGuard()) {
-                std::printf("[mem] %s write REFUSED @ %08x size %zu guest-pc=%08x lr=%08x\n",
-                            gwhat, addr, sizeof(T), rt_->ActiveJit()->Regs()[15],
-                            rt_->ActiveJit()->Regs()[14]);
-                std::printf("[mem] %s REFUSED regs r0=%08x r1=%08x r2=%08x r3=%08x "
-                            "r4=%08x r5=%08x r6=%08x r7=%08x\n",
-                            gwhat, rt_->ActiveJit()->Regs()[0], rt_->ActiveJit()->Regs()[1],
-                            rt_->ActiveJit()->Regs()[2], rt_->ActiveJit()->Regs()[3],
-                            rt_->ActiveJit()->Regs()[4], rt_->ActiveJit()->Regs()[5],
-                            rt_->ActiveJit()->Regs()[6], rt_->ActiveJit()->Regs()[7]);
-            }
-            return;
-        }
-    }
-    if (!rt_->CheckAccess(addr, sizeof(T), true, false)) {
+    // RELRO after relocation is read-only as the real loader makes it (the
+    // mapping table says so; the guard list names it and also covers a
+    // RELRO that shares a table entry). A write there halts like any other
+    // bad write: it used to be dropped while the guest ran on.
+    const char* gwhat = nullptr;
+    if (rt_->WriteGuardHit(addr, sizeof(T), &gwhat) || !rt_->CheckAccess(addr, sizeof(T), true, false)) {
         if (rt_->NoteBad()) {
-            std::printf("[mem] BAD write @ %08x size %zu guest-pc=%08x -- halting\n", addr,
-                        sizeof(T), rt_->ActiveJit()->Regs()[15]);
-            // Fox-hunt (2026-10-15): GC mark-store faults need the list owner
-            // (r4), victim object (r6) and marker source (r7) to name the
-            // writer. Capped by NoteBad like the line above.
-            std::printf("[mem] BAD regs lr=%08x r4=%08x r5=%08x r6=%08x r7=%08x\n",
-                        rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[4],
+            std::printf("[mem] LOUD BAD write @ %08x size %zu%s%s guest-pc=%08x -- halting\n", addr,
+                        sizeof(T), gwhat ? " guard=" : "", gwhat ? gwhat : "",
+                        rt_->ActiveJit()->Regs()[15]);
+            // The registers that usually name the writer and its object.
+            std::printf("[mem] BAD regs lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
+                        "r6=%08x r7=%08x\n",
+                        rt_->ActiveJit()->Regs()[14], rt_->ActiveJit()->Regs()[0],
+                        rt_->ActiveJit()->Regs()[1], rt_->ActiveJit()->Regs()[2],
+                        rt_->ActiveJit()->Regs()[3], rt_->ActiveJit()->Regs()[4],
                         rt_->ActiveJit()->Regs()[5], rt_->ActiveJit()->Regs()[6],
                         rt_->ActiveJit()->Regs()[7]);
-            // Fox-hunt: identify the gray object at r7 (header dump names the
-            // type: table/stack/closure) + find the garbage slot nearby (the
-            // deterministic heap makes its address stable across boots ->
-            // range-watch it next run to catch the writer). Capped by NoteBad.
-            {
-                const std::uint32_t o7 = rt_->ActiveJit()->Regs()[7];
-                if (rt_->CheckRange(o7 - 16, 512, false)) {
-                    const std::uint8_t* p = rt_->H<const std::uint8_t>(o7 - 16);
-                    std::printf("[mem] BAD r7obj:");
-                    for (int j = 0; j < 512; j++) {
-                        std::printf(" %02x", p[j]);
-                    }
-                    std::printf("\n");
-                }
-            }
             rt_->DumpEventRing();
         }
         rt_->stop_step_ = true;
         rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
-    }
-    const std::int64_t wa = WatchAddr();
-    if (wa >= 0 && addr == static_cast<std::uint32_t>(wa)) {
-        std::printf("[wpa-w] write to %08x = %08x guest-pc=%08x\n", addr,
-                    static_cast<std::uint32_t>(v), rt_->ActiveJit()->Regs()[15]);
-    }
-    // HUNT watch: every legal guest store checked against live heap.
-    // Static tristate (no EnvOn mutex on this path: millions of stores).
-    {
-        static int hwen = -1;
-        if (hwen < 0) {
-            hwen = std::getenv("HARNESS_HEAPWATCH") ? 1 : 0;
-        }
-        if (hwen) {
-            rt_->HeapWatchViolation(addr, sizeof(T));
-        }
     }
     if ((addr & (sizeof(T) - 1)) == 0) {
         __atomic_store_n(rt_->H<T>(addr), v, __ATOMIC_RELAXED);  // single-copy atomic
@@ -18087,32 +17196,11 @@ std::optional<std::uint32_t> GuestCallbacks::MemoryReadCode(VAddr a) {
 }
 void GuestCallbacks::MemoryWrite8(VAddr a, std::uint8_t v) { Write(a, v); }
 void GuestCallbacks::MemoryWrite16(VAddr a, std::uint16_t v) { Write(a, v); }
-void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) {
-    Write(a, v);
-    // Value watchpoint (HARNESS_WP=hexvalue): who materializes a value?
-    const std::int64_t wp = WriteWP();
-    if (wp >= 0 && v == static_cast<std::uint32_t>(wp)) {
-        std::printf("[wp] %08x written to %08x guest-pc=%08x\n", v, a, rt_->ActiveJit()->Regs()[15]);
-    }
-    // Address watchpoint, write side (HARNESS_WPA=hexaddr also arms this).
-    // NOTE: bulk stores (guest memset/memcpy thunks) bypass callbacks.
-    const std::int64_t wa = WatchAddr();
-    if (wa >= 0 && a == static_cast<std::uint32_t>(wa)) {
-        auto& regs = rt_->ActiveJit()->Regs();
-        std::printf("[wpa] WRITE to %08x = %08x guest-pc=%08x%s\n", a, v, regs[15],
-                    rt_->GuestTid() == 1 ? "" : " (T2+)");
-        std::printf("[wpa] regs:");
-        for (int r = 0; r < 12; r++) {
-            std::printf(" r%d=%08x", r, regs[r]);
-        }
-        std::printf("\n");
-    }
-}
-
+void GuestCallbacks::MemoryWrite32(VAddr a, std::uint32_t v) { Write(a, v); }
 void GuestCallbacks::MemoryWrite64(VAddr a, std::uint64_t v) { Write(a, v); }
 
 void GuestCallbacks::InterpreterFallback(VAddr pc, std::size_t n) {
-    std::printf("[jit] InterpreterFallback pc=%08x n=%zu\n", pc, n);
+    std::printf("[jit] LOUD InterpreterFallback pc=%08x n=%zu -- halting\n", pc, n);
     rt_->stop_step_ = true;
     rt_->ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
 }
@@ -18157,23 +17245,10 @@ std::string Runtime::SvcName(std::uint32_t swi) const {
 
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:
 // CallImport's gotos to bad_ptr cannot cross automatic inits, so this lives
-// here (same convention as TimeWarp). All paths Ret()+return (handled).
-void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
-                        std::uint32_t a2, std::uint32_t a3) {
+// here. All paths Ret()+return (handled).
+void Runtime::InetThunk(ImportId id, Regs& regs, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                        std::uint32_t a3) {
     using I = ImportId;
-    // TEMP-DIAG (ntop failures): log args, capped (ntop has its own cap;
-    // pton spam must not eat it).
-    if (DiagOn()) {  // PLAN.md A: diagnostic layer
-        static int ilog = 0, olog = 0;
-        if (id == I::inet_ntop_ && olog < 12) {
-            olog++;
-            std::printf("[netsock] %s(%u %08x %08x %08x)%s\n", n.c_str(), a0, a1, a2, a3,
-                        olog == 12 ? " (quiet henceforth)" : "");
-        } else if (id == I::inet_pton_ && ilog < 4) {
-            ilog++;
-            std::printf("[netsock] %s(%u %08x %08x %08x)\n", n.c_str(), a0, a1, a2, a3);
-        }
-    }
     if (id == I::inet_ntoa_ || id == I::inet_ntop_) {
         // inet_ntoa(struct in_addr): addr comes BY VALUE in r0 (NOT a
         // pointer). inet_ntop(af, src, dst, size): dst=a2, size=a3.
@@ -18190,18 +17265,6 @@ void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint
             const std::uint32_t need = (a0 == 10 /*AF_INET6*/) ? 46u : 16u;
             if ((a0 != 2 && a0 != 10) || a3 < need || !CheckRange(a1, 4, false) ||
                 !CheckRange(a2, need, true)) {
-                if (DiagOn()) {  // which check failed
-                    const std::uint8_t* sp2 =
-                        (a1 && CheckRange(a1, 16, false)) ? H<const std::uint8_t>(a1) : nullptr;
-                    std::printf("[netsock] ntop-FAIL af=%u size=%u src=%08x dst=%08x%s", a0, a3,
-                                a1, a2, sp2 ? " bytes:" : " (src unreadable)");
-                    if (sp2) {
-                        for (int q = 0; q < 16; q++) {
-                            std::printf(" %02x", sp2[q]);
-                        }
-                    }
-                    std::printf("\n");
-                }
                 SetGuestErrno(a0 != 2 && a0 != 10 ? EAFNOSUPPORT : ENOSPC);
                 Ret(regs, 0);
                 return;
@@ -18279,96 +17342,19 @@ void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint
 }
 
 void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
-    // Emulate the classic ARM switch idiom `add pc, rN, pc` (Rd==pc, Rm==pc),
-    // which Dynarmic reports as UnpredictableInstruction. Semantics: branch to
-    // rN + (insn+8), staying in ARM state. Narrow match: ADD-register, S==0,
-    // no shift, Rd==15, Rm==15 (any cond, any Rn).
-    if (ex == Exception::UnpredictableInstruction) {
-        const std::uint32_t a = pc & ~std::uint32_t(3);
-        std::uint32_t w = 0xDEADDEADu;
-        const bool ok = rt_->CheckRange(a, 4, false);
-        if (ok) {
-            std::memcpy(&w, rt_->H(a), 4);
-        }
-        std::printf("[jit] unpred @%08x ok=%d w=%08x\n", a, (int)ok, w);
-        // NOTE: in Run mode Dynarmic reports the BLOCK start, so `a` is the
-        // `ldr rN, [pc, #imm]` while the unpredictable `add pc, rN, pc` sits
-        // at a+4. Match the 2-insn pair and emulate both (idempotent if the
-        // ldr already executed: same value rewritten).
-        if (ok && rt_->CheckRange(a + 4, 4, false)) {
-            std::uint32_t w1 = 0;
-            std::memcpy(&w1, rt_->H(a + 4), 4);
-            const bool is_ldr = ((w >> 26) & 3u) == 1 && ((w >> 25) & 1u) == 0 &&
-                                ((w >> 20) & 1u) == 1 && ((w >> 16) & 0xFu) == 0xFu;
-            const std::uint32_t rt = (w >> 12) & 0xFu;
-            const bool is_add =
-                ((w1 >> 26) & 3u) == 0 && ((w1 >> 25) & 1u) == 0 && ((w1 >> 21) & 0xFu) == 4 &&
-                ((w1 >> 20) & 1u) == 0 && ((w1 >> 12) & 0xFu) == 0xFu && (w1 & 0xFu) == 0xFu &&
-                (w1 & 0xFF0u) == 0 && ((w1 >> 16) & 0xFu) == rt;
-            if (is_ldr && is_add) {
-                const std::uint32_t off = w & 0xFFFu;
-                const std::uint32_t lit = ((w >> 23) & 1u) ? (a + 8 + off) : (a + 8 - off);
-                if (rt_->CheckRange(lit, 4, false)) {
-                    std::uint32_t rval = 0;
-                    std::memcpy(&rval, rt_->H(lit), 4);
-                    const std::uint32_t target = rval + (a + 4) + 8;
-                    auto& regs = rt_->ActiveJit()->Regs();
-                    regs[rt] = rval;
-                    regs[15] = target;
-                    // Entries are ARM (pad does `bx pc` to switch); the JIT may
-                    // still be Thumb (it falls through `bx pc` without switching).
-                    // Force USER+ARM, NZCV/GE preserved — same contract as Ret().
-                    {
-                        std::uint32_t cpsr = rt_->ActiveJit()->Cpsr();
-                        cpsr = (cpsr & ~std::uint32_t(0x3F)) | std::uint32_t(0x10);
-                        rt_->ActiveJit()->SetCpsr(cpsr);
-                    }
-                    static std::uint64_t addpc_hits = 0;
-                    if (++addpc_hits <= 3) {
-                        std::printf("[jit] ldr/add-pc @%08x r%u=%08x -> %08x\n", a, rt, rval,
-                                    target);
-                    }
-                    return;  // resume, do NOT halt
-                }
-            }
-        }
-        if (ok) {
-            const bool is_add = ((w >> 26) & 3u) == 0 && ((w >> 25) & 1u) == 0 &&
-                                ((w >> 21) & 0xFu) == 4 && ((w >> 20) & 1u) == 0;
-            if (is_add && ((w >> 12) & 0xFu) == 0xFu && (w & 0xFu) == 0xFu &&
-                (w & 0xFF0u) == 0) {
-                auto& regs = rt_->ActiveJit()->Regs();
-                const std::uint32_t rn = (w >> 16) & 0xFu;
-                const std::uint32_t target = regs[rn] + a + 8;
-                static std::uint64_t addpc_hits = 0;
-                if (++addpc_hits <= 3) {
-                    std::printf("[jit] add-pc idiom @%08x r%u=%08x -> %08x\n", a, rn, regs[rn],
-                                target);
-                }
-                regs[15] = target;
-                return;  // resume, do NOT halt
-            }
-        }
-    }
-    std::printf("[jit] ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
-    // DIAG: mini-backtrace for null-jumps (pc=0): lr + stack code-pointers.
+    // Undefined/unpredictable instruction, breakpoint, ...: a clean guest
+    // halt. (An `add pc, rN, pc` emulation lived here until 2026-11: Dynarmic
+    // executes ADD with Rd == PC and S == 0 itself, so it never ran.)
+    std::printf("[jit] LOUD ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
+    // Mini-backtrace (null jumps, pc = 0): lr + guest code addresses on the stack.
     {
         auto& regs = rt_->ActiveJit()->Regs();
         std::printf("[jit] lr=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x%s\n", regs[14], regs[13],
                     regs[0], regs[1], regs[2], regs[3], rt_->GuestTid() == 1 ? "" : " (T2+)");
-        std::uint32_t sp = regs[13];
-        // Module text range: [0, 0x6EE000) per loader layout (bias 0).
-        int shown = 0;
-        for (std::uint32_t a = sp & ~3u; a < sp + 512 && shown < 8; a += 4) {
-            std::uint32_t w = 0;
-            if (!rt_->CheckRange(a, 4, false)) {
-                break;
-            }
-            std::memcpy(&w, rt_->H(a), 4);
-            if (w >= 0x1000 && w < 0x6EE000 && (w & 1) == 0) {
-                std::printf("[jit] stack+%u: ret %08x\n", a - sp, w);
-                shown++;
-            }
+        Runtime::StackHit hits[8];
+        const Runtime::StackScan sc = rt_->ScanStackForReturnAddresses(regs[13], 512, hits, 8);
+        for (unsigned i = 0; i < sc.hits; i++) {
+            std::printf("[jit] stack+%u: ret %08x\n", hits[i].off, hits[i].value);
         }
     }
     rt_->stop_step_ = true;
@@ -18574,8 +17560,7 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
         // side naturally (read-only fs semantics), which is correct.
         // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
         // stack reads them (observed: worker fopen("/etc/hosts") while
-        // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
-        // synthetic hosts (see below) instead of the host file.
+        // resolving cloud.rovio.com): passed through.
         // What a 32-bit process reads there on an arm64 kernel (the host
         // process is 64-bit and would get its own view): see Proc32File.
         if (g == "/proc/cpuinfo" || g == "/proc/self/auxv") {
@@ -18585,31 +17570,7 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             }
         }
         if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
-            g == "/etc/resolv.conf") {
-            return g;
-        }
-        if (g == "/etc/hosts") {
-            if (EnvOn("HARNESS_HOSTSHACK")) {
-                // Synthetic hosts for DNS-hack experiments (no system
-                // change: only this guest path is virtualized).
-                static std::string hackpath;
-                if (hackpath.empty()) {
-                    hackpath = files_hostbase_ + "/synth.hosts";
-                    FILE* hf = std::fopen(hackpath.c_str(), "r");
-                    if (!hf) {
-                        hf = std::fopen(hackpath.c_str(), "w");
-                        if (hf) {
-                            std::fputs("127.0.0.1 localhost\n127.0.0.2 cloud.rovio.com\n",
-                                       hf);
-                            std::fclose(hf);
-                        }
-                    } else {
-                        std::fclose(hf);
-                    }
-                }
-                std::printf("[files] hosts HACK -> %s\n", hackpath.c_str());
-                return hackpath;
-            }
+            g == "/etc/resolv.conf" || g == "/etc/hosts") {
             return g;
         }
         if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&

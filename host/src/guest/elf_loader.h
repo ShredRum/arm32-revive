@@ -42,7 +42,8 @@ inline bool BlockingImportName(const std::string& n) {
 // Imports the guests call in tight loops, dispatched by a load-time id ahead
 // of the import-name chain (Runtime::CallImport), like FastMath.
 enum class HotImport : std::uint8_t {
-    None, TlsGet, TlsSet, MutexLock, MutexUnlock, MemCopy, MemSet, MemSetAeabi, MemClr
+    None, TlsGet, TlsSet, MutexLock, MutexUnlock, MemCopy, MemSet, MemSetAeabi, MemClr,
+    MemCmp, StrLen, StrCmp
 };
 inline HotImport HotImportForName(const std::string& n) {
     if (n == "pthread_getspecific") return HotImport::TlsGet;
@@ -64,6 +65,10 @@ inline HotImport HotImportForName(const std::string& n) {
     if (n == "__aeabi_memclr" || n == "__aeabi_memclr4" || n == "__aeabi_memclr8") {
         return HotImport::MemClr;
     }
+    // The three most called imports of a Rovio frame (docs/minimum.md).
+    if (n == "memcmp" || n == "bcmp") return HotImport::MemCmp;
+    if (n == "strlen") return HotImport::StrLen;
+    if (n == "strcmp") return HotImport::StrCmp;
     return HotImport::None;
 }
 

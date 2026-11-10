@@ -1,4 +1,5 @@
-// Raw guest memory: one 4GB reservation, sub-mapped on demand.
+// Raw guest memory: one 4GB reservation, sub-mapped on demand, with a guard
+// behind it.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -14,8 +15,14 @@ namespace abr {
 
 class GuestMemory {
 public:
+    // Never accessible, right after the 4 GB: generated code reads and writes
+    // at base + a 32-bit guest address, so an access that starts in the last
+    // bytes of the guest space ends up to 7 bytes past it. Without the guard
+    // those bytes are whatever the host mapped there.
+    static constexpr std::size_t kGuard = 0x10000;
+
     GuestMemory() {
-        base_ = static_cast<std::uint8_t*>(mmap(nullptr, 0x100000000ULL, PROT_NONE,
+        base_ = static_cast<std::uint8_t*>(mmap(nullptr, 0x100000000ULL + kGuard, PROT_NONE,
                                                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
         if (base_ == MAP_FAILED) {
             std::perror("mmap guest reservation");
@@ -24,7 +31,7 @@ public:
     }
     ~GuestMemory() {
         if (base_) {
-            munmap(base_, 0x100000000ULL);
+            munmap(base_, 0x100000000ULL + kGuard);
         }
     }
 

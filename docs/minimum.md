@@ -50,8 +50,8 @@ registry ParseError dumps, worker-hang socket/pipe/job logging, "black frame"
 GL state dumps and upload checksums, wall4 memset logging, Fox-hunt GC
 dumps, HEAPWATCH (needs fastmem off), NORELEASE, ZEROFILL, MALLOCPAD,
 CLAMPWRITE, LASTSVC/SVCHIST, PCTRACE/PCLOG, EXIDXLOG, TRANSLOG, PATHLOG,
-FILESLOG, POLLDBG, CALLMAX, JNIMAX, TIMEWARP, HOSTSHACK, DNS1/2, DEVID,
-NETTYPE, SHOTSWAP/SHOTCLEAR (PC), ... Each closed hunt's block can go; keep
+FILESLOG, CALLMAX, JNIMAX (TIMEWARP, HOSTSHACK, POLLDBG, DNS1/2, DEVID,
+NETTYPE, LOCALE, SHOTSWAP/SHOTCLEAR: removed 2026-11-10), ... Each closed hunt's block can go; keep
 the few that serve every investigation: HARNESS_DIAG, ABR_DIAG_COUNTERS,
 abdump, the NO* switches of the JIT features (NOJITSHARE, NOTLSTHUNK,
 NOFASTDISPATCH, NOOPT), HARNESS_REALGL/PAGESIZE/HEAPBASE where tests use them.

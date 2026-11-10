@@ -58,18 +58,6 @@ public:
     std::uint32_t Shrunk() const { return shrunk_; }
     unsigned long long Ops() const { return ops_; }
     std::size_t MaxLive() const { return max_live_; }
-    // Diag-only self-check: live entries with size > sz. Proves the ordered
-    // side-index of large blocks (Runtime::big_live_) stays in sync with this
-    // table without trusting its own bookkeeping.
-    std::size_t CountLargerThan(std::uint32_t sz) const {
-        std::size_t n = 0;
-        for (const Entry& e : tab_) {
-            if (e.base != kEmpty && e.size != kEmpty && e.size > sz) {
-                ++n;
-            }
-        }
-        return n;
-    }
 
     void Clear() {
         for (auto& e : tab_) {
