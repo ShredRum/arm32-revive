@@ -1823,14 +1823,13 @@ static bool Boot(JavaVM* vm) {
     abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
     Log("flags: fastmem=%s mallocpad=%s zerofill=%s heapwatch=%s norelease=%s "
-        "clampwrite=%s diag=%s jitopt=%s jitshare=%s tlsthunk=%s fastdispatch=%s hostfpsr=%s "
+        "diag=%s jitopt=%s jitshare=%s tlsthunk=%s fastdispatch=%s hostfpsr=%s "
         "jitcallbacks=%s",
         JitFastmemOn() ? "on" : "off",
         std::getenv("HARNESS_MALLOCPAD") ? std::getenv("HARNESS_MALLOCPAD") : "0",
         std::getenv("HARNESS_ZEROFILL") ? std::getenv("HARNESS_ZEROFILL") : "off",
         std::getenv("HARNESS_HEAPWATCH") ? "on" : "off",
         std::getenv("HARNESS_NORELEASE") ? "on" : "off",
-        ClampWriteOn() ? "on" : "off(+jni bound)",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off",

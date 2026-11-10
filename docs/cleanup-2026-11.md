@@ -15,12 +15,12 @@ on every writer; its root cause was the JNI table off by one (1177bac), and
 ## Batches (tick when committed)
 
 1. Heap firewall leftovers
-   - [ ] ClampHeapWrite and HARNESS_CLAMPWRITE gone from every caller
+   - [x] ClampHeapWrite and HARNESS_CLAMPWRITE gone from every caller
          (memcpy/memset/str*, printf family, fread, fgets, sscanf
          numerics) — A1, A5
-   - [ ] JNI GetString(UTF)Region force clamp — A4 / B-R1
-   - [ ] sscanf %s/%c/%[ field clamp — A2
-   - [ ] big_live_ side index — A3
+   - [x] JNI GetString(UTF)Region force clamp — A4 / B-R1
+   - [x] sscanf %s/%c/%[ field clamp — A2
+   - [x] big_live_ side index — A3
 2. JNI audio buffer pool `array_pool_` (scan on every free/realloc, leaks
    past 8) — B-R2
 3. Retired knobs and diag remnants: MALLOCPAD, ZEROFILL, NORELEASE,

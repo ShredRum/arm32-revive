@@ -421,70 +421,15 @@ static void Hex64(char*& p, std::uint64_t v) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// D2 (2026-10-18): live-block index surface.
-// The old structure was a std::map<base, usable>: exact base lookups PLUS
-// ORDERED interval containment for interior pointers. The new index (live_heap.h)
-// is flat and allocation-free per operation and exact for bases; containment is
-// answered EXACTLY by two tiers: an ordered side-index of blocks larger than the
-// probe's reach (big_live_) plus a bounded back-probe for every smaller block.
-// Why not the probe alone: a real session showed every in-arena containment
-// query is either an exact base or an interior farther than 512 B back
-// (contain_ok=0), so a probe-only answer silently dropped the sscanf field clamp
-// on 1218 boot-path destinations -- a bounded probe is not containment. The
-// two-tier answer was then PROVEN equal to the old full ordered map on that same
-// workload (temporary DiagOn oracle: contain_diff=0 over 1242 interior queries +
-// boot, big==bigscan each report), which is why the oracle is gone and only the
-// plain counters below remain.
-// Containment is still only ever asked by cold consumers (the diagnostic
-// firewall, heapwatch, sscanf's %s/%[/%c destination, the two JNI region bounds).
-// Every call site already holds mutex_.
-// ---------------------------------------------------------------------------
-
-// Ordered containment over a map<base, usable>: an exact base hit, else the
-// interval of the immediately preceding live block if the address falls inside
-// it. This is the probe's tier-1 replacement (see the D2 block above): the only
-// blocks whose interiors a hash cannot reach, ordered because ordering is
-// exactly what containment needs.
-static bool MapContaining(const std::map<std::uint32_t, std::uint32_t>& m, std::uint32_t addr,
-                          std::uint32_t* base, std::uint32_t* size) {
-    const auto it = m.find(addr);
-    if (it != m.end()) {
-        *base = addr;
-        *size = it->second;
-        return true;
-    }
-    auto jt = m.upper_bound(addr);
-    if (jt != m.begin()) {
-        --jt;
-        if ((std::uint64_t)addr - jt->first < jt->second) {
-            *base = jt->first;
-            *size = jt->second;
-            return true;
-        }
-    }
-    return false;
-}
-
+// Live-block index (live_heap.h): exact for block bases, which is what
+// free/realloc ask. Containment of an interior address (LiveIdxContaining) is
+// a bounded back-probe, asked only by diagnostics.
 void Runtime::LiveIdxInsert(std::uint32_t base, std::uint32_t size) {
     live_idx_.Insert(base, size);
-    // Large-block side-index (exact containment tier). Safe to insert without
-    // checking for a previous entry: callers only insert a base that is not live
-    // (fresh malloc/calloc, or realloc right after its erase). Small blocks pay
-    // nothing here -- and that is the hot path.
-    if (size > kProbeReach) {
-        big_live_[base] = size;
-        ++big_ins_n_;
-    }
 }
 
 std::uint32_t Runtime::LiveIdxErase(std::uint32_t base) {
-    const std::uint32_t got = live_idx_.Erase(base);
-    if (got > kProbeReach) {
-        big_live_.erase(base);
-        ++big_del_n_;
-    }
-    return got;
+    return live_idx_.Erase(base);
 }
 
 std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
@@ -494,15 +439,10 @@ std::uint32_t Runtime::LiveIdxFind(std::uint32_t base) {
 
 bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::uint32_t* size) {
     std::lock_guard<std::recursive_mutex> heap(heap_mu_);
-    // EXACT, two tiers, cheapest first:
-    //   1. a live block whose base is this very address (one hash lookup);
-    //   2. a block LARGER than the probe's reach -- the only blocks whose
-    //      interiors the probe below cannot reach (one ordered lookup, small map);
-    //   3. a block at most kProbeReach payload: its base is at most 64 x 8 B
-    //      behind the 8-aligned address (bounded back-probe).
-    // Cost note: only the cold consumers ask this (sscanf's %s/%[/%c bound, the
-    // JNI region bounds, the diagnostic firewall/heapwatch) -- never the
-    // alloc/free hot path.
+    // A live block whose base is this very address (one hash lookup), else one
+    // whose base is at most 64 x 8 B behind the 8-aligned address (bounded
+    // back-probe): blocks larger than that are not found from their interior.
+    // Diagnostics only (heapwatch).
     std::uint32_t b = 0, s = 0;
     bool found = false;
     const std::uint32_t exact = live_idx_.Find(addr);
@@ -514,11 +454,7 @@ bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::ui
         // Interior pointer. Only an in-arena address can be inside a live block,
         // so the common non-heap destination (guest stack, module) costs one
         // range check and nothing else.
-        if (MapContaining(big_live_, addr, &b, &s)) {
-            found = true;
-            ++hx_contain_big_;
-        }
-        if (!found) {
+        {
             const std::uint32_t a8 = addr & ~std::uint32_t(7);
             for (unsigned k = 1; k <= 64; ++k) {
                 const std::uint32_t off = k * 8u;
@@ -550,79 +486,15 @@ bool Runtime::LiveIdxContaining(std::uint32_t addr, std::uint32_t* base, std::ui
 void Runtime::PrintHeapIdx() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> heap(heap_mu_);  // order: mutex_ -> heap_mu_
-    // bigscan= walks the flat table independently: it must equal big= (the
-    // ordered side-index size) or the two tiers have drifted apart.
-    const std::size_t bigscan = live_idx_.CountLargerThan(kProbeReach);
     std::printf(
         "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
-        "contain_ok=%llu contain_big=%llu contain_miss=%llu free_unk=%llu "
-        "realloc_unk=%llu pool_stale=%llu big=%zu bigscan=%zu "
-        "big_ins=%llu big_del=%llu usedKB=%llu\n",
+        "contain_ok=%llu contain_miss=%llu free_unk=%llu "
+        "realloc_unk=%llu pool_stale=%llu usedKB=%llu\n",
         live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
         live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_contain_ok_,
-        hx_contain_big_, hx_contain_miss_, hx_free_unknown_,
-        hx_realloc_unknown_, hx_pool_stale_, big_live_.size(),
-        bigscan, big_ins_n_, big_del_n_,
+        hx_contain_miss_, hx_free_unknown_,
+        hx_realloc_unknown_, hx_pool_stale_,
         (unsigned long long)(heap_used_ >> 10));
-}
-
-std::uint32_t Runtime::ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
-                                      bool force) {
-    // D1: OFF by default (see dispatch.h). Bypass before the lock so the hot
-    // memory/string paths pay nothing, not even an uncontended lock. force=true
-    // is used only by the JNI region paths, whose return value is a functional
-    // bound.
-    if (!force && !ClampWriteOn()) {
-        return len;
-    }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // Find the containing live block (exact base, else an interior resolved by
-    // the large-block side-index or the bounded back-probe). Not inside one ->
-    // unclamped, same as before.
-    std::uint32_t base = 0, size = 0;
-    if (!LiveIdxContaining(dst, &base, &size)) {
-        // Not inside any LIVE allocation. Inside the arena this means a dlmalloc
-        // header word, a free chunk, the top chunk or a quarantined (freed)
-        // block -- i.e. exactly the bump-era overflow/UAF-write that bump
-        // tolerated (never reused) and dlmalloc cannot (that memory is metadata
-        // now). The write goes through UNCLAMPED (host-side: heapwatch only sees
-        // guest stores). Log it (capped) so the writer is named before the
-        // metadata detonates. NOTE (D2): `base=0` means "no containing live
-        // block"; it replaced the old `nxt=` successor head, which a hash index
-        // cannot cheaply produce (and whose only consumer was this log line).
-        if (dst >= heap_base_ && (std::uint64_t)dst < (std::uint64_t)heap_base_ + kHeapSize) {
-            static int gn = 0;
-            if (gn < 40) {
-                gn++;
-                std::uint32_t lr = 0, pc = 0;
-                Dynarmic::A32::Jit* aj = ActiveJit();
-                if (aj) {
-                    lr = aj->Regs()[14];
-                    pc = aj->Regs()[15];
-                }
-                std::printf("[heap] GAPWRITE %s dst=%08x len=%u base=%08x pc=%08x lr=%08x\n", n,
-                            dst, len, 0, pc, lr);
-            }
-        }
-        return len;  // gap/quarantine/module: not ours
-    }
-    const std::uint64_t lim = (std::uint64_t)base + size;
-    const std::uint64_t end = (std::uint64_t)dst + len;
-    if (end > lim) {
-        static int ocn = 0;
-        if (ocn < 10) {
-            ocn++;
-            std::uint32_t lr = 0;
-            Dynarmic::A32::Jit* aj = ActiveJit();
-            if (aj) {
-                lr = aj->Regs()[14];
-            }
-            std::printf("[heap] LOUD %s overflow dst=%08x len=%u base=%08x size=%u lr=%08x\n", n,
-                        dst, len, base, size, lr);
-        }
-        return (std::uint32_t)(lim > dst ? lim - dst : 0);
-    }
-    return len;
 }
 
 bool Runtime::CheckAccess(std::uint32_t addr, std::size_t size, bool write, bool exec) {
@@ -2990,8 +2862,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         //   strncpy: src up to NUL or n; dst [0, n) (zero padded, no NUL
         //            added when src has >= n bytes)
         //   strncat: src up to NUL or n; dst [dlen, dlen+min(slen,n)] + NUL
-        // ClampHeapWrite is the optional overflow firewall (off by default);
-        // when it shortens a write the result is still NUL terminated.
         const bool cat = (id == I::strcat_ || id == I::strncat_);
         const bool bounded = (id == I::strncpy_ || id == I::strncat_);
         std::uint32_t slen = 0, dlen = 0;
@@ -3008,21 +2878,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (want > 0xFFFFFFFFu || !CheckRange(dst, static_cast<std::size_t>(want), true)) {
             goto bad_ptr;
         }
-        const std::uint32_t room =
-            ClampHeapWrite(dst, static_cast<std::uint32_t>(want), n.c_str());
         if (id == I::strncpy_) {
-            const std::uint32_t copy = std::min(slen, room);
+            const std::uint32_t copy = std::min(slen, a2);
             std::memmove(H(dst), H<const void>(a1), copy);
-            if (room > copy) {
-                std::memset(H(dst + copy), 0, room - copy);
+            if (a2 > copy) {
+                std::memset(H(dst + copy), 0, a2 - copy);
             }
-            if (room < want && room > 0) {
-                *H<char>(dst + room - 1) = '\0';  // firewall truncation
-            }
-        } else if (room > 0) {
-            const std::uint32_t copy = std::min(slen, room - 1);
-            std::memmove(H(dst), H<const void>(a1), copy);
-            *H<char>(dst + copy) = '\0';
+        } else {
+            std::memmove(H(dst), H<const void>(a1), slen);
+            *H<char>(dst + slen) = '\0';
         }
         Ret(regs, a0);
         return;
@@ -3425,7 +3289,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::uint32_t dp = suppress ? 0 : next_ptr();
                 // %n writes 4B: route through the firewall (interior dp near
                 // an allocation end would smash neighbor headers).
-                if (dp && ClampHeapWrite(dp, 4, "sscanf-%n") >= 4 && CheckRange(dp, 4, true)) {
+                if (dp && CheckRange(dp, 4, true)) {
                     std::int32_t c = (std::int32_t)ii;
                     std::memcpy(H(dp), &c, 4);
                 }
@@ -3446,35 +3310,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             std::uint32_t dp = suppress ? 0 : next_ptr();
             int maxw = width > 0 ? width : 1000000;
-            // Overflow firewall: clamp the field to the remaining heap
-            // allocation at dp (mapping checks pass arena-wide; without this
-            // %s/%[/%c smash chunk neighbors -> silent dlmalloc death).
-            // Non-heap dp (stack/module) keeps legacy boundless behavior.
-            // %c writes no NUL; %s/%[ need room for it.
-            if (dp && !suppress) {
-                std::lock_guard<std::recursive_mutex> flock(mutex_);
-                bool in_heap = false;
-                std::uint64_t rem = 0;
-                // D2: one containment query instead of find + upper_bound.
-                std::uint32_t cbase = 0, csize = 0;
-                if (LiveIdxContaining(dp, &cbase, &csize)) {
-                    in_heap = true;
-                    rem = (std::uint64_t)cbase + csize - dp;
-                }
-                if (in_heap) {
-                    if (conv == 'c') {
-                        // No NUL appended: cap chars at remaining bytes.
-                        if ((std::uint64_t)maxw > rem) {
-                            maxw = (int)rem;
-                        }
-                    } else if (rem == 0) {
-                        maxw = 0;  // no room even for NUL: convert nothing
-                    } else if ((std::uint64_t)maxw + 1 > rem) {
-                        // Chars + NUL must fit rem.
-                        maxw = (int)(rem - 1);
-                    }
-                }
-            }
             if (conv == 'c') {
                 int want = (width > 0) ? width : 1;
                 int k = 0;
@@ -3650,43 +3485,43 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                             // long long / intmax_t: the guest's slot is 8 bytes.
                             if (is_signed) {
                                 long long w64 = sv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                if (dp && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
                                     }
                             } else {
                                 unsigned long long w64 = uv;
-                                if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                                if (dp && CheckRange(dp, 8, true)) {
                                     std::memcpy(H(dp), &w64, 8);
                                     }
                             }
                         } else if (len == 1) {
                             std::int8_t w8 =
                                 is_signed ? (std::int8_t)sv : (std::int8_t)(std::uint8_t)uv;
-                            if (dp && ClampHeapWrite(dp, 1, "sscanf-num") >= 1 && CheckRange(dp, 1, true)) {
+                            if (dp && CheckRange(dp, 1, true)) {
                                 std::memcpy(H(dp), &w8, 1);
                                 }
                         } else if (len == 2) {
                             std::int16_t w16 =
                                 is_signed ? (std::int16_t)sv : (std::int16_t)(std::uint16_t)uv;
-                            if (dp && ClampHeapWrite(dp, 2, "sscanf-num") >= 2 && CheckRange(dp, 2, true)) {
+                            if (dp && CheckRange(dp, 2, true)) {
                                 std::memcpy(H(dp), &w16, 2);
                                 }
                         } else if (!is_signed && conv == 'p') {
                             // %p writes an int*.
                             std::int32_t w32 = (std::int32_t)uv;
-                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                            if (dp && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &w32, 4);
                                 }
                         } else {
                             // int / long / size_t / ptrdiff_t: 4 bytes.
                             if (is_signed) {
                                 std::int32_t w32 = (std::int32_t)sv;
-                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                                if (dp && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &w32, 4);
                                     }
                             } else {
                                 std::uint32_t wu = (std::uint32_t)uv;
-                                if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                                if (dp && CheckRange(dp, 4, true)) {
                                     std::memcpy(H(dp), &wu, 4);
                                     }
                             }
@@ -3725,12 +3560,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     if (!suppress) {
                         if (flen == 8) {
                             // %lf / %Lf: the guest's slot is a double (8B).
-                            if (dp && ClampHeapWrite(dp, 8, "sscanf-num") >= 8 && CheckRange(dp, 8, true)) {
+                            if (dp && CheckRange(dp, 8, true)) {
                                 std::memcpy(H(dp), &dv, 8);
                                 }
                         } else {
                             float fv = (float)dv;
-                            if (dp && ClampHeapWrite(dp, 4, "sscanf-num") >= 4 && CheckRange(dp, 4, true)) {
+                            if (dp && CheckRange(dp, 4, true)) {
                                 std::memcpy(H(dp), &fv, 4);
                                 }
                         }
@@ -4751,19 +4586,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         st.stack = via_va ? (sized ? a3 : a2) : regs[13];   // va_list or stack args
         std::size_t total = 0;
         const std::string out = ExpandPrintf(fmt, st, &total);
-        if (cap > 0 && CheckRange(dst, 1, true)) {
-            // The write goes through the overflow firewall (like memcpy and
-            // sscanf do): a guest buffer too small for the result must not
-            // smash its neighbour in the heap arena -- the class of the
-            // 2026-10-18 "GOT slot zeroed" incident.
-            const std::size_t want =
-                std::min<std::size_t>(out.size(), (std::size_t)cap - 1) + 1;  // + NUL
-            const std::uint32_t allowed = ClampHeapWrite(dst, (std::uint32_t)want, "printf");
-            if (allowed > 0 && CheckRange(dst, allowed, true)) {
-                const std::size_t w = std::min<std::size_t>(out.size(), allowed - 1);
-                std::memcpy(H(dst), out.data(), w);
-                H(dst)[w] = 0;
+        if (cap > 0) {
+            const std::size_t w = std::min<std::size_t>(out.size(), (std::size_t)cap - 1);
+            if (!CheckRange(dst, w + 1, true)) {  // a wild destination halts (A-18)
+                goto bad_ptr;
             }
+            std::memcpy(H(dst), out.data(), w);
+            H(dst)[w] = 0;
         }
         // C99: the return value is the length that WOULD have been written,
         // not the number of characters that fit.
@@ -5796,33 +5625,13 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             // Clamp absurd sizes (guest bug shield; host fread would try).
-            if (std::uint64_t(a1) * a2 > 0x1000000u && !CheckRange(a0, (std::size_t)a1 * a2, true)) {
-                Ret(regs, 0);
-                return;
-            }
             if (!CheckRange(a0, (std::size_t)a1 * a2, true)) {
                 Ret(regs, 0);
                 return;
             }
-            // Overflow firewall (same class as memcpy): the arena-wide
-            // CheckRange above passes short game buffers; clamp the item
-            // count to the mapped allocation so ::fread can't smash chunk
-            // neighbors (silent host SIGSEGV in dlmalloc metadata).
-            const std::uint64_t want64 = (std::uint64_t)a1 * a2;
-            const std::uint32_t wbytes =
-                ClampHeapWrite(a0, want64 > 0xFFFFFFFFu ? 0xFFFFFFFFu : (std::uint32_t)want64,
-                               "fread");
-            const std::uint32_t wn = a1 ? wbytes / a1 : 0;
-            std::size_t got = std::fread(H(a0), a1, wn, f);
-            if (got < wn && wn == a2) {
+            std::size_t got = std::fread(H(a0), a1, a2, f);
+            if (got < a2) {
                 SetGuestErrno(errno ? errno : EIO);
-            }
-            if (wn < a2) {
-                static int frc = 0;
-                if (frc < 10) {
-                    frc++;
-                    std::printf("[heap] LOUD fread short items=%u want=%u\n", wn, a2);
-                }
             }
             // TEMP-DIAG (registry ParseError): dump exact bytes read.
             bool regdump = false;
@@ -5934,13 +5743,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, 0);
                     return;
                 }
-                // Same overflow firewall as fread (short line buffer).
-                const std::uint32_t wlen = ClampHeapWrite(a0, a1, "fgets");
-                if (wlen == 0) {
-                    Ret(regs, 0);
-                    return;
-                }
-                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)wlen, f);
+                char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)std::min<std::uint32_t>(a1, 0x7FFFFFFFu), f);
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
@@ -9946,9 +9749,8 @@ std::uint32_t Runtime::PthreadSetSpecific(std::uint32_t key, std::uint32_t value
 void Runtime::GuestMemCopy(ImportId id, Regs& regs, const std::string& n, std::uint32_t dst, std::uint32_t src,
                            std::uint32_t len) {
     using I = ImportId;
-    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
-    std::memmove(H(dst), H<const void>(src), wlen);
-    ScanWP(this, dst, wlen, n.c_str());
+    std::memmove(H(dst), H<const void>(src), len);
+    ScanWP(this, dst, len, n.c_str());
     Ret(regs, dst);
 }
 
@@ -9966,9 +9768,8 @@ void Runtime::GuestMemSet(ImportId id, Regs& regs, const std::string& n, std::ui
                         fill & 0xFF, lr);
         }
     }
-    const std::uint32_t wlen = ClampHeapWrite(dst, len, n.c_str());
-    std::memset(H(dst), fill, wlen);
-    ScanWP(this, dst, wlen, n.c_str());
+    std::memset(H(dst), fill, len);
+    ScanWP(this, dst, len, n.c_str());
     Ret(regs, dst);
 }
 
@@ -15776,26 +15577,17 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            // BOUND THE WRITE BY THE DESTINATION ALLOCATION (2026-10-17; kept
-            // under D1 as force=true because it is a functional bound, not a
-            // firewall): the game sizes `buf` from its own length bookkeeping,
-            // so an unchecked UTF-16 widen overran a 24 B block into the next
-            // chunk's head -- exactly the metadata smear that detonated in
-            // mspace_free (ok_inuse failed on a head overwritten by wide
-            // chars). CheckRange only proves the mapping is writable (the whole
-            // arena is).
-            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringRegion", true);
             std::u16string units;
 #ifdef __ANDROID__
             if (js) {
-                units.resize(wlen / 2);
+                units.resize(a3);
                 re->GetStringRegion(js, static_cast<jsize>(a2), static_cast<jsize>(units.size()),
                                     reinterpret_cast<jchar*>(&units[0]));
                 re->ExceptionClear();
             } else
 #endif
             {
-                units = Utf16OfMutf8(it->second).substr(a2, wlen / 2);
+                units = Utf16OfMutf8(it->second).substr(a2, a3);
             }
             std::memcpy(H(buf), units.data(), units.size() * 2);
         } else {
@@ -15818,20 +15610,7 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t wlen = ClampHeapWrite(buf, want, "GetStringUTFRegion", true);
-            std::memcpy(H(buf), bytes.data(), wlen);
-        }
-        {
-            // Triage (capped): name the string, the destination and the size we
-            // believe the destination allocation has. alloc=0 = not a heap
-            // block (jni arena / static) -> ClampHeapWrite left it unclamped.
-            static int rn = 0;
-            if (DiagOn() && rn < 8) {
-                rn++;
-                std::uint32_t asz = LiveIdxFind(buf);
-                std::printf("[jni] region%s str=%08x start=%u len=%u buf=%08x alloc=%u\n",
-                            fn == 220 ? "U" : "", a1, a2, a3, buf, asz);
-            }
+            std::memcpy(H(buf), bytes.data(), want);
         }
         Ret(regs, 0);
         return;

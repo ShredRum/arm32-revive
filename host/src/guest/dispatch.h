@@ -192,15 +192,6 @@ inline constexpr std::uint32_t kJniObjectLimit = kGuestDataBase + kGuestDataSize
 bool JniStringFits(std::uint32_t next, std::size_t len, std::uint32_t* out);
 bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out);
 
-// D1 (2026-10-17, PLAN.md): the dlmalloc overflow firewall is OFF by default.
-// Default OFF means no recursive_mutex and no live-block index walk on the
-// memcpy/memmove/memset/strcpy/strcat/fgets/fread paths -- the write proceeds at
-// its natural length. HARNESS_CLAMPWRITE=1 re-arms it.
-// The two JNI GetString*Region calls pass force=true: there the return value
-// is a FUNCTIONAL destination bound, not a firewall (an unbounded UTF-16 widen
-// overran a 24 B block into the next chunk head), so it stays on regardless.
-inline bool ClampWriteOn() { return EnvOn("HARNESS_CLAMPWRITE"); }
-
 class Runtime;
 class GuestCallbacks;
 // Deleter of a Jit from Runtime::NewJit: takes it off the runtime's record.
@@ -482,24 +473,10 @@ public:
     // heap allocation (overflow); quarantined = UAF write. LOUD capped.
     // Runs on EVERY guest store when fastmem is off: hunt-only cost.
     bool HeapWatchViolation(std::uint32_t addr, std::size_t size);
-    // Overflow firewall (dlmalloc era): bulk writes past a live chunk smash
-    // dlmalloc headers -> host SIGSEGV with no witness. Exact-base writes
-    // are clamped to the mapped size + LOUD (capped); interior-pointer
-    // overflows stay visible (future work).
-    std::uint32_t ClampHeapWrite(std::uint32_t dst, std::uint32_t len, const char* n,
-                                 bool force = false);
 
-    // D2 (2026-10-18): the live-block index surface. Insert/erase/find keep the
-    // exact base semantics the old std::map had; Containing resolves an interior
-    // pointer EXACTLY, by two mechanisms: an ordered side-index of the (few)
-    // blocks larger than the probe's reach -- the only blocks whose interiors a
-    // hash cannot reach -- and a bounded back-probe for everything smaller.
-    // The two-tier shape is not taste: a real session showed every in-arena
-    // containment query is either an exact base or an interior farther than
-    // 512 B back (contain_ok=0), so a probe alone silently LOST the sscanf field
-    // clamp on 1242 Boot-path destinations. All four are called with mutex_
-    // already held; under DiagOn() they cross-check the (temporary, full) std::map
-    // oracle, so exactness is measured, not asserted.
+    // The live-block index (live_heap.h): exact base lookups for free and
+    // realloc; Containing is a bounded back-probe for diagnostics. The heap
+    // lock (heap_mu_) is taken inside.
     void LiveIdxInsert(std::uint32_t base, std::uint32_t size);
     std::uint32_t LiveIdxErase(std::uint32_t base);       // 0 = was not live
     std::uint32_t LiveIdxFind(std::uint32_t base);        // 0 = not live
@@ -1043,32 +1020,15 @@ private:
     // has been OFF by default since D1. See live_heap.h for the shape and the
     // semantics kept; harness.cpp has the differential self-test.
     abr::LiveHeapIndex live_idx_;
-    // D2 exactness, second tier (2026-10-18): an ORDERED index of the live
-    // blocks the bounded back-probe cannot reach, i.e. usable size >
-    // kProbeReach. Ordering is what "which block contains this interior pointer"
-    // needs and a hash cannot provide; keeping it for the large blocks only is
-    // enough because an interior offset > reach is only possible inside a block
-    // larger than the reach. Those blocks are the long-lived buffers, not the
-    // allocation churn, so the host node per entry here is bounded (measured:
-    // printed as big= / bigscan= next to the flat index it shadows) -- while the
-    // hot small-block path stays allocation-free. INVARIANT: LiveIdxInsert is
-    // only ever called for a base that is NOT live (fresh malloc/calloc, or
-    // realloc after its erase), so a stale entry can never linger here.
-    // Membership maintenance counts (big_ins_n_/big_del_n_) price this tier.
-    static constexpr std::uint32_t kProbeReach = 512;  // 64 x 8 B probe steps
-    std::map<std::uint32_t, std::uint32_t> big_live_;
     // D2 measurement counters (plain members: every call site already holds
     // mutex_). They answer "what did the old structure actually cost / did its
     // odd paths ever fire", instead of asserting it. Printed by PrintHeapIdx
     // under HARNESS_DIAG only.
     unsigned long long hx_contain_ok_ = 0;     // interior found by the back-probe
-    unsigned long long hx_contain_big_ = 0;    // interior resolved by big_live_
     unsigned long long hx_contain_miss_ = 0;   // in-arena, not inside a live block
     unsigned long long hx_free_unknown_ = 0;   // free of a pointer we never handed out
     unsigned long long hx_realloc_unknown_ = 0;
     unsigned long long hx_pool_stale_ = 0;     // pooled array whose block was freed
-    unsigned long long big_ins_n_ = 0;         // big-block inserts (side-index cost)
-    unsigned long long big_del_n_ = 0;         // big-block erases
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {

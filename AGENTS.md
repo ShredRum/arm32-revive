@@ -107,7 +107,7 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on mallocpad=0 zerofill=off heapwatch=off norelease=off
-clampwrite=off(+jni bound) diag=off jitopt=safe jitshare=on tlsthunk=on
+diag=off jitopt=safe jitshare=on tlsthunk=on
 fastdispatch=on hostfpsr=on jitcallbacks=on`. There is no heap quarantine (REVIEW R-013: a delay before
 reuse only hides a use-after-free).
 
