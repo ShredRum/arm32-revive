@@ -655,8 +655,8 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     // No lock on the call path: GL state belongs to each thread's context
     // and the driver keeps it. RealGL's own shared state is the glGetString
-    // slots and the GLDRAWLOG texture-size tracking; each takes mu_ where it
-    // is touched (minimum F3: a lock on every GL call guarded nothing else).
+    // slots, which take mu_ (minimum F3: a lock on every GL call guarded
+    // nothing else).
     Runtime* r = rt_;
     const std::uint32_t sp = regs[13];
     using G = GlId;  // the import's load-time id (gl_ids.h); name is for logs only
@@ -831,10 +831,6 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glActiveTexture) {
-        if (GlDrawLog()) {  // texture-size tracking for the draw log only
-            std::lock_guard<std::mutex> l(mu_);
-            active_tex_ = a0 - 0x84C0u;
-        }
         glActiveTexture((GLenum)a0);
         r->Ret(regs, 0);
         return true;
@@ -1217,12 +1213,6 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glBindTexture) {
-        if (GlDrawLog()) {
-            std::lock_guard<std::mutex> l(mu_);
-            if (a0 == 0x0DE1u && active_tex_ < 8) {
-                bound_tex2d_[active_tex_] = a1;
-            }
-        }
         glBindTexture((GLenum)a0, (GLuint)a1);
         r->Ret(regs, 0);
         return true;
@@ -1266,14 +1256,6 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // intermediate query eats its signal. Query only for diag.
         if (GlDrawLog()) {
             const GLenum e = glGetError();
-            // TEMP-DIAG: track size by bound texture of active unit (read only
-            // by the GLDRAWLOG block at :819, so write under the same gate).
-            {
-                std::lock_guard<std::mutex> l(mu_);
-                if (active_tex_ < 8 && bound_tex2d_[active_tex_]) {
-                    tex_size_[bound_tex2d_[active_tex_]] = (a3 & 0xFFFFu) | (h << 16);
-                }
-            }
             std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x\n", name, a3, h, fmt, typ,
                         p ? "data" : "NULL", e);
         }
@@ -1302,29 +1284,10 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         glTexSubImage2D((GLenum)a0, (GLint)a1, (GLint)a2, (GLint)a3, (GLsizei)w, (GLsizei)h,
                         (GLenum)fmt, (GLenum)typ, p);
         // Same error-queue reasoning as TexImage2D (game-owned signal).
-        GLenum e = GlDrawLog() ? glGetError() : (GLenum)0;
-        // TEMP-DIAG (black frame): checksum the whole upload (capped).
-        // Gated default-off: per-upload CPU loop + printfs, zero guest effect.
         if (GlDrawLog()) {
-            std::uint64_t sum = 0, total = 0;
-            if (p && w && h && w < 4096 && h < 4096) {
-                std::uint32_t bpp = (typ == 0x1401u) ? 4 : 2;
-                total = (std::uint64_t)w * h * bpp;
-                std::uint64_t cap = total > 65536 ? 65536 : total;
-                if (r->CheckRange(dat, (std::size_t)cap, false)) {
-                    const std::uint8_t* b = (const std::uint8_t*)p;
-                    for (std::uint64_t i = 0; i < cap; i++) {
-                        sum += b[i];
-                    }
-                }
-            }
-            std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x sum=%llu/%llu\n", name, w, h, fmt,
-                        typ, p ? "data" : "NULL", e, (unsigned long long)sum,
-                        (unsigned long long)total);
-        }
-        if (GlDrawLog()) {
-            std::printf("[realgl] %s %ux%u fmt=%04x %s err=%04x\n", name, w, h, fmt, p ? "data" : "NULL",
-                        e);
+            const GLenum e = glGetError();
+            std::printf("[realgl] %s %ux%u fmt=%04x typ=%04x %s err=%04x\n", name, w, h, fmt, typ,
+                        p ? "data" : "NULL", e);
         }
         r->Ret(regs, 0);
         return true;
@@ -1448,14 +1411,6 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         }
         glVertexAttribPointer((GLuint)a0, (GLint)a1, (GLenum)a2, (GLboolean)a3, (GLsizei)stride,
                               p);
-        // TEMP-DIAG (black frame): dump first vertex for float attribs.
-        // Gated default-off (was per-attrib-setup printf).
-        if (!vbo && a2 == 0x1406u && p && GlDrawLog() &&
-            r->CheckRange(gp, 16, false)) {
-            const float* f = (const float*)p;
-            std::printf("[realgl] %s idx=%u size=%u stride=%u v0=[%.1f %.1f %.1f %.1f]\n", name, a0, a1,
-                        stride, f[0], f[1], f[2], f[3]);
-        }
         r->Ret(regs, 0);
         return true;
     }
@@ -1481,41 +1436,6 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glDrawArrays || id == G::glDrawElements) {
-        // TEMP-DIAG (black frame): dump real draw state. ~10 GL round-trips
-        // + 4 printfs PER DRAW — gated default-off (old investigation).
-        if (GlDrawLog()) {
-            GLint prog = 0, tex = 0, vp[4] = {0}, blend = 0, scissor = 0, ab0 = 0;
-            glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-            glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
-            glGetIntegerv(GL_VIEWPORT, vp);
-            blend = glIsEnabled(GL_BLEND);
-            scissor = glIsEnabled(GL_SCISSOR_TEST);
-            glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &ab0);
-            std::printf("[realgl] %s prog=%d tex=%d vp=%d,%d,%d,%d blend=%d scissor=%d ab0=%d\n", name,
-                        prog, tex, vp[0], vp[1], vp[2], vp[3], blend, scissor, ab0);
-            // MVP at location 2 + first texel of the bound texture.
-            {
-                float m[16] = {0};
-                glGetUniformfv((GLuint)prog, 2, m);
-                std::printf("[realgl] %s mvp=[%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f]\n",
-                            name, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
-                            m[11], m[12], m[13], m[14], m[15]);
-            }
-            {
-                // ES2 has no texture readback; report tracked upload size.
-                std::uint32_t tw = 0, th = 0;
-                std::lock_guard<std::mutex> l(mu_);
-                auto it = tex_size_.find((std::uint32_t)tex);
-                if (it != tex_size_.end()) {
-                    tw = it->second & 0xFFFFu;
-                    th = it->second >> 16;
-                }
-                GLint minf = 0, magf = 0;
-                glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minf);
-                glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &magf);
-                std::printf("[realgl] %s texsize=%ux%u min=%04x mag=%04x\n", name, tw, th, minf, magf);
-            }
-        }
         if (id == G::glDrawArrays) {
             glDrawArrays((GLenum)a0, (GLint)a1, (GLsizei)a2);
         } else {
@@ -1805,33 +1725,10 @@ bool RealGL::Screenshot(const char* path, int w, int h) {
     if (!ok_ || w <= 0 || h <= 0 || w > 2048 || h > 2048) {
         return false;
     }
-    // TEMP-DIAG: which framebuffer are we reading? (PBO binds don't
-    // exist in ES2, skip them.)
-    {
-        GLint fb = -1;
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
-        std::printf("[realgl] shot: fb=%d\n", fb);
-    }
     // NOTE: read GL_RGBA, never GL_RGB: RGB reads from an alpha-bearing
     // config are GL_INVALID_OPERATION on NVIDIA (every black screenshot so
     // far was this read bug, not a rendering failure).
     std::string px((std::size_t)w * h * 4, '\0');
-    // TEMP-DIAG: HARNESS_SHOTSWAP=1 swaps before reading (pbuffer
-    // back/front experiment).
-    if (std::getenv("HARNESS_SHOTSWAP") && disp_ && surf_) {
-        eglSwapBuffers((EGLDisplay)disp_, (EGLSurface)surf_);
-    }
-    // TEMP-DIAG (black frame): HARNESS_SHOTCLEAR=1 fills red first to prove
-    // the readback path; without it we read the game's draws.
-    if (std::getenv("HARNESS_SHOTCLEAR")) {
-        glDisable(GL_SCISSOR_TEST);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_BLEND);
-        glClearColor(1, 0, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT);
-        GLenum e = glGetError();
-        std::printf("[realgl] shotclear err=%04x\n", e);
-    }
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     // Present to the live window (swap AFTER the readback: reads come from
     // the back buffer, the display shows the front; without this the window
