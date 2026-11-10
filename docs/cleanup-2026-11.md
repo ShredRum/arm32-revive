@@ -21,7 +21,7 @@ on every writer; its root cause was the JNI table off by one (1177bac), and
    - [x] JNI GetString(UTF)Region force clamp — A4 / B-R1
    - [x] sscanf %s/%c/%[ field clamp — A2
    - [x] big_live_ side index — A3
-2. JNI audio buffer pool `array_pool_` (scan on every free/realloc, leaks
+2. [x] JNI audio buffer pool `array_pool_` (scan on every free/realloc, leaks
    past 8) — B-R2
 3. Retired knobs and diag remnants: MALLOCPAD, ZEROFILL, NORELEASE,
    HEAPBASE, realloc pre-dump, TIMEWARP, NOWORKER, WP/WPA/HEAPWATCH/

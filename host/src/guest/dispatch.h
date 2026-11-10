@@ -1028,7 +1028,6 @@ private:
     unsigned long long hx_contain_miss_ = 0;   // in-arena, not inside a live block
     unsigned long long hx_free_unknown_ = 0;   // free of a pointer we never handed out
     unsigned long long hx_realloc_unknown_ = 0;
-    unsigned long long hx_pool_stale_ = 0;     // pooled array whose block was freed
 
     // Worker thread states (guest tid -> host). Main thread is tid 1.
     struct ThreadState {
@@ -1154,10 +1153,6 @@ private:
     };
     std::unordered_map<std::uint32_t, ArrayPin> array_pins_;
 #endif
-    // Recycled guest copy-buffers (addr,len), exact-len match only. Declared
-    // outside the ANDROID gate (used by GuestFree/Realloc coherence scans on
-    // all targets; stays empty where real arrays never occur).
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> array_pool_;
     std::uint32_t jni_str_next_ = 0;  // bump in [kJniStringStart,kJniStringLimit)
     std::uint32_t jvm_table_ = 0;   // guest VA of 8-entry JavaVM table
     std::uint32_t jvm_ = 0;         // guest VA of JavaVM* (word -> jvm_table_)

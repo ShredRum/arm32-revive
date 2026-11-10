@@ -489,11 +489,11 @@ void Runtime::PrintHeapIdx() {
     std::printf(
         "[heapidx] live=%zu max=%zu cap=%zu grown=%u compacted=%u shrunk=%u ops=%llu "
         "contain_ok=%llu contain_miss=%llu free_unk=%llu "
-        "realloc_unk=%llu pool_stale=%llu usedKB=%llu\n",
+        "realloc_unk=%llu usedKB=%llu\n",
         live_idx_.Size(), live_idx_.MaxLive(), live_idx_.Capacity(), live_idx_.Grown(),
         live_idx_.Compacted(), live_idx_.Shrunk(), live_idx_.Ops(), hx_contain_ok_,
         hx_contain_miss_, hx_free_unknown_,
-        hx_realloc_unknown_, hx_pool_stale_,
+        hx_realloc_unknown_,
         (unsigned long long)(heap_used_ >> 10));
 }
 
@@ -821,12 +821,6 @@ std::uint32_t Runtime::GuestRealloc(std::uint32_t addr, std::uint32_t size) {
             diag_.heap_peak = heap_used_;
         }
 #endif
-        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-            if (it->first == addr) {
-                array_pool_.erase(it);
-                break;
-            }
-        }
     }
     // Zero-fill policy: the bytes past the old size are fresh to the guest.
     // Bump parity says they read as zeros; dlmalloc's copy leaves whatever the
@@ -884,13 +878,6 @@ void Runtime::GuestFree(std::uint32_t addr) {
             log_free(0xFFFFFFFFu);
         }
         return;
-    }
-    // Drop any audio-pool reference (stale reuse would alias).
-    for (auto pit = array_pool_.begin(); pit != array_pool_.end(); ++pit) {
-        if (pit->first == addr) {
-            array_pool_.erase(pit);
-            break;
-        }
     }
     if (HeapKnob(kMallocLog)) {
         log_free(size);
@@ -17026,28 +17013,8 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             if (re && rarr) {
                 jsize len = re->GetArrayLength(static_cast<jarray>(rarr));
                 if (!re->ExceptionCheck() && len > 0 && len < 10000000) {
-                    // Pool first (exact len): kills the per-callback orphan
-                    // leak without changing copy semantics (fresh bytes are
-                    // always memcpied in below).
-                    std::uint32_t gb = 0;
-                    {
-                        std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
-                        for (auto it = array_pool_.begin(); it != array_pool_.end(); ++it) {
-                            if (it->second == (std::uint32_t)len) {
-                                if (LiveIdxFind(it->first)) {
-                                    gb = it->first;
-                                    array_pool_.erase(it);
-                                    break;
-                                }
-                                // Stale pool entry (its block was freed): counted,
-                                // then skipped -- a fresh block is allocated below.
-                                ++hx_pool_stale_;
-                            }
-                        }
-                    }
-                    if (!gb) {
-                        gb = GuestMalloc((std::uint32_t)len);
-                    }
+                    // A guest copy of the elements, freed by the Release.
+                    const std::uint32_t gb = GuestMalloc((std::uint32_t)len);
                     jbyte* hp = gb ? re->GetByteArrayElements(static_cast<jbyteArray>(rarr),
                                                               nullptr)
                                    : nullptr;
@@ -17070,6 +17037,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                     if (hp) {
                         re->ReleaseByteArrayElements(static_cast<jbyteArray>(rarr), hp,
                                                      JNI_ABORT);
+                    }
+                    if (gb) {
+                        GuestFree(gb);
                     }
                     re->ExceptionClear();
                 } else {
@@ -17277,15 +17247,10 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                         re->ExceptionClear();
                     }
                 }
-                // Recycle the guest copy (cap 8; overflow leaks as before).
-                // Only properly-Released buffers: the guest cannot hold them
-                // (it must Release before the next Get on the same array).
-                // After JNI_COMMIT the guest still owns the buffer.
-                if (!commit_only && pin.guest_buf && pin.len) {
-                    std::lock_guard<std::recursive_mutex> lock(heap_mu_);  // array_pool_
-                    if (array_pool_.size() < 8) {
-                        array_pool_.push_back({pin.guest_buf, pin.len});
-                    }
+                // The guest copy goes with the release; after JNI_COMMIT the
+                // guest still owns it.
+                if (!commit_only && pin.guest_buf) {
+                    GuestFree(pin.guest_buf);
                 }
                 Ret(regs, 0);
                 return;
