@@ -611,13 +611,6 @@ int main(int argc, char** argv) {
         }
         std::printf("\n");
     }
-    // TEMP-DIAG: host memcmp sanity (wild memcmp3 values investigation).
-    {
-        int t1 = std::memcmp("min", "for", 3);
-        int t2 = std::memcmp("PVR", "PVR", 3);
-        int t3 = std::memcmp("PVR", "BMP", 3);
-        std::printf("[memselftest] %d %d %d (want 7 0 14)\n", t1, t2, t3);
-    }
     // D2 self-test: no guest .so needed, so it runs before argv is checked.
     if (std::getenv("HARNESS_LIVEIDX_TEST")) {
         return LiveIdxSelfTest();
@@ -1066,12 +1059,6 @@ int main(int argc, char** argv) {
             rt.RealGLBackend()->Screenshot(shot.c_str(), 800, 480);
         }
         rt.ThreadCensus();
-        {
-            // TEMP-DIAG (heap pressure): bump top at exit (leak-only free;
-            // ceiling was 256MB (now 1GB) -> NULL mallocs -> null+off faults.
-            std::printf("[heap] top=%08x (base %08x, ceiling %08x)\n", rt.HeapTop(),
-                        abr::kHeapBase, abr::kHeapBase + abr::kHeapSize);
-        }
         // HARNESS_SHOW=N: keep the live GL window open N seconds (viewing).
         if (const char* sh = std::getenv("HARNESS_SHOW")) {
             int secs = std::atoi(sh);
