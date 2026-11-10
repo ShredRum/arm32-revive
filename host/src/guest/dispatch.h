@@ -447,6 +447,7 @@ public:
     // not readable -- the caller must then halt the guest, as a real libc
     // would fault. On success *len = min(strlen, max).
     bool GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* len);
+    bool GuestStrCompare(std::uint32_t a0, std::uint32_t a1, std::uint32_t lim, bool nocase, int* out);
 
     // Guest printf vararg cursor. Two shapes share it: inline APCS words then
     // stack (ai starts at the first free core reg; stack = regs[13] at entry),

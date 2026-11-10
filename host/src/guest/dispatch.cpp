@@ -213,15 +213,14 @@ bool DiagOn() {
     return on;
 }
 
-// Real GLES backend instance (created on first gl* import).
+// The real GLES backend (made with the Runtime: a lazy first-call creation
+// raced between two guest threads).
 RealGL* Runtime::RealGLBackend() {
-    if (!realgl_) {
-        realgl_ = new RealGL(this);
-    }
     return realgl_;
 }
 
 Runtime::Runtime(GuestMemory& mem, LoadedModule& mod) : mem_(mem), mod_(mod) {
+    realgl_ = new RealGL(this);
     // Room for imports made at run time (RuntimeImport): the table must not
     // move while other threads index it.
     mod_.imports.reserve(mod_.imports.size() + 512);
@@ -1219,6 +1218,43 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
     return true;
 }
 
+// strcmp / strncmp (lim = n) / strcasecmp / strncasecmp over guest memory.
+// False when a byte the compare needs is not readable.
+bool Runtime::GuestStrCompare(std::uint32_t a0, std::uint32_t a1, std::uint32_t lim, bool nocase,
+                              int* out) {
+    // One pass in the common case: the host compare is bounded by what is
+    // readable after both pointers, so it stops at the first difference or
+    // NUL and cannot leave a mapping (also when another guest thread
+    // rewrites a terminator meanwhile).
+    if (lim == 0) {
+        *out = 0;
+        return true;
+    }
+    const char* pa = H<const char>(a0);
+    const char* pb = H<const char>(a1);
+    int pra = 0, prb = 0;
+    std::uint32_t ea = 0, eb = 0;
+    if (!FindMapping(a0, std::uint64_t(a0) + 1, &pra, &ea) || !(pra & PROT_READ) ||
+        !FindMapping(a1, std::uint64_t(a1) + 1, &prb, &eb) || !(prb & PROT_READ)) {
+        return false;
+    }
+    const std::uint32_t n = std::min(lim, std::min(ea - a0, eb - a1));
+    int r = nocase ? strncasecmp(pa, pb, n) : std::strncmp(pa, pb, n);
+    if (r == 0 && n < lim && std::memchr(pa, 0, n) == nullptr) {
+        // n equal bytes and no NUL: a string runs into the next mapping.
+        // The lengths mapping by mapping, then the compare over them.
+        std::uint32_t la = 0, lb = 0;
+        if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
+            return false;
+        }
+        // Up to and with the shorter string's NUL, never past lim.
+        const std::uint32_t m = std::min(lim, std::min(la, lb) + (la != lb || la < lim ? 1u : 0u));
+        r = nocase ? strncasecmp(pa, pb, m) : std::memcmp(pa, pb, m);
+    }
+    *out = r;
+    return true;
+}
+
 // Validates a guest range before host-side bulk access. Halts cleanly on violation.
 bool Runtime::CheckRange(std::uint32_t guest, std::size_t size, bool write) {
     if (size == 0) {
@@ -1903,19 +1939,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const ImportId id = imp.import_id;
     using I = ImportId;
     const std::uint32_t a0 = regs[0], a1 = regs[1], a2 = regs[2], a3 = regs[3];
-    // GL fast path. gl* calls are the hottest imports (12-20 per draw): send
-    // them to the real driver before the long name chain below, and without
-    // the runtime's mutex_ (RealGL has its own lock). Unhandled names and
-    // threads without a GL context fall through to the fake shim.
-    if (n.size() > 2 && n[0] == 'g' && n[1] == 'l' &&
-        RealGLBackend()->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
-        return;
-    }
-    // OpenSL ES (opensl.cpp): slCreateEngine and the "SL:" interface methods,
-    // names outside the import id table.
-    if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
-        return;
-    }
     // DIAG-only audit: record every distinct guest import actually CALLED.
     // Used to find host-side service gaps of the kind that broke Space (a
     // missing strtod left luaO_str2d's endptr uninitialised, so Lua's
@@ -1936,15 +1959,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         }
     }
 
-    // Fast path first (after the diagnostic bookkeeping above, so the
-    // "first call" audit still sees these imports): the math functions the
-    // guest hammers in loops are dispatched by their load-time id instead of
-    // the import-name chain below.
-    if (imp.fast_math != 0) {
-        CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
-        return;
-    }
+    // The imports a frame calls by the thousand come first, by the kind the
+    // loader gave them (HotImportForName): nothing before them but the
+    // audit's test above.
     switch (imp.hot) {
+        case HotImport::MemCmp:
+            if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
+                goto bad_ptr;
+            }
+            Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
+            return;
+        case HotImport::StrLen: {
+            std::uint32_t len = 0;
+            if (!GuestStrnlen(a0, 0xFFFFFFFFu, &len)) {
+                goto bad_ptr;
+            }
+            Ret(regs, len);
+            return;
+        }
+        case HotImport::StrCmp: {
+            int r = 0;
+            if (!GuestStrCompare(a0, a1, 0xFFFFFFFFu, false, &r)) {
+                goto bad_ptr;
+            }
+            Ret(regs, static_cast<std::uint32_t>(r));
+            return;
+        }
         case HotImport::TlsGet:
             BindTls();
             Ret(regs, PthreadGetSpecific(a0));
@@ -1982,6 +2022,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         case HotImport::None:
             break;
+    }
+    // The math functions the guest hammers in loops, by their load-time id.
+    if (imp.fast_math != 0) {
+        CallFastMath(imp.fast_math, regs, a0, a1, a2, a3);
+        return;
+    }
+    // GL calls (12-20 per draw) go to the real driver by their load-time id
+    // (gl_ids.h), without the runtime's mutex_. A thread without a GL
+    // context falls through to the fake shim (PC) or the generic stub.
+    if (imp.gl_id != GlId::None && realgl_->Handle(imp.gl_id, n.c_str(), regs, a0, a1, a2, a3)) {
+        return;
+    }
+    // OpenSL ES (opensl.cpp): slCreateEngine and the "SL:" interface methods,
+    // names outside the import id table.
+    if (id == I::None && !n.empty() && (n[0] == 'S' || n[0] == 's') && OpenSlCall(n, regs)) {
+        return;
     }
 
     // --- memory management ---
@@ -2597,37 +2653,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strncasecmp_:
     case I::strncmp_:
     if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
-        // Compare in guest memory, one pass in the common case: the host
-        // compare is bounded by what is readable after both pointers, so it
-        // stops at the first difference or NUL and cannot leave a mapping
-        // (also when another guest thread rewrites a terminator meanwhile).
         const bool bounded = (id == I::strncmp_ || id == I::strncasecmp_);
-        const bool nocase = (id == I::strcasecmp_ || id == I::strncasecmp_);
-        const std::uint32_t lim = bounded ? a2 : 0xFFFFFFFFu;
-        if (lim == 0) {
-            Ret(regs, 0);
-            return;
-        }
-        const char* pa = H<const char>(a0);
-        const char* pb = H<const char>(a1);
-        int pra = 0, prb = 0;
-        std::uint32_t ea = 0, eb = 0;
-        if (!FindMapping(a0, std::uint64_t(a0) + 1, &pra, &ea) || !(pra & PROT_READ) ||
-            !FindMapping(a1, std::uint64_t(a1) + 1, &prb, &eb) || !(prb & PROT_READ)) {
+        int r = 0;
+        if (!GuestStrCompare(a0, a1, bounded ? a2 : 0xFFFFFFFFu,
+                             id == I::strcasecmp_ || id == I::strncasecmp_, &r)) {
             goto bad_ptr;
-        }
-        const std::uint32_t n = std::min(lim, std::min(ea - a0, eb - a1));
-        int r = nocase ? strncasecmp(pa, pb, n) : std::strncmp(pa, pb, n);
-        if (r == 0 && n < lim && std::memchr(pa, 0, n) == nullptr) {
-            // n equal bytes and no NUL: a string runs into the next mapping.
-            // The lengths mapping by mapping, then the compare over them.
-            std::uint32_t la = 0, lb = 0;
-            if (!GuestStrnlen(a0, lim, &la) || !GuestStrnlen(a1, lim, &lb)) {
-                goto bad_ptr;
-            }
-            // Up to and with the shorter string's NUL, never past lim.
-            const std::uint32_t m = std::min(lim, std::min(la, lb) + (la != lb || la < lim ? 1u : 0u));
-            r = nocase ? strncasecmp(pa, pb, m) : std::memcmp(pa, pb, m);
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return;
