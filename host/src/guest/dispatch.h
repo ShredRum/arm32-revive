@@ -1015,6 +1015,7 @@ private:
         // -> OOM -> bad free -> USAGE_ERROR abort). Reaped exactly once by
         // ReapThreadStack (thread exit, or join/detach, whichever comes first).
         std::uint32_t stack = 0;
+        std::uint32_t stack_size = 0;
         std::string last_svc = "?";  // HARNESS_LASTSVC triage: parked import
         std::string svc_hist;        // ring of recent imports (path shape)
     };

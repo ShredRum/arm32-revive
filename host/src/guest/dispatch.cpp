@@ -2089,7 +2089,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (::sysconf(_SC_PAGESIZE) != 4096 || ::madvise(H(a0), len, MADV_DONTNEED) != 0) {
+            if (GuestMemory::HostPageSize() != 4096 || ::madvise(H(a0), len, MADV_DONTNEED) != 0) {
                 std::memset(H(a0), 0, len);
             }
         }
@@ -2309,9 +2309,15 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::sysconf_:
     if (id == I::sysconf_) {
-        // The guest asks for the page size and friends. The _SC_* values
-        // are the Linux ones on both ABIs, so the host's answer is the
-        // guest's.
+        // The guest's pages are 4 KiB whatever the host's are (its segments
+        // are 4 KiB aligned and its __page_size says 4096; a 16 KiB host is
+        // the bridge's concern): bionic's _SC_PAGESIZE (0x27) and
+        // _SC_PAGE_SIZE (0x28, bits/sysconf.h). The other _SC_* numbers are
+        // bionic's on both ABIs, so the host's answer is the guest's.
+        if (a0 == 0x27u || a0 == 0x28u) {
+            Ret(regs, 4096);
+            return;
+        }
         Ret(regs, static_cast<std::uint32_t>(::sysconf(static_cast<int>(a0))));
         return;
     }
@@ -2482,7 +2488,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         case 6:   // AT_PAGESZ
         case 30:  // AT_PAGESIZE (the arm64 name for the same thing)
-            Ret(regs, static_cast<std::uint32_t>(::sysconf(_SC_PAGESIZE)));
+            Ret(regs, 4096);  // the guest's page size, as sysconf and __page_size
             return;
         case 11:  // AT_UID
             Ret(regs, static_cast<std::uint32_t>(::getuid()));
@@ -12530,8 +12536,27 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return 0xFFFFFFFFu;
     }
+    // The attributes (PthreadAttr's layout): a thread created detached is
+    // gone when it ends, as after pthread_detach (it used to stay in
+    // threads_ for good), and a stack larger than ours is given. A smaller
+    // request still gets kThreadStackSize: these stacks come from the guest
+    // heap without a guard page, so a smaller one would turn an overflow
+    // into silent heap damage instead of the fault a device gives.
+    bool detached = false;
+    std::uint32_t stack_size = kThreadStackSize;
     if (attr != 0) {
-        std::printf("[thread] NOTE non-null attr %08x (ignored)\n", attr);
+        if (!CheckRange(attr, 24, false)) {
+            std::printf("[thread] LOUD pthread_create: bad attr %08x -- halting\n", attr);
+            HaltGuest();
+            return 0xFFFFFFFFu;
+        }
+        std::uint32_t f[6];
+        std::memcpy(f, H(attr), sizeof f);
+        detached = (f[0] & 1u) != 0;
+        constexpr std::uint32_t kMaxStack = 64u << 20;
+        if (f[2] > stack_size) {
+            stack_size = (std::min(f[2], kMaxStack) + 0xFFFu) & ~0xFFFu;
+        }
     }
     if (!cb_) {
         std::printf("[thread] LOUD no callbacks registered -- halting\n");
@@ -12541,9 +12566,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // 8MB guest stack from the heap. Stack-overflow smash guard (triage
     // 2026-10-16). The block is owned by the ThreadState now and handed back by
     // ReapThreadStack (2026-10-18: it used to be leaked outright).
-    const std::uint32_t stack = GuestMalloc(kThreadStackSize);
+    const std::uint32_t stack = GuestMalloc(stack_size);
     if (!stack) {
-        return ENOMEM;
+        return EAGAIN;  // POSIX: no resources for another thread
     }
     std::size_t cpu_id = 0;
     if (!AcquireCpuId(&cpu_id)) {
@@ -12556,8 +12581,10 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         tid = AllocTid();
         st->stack = stack;
+        st->stack_size = stack_size;
+        st->detached = detached;
         thr_stacks_++;
-        thr_stack_bytes_ += kThreadStackSize;
+        thr_stack_bytes_ += stack_size;
         threads_[tid] = st;
     }
     if (!CheckRange(tid_out, 4, true)) {
@@ -12573,9 +12600,9 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
     // std::thread throws std::system_error when the host cannot create a
     // thread; that must become EAGAIN for the guest, not std::terminate.
     try {
-    st->th = std::thread([this, st, tid, start, arg, stack, cpu_id]() {
+    st->th = std::thread([this, st, tid, start, arg, stack, stack_size, cpu_id]() {
         t_hot.tid = tid;
-        SetThreadStack(stack, kThreadStackSize);
+        SetThreadStack(stack, stack_size);
         Dynarmic::A32::UserConfig cfg;
         cfg.callbacks = cb_;
         cfg.optimizations =
@@ -12596,7 +12623,7 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         PushLocalFrame();  // real handles made here go with the thread, as on a JVM
         auto& regs = jit.Regs();
         regs.fill(0);
-        regs[13] = stack + kThreadStackSize - 8;  // 8-aligned top
+        regs[13] = stack + stack_size - 8;  // 8-aligned top
         regs[14] = mod_.halt_va;           // routine return ends the thread
         regs[0] = arg;
         if (start & 1u) {
@@ -13006,7 +13033,7 @@ void Runtime::ReapThreadStack(std::uint32_t tid) {
     const std::uint32_t s = it->second->stack;
     it->second->stack = 0;
     thr_stacks_--;
-    thr_stack_bytes_ -= kThreadStackSize;
+    thr_stack_bytes_ -= it->second->stack_size;
     if (DiagOn()) {
         static int rn = 0;
         if (rn < 40) {

@@ -176,6 +176,10 @@ struct RuntimeTestAccess {
         rt.mem().Map(a, n, PROT_READ | PROT_WRITE);
         rt.AddMapping(a, n, PROT_READ | PROT_WRITE);
     }
+    static bool HasThread(Runtime& rt, std::uint32_t tid) {
+        std::lock_guard<std::recursive_mutex> l(rt.mutex_);
+        return rt.threads_.count(tid) != 0;
+    }
     static bool TakeStopped(Runtime& rt) {
         const bool s = rt.stop_step_;
         rt.stop_step_ = false;
@@ -518,6 +522,9 @@ int main() {
     mod.imports.push_back(abr::Import{"strchr", true, 0, 0, 0});        // 132
     mod.imports.push_back(abr::Import{"strstr", true, 0, 0, 0});        // 133
     mod.imports.push_back(abr::Import{"fcntl", true, 0, 0, 0});         // 134
+    mod.imports.push_back(abr::Import{"pthread_create", true, 0, 0, 0});  // 135
+    mod.imports.push_back(abr::Import{"pthread_join", true, 0, 0, 0});    // 136
+    mod.imports.push_back(abr::Import{"pthread_attr_setdetachstate", true, 0, 0, 0});  // 137
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -980,10 +987,11 @@ int main() {
             Expect("memmem missing", std::to_string(call(2, args)), "0");
         }
         {
-            // _SC_PAGESIZE is 30 in Linux.
-            const std::uint32_t args[4] = {30, 0, 0, 0};
-            const std::uint32_t r = call(3, args);
-            Expect("sysconf _SC_PAGESIZE", std::to_string(r != 0 ? 1 : 0), "1");
+            // The guest's pages are 4 KiB on any host: bionic's _SC_PAGESIZE
+            // (0x27) and _SC_PAGE_SIZE (0x28), also with HARNESS_PAGESIZE.
+            const std::uint32_t a27[4] = {0x27, 0, 0, 0}, a28[4] = {0x28, 0, 0, 0};
+            Expect("sysconf _SC_PAGESIZE / _SC_PAGE_SIZE",
+                   std::to_string(call(3, a27)) + " " + std::to_string(call(3, a28)), "4096 4096");
         }
         {
             const std::uint32_t args[4] = {0, 0, 0, 0};
@@ -1354,8 +1362,8 @@ int main() {
         Expect("getauxval(AT_HWCAP) excludes VFPv4",
                std::to_string(hwcap & abr::kHwcapVfpv4), "0");
         const std::uint32_t ps[4] = {kAtPagesz, 0, 0, 0};
-        Expect("getauxval(AT_PAGESZ) is the page size",
-               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps) > 0 ? 1 : 0), "1");
+        Expect("getauxval(AT_PAGESZ) is the guest's 4 KiB",
+               std::to_string(abr::RuntimeTestAccess::Call(rt, 19, ps)), "4096");
         const std::uint32_t h2[4] = {kAtHwcap2, 0, 0, 0};
         Expect("getauxval(AT_HWCAP2) is zero",
                std::to_string(abr::RuntimeTestAccess::Call(rt, 19, h2)), "0");
@@ -3546,6 +3554,50 @@ int main() {
         Expect("attr: stack size 8192 accepted", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, ok)), "0");
         Expect("attr: below 8192 refused", std::to_string(abr::RuntimeTestAccess::Call(rt, 113, small)),
                std::to_string(EINVAL));
+    }
+
+    // --- pthread_create honours its attributes: a thread created detached
+    //     leaves no entry behind when it ends; a joinable one hands its
+    //     return value to pthread_join and is gone after it.
+    {
+        const std::uint32_t kPage = 0x61020000u, kAttr = 0x10008F40, kTid = 0x10008F60, kRet = 0x10008F64;
+        abr::RuntimeTestAccess::MapRwx(rt, kPage, 0x1000);
+        // mov r0,#42; bx lr ... and the return trampoline `svc #0`.
+        const std::uint32_t code[] = {0xe3a0002a, 0xe12fff1e, 0, 0, 0xef000000};
+        std::memcpy(rt.H(kPage), code, sizeof(code));
+        const std::uint32_t old_halt = mod.halt_va;
+        mod.halt_va = kPage + 0x10;
+        abr::GuestCallbacks cbt(&rt);
+        rt.set_callbacks(&cbt);
+        auto call = [&](std::uint32_t idx, std::uint32_t x, std::uint32_t y = 0, std::uint32_t z = 0,
+                        std::uint32_t w = 0) {
+            const std::uint32_t a[4] = {x, y, z, w};
+            return abr::RuntimeTestAccess::Call(rt, idx, a);
+        };
+        call(112, kAttr);
+        call(137, kAttr, 1);  // PTHREAD_CREATE_DETACHED
+        const std::uint32_t rc = call(135, kTid, kAttr, kPage, 0);
+        std::uint32_t tid = 0;
+        std::memcpy(&tid, rt.H(kTid), 4);
+        bool gone = false;
+        for (int i = 0; i < 2000 && !gone; i++) {
+            gone = !abr::RuntimeTestAccess::HasThread(rt, tid);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        Expect("pthread_create(detached attr): the thread leaves no entry",
+               std::to_string(rc) + (gone ? " gone" : " still there"), "0 gone");
+        const std::uint32_t rc2 = call(135, kTid, 0, kPage, 0);
+        std::memcpy(&tid, rt.H(kTid), 4);
+        const std::uint32_t jr = call(136, tid, kRet);
+        std::uint32_t retval = 0;
+        std::memcpy(&retval, rt.H(kRet), 4);
+        Expect("pthread_create + pthread_join: return value, entry gone",
+               std::to_string(rc2) + " " + std::to_string(jr) + " " + std::to_string(retval) + " " +
+                   (abr::RuntimeTestAccess::HasThread(rt, tid) ? "there" : "gone"),
+               "0 0 42 gone");
+        rt.set_callbacks(nullptr);
+        mod.halt_va = old_halt;
+        abr::RuntimeTestAccess::TakeStopped(rt);
     }
 
     // --- cond wakes: a signal with nobody waiting is not kept, and a signal
