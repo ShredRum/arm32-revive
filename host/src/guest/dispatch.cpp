@@ -140,21 +140,6 @@ void* mspace_calloc(dl_mspace, size_t, size_t);
 size_t mspace_usable_size(const void*);
 }  // extern "C"
 
-
-
-// HARNESS_TIMEWARP=<sec>: guest clock shift (defined here to avoid crossing
-// goto bad_ptr initializations inside CallImport).
-static std::int64_t TimeWarp() {
-    static std::int64_t w = -2;
-    if (w == -2) {
-        w = 0;
-        if (const char* e = std::getenv("HARNESS_TIMEWARP")) {
-            w = (std::int64_t)std::strtoll(e, nullptr, 0);
-        }
-    }
-    return w;
-}
-
 // Honest guest sleep (2026-10-19, PLAN item 8). bionic blocks the calling
 // thread for the requested time; the old 5 ms clamp was a bring-up guard
 // against delay loops hanging the emulator. Neither shipped guest sleeps on a
@@ -2709,35 +2694,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (!CheckRange(a0, a2, false)) {
             goto bad_ptr;
         }
-        // HARNESS_MEMDUMP=<hexlr>: hex+ascii dump of the scanned buffer when
-        // the caller's lr matches (JSON-parse forensics: input lives on the
-        // heap and drifts between runs due to worker-thread racing, so
-        // post-mortem dumps are unreliable — capture at call time).
-        // Read once: memchr is hot (JSON/string parsing) and getenv is a
-        // linear scan of environ.
-        static const std::int64_t memdump_lr = [] {
-            const char* e = std::getenv("HARNESS_MEMDUMP");
-            return e ? static_cast<std::int64_t>(std::strtoul(e, nullptr, 16)) : std::int64_t(-1);
-        }();
-        if (memdump_lr >= 0) {
-            const std::uint32_t mlr = static_cast<std::uint32_t>(memdump_lr);
-            if (regs[14] == mlr && a2 <= 0x10000) {
-                std::printf("[memdump] %s(%08x,'%c',%u) lr=%08x:\n", n.c_str(), a0,
-                            (a1 & 0xFF) >= 32 ? (char)(a1 & 0xFF) : '?', a2, regs[14]);
-                const std::uint8_t* bp = H<const std::uint8_t>(a0);
-                for (std::uint32_t i = 0; i < a2; i += 16) {
-                    std::printf("[memdump] %08x:", a0 + i);
-                    for (std::uint32_t j = i; j < i + 16 && j < a2; j++) {
-                        std::printf(" %02x", bp[j]);
-                    }
-                    std::printf("  |");
-                    for (std::uint32_t j = i; j < i + 16 && j < a2; j++) {
-                        std::printf("%c", (bp[j] >= 32 && bp[j] < 127) ? (char)bp[j] : '.');
-                    }
-                    std::printf("|\n");
-                }
-            }
-        }
         const char* p = H<const char>(a0);
         const char* f = (id == I::memchr_)
                             ? static_cast<const char*>(std::memchr(p, a1 & 0xFF, a2))
@@ -3585,14 +3541,11 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     // --- time (32-bit guest layouts: two u32 words, NOT host structs) ---
-    // HARNESS_TIMEWARP=<sec>: shift all guest clocks forward (timer-gate
-    // tests: loading/menu timeouts expire without wall waiting).
     case I::clock_gettime_:
     if (id == I::clock_gettime_) {
         struct timespec ts {};
         const int r = clock_gettime(a0, &ts);
         if (r == 0) {
-            ts.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(ts.tv_sec);
             const std::uint32_t nsec = static_cast<std::uint32_t>(ts.tv_nsec);
             if (CheckRange(a1, 8, true)) {
@@ -3608,7 +3561,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         struct timeval tv {};
         const int r = gettimeofday(&tv, nullptr);
         if (r == 0 && a0 != 0) {
-            tv.tv_sec += (time_t)TimeWarp();
             const std::uint32_t sec = static_cast<std::uint32_t>(tv.tv_sec);
             const std::uint32_t usec = static_cast<std::uint32_t>(tv.tv_usec);
             if (CheckRange(a0, 8, true)) {
@@ -3623,10 +3575,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::clock_:
     case I::time_:
     if (id == I::time_ || id == I::clock_) {
-        std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
-        if (id == I::time_) {
-            t += (time_t)TimeWarp();
-        }
+        const std::time_t t = (id == I::time_) ? std::time(nullptr) : std::clock();
         if (id == I::time_ && a0 != 0 && CheckRange(a0, 4, true)) {
             const std::uint32_t w = static_cast<std::uint32_t>(t & 0xFFFFFFFFu);
             std::memcpy(H(a0), &w, 4);
@@ -3652,9 +3601,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             std::memcpy(&gt, H(a0), 4);
         }
         std::time_t tt = (std::time_t)gt;
-        if (is_local) {
-            tt += (time_t)TimeWarp();
-        }
         thread_local struct tm scratch {};
         struct tm* ht = is_local ? localtime_r(&tt, &scratch) : gmtime_r(&tt, &scratch);
         std::uint32_t out = a1;
@@ -4626,21 +4572,6 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::pthread_create_:
     if (id == I::pthread_create_) {
-        // HARNESS_NOWORKER=1: skip thread creation (return 0, no thread).
-        // Diagnosis-only: removes worker/main interleaving nondeterminism
-        // (shared bump-heap addresses -> hash orders -> path variance).
-        // Joins will hang if reached; the font wall dies long before.
-        // NOTE: any value (even empty) counts as set; use env -u to run real
-        // worker threads.
-        if (EnvOn("HARNESS_NOWORKER")) {
-            std::printf("[thread] NOWORKER: skip create start=%08x\n", a2);
-            if (a0 && CheckRange(a0, 4, true)) {
-                std::uint32_t zero = 0;
-                std::memcpy(H(a0), &zero, 4);
-            }
-            Ret(regs, 0);
-            return;
-        }
         // TEMP-DIAG (worker hang): log the job name (inline C string at
         // [arg+0x20], seen as "Configuration") so runs inventory jobs.
         // Also scan [arg,arg+0x200] for an http URL (job identity).
@@ -12916,26 +12847,6 @@ std::uint32_t Runtime::PthreadCreate(std::uint32_t tid_out, std::uint32_t attr, 
         RegisterSigThread(tid, &jit);
         sampler::ThreadUses();  // the profiler's timer for a guest-created thread, when on
         PushLocalFrame();  // real handles made here go with the thread, as on a JVM
-        // HARNESS_WBEAT=1: sample worker guest PC every 5s (finds stuck
-        // workers; racy values, liveness only — same caveat as main beat).
-        if (std::getenv("HARNESS_WBEAT")) {
-            std::thread([st, tid, &jit]() {
-                for (int i = 0; i < 60; i++) {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    bool dd = false;
-                    {
-                        std::lock_guard<std::mutex> l(st->m);
-                        dd = st->done;
-                    }
-                    if (dd) {
-                        break;
-                    }
-                    auto& rr = jit.Regs();
-                    std::printf("[wbeat] tid=%u pc=%08x lr=%08x sp=%08x\n", tid, rr[15],
-                                rr[14], rr[13]);
-                }
-            }).detach();
-        }
         auto& regs = jit.Regs();
         regs.fill(0);
         regs[13] = stack + kThreadStackSize - 8;  // 8-aligned top
@@ -17575,7 +17486,7 @@ std::string Runtime::SvcName(std::uint32_t swi) const {
 
 // inet_* (inet_addr/inet_aton/inet_pton/inet_ntoa/inet_ntop). File scope:
 // CallImport's gotos to bad_ptr cannot cross automatic inits, so this lives
-// here (same convention as TimeWarp). All paths Ret()+return (handled).
+// here. All paths Ret()+return (handled).
 void Runtime::InetThunk(ImportId id, Regs& regs, const std::string& n, std::uint32_t a0, std::uint32_t a1,
                         std::uint32_t a2, std::uint32_t a3) {
     using I = ImportId;
@@ -17992,8 +17903,7 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
         // side naturally (read-only fs semantics), which is correct.
         // /etc/hosts + /etc/resolv.conf: the game's bundled HTTP/DNS
         // stack reads them (observed: worker fopen("/etc/hosts") while
-        // resolving cloud.rovio.com). HARNESS_HOSTSHACK=1 serves a
-        // synthetic hosts (see below) instead of the host file.
+        // resolving cloud.rovio.com): passed through.
         // What a 32-bit process reads there on an arm64 kernel (the host
         // process is 64-bit and would get its own view): see Proc32File.
         if (g == "/proc/cpuinfo" || g == "/proc/self/auxv") {
@@ -18003,31 +17913,7 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             }
         }
         if (g.compare(0, 5, "/sys/") == 0 || g.compare(0, 6, "/proc/") == 0 ||
-            g == "/etc/resolv.conf") {
-            return g;
-        }
-        if (g == "/etc/hosts") {
-            if (EnvOn("HARNESS_HOSTSHACK")) {
-                // Synthetic hosts for DNS-hack experiments (no system
-                // change: only this guest path is virtualized).
-                static std::string hackpath;
-                if (hackpath.empty()) {
-                    hackpath = files_hostbase_ + "/synth.hosts";
-                    FILE* hf = std::fopen(hackpath.c_str(), "r");
-                    if (!hf) {
-                        hf = std::fopen(hackpath.c_str(), "w");
-                        if (hf) {
-                            std::fputs("127.0.0.1 localhost\n127.0.0.2 cloud.rovio.com\n",
-                                       hf);
-                            std::fclose(hf);
-                        }
-                    } else {
-                        std::fclose(hf);
-                    }
-                }
-                std::printf("[files] hosts HACK -> %s\n", hackpath.c_str());
-                return hackpath;
-            }
+            g == "/etc/resolv.conf" || g == "/etc/hosts") {
             return g;
         }
         if (!files_prefix_.empty() && g.compare(0, files_prefix_.size(), files_prefix_) == 0 &&
