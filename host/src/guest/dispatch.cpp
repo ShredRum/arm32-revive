@@ -9706,7 +9706,17 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            if (!CheckRange(pd.loc_va, 4, false)) {
+            bool ok = CheckRange(pd.loc_va, 4, true);
+            if (!ok) {
+                // Read-only page: only allowed if within a mapped segment of the module (DT_TEXTREL).
+                for (const auto& seg : mod_.segments) {
+                    if (pd.loc_va >= seg.start && pd.loc_va + 4 <= seg.start + seg.size) {
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+            if (!ok) {
                 std::printf("[data] LOUD import %u loc %08x out of range -- halting\n", idx,
                             pd.loc_va);
                 stop_step_ = true;
