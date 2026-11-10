@@ -448,6 +448,9 @@ public:
     // would fault. On success *len = min(strlen, max).
     bool GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* len);
     void NoteFailedJavaCall(std::uint32_t fn, std::uint32_t method, const std::string& mdesc);
+    static constexpr std::uint32_t kBadLen = 0xFFFFFFFFu;
+    std::uint32_t GuestStrlenOrBad(std::uint32_t p);
+    std::uint64_t GuestExtent(std::uint32_t addr, std::uint64_t max, bool write);
     bool GuestStrCompare(std::uint32_t a0, std::uint32_t a1, std::uint32_t lim, bool nocase, int* out);
 
     // Guest printf vararg cursor. Two shapes share it: inline APCS words then

@@ -2448,6 +2448,10 @@ int main() {
         }
         Expect("strtok_r tokens", got, "xynull");
         Expect("strtok does not halt", abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "0");
+        put(kA, "a b");
+        call(131, kA, kB, 0xE0000000u);
+        Expect("strtok_r with a wild save pointer halts",
+               abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
     }
 
     // --- LDREX/STREX are atomic across threads: 4 Jits on the shared monitor,
@@ -3349,6 +3353,38 @@ int main() {
                    std::string(fd >= 0 ? "fd" : "-1") + " " +
                        (std::filesystem::exists(host_dir + "/q1/q2/new.bin") ? "1" : "0"),
                    "fd 1");
+            // fread with a count far beyond the buffer's memory: the file
+            // ends first, so it reads what there is (a real libc touches only
+            // those bytes). A file longer than the memory left is the fault.
+            {
+                put(kP, "/data/data/abr.errno/files/small.bin");
+                put(kBuf, "w");
+                const std::uint32_t fo[4] = {kP, kBuf, 0, 0};
+                const std::uint32_t wf = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                put(kBuf + 0x10, "0123456789");
+                const std::uint32_t wa[4] = {kBuf + 0x10, 1, 10, wf};
+                abr::RuntimeTestAccess::Call(rt, 32, wa);
+                const std::uint32_t wc[4] = {wf, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, wc);
+                put(kBuf, "r");
+                const std::uint32_t rf = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                const std::uint32_t kTailBuf = 0x50000000u - 64;  // 64 bytes to the heap's end
+                const std::uint32_t ra[4] = {kTailBuf, 1, 0x7FFFFFFFu, rf};
+                const std::uint32_t got = abr::RuntimeTestAccess::Call(rt, 120, ra);
+                Expect("fread(count beyond the mapping) of a 10-byte file",
+                       std::to_string(got) + " " + std::string(rt.H<const char>(kTailBuf), 10) + " " +
+                           (abr::RuntimeTestAccess::TakeStopped(rt) ? "halted" : "ran on"),
+                       "10 0123456789 ran on");
+                const std::uint32_t rc[4] = {rf, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, rc);
+                const std::uint32_t rf2 = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                const std::uint32_t rb[4] = {0x50000000u - 4, 1, 100, rf2};  // 4 bytes left, 10 in the file
+                abr::RuntimeTestAccess::Call(rt, 120, rb);
+                Expect("fread of more than the memory left halts",
+                       abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
+                const std::uint32_t rc2[4] = {rf2, 0, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 22, rc2);
+            }
             // Record locks reach the host with the guest's 32-bit struct
             // flock converted; an unknown command is EINVAL, not "success".
             const std::uint32_t kFl = kBuf + 0x40;

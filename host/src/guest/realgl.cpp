@@ -1610,15 +1610,15 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             case 0x8005: cnt = 4; break;  // BLEND_COLOR
             default: break;               // scalars
         }
+        // The two variable-length lists: as many values as the driver
+        // reports (COMPRESSED_TEXTURE_FORMATS can exceed 64 on modern
+        // drivers, so every form sizes its buffer from the count, E-06).
+        if (a0 == 0x86A3 || a0 == 0x8DF8) {
+            GLint nn = 0;
+            glGetIntegerv(a0 == 0x86A3 ? 0x86A2 : 0x8DF9, &nn);
+            cnt = (nn > 0 && nn <= 4096) ? nn : 0;
+        }
         if (id == G::glGetIntegerv) {
-            // The two variable-length lists: as many values as the driver
-            // reports (COMPRESSED_TEXTURE_FORMATS can exceed 64 on modern
-            // drivers, so the buffer is sized from the count, E-06).
-            if (a0 == 0x86A3 || a0 == 0x8DF8) {
-                GLint nn = 0;
-                glGetIntegerv(a0 == 0x86A3 ? 0x86A2 : 0x8DF9, &nn);
-                cnt = (nn > 0 && nn <= 4096) ? nn : 0;
-            }
             std::vector<GLint> v(static_cast<std::size_t>(cnt < 4 ? 4 : cnt), 0);
             glGetIntegerv((GLenum)a0, v.data());
             if (r->CheckRange(a1, (std::uint32_t)(cnt * 4), true)) {
@@ -1642,14 +1642,15 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             if (!r->CheckRange(a1, bytes, true)) {
                 return bad(a1);
             }
+            const std::size_t slots = static_cast<std::size_t>(cnt < 4 ? 4 : cnt);
             if (fl) {
-                GLfloat v[4] = {0, 0, 0, 0};
-                glGetFloatv((GLenum)a0, v);
-                std::memcpy(r->H(a1), v, bytes);
+                std::vector<GLfloat> v(slots, 0.0f);
+                glGetFloatv((GLenum)a0, v.data());
+                std::memcpy(r->H(a1), v.data(), bytes);
             } else {
-                GLboolean v[4] = {0, 0, 0, 0};
-                glGetBooleanv((GLenum)a0, v);
-                std::memcpy(r->H(a1), v, bytes);
+                std::vector<GLboolean> v(slots, 0);
+                glGetBooleanv((GLenum)a0, v.data());
+                std::memcpy(r->H(a1), v.data(), bytes);
             }
         }
         r->Ret(regs, 0);

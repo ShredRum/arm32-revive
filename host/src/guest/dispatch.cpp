@@ -1227,6 +1227,33 @@ bool Runtime::GuestStrnlen(std::uint32_t s, std::uint32_t max, std::uint32_t* le
     return true;
 }
 
+// strlen of a guest string, or kBadLen when a byte before its NUL is not
+// readable (the caller halts the guest).
+std::uint32_t Runtime::GuestStrlenOrBad(std::uint32_t p) {
+    std::uint32_t l = 0;
+    return GuestStrnlen(p, kBadLen, &l) ? l : kBadLen;  // l == kBadLen: no NUL in 4 GB
+}
+
+// How many bytes from addr on are readable (writable) guest memory, up to
+// max: across neighbouring mappings, as a host access would run.
+std::uint64_t Runtime::GuestExtent(std::uint32_t addr, std::uint64_t max, bool write) {
+    std::uint64_t done = 0;
+    while (done < max) {
+        const std::uint64_t cur = std::uint64_t(addr) + done;
+        if (cur > 0xFFFFFFFFull) {
+            break;
+        }
+        int prot = 0;
+        std::uint32_t ext_end = 0;
+        if (!FindMapping(static_cast<std::uint32_t>(cur), cur + 1, &prot, &ext_end) ||
+            !(prot & (write ? PROT_WRITE : PROT_READ))) {
+            break;
+        }
+        done += ext_end - static_cast<std::uint32_t>(cur);
+    }
+    return std::min(done, max);
+}
+
 // strcmp / strncmp (lim = n) / strcasecmp / strncasecmp over guest memory.
 // False when a byte the compare needs is not readable.
 bool Runtime::GuestStrCompare(std::uint32_t a0, std::uint32_t a1, std::uint32_t lim, bool nocase,
@@ -2644,30 +2671,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     // Every bulk access is range-checked first: a wild guest pointer must
     // halt cleanly, never segfault the host. memcpy/memmove/memset and their
     // __aeabi_ forms: HotImport.
-    case I::bcmp_:
-    case I::memcmp_:
-    if (id == I::memcmp_ || id == I::bcmp_) {
-        if (!CheckRange(a0, a2, false) || !CheckRange(a1, a2, false)) {
-            goto bad_ptr;
-        }
-        Ret(regs, static_cast<std::uint32_t>(std::memcmp(H<const void>(a0), H<const void>(a1), a2)));
-        return;
-    }
-    case I::strlen_:
+    // memcmp, bcmp, strlen and strcmp too (the hot switch above).
     case I::strnlen_:
-    if (id == I::strlen_ || id == I::strnlen_) {
+    if (id == I::strnlen_) {
         std::uint32_t len = 0;
-        if (!GuestStrnlen(a0, id == I::strnlen_ ? a1 : 0xFFFFFFFFu, &len)) {
+        if (!GuestStrnlen(a0, a1, &len)) {
             goto bad_ptr;
         }
         Ret(regs, len);
         return;
     }
     case I::strcasecmp_:
-    case I::strcmp_:
     case I::strncasecmp_:
     case I::strncmp_:
-    if (id == I::strcmp_ || id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
+    if (id == I::strncmp_ || id == I::strcasecmp_ || id == I::strncasecmp_) {
         const bool bounded = (id == I::strncmp_ || id == I::strncasecmp_);
         int r = 0;
         if (!GuestStrCompare(a0, a1, bounded ? a2 : 0xFFFFFFFFu,
@@ -2750,10 +2767,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     if (id == I::strchr_ || id == I::strrchr_ || id == I::strstr_ || id == I::strpbrk_ || id == I::strspn_ ||
         id == I::strcspn_) {
         // Both strings are checked up to their NUL first (GuestStrnlen).
-        auto gstrlen = [&](std::uint32_t p) -> std::uint32_t {
-            std::uint32_t l = 0;
-            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
-        };
+        auto gstrlen = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         const std::uint32_t hl = gstrlen(a0);
         if (hl == 0xFFFFFFFFu) {
             goto bad_ptr;
@@ -2794,8 +2808,8 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         thread_local std::uint32_t strtok_state = 0;
         std::uint32_t state = 0;
         if (id == I::strtok_r_) {
-            if (!CheckRange(a2, 4, false)) {
-                goto bad_ptr;
+            if (!CheckRange(a2, 4, true)) {
+                goto bad_ptr;  // the save pointer is read here and written below
             }
             std::memcpy(&state, H(a2), 4);
             if (a0 != 0) {
@@ -2807,10 +2821,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             state = strtok_state;
         }
-        auto gstrlen2 = [&](std::uint32_t p) -> std::uint32_t {
-            std::uint32_t l = 0;
-            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
-        };
+        auto gstrlen2 = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         const std::uint32_t dl = gstrlen2(a1);
         if (dl == 0xFFFFFFFFu) {
             goto bad_ptr;
@@ -2828,9 +2839,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         const char* base = H<const char>(state);
         auto save = [&](std::uint32_t v) {
             if (id == I::strtok_r_) {
-                if (CheckRange(a2, 4, true)) {
-                    std::memcpy(H(a2), &v, 4);
-                }
+                std::memcpy(H(a2), &v, 4);  // checked writable above
             } else {
                 strtok_state = v;
             }
@@ -4847,14 +4856,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         // kept this behaviour in 96acf7f). The write-open is tried first; only
         // when it fails with ENOENT are the parents made and the open tried
         // again, so an open into an existing directory costs nothing extra.
-        // True when a directory was created.
+        // Called after an ENOENT. True when the parent directory exists now,
+        // made here or by another guest thread meanwhile: the caller tries
+        // again. False leaves errno at ENOENT for the caller's answer.
         auto ensure_parent = [&](const std::string& hp) -> bool {
             const std::size_t slash = hp.rfind('/');
-            if (slash == std::string::npos || slash == 0) {
-                return false;
+            bool there = false;
+            if (slash != std::string::npos && slash > 0) {
+                const std::string dir = hp.substr(0, slash);
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                there = std::filesystem::is_directory(dir, ec);
             }
-            std::error_code ec;
-            return std::filesystem::create_directories(hp.substr(0, slash), ec) && !ec;
+            if (!there) {
+                errno = ENOENT;
+            }
+            return there;
         };
         // Packed files (apk_vfs.h): the packed file at host path hp when
         // there is no real one (a real file, even a dangling link, wins).
@@ -5273,17 +5290,29 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, 0);
                 return;
             }
-            // A destination that is not writable guest memory: a real libc
-            // faults there (it used to answer 0 items, silently).
-            if (!CheckRange(a0, (std::size_t)a1 * a2, true)) {
+            // A real libc writes only the bytes the file gives, so a count
+            // larger than the buffer's memory is fine while the file ends
+            // first. The read is bounded by the writable memory after ptr; a
+            // file that fills all of it and has more is the fault a device
+            // gives (it used to answer 0 items, silently).
+            const std::uint64_t want = std::uint64_t(a1) * a2;
+            const std::uint64_t room = GuestExtent(a0, want, true);
+            if (room == 0) {
                 goto bad_ptr;
             }
             errno = 0;
-            const std::size_t got = std::fread(H(a0), a1, a2, f);
-            if (got < a2 && std::ferror(f)) {
+            const std::size_t got_bytes = std::fread(H(a0), 1, static_cast<std::size_t>(room), f);
+            if (got_bytes < room && std::ferror(f)) {
                 SetGuestErrno(errno ? errno : EIO);  // an error, not the end of the file
             }
-            Ret(regs, static_cast<std::uint32_t>(got));
+            if (room < want && got_bytes == room && !std::feof(f)) {
+                int c = std::fgetc(f);  // is there really more to read?
+                if (c != EOF) {
+                    std::ungetc(c, f);
+                    goto bad_ptr;
+                }
+            }
+            Ret(regs, static_cast<std::uint32_t>(got_bytes / a1));
             return;
         }
         if (id == I::fwrite_) {
@@ -8309,10 +8338,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::strxfrm_:
     {
         // Bounded guest strlen; 0xFFFFFFFF = unreadable or unterminated.
-        auto guest_strlen = [&](std::uint32_t p) -> std::uint32_t {
-            std::uint32_t l = 0;
-            return GuestStrnlen(p, 0xFFFFFFFFu, &l) && l != 0xFFFFFFFFu ? l : 0xFFFFFFFFu;
-        };
+        auto guest_strlen = [&](std::uint32_t p) { return GuestStrlenOrBad(p); };
         if (id == I::strcasestr_) {
             const std::uint32_t hl = guest_strlen(a0), nl = guest_strlen(a1);
             if (hl == 0xFFFFFFFFu || nl == 0xFFFFFFFFu) {
