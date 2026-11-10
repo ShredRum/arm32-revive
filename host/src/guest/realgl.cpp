@@ -498,11 +498,15 @@ struct GlThread {
 };
 thread_local GlThread t_gl;
 
+// True when an enabled array reads guest memory. An enabled array whose
+// pointer was set with a buffer object bound is an offset into that buffer
+// (the ordinary GLES 1.1 VBO path) and needs no range check here.
 static inline bool HasClientArrays() {
-    return t_gl.client_vertex.enabled || t_gl.client_normal.enabled ||
-           t_gl.client_color.enabled || t_gl.client_tex_coord[0].enabled ||
-           t_gl.client_tex_coord[1].enabled || t_gl.client_tex_coord[2].enabled ||
-           t_gl.client_tex_coord[3].enabled;
+    const auto in_guest = [](const ClientArray& a) { return a.enabled && a.vbo == 0; };
+    return in_guest(t_gl.client_vertex) || in_guest(t_gl.client_normal) ||
+           in_guest(t_gl.client_color) || in_guest(t_gl.client_tex_coord[0]) ||
+           in_guest(t_gl.client_tex_coord[1]) || in_guest(t_gl.client_tex_coord[2]) ||
+           in_guest(t_gl.client_tex_coord[3]);
 }
 
 static bool ValidateClientArray(Runtime* r, const char* name, const char* arr_name,
