@@ -4099,6 +4099,40 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         Ret(regs, PthreadAttr(id, n, a0, a1, a2));
         return;
     }
+    case I::pthread_condattr_destroy_:
+    case I::pthread_condattr_init_:
+    if (id == I::pthread_condattr_init_ || id == I::pthread_condattr_destroy_) {
+        // bionic's pthread_condattr_t is one long of flags (shared bit, clock
+        // bits); init clears it. No title imports a condattr setter, so a
+        // cond made with one is a default cond (PthreadCond's note on clocks).
+        if (!CheckRange(a0, 4, true)) {
+            goto bad_ptr;
+        }
+        std::memset(H(a0), 0, 4);
+        Ret(regs, 0);
+        return;
+    }
+    case I::pthread_setname_np_:
+    if (id == I::pthread_setname_np_) {
+        // (thread, name): bionic refuses a name of 16 bytes or more (ERANGE).
+        // The calling thread's host thread takes the name (it shows in ps
+        // and in crash reports); another thread's is accepted and not set.
+        std::uint32_t len = 0;
+        if (!GuestStrnlen(a1, 0xFFFFFFFFu, &len)) {
+            goto bad_ptr;
+        }
+        if (len >= 16) {
+            Ret(regs, ERANGE);
+            return;
+        }
+        if (a0 == GuestTid()) {
+            char name[16] = {0};
+            std::memcpy(name, H<const char>(a1), len);
+            pthread_setname_np(pthread_self(), name);
+        }
+        Ret(regs, 0);
+        return;
+    }
     case I::__pthread_cleanup_pop_:
     case I::__pthread_cleanup_push_:
     if (id == I::__pthread_cleanup_push_ || id == I::__pthread_cleanup_pop_) {

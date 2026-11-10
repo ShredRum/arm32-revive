@@ -342,3 +342,12 @@ Still to do:
 - [ ] Speed before/after vs master, interleaved.
 - [ ] A read-only audit of this session's diff (889703b..HEAD) was not done
       (session budget): do it before the merge.
+
+Sandbox boot gate, 2026-11-10 (build marker of the day, lib md5 92e72bf9...):
+rio, seasons, space, star-wars, star-wars-ii-amz, stella all reach their
+menu; HEAPCORRUPT/USAGE_ERROR/LOUD/STUCK/FATAL 0, death.log 0 B; screenshots
+looked at. The first run showed LOUD=3 on Rio: the new stub line named three
+imports that worker threads called and that silently answered 0
+(pthread_condattr_init, pthread_condattr_destroy, pthread_setname_np); they
+are implemented now. NOT checked yet: a level, sound, background/resume,
+the `classic` branch, speed.
