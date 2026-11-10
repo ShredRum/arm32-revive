@@ -5220,18 +5220,19 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // (An earlier revision keyed on a0 and silently returned 0 — every
             // file read was empty; empty seed files masked it.)
             FILE* f = file_of(a3);
-            if (!f || !CheckRange(a0, 1, false) || a1 == 0 || a2 == 0) {
+            if (!f || a1 == 0 || a2 == 0) {
                 Ret(regs, 0);
                 return;
             }
-            // Clamp absurd sizes (guest bug shield; host fread would try).
+            // A destination that is not writable guest memory: a real libc
+            // faults there (it used to answer 0 items, silently).
             if (!CheckRange(a0, (std::size_t)a1 * a2, true)) {
-                Ret(regs, 0);
-                return;
+                goto bad_ptr;
             }
+            errno = 0;
             const std::size_t got = std::fread(H(a0), a1, a2, f);
-            if (got < a2) {
-                SetGuestErrno(errno ? errno : EIO);
+            if (got < a2 && std::ferror(f)) {
+                SetGuestErrno(errno ? errno : EIO);  // an error, not the end of the file
             }
             Ret(regs, static_cast<std::uint32_t>(got));
             return;
@@ -5240,9 +5241,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             // fwrite(ptr=a0, size=a1, nmemb=a2, stream=a3): handle is LAST
             // (same a0-keying bug as fread had — fixed together).
             FILE* f = file_of(a3);
-            if (!f || a1 == 0 || a2 == 0 || !CheckRange(a0, (std::size_t)a1 * a2, false)) {
+            if (!f || a1 == 0 || a2 == 0) {
                 Ret(regs, 0);
                 return;
+            }
+            if (!CheckRange(a0, (std::size_t)a1 * a2, false)) {
+                goto bad_ptr;  // as fread: a real libc faults on a wild source
             }
             const std::size_t wrote = std::fwrite(H(a0), a1, a2, f);
             if (wrote < a2) {
@@ -6627,9 +6631,83 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, g);
                 return;
             }
-            // File locks etc.: success-lie (single-process bring-up; revisit
-            // if a game path depends on lock contention).
-            Ret(regs, 0);
+            // Record locks, by the guest's command numbers (arm
+            // asm-generic/fcntl.h): F_GETLK 5, F_SETLK 6, F_SETLKW 7 with the
+            // 16-byte struct flock {short type, whence; long start, len; pid},
+            // and 12, 13, 14 with the 32-byte struct flock64 {short type,
+            // whence; pad; long long start, len; pid}. The host does the lock
+            // with its own 64-bit struct. (They answered "success" unasked.)
+            if ((cmd >= 5 && cmd <= 7) || (cmd >= 12 && cmd <= 14)) {
+                const bool wide = cmd >= 12;
+                const int op = wide ? cmd - 12 : cmd - 5;  // 0 get, 1 set, 2 set and wait
+                const std::uint32_t gsize = wide ? 32u : 16u;
+                if (!CheckRange(a2, gsize, op == 0)) {
+                    set_guest_errno(EFAULT);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                std::int16_t type = 0, whence = 0;
+                std::int32_t pid = 0;
+                std::int64_t start = 0, len = 0;
+                std::memcpy(&type, H(a2), 2);
+                std::memcpy(&whence, H(a2 + 2), 2);
+                if (wide) {
+                    std::memcpy(&start, H(a2 + 8), 8);
+                    std::memcpy(&len, H(a2 + 16), 8);
+                } else {
+                    std::int32_t s32 = 0, l32 = 0;
+                    std::memcpy(&s32, H(a2 + 4), 4);
+                    std::memcpy(&l32, H(a2 + 8), 4);
+                    start = s32;
+                    len = l32;
+                }
+                struct flock fl {};
+                fl.l_type = type;
+                fl.l_whence = whence;
+                fl.l_start = static_cast<off_t>(start);
+                fl.l_len = static_cast<off_t>(len);
+                const int r = ::fcntl(hfd, op == 0 ? F_GETLK : op == 1 ? F_SETLK : F_SETLKW, &fl);
+                if (r < 0) {
+                    set_guest_errno(errno);
+                    Ret(regs, static_cast<std::uint32_t>(-1));
+                    return;
+                }
+                if (op == 0) {
+                    type = static_cast<std::int16_t>(fl.l_type);
+                    whence = static_cast<std::int16_t>(fl.l_whence);
+                    pid = static_cast<std::int32_t>(fl.l_pid);
+                    std::memcpy(H(a2), &type, 2);
+                    std::memcpy(H(a2 + 2), &whence, 2);
+                    if (wide) {
+                        start = fl.l_start;
+                        len = fl.l_len;
+                        std::memcpy(H(a2 + 8), &start, 8);
+                        std::memcpy(H(a2 + 16), &len, 8);
+                        std::memcpy(H(a2 + 24), &pid, 4);
+                    } else {
+                        const std::int32_t s32 = static_cast<std::int32_t>(fl.l_start);
+                        const std::int32_t l32 = static_cast<std::int32_t>(fl.l_len);
+                        std::memcpy(H(a2 + 4), &s32, 4);
+                        std::memcpy(H(a2 + 8), &l32, 4);
+                        std::memcpy(H(a2 + 12), &pid, 4);
+                    }
+                }
+                Ret(regs, 0);
+                return;
+            }
+            // Anything else is not implemented: EINVAL, as the kernel answers
+            // a command it does not know, and one LOUD line per command.
+            {
+                static std::mutex seen_mu;
+                static std::set<int> seen;
+                std::lock_guard<std::mutex> l(seen_mu);
+                if (seen.insert(cmd).second) {
+                    std::printf("[fcntl] LOUD unimplemented command %d (fd %u, arg %08x) -> EINVAL\n", cmd,
+                                a0, a2);
+                }
+            }
+            set_guest_errno(EINVAL);
+            Ret(regs, static_cast<std::uint32_t>(-1));
             return;
         }
         if (id == I::ioctl_ && IsAlarmFd(a0)) {
@@ -8537,26 +8615,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     {
-        // Locked: worker threads share stub_hits_ with main. Diagnostic layer
-        // (PLAN.md A5/B13): with DIAG off this skips the per-call map probe on
-        // An import the harness does not implement: answer 0 (the guest gets
-        // a plausible "success") and SAY SO -- exactly what a port needs
-        // to see, so this is NOT behind HARNESS_DIAG. The log stays capped
-        // at 5 lines per import name: a run adds a few dozen lines
-        // (measured: 69 [stub] lines in a DIAG run), not a flood.
+        // An import nobody implemented: the guest gets 0, which may or may
+        // not be an answer it can live with. The first call of each name
+        // says so with LOUD, from any thread, so the device gate sees it and
+        // the import gets implemented; the next four calls are plain lines.
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::uint64_t& hits = stub_hits_[n];
-        // Enriched logging for environment queries: names matter.
-        if (id == I::__system_property_get_ || id == I::dlopen_ || id == I::open_ ||
-            id == I::fopen_ || id == I::stat_ || id == I::access_) {
-            std::printf("[env]%s %s(\"%s\") lr=%08x\n", GuestTid() == 1 ? "" : "(T2+)", n.c_str(),
-                        GuestStr(a0), regs[14]);
-        }
         hits++;
-        static bool threadlog = std::getenv("HARNESS_THREADLOG") != nullptr;
-        if (hits <= 5 && (GuestTid() == 1 || threadlog)) {
-            std::printf("[stub]%s %s(%08x %08x lr=%08x) -> 0%s\n", GuestTid() == 1 ? "" : "(T2+)",
-                        n.c_str(), a0, a1, regs[14], hits == 5 ? " (quiet henceforth)" : "");
+        if (hits <= 5) {
+            std::printf("[stub][t%u] %s%s(%08x %08x %08x %08x lr=%08x) -> 0%s\n", GuestTid(),
+                        hits == 1 ? "LOUD unimplemented import " : "", n.c_str(), a0, a1, a2, a3,
+                        regs[14], hits == 5 ? " (quiet henceforth)" : "");
         }
     }
     }  // switch (id)

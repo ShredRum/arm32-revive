@@ -517,6 +517,7 @@ int main() {
     mod.imports.push_back(abr::Import{"strtok_r", true, 0, 0, 0});      // 131
     mod.imports.push_back(abr::Import{"strchr", true, 0, 0, 0});        // 132
     mod.imports.push_back(abr::Import{"strstr", true, 0, 0, 0});        // 133
+    mod.imports.push_back(abr::Import{"fcntl", true, 0, 0, 0});         // 134
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -3340,6 +3341,29 @@ int main() {
                    std::string(fd >= 0 ? "fd" : "-1") + " " +
                        (std::filesystem::exists(host_dir + "/q1/q2/new.bin") ? "1" : "0"),
                    "fd 1");
+            // Record locks reach the host with the guest's 32-bit struct
+            // flock converted; an unknown command is EINVAL, not "success".
+            const std::uint32_t kFl = kBuf + 0x40;
+            const std::int16_t wr_lock[2] = {1 /*F_WRLCK*/, 0 /*SEEK_SET*/};
+            const std::int32_t range[3] = {0, 10, 0};
+            std::memcpy(rt.H(kFl), wr_lock, 4);
+            std::memcpy(rt.H(kFl + 4), range, 12);
+            const std::uint32_t lk[4] = {static_cast<std::uint32_t>(fd), 6 /*F_SETLK*/, kFl, 0};
+            const std::int32_t set = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, lk));
+            const std::uint32_t gk[4] = {static_cast<std::uint32_t>(fd), 5 /*F_GETLK*/, kFl, 0};
+            const std::int32_t get = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, gk));
+            std::int16_t got_type = -1;
+            std::memcpy(&got_type, rt.H(kFl), 2);  // our own lock never conflicts: F_UNLCK (2)
+            const std::uint32_t bad[4] = {static_cast<std::uint32_t>(fd), 999, 0, 0};
+            const std::int32_t unk = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 134, bad));
+            Expect("fcntl F_SETLK / F_GETLK / unknown command",
+                   std::to_string(set) + " " + std::to_string(get) + " " + std::to_string(got_type) + " " +
+                       std::to_string(unk) + " " + std::to_string(guest_errno()),
+                   "0 0 2 -1 " + std::to_string(EINVAL));
+            const std::uint32_t bp[4] = {static_cast<std::uint32_t>(fd), 6, 0xE0000000u, 0};
+            abr::RuntimeTestAccess::Call(rt, 134, bp);
+            Expect("fcntl F_SETLK with a wild struct is EFAULT", std::to_string(guest_errno()),
+                   std::to_string(EFAULT));
             const std::uint32_t ca[4] = {static_cast<std::uint32_t>(fd), 0, 0, 0};
             abr::RuntimeTestAccess::Call(rt, 36, ca);
         }
