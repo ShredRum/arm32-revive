@@ -17307,25 +17307,16 @@ void GuestCallbacks::ExceptionRaised(VAddr pc, Exception ex) {
     // Undefined/unpredictable instruction, breakpoint, ...: a clean guest
     // halt. (An `add pc, rN, pc` emulation lived here until 2026-11: Dynarmic
     // executes ADD with Rd == PC and S == 0 itself, so it never ran.)
-    std::printf("[jit] ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
-    // DIAG: mini-backtrace for null-jumps (pc=0): lr + stack code-pointers.
+    std::printf("[jit] LOUD ExceptionRaised pc=%08x ex=%d -- halting\n", pc, static_cast<int>(ex));
+    // Mini-backtrace (null jumps, pc = 0): lr + guest code addresses on the stack.
     {
         auto& regs = rt_->ActiveJit()->Regs();
         std::printf("[jit] lr=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x%s\n", regs[14], regs[13],
                     regs[0], regs[1], regs[2], regs[3], rt_->GuestTid() == 1 ? "" : " (T2+)");
-        std::uint32_t sp = regs[13];
-        // Module text range: [0, 0x6EE000) per loader layout (bias 0).
-        int shown = 0;
-        for (std::uint32_t a = sp & ~3u; a < sp + 512 && shown < 8; a += 4) {
-            std::uint32_t w = 0;
-            if (!rt_->CheckRange(a, 4, false)) {
-                break;
-            }
-            std::memcpy(&w, rt_->H(a), 4);
-            if (w >= 0x1000 && w < 0x6EE000 && (w & 1) == 0) {
-                std::printf("[jit] stack+%u: ret %08x\n", a - sp, w);
-                shown++;
-            }
+        Runtime::StackHit hits[8];
+        const Runtime::StackScan sc = rt_->ScanStackForReturnAddresses(regs[13], 512, hits, 8);
+        for (unsigned i = 0; i < sc.hits; i++) {
+            std::printf("[jit] stack+%u: ret %08x\n", hits[i].off, hits[i].value);
         }
     }
     rt_->stop_step_ = true;
