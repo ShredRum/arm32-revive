@@ -384,3 +384,31 @@ nothing found beyond ExceptionDescribe (runs Java) taken off the
 review: no new LOUD line preceded it, so batch 7, fcntl and the stub are
 ruled out; it still needs boot batches against 889703b.
 Not re-gated on a device after these fixes (the sandbox was off).
+
+## State 2026-11-10, evening: speed check and gate of the branch after the review fixes
+
+Build: `cleanup-crutches` at `31fed39`, sandbox lib, build marker `Nov 10 2026 18:28:12`.
+
+**Speed, master vs branch** (`scripts/speed.sh`, new: whole-APK A/B on the
+sandbox, process CPU per presented frame, variants interleaved). SW2
+(`star-wars-ii-amz`) main menu, 6 rounds of 30 s, raw rows in
+`work/speed/result.txt`:
+
+| | master | branch |
+|---|---|---|
+| mean, ms CPU per frame | 9.71 | 9.52 |
+| range | 9.54–9.84 | 9.40–9.72 |
+
+The branch is not slower; it is about 0.18 ms (2 %) faster, which is at the
+edge of what this measurement resolves (rounds 1 and 6 were equal). LOUD 0 in
+all 12 runs. MrEmpathy's build was not measured in the same run, so the old
+0.79 ms gap is not re-stated.
+
+**Boot gate, all eight titles** (rio, seasons, space, star-wars,
+star-wars-ii-amz, stella, classic, 99-bricks): every title reaches its menu,
+all seven markers 0, `death.log` 0 B, no new tombstones. Screenshots:
+`work/gate_all.png`. 99 Bricks reached its menu in this one boot; its rare
+early death (1 of 3 earlier) stays open and unattributed.
+
+Not done on a device: levels, sound, background/resume, MCSM, the phone.
+Merge to master is the owner's call.
