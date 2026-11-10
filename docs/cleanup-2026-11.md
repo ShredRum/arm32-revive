@@ -361,3 +361,11 @@ UnityPlayer.nativeActivityIndicatorStyle), the other 2 clean. NOT known
 whether this is new: 99 Bricks has open intermittent defects (R-007, R-010)
 with a different symptom. Needs a 20-30 boot batch on this build against
 889703b before the merge to master.
+
+99 Bricks on the sandbox opens Google Play Games' sign-in window on every
+boot (com.google.android.gms SignInActivity, from com.prime31.GameHelper
+.resolveConnectionResult), and the game waits behind it: a boot batch
+(`scripts/boots.sh`) says little until that window is dealt with. A smali
+patch of PlayGameServicesPlugin.authenticate() alone did not remove it
+(dropped, not committed). The comparison build of 889703b for the sandbox
+is work/boots/libabhost_889703b_sandbox.so.
