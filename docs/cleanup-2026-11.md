@@ -256,3 +256,26 @@ private caches). Kept: B, C (last, own commit), E (as a fault handler).
 - New rule: protections and diagnostics added during an investigation are
   marked as such and removed in the commit that fixes the root cause; one
   that stays says why (in the code and the commit message).
+
+## Batch 6 additions: decided items from the audits (owner, 2026-11-10)
+
+Each one as proposed in the conversation of 2026-11-10:
+- [ ] ensure_parent: keep the behaviour, make it free — open first; only on
+      ENOENT create the parents and retry (the owner kept it in 96acf7f).
+- [ ] Generic 0-stub for unimplemented imports: keep returning, but log
+      LOUD (once per name) so the gate sees it; implement each one that
+      shows up.
+- [ ] fcntl F_SETLK/F_GETLK/F_SETLKW: forward to the host with struct flock
+      converted 32 -> 64 bit, instead of "success" for unhandled commands.
+- [ ] Page size: the guest is told 4096 everywhere (sysconf, getauxval
+      AT_PAGESZ, __page_size); 16 KB host pages stay the bridge's concern.
+- [ ] pthread_create honours its attr: detached threads are reaped when
+      they end (no entry left in threads_), the requested stack size is
+      used within a sane range.
+- [ ] GL getters that return silently on a bad pointer halt LOUD instead.
+- [ ] qsort/bsearch: drop the arbitrary 64 MiB cap, check the range (n*size,
+      overflow-safe).
+- [ ] Shader 0x01 -> newline rewrite: test on the sandbox without it; drop
+      it if every title still draws.
+- [ ] A free of an unknown address: one LOUD line (capped).
+- [ ] heap_used_ accounting: malloc and free use the same size.
