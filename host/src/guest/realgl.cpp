@@ -437,6 +437,17 @@ static bool EnsureGles1() {
     return init_ok;
 }
 
+// A guest's *OES framebuffer call goes to the GLES 1.1 library's function of
+// that name. The GLES2 function without the suffix is another entry point,
+// which a GLES 1.1 context need not have: if the library lacks the OES one,
+// the call cannot be made, and that is said rather than guessed around.
+#define ABR_OES_OR_HALT(fn)                                                             \
+    if (!EnsureGles1() || !g_gles1.fn) {                                                \
+        std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name); \
+        r->HaltGuest();                                                                 \
+        return true;                                                                    \
+    }
+
 static std::uint32_t GlTypeSize(GLenum type) {
     switch (type) {
         case 0x1400: // GL_BYTE
@@ -1063,7 +1074,8 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         return true;
     }
     if (id == G::glCheckFramebufferStatus || id == G::glCheckFramebufferStatusOES) {
-        if (id == G::glCheckFramebufferStatusOES && EnsureGles1() && g_gles1.glCheckFramebufferStatusOES) {
+        if (id == G::glCheckFramebufferStatusOES) {
+            ABR_OES_OR_HALT(glCheckFramebufferStatusOES);
             r->Ret(regs, (std::uint32_t)g_gles1.glCheckFramebufferStatusOES((GLenum)a0));
         } else {
             r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
@@ -1467,18 +1479,22 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
         } else if (id == G::glGenFramebuffers || id == G::glGenFramebuffersOES ||
                    id == G::glDeleteFramebuffers || id == G::glDeleteFramebuffersOES) {
-            if (id == G::glGenFramebuffersOES && EnsureGles1() && g_gles1.glGenFramebuffersOES) {
+            if (id == G::glGenFramebuffersOES) {
+                ABR_OES_OR_HALT(glGenFramebuffersOES);
                 g_gles1.glGenFramebuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
-            } else if (id == G::glDeleteFramebuffersOES && EnsureGles1() && g_gles1.glDeleteFramebuffersOES) {
+            } else if (id == G::glDeleteFramebuffersOES) {
+                ABR_OES_OR_HALT(glDeleteFramebuffersOES);
                 g_gles1.glDeleteFramebuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
             } else {
                 is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                        : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
             }
         } else {
-            if (id == G::glGenRenderbuffersOES && EnsureGles1() && g_gles1.glGenRenderbuffersOES) {
+            if (id == G::glGenRenderbuffersOES) {
+                ABR_OES_OR_HALT(glGenRenderbuffersOES);
                 g_gles1.glGenRenderbuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
-            } else if (id == G::glDeleteRenderbuffersOES && EnsureGles1() && g_gles1.glDeleteRenderbuffersOES) {
+            } else if (id == G::glDeleteRenderbuffersOES) {
+                ABR_OES_OR_HALT(glDeleteRenderbuffersOES);
                 g_gles1.glDeleteRenderbuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
             } else {
                 is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
@@ -1491,11 +1507,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES ||
         id == G::glBindRenderbuffer || id == G::glBindRenderbufferOES) {
-        if (id == G::glBindFramebufferOES && EnsureGles1() && g_gles1.glBindFramebufferOES) {
+        if (id == G::glBindFramebufferOES) {
+            ABR_OES_OR_HALT(glBindFramebufferOES);
             g_gles1.glBindFramebufferOES((GLenum)a0, (GLuint)a1);
         } else if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES) {
             glBindFramebuffer((GLenum)a0, (GLuint)a1);
-        } else if (id == G::glBindRenderbufferOES && EnsureGles1() && g_gles1.glBindRenderbufferOES) {
+        } else if (id == G::glBindRenderbufferOES) {
+            ABR_OES_OR_HALT(glBindRenderbufferOES);
             g_gles1.glBindRenderbufferOES((GLenum)a0, (GLuint)a1);
         } else {
             glBindRenderbuffer((GLenum)a0, (GLuint)a1);
@@ -1506,7 +1524,8 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glFramebufferRenderbuffer || id == G::glFramebufferRenderbufferOES) {
         // (target, attachment, renderbuffertarget, renderbuffer)
-        if (id == G::glFramebufferRenderbufferOES && EnsureGles1() && g_gles1.glFramebufferRenderbufferOES) {
+        if (id == G::glFramebufferRenderbufferOES) {
+            ABR_OES_OR_HALT(glFramebufferRenderbufferOES);
             g_gles1.glFramebufferRenderbufferOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
         } else {
             glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
@@ -1519,7 +1538,8 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         // (target, attachment, textarget, texture, level) -- the level is
         // the first stack word.
         const std::uint32_t level = Stk(r, sp, 0);
-        if (id == G::glFramebufferTexture2DOES && EnsureGles1() && g_gles1.glFramebufferTexture2DOES) {
+        if (id == G::glFramebufferTexture2DOES) {
+            ABR_OES_OR_HALT(glFramebufferTexture2DOES);
             g_gles1.glFramebufferTexture2DOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
         } else {
             glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
@@ -1532,7 +1552,8 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glRenderbufferStorage || id == G::glRenderbufferStorageOES) {
         // (target, internalformat, width, height)
-        if (id == G::glRenderbufferStorageOES && EnsureGles1() && g_gles1.glRenderbufferStorageOES) {
+        if (id == G::glRenderbufferStorageOES) {
+            ABR_OES_OR_HALT(glRenderbufferStorageOES);
             g_gles1.glRenderbufferStorageOES((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
         } else {
             glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
