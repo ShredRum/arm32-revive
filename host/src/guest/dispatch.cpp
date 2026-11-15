@@ -9706,17 +9706,8 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            bool ok = CheckRange(pd.loc_va, 4, true);
-            if (!ok) {
-                // Read-only page: only allowed if within a mapped segment of the module (DT_TEXTREL).
-                for (const auto& seg : mod_.segments) {
-                    if (pd.loc_va >= seg.start && pd.loc_va + 4 <= seg.start + seg.size) {
-                        ok = true;
-                        break;
-                    }
-                }
-            }
-            if (!ok) {
+            // Writable memory, or a text relocation (WriteDataSlot).
+            if (!CheckRange(pd.loc_va, 4, true) && !ReadOnlySegmentAt(mod_, pd.loc_va)) {
                 std::printf("[data] LOUD import %u loc %08x out of range -- halting\n", idx,
                             pd.loc_va);
                 stop_step_ = true;
@@ -9737,26 +9728,14 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            bool ok = CheckRange(pd.loc_va, 4, true);
-            if (!ok) {
-                // Read-only page: only allowed if within a mapped segment of the module (DT_TEXTREL).
-                for (const auto& seg : mod_.segments) {
-                    if (pd.loc_va >= seg.start && pd.loc_va + 4 <= seg.start + seg.size) {
-                        ok = true;
-                        break;
-                    }
-                }
-            }
-            if (!ok) {
+            // Writable memory, or a text relocation (WriteDataSlot).
+            if (!CheckRange(pd.loc_va, 4, true) && !ReadOnlySegmentAt(mod_, pd.loc_va)) {
                 std::printf("[data] LOUD %s loc %08x out of range -- halting\n", s.name, pd.loc_va);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t v = pd.addend + s.addr;
-            const std::uint32_t page = pd.loc_va & ~std::uint32_t(0xFFF);
-            mem_.Protect(page, 0x1000, PROT_READ | PROT_WRITE);
-            std::memcpy(H(pd.loc_va), &v, 4);
+            WriteDataSlot(mem_, mod_, pd.loc_va, pd.addend + s.addr);
             patched++;
         }
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);
@@ -9805,13 +9784,6 @@ void Runtime::InitDataImports() {
         std::printf("[data] LOUD uncovered data import \"%s\" -> zero page %08x "
                     "(the guest expected a real libc object)\n",
                     mod_.imports[i].name.c_str(), page);
-    }
-    // Restore protection on any read-only segment pages temporarily made writable
-    // while applying text relocations (DT_TEXTREL).
-    for (const auto& seg : mod_.segments) {
-        if ((seg.prot & PROT_WRITE) == 0) {
-            mem_.Protect(seg.start, seg.size, seg.prot);
-        }
     }
 }
 

@@ -761,6 +761,32 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
 // to it and point the import itself at that address. A data import has no
 // call target -- its "trampoline" address is a code address the guest must
 // never dereference as data. The caller range-checks the slots first.
+const LoadSegment* ReadOnlySegmentAt(const LoadedModule& mod, std::uint32_t va) {
+    for (const LoadSegment& seg : mod.segments) {
+        if ((seg.prot & PROT_WRITE) == 0 && va >= seg.start && seg.size >= 4 &&
+            va - seg.start <= seg.size - 4) {
+            return &seg;
+        }
+    }
+    return nullptr;
+}
+
+void WriteDataSlot(GuestMemory& mem, const LoadedModule& mod, std::uint32_t loc_va,
+                   std::uint32_t value) {
+    // The window is whole guest pages: LOADs are page-aligned, so every page
+    // of it belongs to the read-only segment, and the word may cross a page.
+    const LoadSegment* ro = ReadOnlySegmentAt(mod, loc_va);
+    const std::uint32_t start = AlignDown(loc_va, 0x1000);
+    const std::uint32_t size = AlignUp(loc_va + 4, 0x1000) - start;
+    if (ro) {
+        mem.Protect(start, size, ro->prot | PROT_WRITE);
+    }
+    std::memcpy(mem.host(loc_va), &value, 4);
+    if (ro) {
+        mem.Protect(start, size, ro->prot);
+    }
+}
+
 bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import_idx,
                        std::uint32_t guest_addr) {
     if (import_idx >= mod.imports.size()) {
@@ -770,16 +796,7 @@ bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import
         if (pd.import_idx != import_idx) {
             continue;
         }
-        const std::uint32_t v = pd.addend + guest_addr;
-        const std::uint32_t page = pd.loc_va & ~std::uint32_t(0xFFF);
-        mem.Protect(page, 0x1000, PROT_READ | PROT_WRITE);
-        std::memcpy(mem.host(pd.loc_va), &v, 4);
-    }
-    // Restore protection on any read-only segment pages temporarily made writable
-    for (const auto& seg : mod.segments) {
-        if ((seg.prot & PROT_WRITE) == 0) {
-            mem.Protect(seg.start, seg.size, seg.prot);
-        }
+        WriteDataSlot(mem, mod, pd.loc_va, pd.addend + guest_addr);
     }
     mod.imports[import_idx].tramp_va = guest_addr;
     // Data imports use the slot as their guest address, so call_va must
