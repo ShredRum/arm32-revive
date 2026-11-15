@@ -47,6 +47,7 @@
 #include <sys/vfs.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <fnmatch.h>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -3748,20 +3749,29 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     }
     case I::uname_:
     if (id == I::uname_) {
-        // Breakpad stores this in the minidump; machine must look like the
-        // guest ABI (armv7l), the rest is informational. struct utsname on
-        // arm32 bionic is 6 fields x 65 bytes.
+        // The device's own answer (struct utsname: 6 fields x 65 bytes on
+        // every Linux ABI), except machine: the guest is an armv7 program,
+        // and what a 32-bit process sees on an arm64 kernel is "armv8l"
+        // (the kernel's compat personality); "armv7l" is what the guests'
+        // era of devices answered and what Breakpad expects of an arm32
+        // minidump.
         if (!CheckRange(a0, 390, true)) {
             goto bad_ptr;
         }
         {
+            struct utsname h {};
+            if (::uname(&h) != 0) {
+                SetGuestErrno(errno);
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
             char u[390] = {};
-            std::strncpy(u + 0, "Linux", 64);
-            std::strncpy(u + 65, "localhost", 64);
-            std::strncpy(u + 130, "3.10.0", 64);
-            std::strncpy(u + 195, "#1 SMP PREEMPT", 64);
+            std::strncpy(u + 0, h.sysname, 64);
+            std::strncpy(u + 65, h.nodename, 64);
+            std::strncpy(u + 130, h.release, 64);
+            std::strncpy(u + 195, h.version, 64);
             std::strncpy(u + 260, "armv7l", 64);
-            std::strncpy(u + 325, "localdomain", 64);
+            std::strncpy(u + 325, h.domainname, 64);
             std::memcpy(H(a0), u, 390);
         }
         Ret(regs, 0);
