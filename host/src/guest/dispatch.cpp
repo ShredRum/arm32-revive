@@ -3990,7 +3990,12 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 const std::string sym = GuestStr(a1);
                 // EGL: one host handler answers every egl* name (the ones it
                 // does not offer return 0, LOUD); SDL loads EGL this way.
-                if (NdkServes(sym) || OpenSlServes(sym) || sym.compare(0, 3, "egl") == 0) {
+                // Any other function the host implements as an import
+                // (libc, libm, GL ...) is served as it is to a static import:
+                // Mono's P/Invoke reaches libc this way (uname).
+                if (NdkServes(sym) || OpenSlServes(sym) || sym.compare(0, 3, "egl") == 0 ||
+                    ImportIdForName(sym.c_str()) != ImportId::None ||
+                    GlIdForName(sym.c_str()) != GlId::None) {
                     v = RuntimeImport(sym);
                 } else if (sym.compare(0, 7, "SL_IID_") == 0) {
                     v = OpenSlIid(sym);  // a data symbol: the variable's address
@@ -3998,6 +4003,22 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             }
             if (!v) {
                 dl_error = std::string("undefined symbol: ") + (a1 ? GuestStr(a1) : "(null)");
+                // A NULL for a name the device's own libraries export is an
+                // answer the host invented; for one they do not (Unity probes
+                // C++-mangled NDK names, Mono tries "unameA") it is the true
+                // answer. The host process has the device's libraries loaded,
+                // so it asks them. Once per name.
+                if (sys_dl_handle_ && a0 == sys_dl_handle_ && a1 &&
+                    ::dlsym(RTLD_DEFAULT, GuestStr(a1)) != nullptr) {
+                    static std::mutex said_mu;
+                    static std::set<std::string> said;
+                    const std::string sym = GuestStr(a1);
+                    std::lock_guard<std::mutex> lk(said_mu);
+                    if (said.insert(sym).second) {
+                        std::printf("[dl] LOUD dlsym(system library, \"%s\"): the host does not serve it -> NULL\n",
+                                    sym.c_str());
+                    }
+                }
             }
             Ret(regs, v);
             return;
