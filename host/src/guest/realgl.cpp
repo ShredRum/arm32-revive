@@ -332,6 +332,7 @@ struct UniCache {
     std::unordered_map<GLint, UniVal>* cur = nullptr;  // prog's map
     std::unordered_map<GLuint, std::unordered_map<GLint, UniVal>> by_prog;
 };
+constexpr std::uint32_t kMaxClientUnits = 8;  // GLES 1.1 texture units tracked
 struct ClientArray {
     bool enabled = false;
     GLint size = 0;
@@ -370,16 +371,19 @@ struct Gles1Api {
     void (*glDeleteRenderbuffersOES)(GLsizei, const GLuint*) = nullptr;
     GLenum (*glCheckFramebufferStatusOES)(GLenum) = nullptr;
 
+    // State queries, for SyncClientArrays.
+    GLboolean (*glIsEnabled)(GLenum) = nullptr;
+    void (*glGetIntegerv)(GLenum, GLint*) = nullptr;
+    void (*glGetPointerv)(GLenum, void**) = nullptr;
+
     bool Init() {
         if (handle) {
             return true;
         }
-#ifdef __ANDROID__
         handle = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_GLOBAL);
-#else
-        handle = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_GLOBAL);
+#ifndef __ANDROID__
         if (!handle) {
-            handle = dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);
+            handle = dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);  // PC: Mesa's name
         }
 #endif
         if (!handle) {
@@ -389,6 +393,9 @@ struct Gles1Api {
         fn = reinterpret_cast<decltype(fn)>(dlsym(handle, #fn)); \
         if (!fn) fn = reinterpret_cast<decltype(fn)>(eglGetProcAddress(#fn))
 
+        ABR_LOAD_GLES1(glIsEnabled);
+        ABR_LOAD_GLES1(glGetIntegerv);
+        ABR_LOAD_GLES1(glGetPointerv);
         ABR_LOAD_GLES1(glClientActiveTexture);
         ABR_LOAD_GLES1(glColor4f);
         ABR_LOAD_GLES1(glColorPointer);
@@ -490,23 +497,114 @@ struct GlThread {
     GlBindings bindings;
     UniCache uni;
     char token = 0;
-    std::uint32_t client_active_texture = 0;
+    // GLES 1.1 client arrays (Rio 1.0.0), as the current context holds
+    // them: kept in step by the gl*Pointer / gl*ClientState handlers, and
+    // read back from the driver (SyncClientArrays) after anything that may
+    // have changed the context under this thread (ForgetGlBindings).
+    bool client_known = false;
+    std::uint32_t client_units = 1;           // texture units tracked, <= kMaxClientUnits
+    std::uint32_t client_active_texture = 0;  // unit index; may be >= client_units
     ClientArray client_vertex;
     ClientArray client_normal;
     ClientArray client_color;
-    ClientArray client_tex_coord[4];
+    ClientArray client_tex_coord[kMaxClientUnits];
 };
 thread_local GlThread t_gl;
+
+// One client array as the driver records it. A pointer the driver holds is
+// the host address the handler gave it, so it maps back to a guest address.
+static ClientArray ReadClientArray(Runtime* r, GLenum cap, GLenum size_pname, GLenum type_pname,
+                                   GLenum stride_pname, GLenum binding_pname,
+                                   GLenum pointer_pname) {
+    ClientArray a;
+    GLint v = 0;
+    a.enabled = g_gles1.glIsEnabled(cap) != GL_FALSE;
+    a.size = 3;  // a normal has no size
+    if (size_pname) {
+        g_gles1.glGetIntegerv(size_pname, &v);
+        a.size = v;
+    }
+    v = 0;
+    g_gles1.glGetIntegerv(type_pname, &v);
+    a.type = static_cast<GLenum>(v);
+    v = 0;
+    g_gles1.glGetIntegerv(stride_pname, &v);
+    a.stride = v;
+    v = 0;
+    g_gles1.glGetIntegerv(binding_pname, &v);
+    a.vbo = static_cast<GLuint>(v);
+    void* p = nullptr;
+    g_gles1.glGetPointerv(pointer_pname, &p);
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(r->H(0));
+    const std::uintptr_t hp = reinterpret_cast<std::uintptr_t>(p);
+    a.va = (a.vbo == 0 && hp >= base && hp - base <= 0xFFFFFFFFu)
+               ? static_cast<std::uint32_t>(hp - base)
+               : 0;  // 0 with the array enabled halts at the draw (NULLVERT)
+    return a;
+}
+
+// Brings this thread's client-array copy in line with the current context.
+// Java runs between two guest calls and may have recreated the context
+// (pause/resume): the new one starts with every array disabled and unit 0
+// selected, whatever the copy says. Costs a few dozen driver queries, once
+// per guest call that touches the arrays, for the GLES 1.1 title only.
+static void SyncClientArrays(Runtime* r) {
+    GlThread& t = t_gl;
+    if (t.client_known) {
+        return;
+    }
+    t.client_known = true;
+    if (!g_gles1.glIsEnabled || !g_gles1.glGetIntegerv || !g_gles1.glGetPointerv ||
+        !g_gles1.glClientActiveTexture) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) {
+            std::printf("[realgl] LOUD the GLES 1.1 library has no state queries: client arrays are "
+                        "tracked by the guest's calls only\n");
+        }
+        return;
+    }
+    GLint v = 0x84C0;  // GL_TEXTURE0
+    g_gles1.glGetIntegerv(0x84E1 /* GL_CLIENT_ACTIVE_TEXTURE */, &v);
+    const GLenum active = static_cast<GLenum>(v);
+    t.client_active_texture = static_cast<std::uint32_t>(v) - 0x84C0u;
+    v = 1;
+    g_gles1.glGetIntegerv(0x84E2 /* GL_MAX_TEXTURE_UNITS */, &v);
+    t.client_units = std::min<std::uint32_t>(v > 0 ? static_cast<std::uint32_t>(v) : 1u, kMaxClientUnits);
+    t.client_vertex = ReadClientArray(r, 0x8074, 0x807A, 0x807B, 0x807C, 0x8896, 0x808E);
+    t.client_normal = ReadClientArray(r, 0x8075, 0, 0x807E, 0x807F, 0x8897, 0x808F);
+    t.client_color = ReadClientArray(r, 0x8076, 0x8081, 0x8082, 0x8083, 0x8898, 0x8090);
+    for (std::uint32_t u = 0; u < kMaxClientUnits; u++) {
+        if (u >= t.client_units) {
+            t.client_tex_coord[u] = ClientArray{};
+            continue;
+        }
+        g_gles1.glClientActiveTexture(0x84C0u + u);
+        t.client_tex_coord[u] = ReadClientArray(r, 0x8078, 0x8088, 0x8089, 0x808A, 0x889A, 0x8092);
+    }
+    g_gles1.glClientActiveTexture(active);
+}
 
 // True when an enabled array reads guest memory. An enabled array whose
 // pointer was set with a buffer object bound is an offset into that buffer
 // (the ordinary GLES 1.1 VBO path) and needs no range check here.
-static inline bool HasClientArrays() {
+// A title that never called a GLES 1.1 function has none: one load and a
+// branch on its draw path.
+static inline bool HasClientArrays(Runtime* r) {
+    if (!g_gles1.handle) {
+        return false;
+    }
+    SyncClientArrays(r);
     const auto in_guest = [](const ClientArray& a) { return a.enabled && a.vbo == 0; };
-    return in_guest(t_gl.client_vertex) || in_guest(t_gl.client_normal) ||
-           in_guest(t_gl.client_color) || in_guest(t_gl.client_tex_coord[0]) ||
-           in_guest(t_gl.client_tex_coord[1]) || in_guest(t_gl.client_tex_coord[2]) ||
-           in_guest(t_gl.client_tex_coord[3]);
+    if (in_guest(t_gl.client_vertex) || in_guest(t_gl.client_normal) ||
+        in_guest(t_gl.client_color)) {
+        return true;
+    }
+    for (std::uint32_t u = 0; u < t_gl.client_units; u++) {
+        if (in_guest(t_gl.client_tex_coord[u])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool ValidateClientArray(Runtime* r, const char* name, const char* arr_name,
@@ -537,8 +635,8 @@ static bool ValidateClientArrays(Runtime* r, const char* name, std::uint32_t max
     if (!ValidateClientArray(r, name, "vertex", t_gl.client_vertex, max_vert_idx)) return false;
     if (!ValidateClientArray(r, name, "normal", t_gl.client_normal, max_vert_idx)) return false;
     if (!ValidateClientArray(r, name, "color", t_gl.client_color, max_vert_idx)) return false;
-    for (int i = 0; i < 4; i++) {
-        if (!ValidateClientArray(r, name, "texcoord", t_gl.client_tex_coord[i], max_vert_idx)) return false;
+    for (std::uint32_t u = 0; u < t_gl.client_units; u++) {
+        if (!ValidateClientArray(r, name, "texcoord", t_gl.client_tex_coord[u], max_vert_idx)) return false;
     }
     return true;
 }
@@ -637,6 +735,7 @@ static void DiagGlForget();
 #endif
 void ForgetGlBindings() {
     t_gl.bindings = GlBindings{};
+    t_gl.client_known = false;
     ForgetUniforms();
 #ifdef ABR_DIAG_COUNTERS
     DiagGlForget();
@@ -1725,8 +1824,14 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             return true;
         }
         g_gles1.glClientActiveTexture((GLenum)a0);
-        const std::uint32_t unit = (a0 >= 0x84C0u && a0 < 0x84C4u) ? (a0 - 0x84C0u) : 0u;
-        t_gl.client_active_texture = unit;
+        // A unit the driver has selects it; any other value is an error the
+        // driver ignores, keeping the unit it had. Which of the two happened
+        // is the driver's to say when the unit is not one tracked here.
+        if (a0 - 0x84C0u < t_gl.client_units) {
+            t_gl.client_active_texture = a0 - 0x84C0u;
+        } else {
+            t_gl.client_known = false;
+        }
         r->Ret(regs, 0);
         return true;
     }
@@ -1750,8 +1855,15 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                 t_gl.client_color.enabled = want;
                 break;
             case 0x8078: { // GL_TEXTURE_COORD_ARRAY
+                SyncClientArrays(r);
                 const std::uint32_t u = t_gl.client_active_texture;
-                if (u < 4) t_gl.client_tex_coord[u].enabled = want;
+                if (u >= t_gl.client_units) {
+                    std::printf("[realgl] %s LOUD client texture unit %u is not tracked (%u are) -- halting\n",
+                                name, u, t_gl.client_units);
+                    r->HaltGuest();
+                    return true;
+                }
+                t_gl.client_tex_coord[u].enabled = want;
                 break;
             }
             default:
@@ -1833,14 +1945,19 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             return true;
         }
         g_gles1.glTexCoordPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        SyncClientArrays(r);
         const std::uint32_t u = t_gl.client_active_texture;
-        if (u < 4) {
-            t_gl.client_tex_coord[u].size = (GLint)a0;
-            t_gl.client_tex_coord[u].type = (GLenum)a1;
-            t_gl.client_tex_coord[u].stride = (GLsizei)a2;
-            t_gl.client_tex_coord[u].va = a3;
-            t_gl.client_tex_coord[u].vbo = vbo ? 1 : 0;
+        if (u >= t_gl.client_units) {
+            std::printf("[realgl] %s LOUD client texture unit %u is not tracked (%u are) -- halting\n",
+                        name, u, t_gl.client_units);
+            r->HaltGuest();
+            return true;
         }
+        t_gl.client_tex_coord[u].size = (GLint)a0;
+        t_gl.client_tex_coord[u].type = (GLenum)a1;
+        t_gl.client_tex_coord[u].stride = (GLsizei)a2;
+        t_gl.client_tex_coord[u].va = a3;
+        t_gl.client_tex_coord[u].vbo = vbo ? 1 : 0;
         r->Ret(regs, 0);
         return true;
     }
@@ -1873,7 +1990,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glDrawArrays || id == G::glDrawElements) {
         if (id == G::glDrawArrays) {
-            if (HasClientArrays() && (GLsizei)a2 > 0) {
+            if (HasClientArrays(r) && (GLsizei)a2 > 0) {
                 const std::uint32_t max_idx = (std::uint32_t)(GLint)a1 + (std::uint32_t)(GLsizei)a2 - 1u;
                 if (!ValidateClientArrays(r, name, max_idx)) {
                     return true;
@@ -1889,7 +2006,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             const bool ibo = BoundBuffer(GL_ELEMENT_ARRAY_BUFFER_BINDING) != 0;
             if (ibo) {
                 p = (const void*)(std::uintptr_t)a3;
-                if (HasClientArrays()) {
+                if (HasClientArrays(r)) {
                     std::printf("[realgl] %s LOUD MIXEDIBO element buffer bound with client vertex arrays -- halting\n", name);
                     r->HaltGuest();
                     return true;
@@ -1909,7 +2026,7 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                 }
             }
             if ((p || ibo) && (GLsizei)a1 > 0) {
-                if (p && HasClientArrays()) {
+                if (p && HasClientArrays(r)) {
                     std::uint32_t max_idx = 0;
                     if (a2 == 0x1401u) { // GL_UNSIGNED_BYTE
                         const auto* u8 = (const std::uint8_t*)p;
