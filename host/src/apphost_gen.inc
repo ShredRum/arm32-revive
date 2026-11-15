@@ -480,6 +480,24 @@ extern "C" void Java_com_rovio_fusion_MyRenderer_nativeResume(JNIEnv* env, jobje
 extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeUpdate", "()Z", env, thiz);
 }
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodBlockStreaming(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodBlockStreaming", "()I", env, thiz);
+}
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodGetInfo(JNIEnv* env, jobject thiz, jint a0) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodGetInfo", "(I)I", env, thiz, a0);
+}
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodInitJni(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodInitJni", "()I", env, thiz);
+}
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodProcess(JNIEnv* env, jobject thiz, jobject a0) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodProcess", "(Ljava/nio/ByteBuffer;)I", env, thiz, a0);
+}
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodProcessMicData(JNIEnv* env, jobject thiz, jobject a0, jint a1) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodProcessMicData", "(Ljava/nio/ByteBuffer;I)I", env, thiz, a0, a1);
+}
+extern "C" jint Java_org_fmod_FMODAudioDevice_fmodUnblockStreaming(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_org_fmod_FMODAudioDevice_fmodUnblockStreaming", "()I", env, thiz);
+}
 extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
 }
@@ -654,4 +672,4 @@ extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_
 extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/skynest/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
 }
-// GEN_COUNT=218
+// GEN_COUNT=224
