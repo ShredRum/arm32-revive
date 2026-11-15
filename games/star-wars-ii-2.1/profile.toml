@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Star Wars II, fan rework "v2.1"
+# VERIFIED data only (aapt2 / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "star-wars-ii-2.1"
+title        = "Angry Birds Star Wars II (rework v2.1)"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"
+
+[apk]
+# A YouTuber's rework of Star Wars II 1.8.1, sent by a forum user. It has a
+# package of its own, so it lives next to `star-wars-ii-amz` as it is.
+package      = "angrybirds_starwars2v2.v1"
+label        = "Angry Birds Star Wars II v2.1"
+version_name = "2.1"
+version_code = 1811
+min_sdk      = 9
+target_sdk   = 26
+original     = "original/AB_StarWars2_v2.1.apk"
+signer_dn    = "CN=angrybirds_starwars2v2.1, OU=angrybirds_starwars2v2.1, O=angrybirds_starwars2v2.1"
+signer_sha256 = "6233a77e0c9acab69c1860e48eb79c22e76676c681279d61ec387ec3c48ca5f7"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsStarWarsII.so"
+size   = 7964256
+sha256 = "9da07e013eb5ffe407471b49c318f7f720b19aa0b872d6f5cc7542197204f3ef"
+md5    = "6320cfaf36272506a8f5ade6038a4d0a"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+
+[strip]
+libs = []
+
+[tree]
+smali_lib_name_orig = "AngryBirdsStarWarsII"

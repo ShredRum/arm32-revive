@@ -35,11 +35,11 @@ library `libabhost.so`:
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
 space, star-wars, star-wars-ii, star-wars-ii-amz, stella, classic, 99-bricks,
-mcsm, rio-1.0.0, seasons-3.1.1. One shared host core. Plain `star-wars-ii` is retired (its
+mcsm, rio-1.0.0, seasons-3.1.1, star-wars-ii-2.1. One shared host core. Plain `star-wars-ii` is retired (its
 content servers are dead, R-004): not built, not gated; the folder stays.
-"All titles" below means the ten the sandbox gate runs: rio, seasons, space,
+"All titles" below means the eleven the sandbox gate runs: rio, seasons, space,
 star-wars, star-wars-ii-amz, stella, classic, 99-bricks, rio-1.0.0,
-seasons-3.1.1 (MCSM is a
+seasons-3.1.1, star-wars-ii-2.1 (MCSM is a
 5.6 GB split set, `scripts/pack_apks.py`; see its journal).
 
 `rio-1.0.0` is the 2011 release of Rio: the old `com.rovio.ka3d` Java
