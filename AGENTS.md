@@ -31,15 +31,16 @@ library `libabhost.so`:
   only checked for an OBB file whose servers are dead; Stella: the Zappar
   scanner button shows "not available" instead of loading ARM32 libraries;
   Rio 1.0.0: the 2011 AdMob SDK is answered "no ad" because it crashes on
-  Android 7+, and the web view's title is read on the UI thread).
+  Android 7+, and the web view's title is read on the UI thread;
+  SpongeBob Doodle Jump: Unity's proxy gets an empty argument array, as Dalvik gave).
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
 space, star-wars, star-wars-ii, star-wars-ii-amz, stella, classic, 99-bricks,
-mcsm, rio-1.0.0, seasons-3.1.1, star-wars-ii-2.1. One shared host core. Plain `star-wars-ii` is retired (its
+mcsm, rio-1.0.0, seasons-3.1.1, star-wars-ii-2.1, spongebob-doodle-jump. One shared host core. Plain `star-wars-ii` is retired (its
 content servers are dead, R-004): not built, not gated; the folder stays.
-"All titles" below means the eleven the sandbox gate runs: rio, seasons, space,
+"All titles" below means the twelve the sandbox gate runs: rio, seasons, space,
 star-wars, star-wars-ii-amz, stella, classic, 99-bricks, rio-1.0.0,
-seasons-3.1.1, star-wars-ii-2.1 (MCSM is a
+seasons-3.1.1, star-wars-ii-2.1, spongebob-doodle-jump (MCSM is a
 5.6 GB split set, `scripts/pack_apks.py`; see its journal).
 
 `rio-1.0.0` is the 2011 release of Rio: the old `com.rovio.ka3d` Java

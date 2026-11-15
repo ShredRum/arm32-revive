@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Doodle Jump SpongeBob SquarePants 1.02 (Unity 4.3.3)
+# VERIFIED data only (aapt2 / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "spongebob-doodle-jump"
+title        = "Doodle Jump SpongeBob SquarePants"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"
+
+[apk]
+package      = "com.mtvn.SpongeBobDoodleJump"
+version_name = "1.02"
+version_code = 25
+min_sdk      = 10
+target_sdk   = 26
+original     = "original/com.mtvn.SpongeBobDoodleJump-1.02.apk"
+activity     = "com.upsight.unity.UnityPlayerNativeActivity"  # launcher (devgate)
+signer_dn    = "CN=MTV Networks"
+signer_sha256 = "88dfce8e9b2296e23703bcddfdfbb4db869afc65b1fbdacbb61808ff73525d33"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libmain.so"
+sha256 = "df20f3907015929b5dc1f8d797aaa8333ae6b92ee1c087d384a82f9569fa8dfb"
+deps        = ["libmono.so", "libunity.so"]
+deps_sha256 = ["3ff6f788b6c25c1fc7e74694b56a00c5fdc873b1310a524055c200aeb41c47e1",
+               "b18777b1e94d7826157dd4ddb6533c0a0a0a594e00e4a482d831fc70cd2be535"]
+load_order  = ["libmono.so", "libmain.so", "libunity.so"]
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libmain.so"
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+jitshare     = "off"           # as 99 Bricks (Unity + Mono)
+
+[strip]
+libs = []
+
+[tree]
+smali_lib_name_orig = ""   # Java loads "main": the host carries that name
+# smali.patch: Unity's proxy gets an empty Object[] instead of null (Dalvik's
+# behaviour; ART passes null and the engine calls GetArrayLength on it).
