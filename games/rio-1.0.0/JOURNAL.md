@@ -128,3 +128,6 @@ Stopped after four rounds on purpose.
 
 Not yet: the owner's play on the phone with this build (levels, saves,
 pause/resume).
+
+2026-11-15, later: the owner played this build on the phone (levels,
+pause/resume, a restart with progress kept): all works. Status: shipped.

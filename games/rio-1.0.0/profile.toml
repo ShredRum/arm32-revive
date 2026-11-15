@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 id           = "rio-1.0.0"
 title        = "Angry Birds Rio (1.0.0)"
-status       = "in-progress"    # shipped | in-progress | planned
+status       = "shipped"         # shipped | in-progress | planned
 strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
 
 [apk]

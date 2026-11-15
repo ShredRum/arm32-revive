@@ -412,3 +412,11 @@ early death (1 of 3 earlier) stays open and unattributed.
 
 Not done on a device: levels, sound, background/resume, MCSM, the phone.
 Merge to master is the owner's call.
+
+## Open, found 2026-11-15 (not from the rio-1.0.0 branch)
+
+`HARNESS_PAGESIZE=16384 ./host/build-native/fmt_test` fails one test,
+`file mmap succeeds` (a guest mmap of a file at offset 4096). With 16 KiB host
+pages a 4 KiB file offset cannot be mapped directly. Phones with 16 KiB pages
+exist (Android 15+): a guest that maps a file at a 4 KiB offset would fail
+there. Not investigated.
