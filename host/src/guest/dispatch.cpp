@@ -8362,6 +8362,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::AMotionEvent_getSize_:
     case I::AMotionEvent_getToolMajor_:
     case I::AMotionEvent_getToolMinor_:
+    case I::AMotionEvent_getToolType_:
+    case I::AMotionEvent_getAxisValue_:
+    case I::AMotionEvent_getButtonState_:
     case I::AMotionEvent_getTouchMajor_:
     case I::AMotionEvent_getTouchMinor_:
     case I::AMotionEvent_getX_:
@@ -11609,7 +11612,8 @@ bool Runtime::NdkServes(const std::string& n) {
         "AMotionEvent_getHistoricalPressure", "AMotionEvent_getHistoricalSize",
         "AMotionEvent_getHistoricalTouchMajor", "AMotionEvent_getHistoricalTouchMinor",
         "AMotionEvent_getHistoricalToolMajor", "AMotionEvent_getHistoricalToolMinor",
-        "AMotionEvent_getHistoricalOrientation", "AConfiguration_new", "AConfiguration_delete",
+        "AMotionEvent_getHistoricalOrientation", "AMotionEvent_getAxisValue",
+        "AMotionEvent_getButtonState", "AMotionEvent_getToolType", "AConfiguration_new", "AConfiguration_delete",
         "AConfiguration_fromAssetManager", "ANativeWindow_fromSurface", "ANativeWindow_acquire",
         "ANativeWindow_release", "ANativeWindow_setBuffersGeometry"};
     return kNames.count(n) != 0;
@@ -11828,6 +11832,10 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         if (id == I::AMotionEvent_getHistoricalToolMajor_) { ret_f(::AMotionEvent_getHistoricalToolMajor(e, i, h)); return true; }
         if (id == I::AMotionEvent_getHistoricalToolMinor_) { ret_f(::AMotionEvent_getHistoricalToolMinor(e, i, h)); return true; }
         if (id == I::AMotionEvent_getHistoricalOrientation_) { ret_f(::AMotionEvent_getHistoricalOrientation(e, i, h)); return true; }
+        // NDK API 13/14 (mouse, stylus, gamepad): getAxisValue(e, axis, index).
+        if (id == I::AMotionEvent_getToolType_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getToolType(e, i))); return true; }
+        if (id == I::AMotionEvent_getButtonState_) { Ret(regs, static_cast<std::uint32_t>(::AMotionEvent_getButtonState(e))); return true; }
+        if (id == I::AMotionEvent_getAxisValue_) { ret_f(::AMotionEvent_getAxisValue(e, static_cast<std::int32_t>(a1), static_cast<std::size_t>(a2))); return true; }
     }
     // --- configuration
     if (id == I::AConfiguration_new_) {

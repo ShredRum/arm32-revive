@@ -420,3 +420,8 @@ Merge to master is the owner's call.
 pages a 4 KiB file offset cannot be mapped directly. Phones with 16 KiB pages
 exist (Android 15+): a guest that maps a file at a 4 KiB offset would fail
 there. Not investigated.
+
+`getifaddrs` / `freeifaddrs` are not implemented: Mono asks for them (through
+dlsym) when 99 Bricks' share button is pressed, gets NULL and a LOUD line,
+and decides there is no network. The share itself works. Implementing them
+means building the guest's `struct ifaddrs` chain in guest memory.
