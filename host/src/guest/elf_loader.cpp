@@ -200,14 +200,32 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
         }
     }
 
-    // Locate .ARM.exidx (SHT_ARM_EXIDX) for __gnu_Unwind_Find_exidx support.
-    // The table lives inside a mapped PT_LOAD (bias 0 => VA == link address).
-    if (ehdr.e_shoff != 0 && ehdr.e_shentsize >= sizeof(Elf32_Shdr)) {
+    // Locate .ARM.exidx for __gnu_Unwind_Find_exidx support.
+    // Check PT_ARM_EXIDX (0x70000001) in program headers first (present even if stripped).
+    constexpr std::uint32_t PT_ARM_EXIDX_TYPE = 0x70000001;
+    for (int i = 0; i < ehdr.e_phnum; i++) {
+        Elf32_Phdr ph;
+        std::memcpy(&ph, file + ehdr.e_phoff + i * ehdr.e_phentsize, sizeof(ph));
+        if (ph.p_type == PT_ARM_EXIDX_TYPE && ph.p_memsz >= 8) {
+            if (first) {
+                out.exidx_va = ph.p_vaddr + bias;
+                out.exidx_count = ph.p_memsz / 8;
+            } else {
+                extra.exidx_va = ph.p_vaddr + bias;
+                extra.exidx_count = ph.p_memsz / 8;
+            }
+            std::printf("[exidx] phdr VA=%08x count=%u\n", ph.p_vaddr + bias, ph.p_memsz / 8);
+            break;
+        }
+    }
+    // Fallback to SHT_ARM_EXIDX in section headers if not found via phdr.
+    if ((first ? out.exidx_count : extra.exidx_count) == 0 &&
+        ehdr.e_shoff != 0 && ehdr.e_shentsize >= sizeof(Elf32_Shdr)) {
         for (std::uint32_t si = 0;
              si < ehdr.e_shnum && (std::uint64_t)(si + 1) * ehdr.e_shentsize <= len; si++) {
             Elf32_Shdr sh;
             std::memcpy(&sh, file + ehdr.e_shoff + si * ehdr.e_shentsize, sizeof(sh));
-            if (sh.sh_type == SHT_ARM_EXIDX && sh.sh_entsize >= 8 && sh.sh_size >= 8) {
+            if (sh.sh_type == SHT_ARM_EXIDX && sh.sh_size >= 8) {
                 if (first) {
                     out.exidx_va = sh.sh_addr + bias;
                     out.exidx_count = sh.sh_size / 8;
@@ -215,7 +233,7 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
                     extra.exidx_va = sh.sh_addr + bias;
                     extra.exidx_count = sh.sh_size / 8;
                 }
-                std::printf("[exidx] VA=%08x count=%u\n", sh.sh_addr + bias, sh.sh_size / 8);
+                std::printf("[exidx] shdr VA=%08x count=%u\n", sh.sh_addr + bias, sh.sh_size / 8);
                 break;
             }
         }
@@ -743,6 +761,32 @@ bool ElfLoader::Load(const char* path, LoadedModule& out, std::string& err, std:
 // to it and point the import itself at that address. A data import has no
 // call target -- its "trampoline" address is a code address the guest must
 // never dereference as data. The caller range-checks the slots first.
+const LoadSegment* ReadOnlySegmentAt(const LoadedModule& mod, std::uint32_t va) {
+    for (const LoadSegment& seg : mod.segments) {
+        if ((seg.prot & PROT_WRITE) == 0 && va >= seg.start && seg.size >= 4 &&
+            va - seg.start <= seg.size - 4) {
+            return &seg;
+        }
+    }
+    return nullptr;
+}
+
+void WriteDataSlot(GuestMemory& mem, const LoadedModule& mod, std::uint32_t loc_va,
+                   std::uint32_t value) {
+    // The window is the whole read-only LOAD, as in Load: GuestMemory keeps
+    // one protection per host page and gives a partly covered page the union,
+    // so on a 16 KiB-page host a window of 4 KiB guest pages could be opened
+    // but never closed again.
+    const LoadSegment* ro = ReadOnlySegmentAt(mod, loc_va);
+    if (ro) {
+        mem.Protect(ro->start, ro->size, ro->prot | PROT_WRITE);
+    }
+    std::memcpy(mem.host(loc_va), &value, 4);
+    if (ro) {
+        mem.Protect(ro->start, ro->size, ro->prot);
+    }
+}
+
 bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import_idx,
                        std::uint32_t guest_addr) {
     if (import_idx >= mod.imports.size()) {
@@ -752,8 +796,7 @@ bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import
         if (pd.import_idx != import_idx) {
             continue;
         }
-        const std::uint32_t v = pd.addend + guest_addr;
-        std::memcpy(mem.host(pd.loc_va), &v, 4);
+        WriteDataSlot(mem, mod, pd.loc_va, pd.addend + guest_addr);
     }
     mod.imports[import_idx].tramp_va = guest_addr;
     // Data imports use the slot as their guest address, so call_va must

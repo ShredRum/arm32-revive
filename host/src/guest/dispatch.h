@@ -1167,6 +1167,8 @@ private:
         std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*
     };
     std::unordered_map<std::uint32_t, HostFile> file_map_;  // guest FILE* -> host
+    void MirrorFileFlags(std::uint32_t h, FILE* f);  // host feof/ferror -> the guest FILE's _flags
+    std::uint32_t tmpnam_buf_ = 0;                   // tmpnam(NULL)'s static buffer (under io_mutex_)
     std::unordered_map<std::uint32_t, int> fd_map_;         // guest fd -> host fd
     std::uint32_t next_guest_fd_ = 100;
     // Guest fd numbers released by close/fclose, reusable only after the

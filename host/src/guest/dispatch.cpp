@@ -1969,6 +1969,25 @@ static std::uint8_t BionicCtypeClass(int c) {
     return b;
 }
 
+// A guest built against the 2011 bionic (Rio 1.0.0) has feof, ferror and getc
+// as inline macros over its FILE: `_flags` is the short at +12, __SEOF 0x20,
+// __SERR 0x40 (BSD stdio, <stdio.h> of that NDK). Such a guest never asks
+// the host, so after every stdio call on a stream the host stream's two
+// indicators are copied there. The handle is looked up again under the
+// lock: a FILE closed by another thread meanwhile has given its block back.
+void Runtime::MirrorFileFlags(std::uint32_t h, FILE* f) {
+    std::lock_guard<std::mutex> io(io_mutex_);
+    const auto it = file_map_.find(h);
+    if (it == file_map_.end() || it->second.f != f) {
+        return;
+    }
+    std::uint16_t fl = 0;
+    std::memcpy(&fl, H(h + 12), 2);
+    fl = static_cast<std::uint16_t>((fl & ~0x60u) | (std::feof(f) ? 0x20u : 0u) |
+                                    (std::ferror(f) ? 0x40u : 0u));
+    std::memcpy(H(h + 12), &fl, 2);
+}
+
 void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     const Import& imp = mod_.imports[idx];
     const std::string& n = imp.name;
@@ -3342,6 +3361,17 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         if (from_stream) {
             std::clearerr(sf);
             std::fseek(sf, sf_start + static_cast<long>(ii), SEEK_SET);
+            // The text was read ahead and the stream put back after what the
+            // conversions used, which also cleared the end-of-file indicator.
+            // An fscanf that ran out of input leaves it set: read once more
+            // at that position, so `while (!feof(fp)) fscanf(...)` ends.
+            if (eof) {
+                const int c = std::fgetc(sf);
+                if (c != EOF) {
+                    std::ungetc(c, sf);
+                }
+            }
+            MirrorFileFlags(a0, sf);
         }
         // assigned = number of successful conversions (EOF => -1).
         Ret(regs, eof ? static_cast<std::uint32_t>(-1)
@@ -4820,7 +4850,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::stat_:
     case I::statfs_:
     case I::tmpfile_:
+    case I::tmpnam_:
     case I::truncate_:
+    case I::__srget_:
     case I::ungetc_:
     case I::unlink_:
     case I::utime_:
@@ -5258,6 +5290,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 }
             }
             int r = (id == I::fclose_) ? std::fclose(f) : std::fflush(f);
+            if (id == I::fflush_) {
+                MirrorFileFlags(a0, f);
+            }
             if (id == I::fclose_) {
                 // fclose owns both the host fd and the 96-byte guest FILE.
                 // Erase the fd mapping and only then make the number
@@ -5312,6 +5347,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     goto bad_ptr;
                 }
             }
+            MirrorFileFlags(a3, f);
             Ret(regs, static_cast<std::uint32_t>(got_bytes / a1));
             return;
         }
@@ -5327,6 +5363,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 goto bad_ptr;  // as fread: a real libc faults on a wild source
             }
             const std::size_t wrote = std::fwrite(H(a0), a1, a2, f);
+            MirrorFileFlags(a3, f);
             if (wrote < a2) {
                 SetGuestErrno(errno ? errno : EIO);
             }
@@ -5349,6 +5386,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (r != 0) {
                 SetGuestErrno(errno);
             }
+            MirrorFileFlags(a0, f);  // a successful seek clears the end-of-file indicator
             if (EnvOn("HARNESS_PATHLOG")) {
                 static std::atomic<int> said{0};
                 if (said.fetch_add(1) < 4000) {
@@ -5371,6 +5409,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, (std::uint32_t)std::ferror(f));
             } else if (id == I::clearerr_) {
                 std::clearerr(f);
+                MirrorFileFlags(a0, f);
                 Ret(regs, 0);
             } else {
                 // Return the guest fd stored at +14 (matches inline reads).
@@ -5389,6 +5428,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
                 char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)std::min<std::uint32_t>(a1, 0x7FFFFFFFu), f);
+                MirrorFileFlags(a2, f);
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
@@ -5405,18 +5445,50 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     Ret(regs, static_cast<std::uint32_t>(-1));
                     return;
                 }
-                Ret(regs, static_cast<std::uint32_t>(std::fputs(GuestStr(a0), f)));
+                const int r = std::fputs(GuestStr(a0), f);
+                MirrorFileFlags(a1, f);
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (id == I::fputc_ || id == I::putc_) {
-                Ret(regs, static_cast<std::uint32_t>(std::fputc((int)a0, f)));
+                const int r = std::fputc((int)a0, f);
+                MirrorFileFlags(a1, f);
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
             if (id == I::ungetc_) {
-                Ret(regs, static_cast<std::uint32_t>(std::ungetc((int)a0, f)));
+                const int r = std::ungetc((int)a0, f);
+                MirrorFileFlags(a1, f);  // a pushed-back character clears end-of-file
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
+            const int c = std::fgetc(f);
+            MirrorFileFlags(a0, f);
+            Ret(regs, static_cast<std::uint32_t>(c));
+            return;
+        }
+        if (id == I::__srget_) {
+            // The refill behind the 2011 bionic's inline getc:
+            //   --fp->_r < 0 ? __srget(fp) : *fp->_p++
+            // The host keeps no buffer in the guest's FILE, so every inline
+            // getc must land here: `_r` (the int at +4) is put back to 0. A
+            // guest that cleared the indicators itself (inline clearerr) is
+            // followed first, as its libc would read again.
+            FILE* f = file_of(a0);
+            if (!f) {
+                Ret(regs, static_cast<std::uint32_t>(-1));
+                return;
+            }
+            std::uint16_t fl = 0;
+            std::memcpy(&fl, H(a0 + 12), 2);
+            if ((fl & 0x60u) == 0 && (std::feof(f) || std::ferror(f))) {
+                std::clearerr(f);
+            }
+            const int c = std::fgetc(f);
+            const std::uint32_t zero = 0;
+            std::memcpy(H(a0 + 4), &zero, 4);
+            MirrorFileFlags(a0, f);
+            Ret(regs, static_cast<std::uint32_t>(c));
             return;
         }
         if (id == I::vfprintf_) {
@@ -5433,7 +5505,9 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             st.ai = 2;
             st.stack = a2;
             const std::string out = ExpandPrintf(fmt, st);
-            Ret(regs, static_cast<std::uint32_t>(std::fwrite(out.data(), 1, out.size(), f)));
+            const std::size_t w = std::fwrite(out.data(), 1, out.size(), f);
+            MirrorFileFlags(a0, f);
+            Ret(regs, static_cast<std::uint32_t>(w));
             return;
         }
         if (id == I::setvbuf_) {
@@ -5472,6 +5546,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             st.stack = regs[13];
             const std::string out = ExpandPrintf(fmt, st);
             const std::size_t w = std::fwrite(out.data(), 1, out.size(), f);
+            MirrorFileFlags(a0, f);
             Ret(regs, static_cast<std::uint32_t>(w));
             return;
         }
@@ -5529,6 +5604,55 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             Ret(regs, h);
+            return;
+        }
+        if (id == I::tmpnam_) {
+            // tmpnam(s): a name no file has yet, in the title's files
+            // directory (bionic's /tmp does not exist on a device). With
+            // s == NULL the name goes to one static buffer, as in libc; it
+            // has the guest's L_tmpnam bytes (1024 in the 2011 bionic, which
+            // is also what a caller's own buffer holds).
+            constexpr std::uint32_t kGuestLTmpnam = 1024;
+            static std::atomic<std::uint32_t> s_seq{1};
+            const std::string name = (files_prefix_.empty() ? std::string("/tmp") : files_prefix_) +
+                                     "/tmp_" + std::to_string(GuestTid()) + "_" +
+                                     std::to_string(s_seq.fetch_add(1));
+            std::uint32_t dst = a0;
+            if (!dst) {
+                // The heap is never entered under io_mutex_ (see fclose).
+                bool have;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    have = tmpnam_buf_ != 0;
+                }
+                const std::uint32_t fresh = have ? 0 : GuestMalloc(kGuestLTmpnam);
+                std::uint32_t spare = 0;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    if (!tmpnam_buf_) {
+                        tmpnam_buf_ = fresh;
+                    } else {
+                        spare = fresh;  // another thread was first
+                    }
+                    dst = tmpnam_buf_;
+                }
+                if (spare) {
+                    GuestFree(spare);
+                }
+            }
+            if (!dst || name.size() + 1 > kGuestLTmpnam) {
+                // The host's own failure, not a guest pointer.
+                std::printf("[svc] LOUD tmpnam: %s -- halting\n",
+                            dst ? "the name does not fit the guest's L_tmpnam" : "no memory for the static buffer");
+                stop_step_ = true;
+                ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
+                return;
+            }
+            if (!CheckRange(dst, name.size() + 1, true)) {
+                goto bad_ptr;
+            }
+            std::memcpy(H(dst), name.c_str(), name.size() + 1);
+            Ret(regs, dst);
             return;
         }
         if (id == I::open_) {
@@ -9601,8 +9725,9 @@ void Runtime::InitDataImports() {
     const std::uint32_t var_environ = GuestMalloc(4);
     const std::uint32_t env_array = GuestMalloc(4);
     const std::uint32_t var_nothrow = GuestMalloc(4);
+    const std::uint32_t var_dso_handle = GuestMalloc(4);
     if (!var_ctype || !var_guard || !var_lower || !var_upper || !var_page || !sF ||
-        !var_environ || !env_array || !var_nothrow) {
+        !var_environ || !env_array || !var_nothrow || !var_dso_handle) {
         std::printf("[data] LOUD var alloc failed -- halting\n");
         ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
         return;
@@ -9633,6 +9758,7 @@ void Runtime::InitDataImports() {
         RebuildEnvironLocked();  // entries the host set before this point
     }
     std::memset(H(var_nothrow), 0, 4);
+    std::memcpy(H(var_dso_handle), &var_dso_handle, 4);
     // __sF: bind the three bionic std streams to the host's. The GOT slot must
     // hold the ARRAY BASE (the guest does a single deref: ldr rX,[got]; add
     // rX,rX,#168), unlike the pointer-cell variables above.
@@ -9657,6 +9783,7 @@ void Runtime::InitDataImports() {
         {"__sF", sF},
         {"environ", var_environ},
         {"_ZSt7nothrow", var_nothrow},
+        {"__dso_handle", var_dso_handle},
     };
     // Bind a data import to a guest address: patch every GOT slot that
     // refers to it and point the import itself at the address (a data
@@ -9667,7 +9794,8 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            if (!CheckRange(pd.loc_va, 4, true)) {
+            // Writable memory, or a text relocation (WriteDataSlot).
+            if (!CheckRange(pd.loc_va, 4, true) && !ReadOnlySegmentAt(mod_, pd.loc_va)) {
                 std::printf("[data] LOUD import %u loc %08x out of range -- halting\n", idx,
                             pd.loc_va);
                 stop_step_ = true;
@@ -9688,14 +9816,14 @@ void Runtime::InitDataImports() {
             if (pd.import_idx != idx) {
                 continue;
             }
-            if (!CheckRange(pd.loc_va, 4, true)) {
+            // Writable memory, or a text relocation (WriteDataSlot).
+            if (!CheckRange(pd.loc_va, 4, true) && !ReadOnlySegmentAt(mod_, pd.loc_va)) {
                 std::printf("[data] LOUD %s loc %08x out of range -- halting\n", s.name, pd.loc_va);
                 stop_step_ = true;
                 ActiveJit()->HaltExecution(Dynarmic::HaltReason::UserDefined2);
                 return;
             }
-            const std::uint32_t v = pd.addend + s.addr;
-            std::memcpy(H(pd.loc_va), &v, 4);
+            WriteDataSlot(mem_, mod_, pd.loc_va, pd.addend + s.addr);
             patched++;
         }
         std::printf("[data] %s -> %08x (%d slots)\n", s.name, s.addr, patched);

@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -331,6 +332,179 @@ struct UniCache {
     std::unordered_map<GLint, UniVal>* cur = nullptr;  // prog's map
     std::unordered_map<GLuint, std::unordered_map<GLint, UniVal>> by_prog;
 };
+constexpr std::uint32_t kMaxClientUnits = 8;  // GLES 1.1 texture units tracked
+struct ClientArray {
+    bool enabled = false;
+    GLint size = 0;
+    GLenum type = 0;
+    GLsizei stride = 0;
+    std::uint32_t va = 0;
+    GLuint vbo = 0;
+};
+
+// GLES 1.1 entry points loaded dynamically from libGLESv1_CM.so
+struct Gles1Api {
+    void* handle = nullptr;
+    bool ready = false;  // loaded, with the state queries: a GLES 1.1 title is running
+    void (*glClientActiveTexture)(GLenum) = nullptr;
+    void (*glColor4f)(GLfloat, GLfloat, GLfloat, GLfloat) = nullptr;
+    void (*glColorPointer)(GLint, GLenum, GLsizei, const void*) = nullptr;
+    void (*glDisableClientState)(GLenum) = nullptr;
+    void (*glEnableClientState)(GLenum) = nullptr;
+    void (*glLightfv)(GLenum, GLenum, const GLfloat*) = nullptr;
+    void (*glLoadMatrixf)(const GLfloat*) = nullptr;
+    void (*glMaterialfv)(GLenum, GLenum, const GLfloat*) = nullptr;
+    void (*glMatrixMode)(GLenum) = nullptr;
+    void (*glNormalPointer)(GLenum, GLsizei, const void*) = nullptr;
+    void (*glTexCoordPointer)(GLint, GLenum, GLsizei, const void*) = nullptr;
+    void (*glTexEnvi)(GLenum, GLenum, GLint) = nullptr;
+    void (*glVertexPointer)(GLint, GLenum, GLsizei, const void*) = nullptr;
+
+    // OES framebuffer object extension in GLES 1.1
+    void (*glGenFramebuffersOES)(GLsizei, GLuint*) = nullptr;
+    void (*glBindFramebufferOES)(GLenum, GLuint) = nullptr;
+    void (*glFramebufferTexture2DOES)(GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+    void (*glFramebufferRenderbufferOES)(GLenum, GLenum, GLenum, GLuint) = nullptr;
+    void (*glDeleteFramebuffersOES)(GLsizei, const GLuint*) = nullptr;
+    void (*glGenRenderbuffersOES)(GLsizei, GLuint*) = nullptr;
+    void (*glBindRenderbufferOES)(GLenum, GLuint) = nullptr;
+    void (*glRenderbufferStorageOES)(GLenum, GLenum, GLsizei, GLsizei) = nullptr;
+    void (*glDeleteRenderbuffersOES)(GLsizei, const GLuint*) = nullptr;
+    GLenum (*glCheckFramebufferStatusOES)(GLenum) = nullptr;
+
+    // State queries, for SyncClientArrays.
+    GLboolean (*glIsEnabled)(GLenum) = nullptr;
+    void (*glGetIntegerv)(GLenum, GLint*) = nullptr;
+    void (*glGetPointerv)(GLenum, void**) = nullptr;
+
+    bool Init() {
+        if (handle) {
+            return true;
+        }
+        handle = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_GLOBAL);
+#ifndef __ANDROID__
+        if (!handle) {
+            handle = dlopen("libGLESv1_CM.so.1", RTLD_NOW | RTLD_GLOBAL);  // PC: Mesa's name
+        }
+#endif
+        if (!handle) {
+            return false;
+        }
+#define ABR_LOAD_GLES1(fn) \
+        fn = reinterpret_cast<decltype(fn)>(dlsym(handle, #fn)); \
+        if (!fn) fn = reinterpret_cast<decltype(fn)>(eglGetProcAddress(#fn))
+
+        ABR_LOAD_GLES1(glIsEnabled);
+        ABR_LOAD_GLES1(glGetIntegerv);
+        ABR_LOAD_GLES1(glGetPointerv);
+        ABR_LOAD_GLES1(glClientActiveTexture);
+        ABR_LOAD_GLES1(glColor4f);
+        ABR_LOAD_GLES1(glColorPointer);
+        ABR_LOAD_GLES1(glDisableClientState);
+        ABR_LOAD_GLES1(glEnableClientState);
+        ABR_LOAD_GLES1(glLightfv);
+        ABR_LOAD_GLES1(glLoadMatrixf);
+        ABR_LOAD_GLES1(glMaterialfv);
+        ABR_LOAD_GLES1(glMatrixMode);
+        ABR_LOAD_GLES1(glNormalPointer);
+        ABR_LOAD_GLES1(glTexCoordPointer);
+        ABR_LOAD_GLES1(glTexEnvi);
+        ABR_LOAD_GLES1(glVertexPointer);
+
+        ABR_LOAD_GLES1(glGenFramebuffersOES);
+        ABR_LOAD_GLES1(glBindFramebufferOES);
+        ABR_LOAD_GLES1(glFramebufferTexture2DOES);
+        ABR_LOAD_GLES1(glFramebufferRenderbufferOES);
+        ABR_LOAD_GLES1(glDeleteFramebuffersOES);
+        ABR_LOAD_GLES1(glGenRenderbuffersOES);
+        ABR_LOAD_GLES1(glBindRenderbufferOES);
+        ABR_LOAD_GLES1(glRenderbufferStorageOES);
+        ABR_LOAD_GLES1(glDeleteRenderbuffersOES);
+        ABR_LOAD_GLES1(glCheckFramebufferStatusOES);
+#undef ABR_LOAD_GLES1
+        // Core GLES 1.1; SyncClientArrays cannot work without them.
+        ready = glIsEnabled && glGetIntegerv && glGetPointerv && glClientActiveTexture;
+        return ready;
+    }
+};
+
+static Gles1Api g_gles1;
+static bool EnsureGles1() {
+    static bool init_done = false;
+    static bool init_ok = false;
+    if (init_done) {
+        return init_ok;
+    }
+    init_done = true;
+    init_ok = g_gles1.Init();
+    return init_ok;
+}
+
+// A GLES 1.1 call goes to the GLES 1.1 library's function of that name, the
+// *OES framebuffer ones included: the GLES2 function without the suffix is
+// another entry point, which a GLES 1.1 context need not have. If the
+// library lacks the function the call cannot be made, and that is said
+// rather than guessed around.
+#define ABR_GLES1_OR_HALT(fn)                                                             \
+    if (!EnsureGles1() || !g_gles1.fn) {                                                \
+        std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name); \
+        r->HaltGuest();                                                                 \
+        return true;                                                                    \
+    }
+
+static std::uint32_t GlTypeSize(GLenum type) {
+    switch (type) {
+        case 0x1400: // GL_BYTE
+        case 0x1401: // GL_UNSIGNED_BYTE
+            return 1;
+        case 0x1402: // GL_SHORT
+        case 0x1403: // GL_UNSIGNED_SHORT
+            return 2;
+        case 0x1404: // GL_INT
+        case 0x1405: // GL_UNSIGNED_INT
+        case 0x1406: // GL_FLOAT
+        case 0x140C: // GL_FIXED
+            return 4;
+        default:
+            return 4;
+    }
+}
+
+static int LightFvCount(GLenum pname) {
+    switch (pname) {
+        case 0x1200: // GL_AMBIENT
+        case 0x1201: // GL_DIFFUSE
+        case 0x1202: // GL_SPECULAR
+        case 0x1203: // GL_POSITION
+            return 4;
+        case 0x1204: // GL_SPOT_DIRECTION
+            return 3;
+        case 0x1205: // GL_SPOT_EXPONENT
+        case 0x1206: // GL_SPOT_CUTOFF
+        case 0x1207: // GL_CONSTANT_ATTENUATION
+        case 0x1208: // GL_LINEAR_ATTENUATION
+        case 0x1209: // GL_QUADRATIC_ATTENUATION
+            return 1;
+        default:
+            return 4;
+    }
+}
+
+static int MaterialFvCount(GLenum pname) {
+    switch (pname) {
+        case 0x1200: // GL_AMBIENT
+        case 0x1201: // GL_DIFFUSE
+        case 0x1202: // GL_SPECULAR
+        case 0x1600: // GL_EMISSION
+        case 0x1602: // GL_AMBIENT_AND_DIFFUSE
+            return 4;
+        case 0x1601: // GL_SHININESS
+            return 1;
+        default:
+            return 4;
+    }
+}
+
 // This thread's GL copies (bindings, uniform values, the uniform-owner
 // token) in one thread_local: a GL call reaches all of them with one TLS
 // lookup (each thread_local is a TLS-resolver call in a dlopened library).
@@ -338,8 +512,154 @@ struct GlThread {
     GlBindings bindings;
     UniCache uni;
     char token = 0;
+    // GLES 1.1 client arrays (Rio 1.0.0), as the current context holds
+    // them: kept in step by the gl*Pointer / gl*ClientState handlers, and
+    // read back from the driver (SyncClientArrays) after anything that may
+    // have changed the context under this thread (ForgetGlBindings).
+    bool client_known = false;
+    // The context the copy was read from, and whether something since then
+    // changed the arrays behind the guest's back (glDeleteBuffers of a
+    // buffer an array points into unbinds it there).
+    EGLContext client_ctx = EGL_NO_CONTEXT;
+    bool client_dirty = true;
+    std::uint32_t client_units = 1;           // texture units tracked, <= kMaxClientUnits
+    std::uint32_t client_active_texture = 0;  // unit index; may be >= client_units
+    ClientArray client_vertex;
+    ClientArray client_normal;
+    ClientArray client_color;
+    ClientArray client_tex_coord[kMaxClientUnits];
 };
 thread_local GlThread t_gl;
+
+// One client array as the driver records it. A pointer the driver holds is
+// the host address the handler gave it, so it maps back to a guest address.
+static ClientArray ReadClientArray(Runtime* r, GLenum cap, GLenum size_pname, GLenum type_pname,
+                                   GLenum stride_pname, GLenum binding_pname,
+                                   GLenum pointer_pname) {
+    ClientArray a;
+    GLint v = 0;
+    a.enabled = g_gles1.glIsEnabled(cap) != GL_FALSE;
+    a.size = 3;  // a normal has no size
+    if (size_pname) {
+        g_gles1.glGetIntegerv(size_pname, &v);
+        a.size = v;
+    }
+    v = 0;
+    g_gles1.glGetIntegerv(type_pname, &v);
+    a.type = static_cast<GLenum>(v);
+    v = 0;
+    g_gles1.glGetIntegerv(stride_pname, &v);
+    a.stride = v;
+    v = 0;
+    g_gles1.glGetIntegerv(binding_pname, &v);
+    a.vbo = static_cast<GLuint>(v);
+    void* p = nullptr;
+    g_gles1.glGetPointerv(pointer_pname, &p);
+    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(r->H(0));
+    const std::uintptr_t hp = reinterpret_cast<std::uintptr_t>(p);
+    a.va = (a.vbo == 0 && hp >= base && hp - base <= 0xFFFFFFFFu)
+               ? static_cast<std::uint32_t>(hp - base)
+               : 0;  // 0 with the array enabled halts at the draw (NULLVERT)
+    return a;
+}
+
+// Brings this thread's client-array copy in line with the current context.
+// Java runs between two guest calls and may have recreated the context
+// (pause/resume): the new one starts with every array disabled and unit 0
+// selected, whatever the copy says. Costs a few dozen driver queries, once
+// per guest call that touches the arrays, for the GLES 1.1 title only.
+static void SyncClientArrays(Runtime* r) {
+    GlThread& t = t_gl;
+    if (t.client_known) {
+        return;
+    }
+    t.client_known = true;
+    // ForgetGlBindings runs at every Java call into the guest, once a frame
+    // at least; a full read-back each time would be ~40 driver calls a
+    // frame. Only a different context, or a deleted buffer, needs it.
+    const EGLContext ctx = eglGetCurrentContext();
+    if (ctx == t.client_ctx && !t.client_dirty) {
+        return;
+    }
+    t.client_ctx = ctx;
+    t.client_dirty = false;
+    GLint v = 0x84C0;  // GL_TEXTURE0
+    g_gles1.glGetIntegerv(0x84E1 /* GL_CLIENT_ACTIVE_TEXTURE */, &v);
+    const GLenum active = static_cast<GLenum>(v);
+    t.client_active_texture = static_cast<std::uint32_t>(v) - 0x84C0u;
+    v = 1;
+    g_gles1.glGetIntegerv(0x84E2 /* GL_MAX_TEXTURE_UNITS */, &v);
+    t.client_units = std::min<std::uint32_t>(v > 0 ? static_cast<std::uint32_t>(v) : 1u, kMaxClientUnits);
+    t.client_vertex = ReadClientArray(r, 0x8074, 0x807A, 0x807B, 0x807C, 0x8896, 0x808E);
+    t.client_normal = ReadClientArray(r, 0x8075, 0, 0x807E, 0x807F, 0x8897, 0x808F);
+    t.client_color = ReadClientArray(r, 0x8076, 0x8081, 0x8082, 0x8083, 0x8898, 0x8090);
+    for (std::uint32_t u = 0; u < kMaxClientUnits; u++) {
+        if (u >= t.client_units) {
+            t.client_tex_coord[u] = ClientArray{};
+            continue;
+        }
+        g_gles1.glClientActiveTexture(0x84C0u + u);
+        t.client_tex_coord[u] = ReadClientArray(r, 0x8078, 0x8088, 0x8089, 0x808A, 0x889A, 0x8092);
+    }
+    g_gles1.glClientActiveTexture(active);
+}
+
+// True when an enabled array reads guest memory. An enabled array whose
+// pointer was set with a buffer object bound is an offset into that buffer
+// (the ordinary GLES 1.1 VBO path) and needs no range check here.
+// A title that never called a GLES 1.1 function has none: one load and a
+// branch on its draw path.
+static inline bool HasClientArrays(Runtime* r) {
+    if (!g_gles1.ready) {
+        return false;
+    }
+    SyncClientArrays(r);
+    const auto in_guest = [](const ClientArray& a) { return a.enabled && a.vbo == 0; };
+    if (in_guest(t_gl.client_vertex) || in_guest(t_gl.client_normal) ||
+        in_guest(t_gl.client_color)) {
+        return true;
+    }
+    for (std::uint32_t u = 0; u < t_gl.client_units; u++) {
+        if (in_guest(t_gl.client_tex_coord[u])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ValidateClientArray(Runtime* r, const char* name, const char* arr_name,
+                                const ClientArray& arr, std::uint32_t max_vert_idx) {
+    if (!arr.enabled || arr.vbo != 0) {
+        return true;
+    }
+    if (!arr.va) {
+        std::printf("[realgl] %s LOUD NULLVERT %s max_idx=%u -- halting\n",
+                    name, arr_name, max_vert_idx);
+        r->HaltGuest();
+        return false;
+    }
+    const std::uint32_t type_sz = GlTypeSize(arr.type);
+    const std::uint32_t elem_sz = (arr.size > 0 ? (std::uint32_t)arr.size : 1u) * type_sz;
+    const std::uint32_t stride = arr.stride > 0 ? (std::uint32_t)arr.stride : elem_sz;
+    const std::uint64_t need = (std::uint64_t)max_vert_idx * stride + elem_sz;
+    if (need >= 0x10000000u || !r->CheckRange(arr.va, (std::size_t)need, false)) {
+        std::printf("[realgl] %s LOUD SHORTVERT %s va=%08x max_idx=%u need=%llu -- halting\n",
+                    name, arr_name, arr.va, max_vert_idx, (unsigned long long)need);
+        r->HaltGuest();
+        return false;
+    }
+    return true;
+}
+
+static bool ValidateClientArrays(Runtime* r, const char* name, std::uint32_t max_vert_idx) {
+    if (!ValidateClientArray(r, name, "vertex", t_gl.client_vertex, max_vert_idx)) return false;
+    if (!ValidateClientArray(r, name, "normal", t_gl.client_normal, max_vert_idx)) return false;
+    if (!ValidateClientArray(r, name, "color", t_gl.client_color, max_vert_idx)) return false;
+    for (std::uint32_t u = 0; u < t_gl.client_units; u++) {
+        if (!ValidateClientArray(r, name, "texcoord", t_gl.client_tex_coord[u], max_vert_idx)) return false;
+    }
+    return true;
+}
 std::atomic<const void*> g_uni_owner{nullptr};
 std::atomic<bool> g_uni_shared{false};
 std::atomic<std::uint64_t> g_prog_gen{1};
@@ -435,6 +755,7 @@ static void DiagGlForget();
 #endif
 void ForgetGlBindings() {
     t_gl.bindings = GlBindings{};
+    t_gl.client_known = false;
     ForgetUniforms();
 #ifdef ABR_DIAG_COUNTERS
     DiagGlForget();
@@ -761,8 +1082,13 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         r->Ret(regs, 0);
         return true;
     }
-    if (id == G::glCheckFramebufferStatus) {
-        r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
+    if (id == G::glCheckFramebufferStatus || id == G::glCheckFramebufferStatusOES) {
+        if (id == G::glCheckFramebufferStatusOES) {
+            ABR_GLES1_OR_HALT(glCheckFramebufferStatusOES);
+            r->Ret(regs, (std::uint32_t)g_gles1.glCheckFramebufferStatusOES((GLenum)a0));
+        } else {
+            r->Ret(regs, (std::uint32_t)glCheckFramebufferStatus((GLenum)a0));
+        }
         return true;
     }
     if (id == G::glGetFramebufferAttachmentParameteriv || id == G::glGetVertexAttribiv) {
@@ -814,6 +1140,24 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     }
     if (id == G::glScissor) {
         glScissor((GLint)a0, (GLint)a1, (GLsizei)a2, (GLsizei)a3);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glLineWidth) {
+        float w = 0;
+        std::memcpy(&w, &a0, 4);
+        glLineWidth(w);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glColor4f) {
+        float f[4] = {0, 0, 0, 0};
+        std::memcpy(&f[0], &a0, 4);
+        std::memcpy(&f[1], &a1, 4);
+        std::memcpy(&f[2], &a2, 4);
+        std::memcpy(&f[3], &a3, 4);
+        ABR_GLES1_OR_HALT(glColor4f);
+        g_gles1.glColor4f(f[0], f[1], f[2], f[3]);
         r->Ret(regs, 0);
         return true;
     }
@@ -1108,13 +1452,15 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
     // --- textures: real objects + real RGBA data (game decodes .pvr itself;
     // observed uploads are RGBA4444/8888, host-native) ---
     if (id == G::glGenTextures || id == G::glGenBuffers || id == G::glGenFramebuffers ||
-        id == G::glGenRenderbuffers || id == G::glDeleteTextures || id == G::glDeleteBuffers ||
-        id == G::glDeleteFramebuffers || id == G::glDeleteRenderbuffers) {
+        id == G::glGenFramebuffersOES || id == G::glGenRenderbuffers || id == G::glGenRenderbuffersOES ||
+        id == G::glDeleteTextures || id == G::glDeleteBuffers || id == G::glDeleteFramebuffers ||
+        id == G::glDeleteFramebuffersOES || id == G::glDeleteRenderbuffers || id == G::glDeleteRenderbuffersOES) {
         // All eight names are "gl<Gen|Delete>...": the G/D switch is at index 2
         // (index 3 is 'e' in both, so n[3] was always false -> every delete ran
         // as a gen: leaked objects + the stale-buffer purge below never ran).
         const bool is_del = id == G::glDeleteTextures || id == G::glDeleteBuffers ||
-                            id == G::glDeleteFramebuffers || id == G::glDeleteRenderbuffers;
+                            id == G::glDeleteFramebuffers || id == G::glDeleteFramebuffersOES ||
+                            id == G::glDeleteRenderbuffers || id == G::glDeleteRenderbuffersOES;
         // 64-bit multiply (was 32-bit 4*a0: wraps at n~0x40000000 -> 0-byte
         // check passes -> driver writes past the guest buffer). Cap 1M (game
         // gens handfuls; wrap/garbage caught) + LOUD instead of smash.
@@ -1133,27 +1479,48 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         } else if (id == G::glGenBuffers || id == G::glDeleteBuffers) {
             if (is_del) {
                 ForgetGlBindings();  // deleting a bound buffer unbinds it
+                t_gl.client_dirty = true;  // and an array may have pointed into it
             }
             is_del ? glDeleteBuffers((GLsizei)a0, (const GLuint*)r->H(a1))
                    : glGenBuffers((GLsizei)a0, (GLuint*)r->H(a1));
-        } else if (id == G::glGenFramebuffers || id == G::glDeleteFramebuffers) {
-            is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
-                   : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
+        } else if (id == G::glGenFramebuffers || id == G::glGenFramebuffersOES ||
+                   id == G::glDeleteFramebuffers || id == G::glDeleteFramebuffersOES) {
+            if (id == G::glGenFramebuffersOES) {
+                ABR_GLES1_OR_HALT(glGenFramebuffersOES);
+                g_gles1.glGenFramebuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
+            } else if (id == G::glDeleteFramebuffersOES) {
+                ABR_GLES1_OR_HALT(glDeleteFramebuffersOES);
+                g_gles1.glDeleteFramebuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
+            } else {
+                is_del ? glDeleteFramebuffers((GLsizei)a0, (const GLuint*)r->H(a1))
+                       : glGenFramebuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            }
         } else {
-            is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
-                   : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            if (id == G::glGenRenderbuffersOES) {
+                ABR_GLES1_OR_HALT(glGenRenderbuffersOES);
+                g_gles1.glGenRenderbuffersOES((GLsizei)a0, (GLuint*)r->H(a1));
+            } else if (id == G::glDeleteRenderbuffersOES) {
+                ABR_GLES1_OR_HALT(glDeleteRenderbuffersOES);
+                g_gles1.glDeleteRenderbuffersOES((GLsizei)a0, (const GLuint*)r->H(a1));
+            } else {
+                is_del ? glDeleteRenderbuffers((GLsizei)a0, (const GLuint*)r->H(a1))
+                       : glGenRenderbuffers((GLsizei)a0, (GLuint*)r->H(a1));
+            }
         }
         if (GlDrawLog()) std::printf("[realgl] %s(%u) ok\n", name, a0);
         r->Ret(regs, 0);
         return true;
     }
-    if (id == G::glBindFramebuffer || id == G::glBindRenderbuffer) {
-        // The guests DO use framebuffers (measured: glBindFramebuffer x3,
-        // glBindRenderbuffer x2 per guest); before this the calls fell into
-        // the generic tail, which answered "success" without doing
-        // anything, so the game rendered into nothing.
-        if (id == G::glBindFramebuffer) {
+    if (id == G::glBindFramebuffer || id == G::glBindFramebufferOES ||
+        id == G::glBindRenderbuffer || id == G::glBindRenderbufferOES) {
+        if (id == G::glBindFramebufferOES) {
+            ABR_GLES1_OR_HALT(glBindFramebufferOES);
+            g_gles1.glBindFramebufferOES((GLenum)a0, (GLuint)a1);
+        } else if (id == G::glBindFramebuffer) {
             glBindFramebuffer((GLenum)a0, (GLuint)a1);
+        } else if (id == G::glBindRenderbufferOES) {
+            ABR_GLES1_OR_HALT(glBindRenderbufferOES);
+            g_gles1.glBindRenderbufferOES((GLenum)a0, (GLuint)a1);
         } else {
             glBindRenderbuffer((GLenum)a0, (GLuint)a1);
         }
@@ -1161,27 +1528,42 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         r->Ret(regs, 0);
         return true;
     }
-    if (id == G::glFramebufferRenderbuffer) {
+    if (id == G::glFramebufferRenderbuffer || id == G::glFramebufferRenderbufferOES) {
         // (target, attachment, renderbuffertarget, renderbuffer)
-        glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        if (id == G::glFramebufferRenderbufferOES) {
+            ABR_GLES1_OR_HALT(glFramebufferRenderbufferOES);
+            g_gles1.glFramebufferRenderbufferOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        } else {
+            glFramebufferRenderbuffer((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3);
+        }
         if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%04x,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
     }
-    if (id == G::glFramebufferTexture2D) {
+    if (id == G::glFramebufferTexture2D || id == G::glFramebufferTexture2DOES) {
         // (target, attachment, textarget, texture, level) -- the level is
         // the first stack word.
         const std::uint32_t level = Stk(r, sp, 0);
-        glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        if (id == G::glFramebufferTexture2DOES) {
+            ABR_GLES1_OR_HALT(glFramebufferTexture2DOES);
+            g_gles1.glFramebufferTexture2DOES((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        } else {
+            glFramebufferTexture2D((GLenum)a0, (GLenum)a1, (GLenum)a2, (GLuint)a3, (GLint)level);
+        }
         if (GlDrawLog()) {
             std::printf("[realgl] %s(%04x,%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3, level);
         }
         r->Ret(regs, 0);
         return true;
     }
-    if (id == G::glRenderbufferStorage) {
+    if (id == G::glRenderbufferStorage || id == G::glRenderbufferStorageOES) {
         // (target, internalformat, width, height)
-        glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        if (id == G::glRenderbufferStorageOES) {
+            ABR_GLES1_OR_HALT(glRenderbufferStorageOES);
+            g_gles1.glRenderbufferStorageOES((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        } else {
+            glRenderbufferStorage((GLenum)a0, (GLenum)a1, (GLsizei)a2, (GLsizei)a3);
+        }
         if (GlDrawLog()) std::printf("[realgl] %s(%04x,%04x,%u,%u) ok\n", name, a0, a1, a2, a3);
         r->Ret(regs, 0);
         return true;
@@ -1462,8 +1844,165 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
         r->Ret(regs, 0);
         return true;
     }
+    if (id == G::glClientActiveTexture) {
+        ABR_GLES1_OR_HALT(glClientActiveTexture);
+        g_gles1.glClientActiveTexture((GLenum)a0);
+        // A unit the driver has selects it; any other value is an error the
+        // driver ignores, keeping the unit it had. Which of the two happened
+        // is the driver's to say when the unit is not one tracked here.
+        if (a0 - 0x84C0u < t_gl.client_units) {
+            t_gl.client_active_texture = a0 - 0x84C0u;
+        } else {
+            t_gl.client_known = false;
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glEnableClientState || id == G::glDisableClientState) {
+        const bool want = (id == G::glEnableClientState);
+        if (!EnsureGles1() || (want ? !g_gles1.glEnableClientState : !g_gles1.glDisableClientState)) {
+            std::printf("[realgl] %s LOUD unimplemented GLES 1.1 function -- halting\n", name);
+            r->HaltGuest();
+            return true;
+        }
+        if (want) g_gles1.glEnableClientState((GLenum)a0);
+        else g_gles1.glDisableClientState((GLenum)a0);
+        switch (a0) {
+            case 0x8074: // GL_VERTEX_ARRAY
+                t_gl.client_vertex.enabled = want;
+                break;
+            case 0x8075: // GL_NORMAL_ARRAY
+                t_gl.client_normal.enabled = want;
+                break;
+            case 0x8076: // GL_COLOR_ARRAY
+                t_gl.client_color.enabled = want;
+                break;
+            case 0x8078: { // GL_TEXTURE_COORD_ARRAY
+                SyncClientArrays(r);
+                const std::uint32_t u = t_gl.client_active_texture;
+                if (u >= t_gl.client_units) {
+                    std::printf("[realgl] %s LOUD client texture unit %u is not tracked (%u are) -- halting\n",
+                                name, u, t_gl.client_units);
+                    r->HaltGuest();
+                    return true;
+                }
+                t_gl.client_tex_coord[u].enabled = want;
+                break;
+            }
+            default:
+                break;
+        }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glVertexPointer) {
+        const bool vbo = BoundBuffer(GL_ARRAY_BUFFER_BINDING) != 0;
+        const void* p = nullptr;
+        if (vbo) {
+            p = (const void*)(std::uintptr_t)a3;
+        } else if (a3) {
+            if (!r->CheckRange(a3, 1, false)) {
+                std::printf("[realgl] %s LOUD BADPTR va=%08x -- halting\n", name, a3);
+                r->HaltGuest();
+                return true;
+            }
+            p = (const void*)r->H(a3);
+        }
+        ABR_GLES1_OR_HALT(glVertexPointer);
+        g_gles1.glVertexPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        t_gl.client_vertex.size = (GLint)a0;
+        t_gl.client_vertex.type = (GLenum)a1;
+        t_gl.client_vertex.stride = (GLsizei)a2;
+        t_gl.client_vertex.va = a3;
+        t_gl.client_vertex.vbo = vbo ? 1 : 0;
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glColorPointer) {
+        const bool vbo = BoundBuffer(GL_ARRAY_BUFFER_BINDING) != 0;
+        const void* p = nullptr;
+        if (vbo) {
+            p = (const void*)(std::uintptr_t)a3;
+        } else if (a3) {
+            if (!r->CheckRange(a3, 1, false)) {
+                std::printf("[realgl] %s LOUD BADPTR va=%08x -- halting\n", name, a3);
+                r->HaltGuest();
+                return true;
+            }
+            p = (const void*)r->H(a3);
+        }
+        ABR_GLES1_OR_HALT(glColorPointer);
+        g_gles1.glColorPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        t_gl.client_color.size = (GLint)a0;
+        t_gl.client_color.type = (GLenum)a1;
+        t_gl.client_color.stride = (GLsizei)a2;
+        t_gl.client_color.va = a3;
+        t_gl.client_color.vbo = vbo ? 1 : 0;
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glTexCoordPointer) {
+        const bool vbo = BoundBuffer(GL_ARRAY_BUFFER_BINDING) != 0;
+        const void* p = nullptr;
+        if (vbo) {
+            p = (const void*)(std::uintptr_t)a3;
+        } else if (a3) {
+            if (!r->CheckRange(a3, 1, false)) {
+                std::printf("[realgl] %s LOUD BADPTR va=%08x -- halting\n", name, a3);
+                r->HaltGuest();
+                return true;
+            }
+            p = (const void*)r->H(a3);
+        }
+        ABR_GLES1_OR_HALT(glTexCoordPointer);
+        g_gles1.glTexCoordPointer((GLint)a0, (GLenum)a1, (GLsizei)a2, p);
+        SyncClientArrays(r);
+        const std::uint32_t u = t_gl.client_active_texture;
+        if (u >= t_gl.client_units) {
+            std::printf("[realgl] %s LOUD client texture unit %u is not tracked (%u are) -- halting\n",
+                        name, u, t_gl.client_units);
+            r->HaltGuest();
+            return true;
+        }
+        t_gl.client_tex_coord[u].size = (GLint)a0;
+        t_gl.client_tex_coord[u].type = (GLenum)a1;
+        t_gl.client_tex_coord[u].stride = (GLsizei)a2;
+        t_gl.client_tex_coord[u].va = a3;
+        t_gl.client_tex_coord[u].vbo = vbo ? 1 : 0;
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glNormalPointer) {
+        const bool vbo = BoundBuffer(GL_ARRAY_BUFFER_BINDING) != 0;
+        const void* p = nullptr;
+        if (vbo) {
+            p = (const void*)(std::uintptr_t)a2;
+        } else if (a2) {
+            if (!r->CheckRange(a2, 1, false)) {
+                std::printf("[realgl] %s LOUD BADPTR va=%08x -- halting\n", name, a2);
+                r->HaltGuest();
+                return true;
+            }
+            p = (const void*)r->H(a2);
+        }
+        ABR_GLES1_OR_HALT(glNormalPointer);
+        g_gles1.glNormalPointer((GLenum)a0, (GLsizei)a1, p);
+        t_gl.client_normal.size = 3;
+        t_gl.client_normal.type = (GLenum)a0;
+        t_gl.client_normal.stride = (GLsizei)a1;
+        t_gl.client_normal.va = a2;
+        t_gl.client_normal.vbo = vbo ? 1 : 0;
+        r->Ret(regs, 0);
+        return true;
+    }
     if (id == G::glDrawArrays || id == G::glDrawElements) {
         if (id == G::glDrawArrays) {
+            if (HasClientArrays(r) && (GLsizei)a2 > 0) {
+                const std::uint32_t max_idx = (std::uint32_t)(GLint)a1 + (std::uint32_t)(GLsizei)a2 - 1u;
+                if (!ValidateClientArrays(r, name, max_idx)) {
+                    return true;
+                }
+            }
             glDrawArrays((GLenum)a0, (GLint)a1, (GLsizei)a2);
         } else {
             // (mode,count,type,indices): all in regs; offset if an element
@@ -1474,6 +2013,11 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             const bool ibo = BoundBuffer(GL_ELEMENT_ARRAY_BUFFER_BINDING) != 0;
             if (ibo) {
                 p = (const void*)(std::uintptr_t)a3;
+                if (HasClientArrays(r)) {
+                    std::printf("[realgl] %s LOUD MIXEDIBO element buffer bound with client vertex arrays -- halting\n", name);
+                    r->HaltGuest();
+                    return true;
+                }
             } else if (a3) {
                 const std::uint64_t isz = IndexSize(a2);
                 const std::uint64_t need = (std::uint64_t)(GLsizei)a1 * isz;
@@ -1488,7 +2032,23 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
                     r->HaltGuest();
                 }
             }
-            if (p || ibo) {
+            if ((p || ibo) && (GLsizei)a1 > 0) {
+                if (p && HasClientArrays(r)) {
+                    std::uint32_t max_idx = 0;
+                    if (a2 == 0x1401u) { // GL_UNSIGNED_BYTE
+                        const auto* u8 = (const std::uint8_t*)p;
+                        for (GLsizei i = 0; i < (GLsizei)a1; i++) if (u8[i] > max_idx) max_idx = u8[i];
+                    } else if (a2 == 0x1403u) { // GL_UNSIGNED_SHORT
+                        const auto* u16 = (const std::uint16_t*)p;
+                        for (GLsizei i = 0; i < (GLsizei)a1; i++) if (u16[i] > max_idx) max_idx = u16[i];
+                    } else if (a2 == 0x1405u) { // GL_UNSIGNED_INT
+                        const auto* u32 = (const std::uint32_t*)p;
+                        for (GLsizei i = 0; i < (GLsizei)a1; i++) if (u32[i] > max_idx) max_idx = u32[i];
+                    }
+                    if (!ValidateClientArrays(r, name, max_idx)) {
+                        return true;
+                    }
+                }
                 glDrawElements((GLenum)a0, (GLsizei)a1, (GLenum)a2, p);
             }
         }
@@ -1497,6 +2057,53 @@ bool RealGL::Handle(GlId id, const char* name, RealGL::Regs& regs, std::uint32_t
             GLenum e = glGetError();
             std::printf("[realgl] %s err=%04x\n", name, e);
         }
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glMatrixMode) {
+        ABR_GLES1_OR_HALT(glMatrixMode);
+        g_gles1.glMatrixMode((GLenum)a0);
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glLoadMatrixf) {
+        if (!a0 || !r->CheckRange(a0, 16 * sizeof(float), false)) {
+            std::printf("[realgl] %s LOUD BADPTR va=%08x -- halting\n", name, a0);
+            r->HaltGuest();
+            return true;
+        }
+        ABR_GLES1_OR_HALT(glLoadMatrixf);
+        g_gles1.glLoadMatrixf((const GLfloat*)r->H(a0));
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glLightfv) {
+        const int cnt = LightFvCount((GLenum)a1);
+        if (!a2 || !r->CheckRange(a2, cnt * sizeof(float), false)) {
+            std::printf("[realgl] %s LOUD BADPTR va=%08x count=%d -- halting\n", name, a2, cnt);
+            r->HaltGuest();
+            return true;
+        }
+        ABR_GLES1_OR_HALT(glLightfv);
+        g_gles1.glLightfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glMaterialfv) {
+        const int cnt = MaterialFvCount((GLenum)a1);
+        if (!a2 || !r->CheckRange(a2, cnt * sizeof(float), false)) {
+            std::printf("[realgl] %s LOUD BADPTR va=%08x count=%d -- halting\n", name, a2, cnt);
+            r->HaltGuest();
+            return true;
+        }
+        ABR_GLES1_OR_HALT(glMaterialfv);
+        g_gles1.glMaterialfv((GLenum)a0, (GLenum)a1, (const GLfloat*)r->H(a2));
+        r->Ret(regs, 0);
+        return true;
+    }
+    if (id == G::glTexEnvi) {
+        ABR_GLES1_OR_HALT(glTexEnvi);
+        g_gles1.glTexEnvi((GLenum)a0, (GLenum)a1, (GLint)a2);
         r->Ret(regs, 0);
         return true;
     }

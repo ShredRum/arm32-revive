@@ -168,6 +168,14 @@ struct LoadedModule {
     std::uint32_t next_tramp = 0;
     std::uint32_t next_vfp_thunk = 0;
 };
+// The read-only LOAD of the module that holds the word at va, or nullptr.
+const LoadSegment* ReadOnlySegmentAt(const LoadedModule& mod, std::uint32_t va);
+// Store one data-import relocation. A slot in a read-only LOAD (a text
+// relocation, DT_TEXTREL: Rio 1.0.0's 2011 library has them) is written
+// through a short RW window over its pages, the way Load applies RELATIVE
+// relocations there; any other slot must be writable -- the caller checks.
+void WriteDataSlot(GuestMemory& mem, const LoadedModule& mod, std::uint32_t loc_va,
+                   std::uint32_t value);
 // Bind a data import to a guest address (see the definition in
 // elf_loader.cpp). Free function so the runtime can use it too.
 bool ResolveDataImport(GuestMemory& mem, LoadedModule& mod, std::uint32_t import_idx,

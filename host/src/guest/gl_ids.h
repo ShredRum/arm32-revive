@@ -19,7 +19,9 @@ namespace abr {
     X(glBindAttribLocation) \
     X(glBindBuffer) \
     X(glBindFramebuffer) \
+    X(glBindFramebufferOES) \
     X(glBindRenderbuffer) \
+    X(glBindRenderbufferOES) \
     X(glBindTexture) \
     X(glBlendEquation) \
     X(glBlendEquationSeparate) \
@@ -28,11 +30,15 @@ namespace abr {
     X(glBufferData) \
     X(glBufferSubData) \
     X(glCheckFramebufferStatus) \
+    X(glCheckFramebufferStatusOES) \
     X(glClear) \
     X(glClearColor) \
     X(glClearDepthf) \
     X(glClearStencil) \
+    X(glClientActiveTexture) \
+    X(glColor4f) \
     X(glColorMask) \
+    X(glColorPointer) \
     X(glCompileShader) \
     X(glCompressedTexImage2D) \
     X(glCompressedTexSubImage2D) \
@@ -43,8 +49,10 @@ namespace abr {
     X(glCullFace) \
     X(glDeleteBuffers) \
     X(glDeleteFramebuffers) \
+    X(glDeleteFramebuffersOES) \
     X(glDeleteProgram) \
     X(glDeleteRenderbuffers) \
+    X(glDeleteRenderbuffersOES) \
     X(glDeleteShader) \
     X(glDeleteTextures) \
     X(glDepthFunc) \
@@ -52,20 +60,26 @@ namespace abr {
     X(glDepthRangef) \
     X(glDetachShader) \
     X(glDisable) \
+    X(glDisableClientState) \
     X(glDisableVertexAttribArray) \
     X(glDrawArrays) \
     X(glDrawElements) \
     X(glEnable) \
+    X(glEnableClientState) \
     X(glEnableVertexAttribArray) \
     X(glFinish) \
     X(glFlush) \
     X(glFramebufferRenderbuffer) \
+    X(glFramebufferRenderbufferOES) \
     X(glFramebufferTexture2D) \
+    X(glFramebufferTexture2DOES) \
     X(glFrontFace) \
     X(glGenBuffers) \
     X(glGenerateMipmap) \
     X(glGenFramebuffers) \
+    X(glGenFramebuffersOES) \
     X(glGenRenderbuffers) \
+    X(glGenRenderbuffersOES) \
     X(glGenTextures) \
     X(glGetActiveAttrib) \
     X(glGetActiveUniform) \
@@ -86,11 +100,18 @@ namespace abr {
     X(glGetUniformLocation) \
     X(glGetVertexAttribiv) \
     X(glGetVertexAttribPointerv) \
+    X(glLightfv) \
+    X(glLineWidth) \
     X(glLinkProgram) \
+    X(glLoadMatrixf) \
+    X(glMaterialfv) \
+    X(glMatrixMode) \
+    X(glNormalPointer) \
     X(glPixelStorei) \
     X(glPolygonOffset) \
     X(glReadPixels) \
     X(glRenderbufferStorage) \
+    X(glRenderbufferStorageOES) \
     X(glScissor) \
     X(glShaderSource) \
     X(glStencilFunc) \
@@ -98,6 +119,8 @@ namespace abr {
     X(glStencilMask) \
     X(glStencilOp) \
     X(glStencilOpSeparate) \
+    X(glTexCoordPointer) \
+    X(glTexEnvi) \
     X(glTexImage2D) \
     X(glTexParameterf) \
     X(glTexParameteri) \
@@ -124,6 +147,7 @@ namespace abr {
     X(glUseProgram) \
     X(glValidateProgram) \
     X(glVertexAttribPointer) \
+    X(glVertexPointer) \
     X(glViewport)
 
 enum class GlId : std::uint16_t {

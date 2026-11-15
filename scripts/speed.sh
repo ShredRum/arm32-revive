@@ -5,6 +5,8 @@
 #   Variants are interleaved (A,B,A,B...): one run resolves +-0.2..0.3 ms,
 #   four rounds about +-0.1 ms. Anything smaller is "below what we resolve".
 #   Env: BOOT (s to wait after start, 50), SECS (s measured, 30).
+#   A Play Protect dialog on install delays the start: answer it at once, or
+#   the run measures a shorter warm-up than its pair.
 # Output per run: variant frames cpu_ms ms_per_frame LOUD-count.
 set -u
 cd "$(dirname "$0")/.."
@@ -36,12 +38,20 @@ tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
 awk -v f=$frames -v c=$((c1-c0)) -v t=$tck 'BEGIN { ms=c*1000/t; printf "%d %d %.3f\n", f, ms, (f>0 ? ms/f : 0) }'
 EOF
 
+# Every other title of the project is stopped before each run: a game left
+# running from an earlier gate takes CPU and skews the numbers.
+OTHERS=""
+for prof in games/*/profile.toml; do
+    op=$(python3 scripts/profile.py "$(basename "$(dirname "$prof")")" apk.package 2>/dev/null) || continue
+    [ -n "$op" ] && [ "$op" != "$PKG" ] && OTHERS="$OTHERS $op"
+done
+
 for r in $(seq 1 "$ROUNDS"); do
     for v in "$@"; do
         name=${v%%=*}; apk=${v#*=}
         $S true || { echo "speed: device does not answer -- stopping" >&2; exit 1; }
         scp -q -P "$P" "$apk" "$DEV:ab_speed.apk" || exit 1
-        $S "sudo /system/bin/am force-stop $PKG; sudo pm install -r ~/ab_speed.apk >/dev/null && rm ~/ab_speed.apk; sudo input keyevent 224; sudo rm -f $F/abflags.txt; sudo monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1" || exit 1
+        $S "for o in $OTHERS; do sudo /system/bin/am force-stop \$o; done; sudo /system/bin/am force-stop $PKG; sudo pm install -r ~/ab_speed.apk >/dev/null && rm ~/ab_speed.apk; sudo input keyevent 224; sudo rm -f $F/abflags.txt; sudo monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1" || exit 1
         sleep "$BOOT"
         res=$($S "sudo sh ~/abmeasure.sh $PKG $SECS; echo LOUD=\$(sudo grep -ac LOUD $F/apphost.log)" | tr '\n' ' ')
         echo "r$r $name $res"
