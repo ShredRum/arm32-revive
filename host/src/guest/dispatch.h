@@ -1168,6 +1168,9 @@ private:
     };
     std::unordered_map<std::uint32_t, HostFile> file_map_;  // guest FILE* -> host
     void MirrorFileFlags(std::uint32_t h, FILE* f);  // host feof/ferror -> the guest FILE's _flags
+    void PutGuestTmTail(std::uint32_t out, const struct tm& t);  // tm_gmtoff, tm_zone of a guest struct tm
+    std::mutex tm_zones_mu_;
+    std::map<std::string, std::uint32_t> tm_zones_;  // zone name -> guest string
     std::uint32_t tmpnam_buf_ = 0;                   // tmpnam(NULL)'s static buffer (under io_mutex_)
     std::unordered_map<std::uint32_t, int> fd_map_;         // guest fd -> host fd
     std::uint32_t next_guest_fd_ = 100;

@@ -1975,6 +1975,29 @@ static std::uint8_t BionicCtypeClass(int c) {
 // the host, so after every stdio call on a stream the host stream's two
 // indicators are copied there. The handle is looked up again under the
 // lock: a FILE closed by another thread meanwhile has given its block back.
+// The tail of a guest struct tm (bionic arm32, 44 bytes): long tm_gmtoff at
+// +36, const char* tm_zone at +40. The zone name ("EET", "EEST", "UTC") is a
+// guest string made once per name and kept, as libc's are static.
+void Runtime::PutGuestTmTail(std::uint32_t out, const struct tm& t) {
+    const std::int32_t off = static_cast<std::int32_t>(t.tm_gmtoff);
+    std::memcpy(H(out + 36), &off, 4);
+    std::uint32_t z = 0;
+    if (t.tm_zone) {
+        const std::string name(t.tm_zone);
+        std::lock_guard<std::mutex> lk(tm_zones_mu_);
+        auto it = tm_zones_.find(name);
+        if (it == tm_zones_.end()) {
+            const std::uint32_t g = GuestMalloc(static_cast<std::uint32_t>(name.size() + 1));
+            if (g) {
+                std::memcpy(H(g), name.c_str(), name.size() + 1);
+            }
+            it = tm_zones_.emplace(name, g).first;
+        }
+        z = it->second;
+    }
+    std::memcpy(H(out + 40), &z, 4);
+}
+
 void Runtime::MirrorFileFlags(std::uint32_t h, FILE* f) {
     std::lock_guard<std::mutex> io(io_mutex_);
     const auto it = file_map_.find(h);
@@ -3644,10 +3667,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             for (int i = 0; i < 9; i++) {
                 std::memcpy(H(out + (std::uint32_t)(i * 4)), &f[i], 4);
             }
-            std::int32_t off = (std::int32_t)ht->tm_gmtoff;
-            std::memcpy(H(out + 36), &off, 4);
-            std::uint32_t z = 0;
-            std::memcpy(H(out + 40), &z, 4);
+            PutGuestTmTail(out, *ht);
             Ret(regs, out);
         } else {
             Ret(regs, 0);
@@ -7978,13 +7998,18 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             ht.tm_yday = f[7];
             ht.tm_isdst = f[8];
             const std::time_t r = std::mktime(&ht);
-            if (CheckRange(a0, 36, true)) {
+            if (CheckRange(a0, 44, true)) {
                 const std::int32_t o[9] = {ht.tm_sec, ht.tm_min, ht.tm_hour, ht.tm_mday,
                                            ht.tm_mon, ht.tm_year, ht.tm_wday, ht.tm_yday,
                                            ht.tm_isdst};
                 for (int i = 0; i < 9; i++) {
                     std::memcpy(H(a0 + (std::uint32_t)(i * 4)), &o[i], 4);
                 }
+                // mktime normalises the whole struct, tm_gmtoff and tm_zone
+                // included: Mono's time-zone search (99 Bricks' share
+                // button) reads tm_gmtoff of the struct it gave mktime, and
+                // a 0 left there sent it hunting back through time forever.
+                PutGuestTmTail(a0, ht);
             }
             Ret(regs, static_cast<std::uint32_t>(r & 0xFFFFFFFFu));
             return;

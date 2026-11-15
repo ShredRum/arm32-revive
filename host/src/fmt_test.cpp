@@ -527,6 +527,8 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_attr_setdetachstate", true, 0, 0, 0});  // 137
     mod.imports.push_back(abr::Import{"__srget", true, 0, 0, 0});  // 138
     mod.imports.push_back(abr::Import{"tmpnam", true, 0, 0, 0});   // 139
+    mod.imports.push_back(abr::Import{"mktime", true, 0, 0, 0});        // 140
+    mod.imports.push_back(abr::Import{"localtime_r", true, 0, 0, 0});   // 141
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -1788,7 +1790,16 @@ int main() {
                    "1/0/70");
             Expect("gmtime epoch weekday/yday", std::to_string(f[6]) + "/" + std::to_string(f[7]),
                    "4/0");
-            Expect("gmtime gmtoff/zone", std::to_string(off) + "/" + std::to_string(zone), "0/0");
+            // tm_zone is libc's name for UTC (it used to be left NULL, which
+            // no libc does): whatever the host's gmtime calls it.
+            {
+                struct tm hu {};
+                const time_t epoch = 0;
+                gmtime_r(&epoch, &hu);
+                Expect("gmtime gmtoff/zone", std::to_string(off) + "/" +
+                           (zone ? std::string(rt.H<const char>(zone)) : std::string("NULL")),
+                       "0/" + std::string(hu.tm_zone ? hu.tm_zone : "NULL"));
+            }
         }
     }
 
@@ -3436,6 +3447,35 @@ int main() {
                            (s1 != s2 && !s2.empty() ? "1" : "0") +
                            (static_cast<unsigned char>(*rt.H(kBuf + 0x100 + s2.size() + 1)) == 0x55 ? "1" : "0") +
                            (abr::RuntimeTestAccess::TakeStopped(rt) ? " halted" : ""),
+                       "1111");
+            }
+            // mktime fills the whole struct tm like libc, tm_gmtoff (+36)
+            // and tm_zone (+40) too: Mono reads tm_gmtoff of the struct it
+            // gave mktime (99 Bricks hung on a 0 there), and localtime_r of
+            // the same instant must agree with it.
+            {
+                const std::uint32_t kTm = kBuf + 0x400, kTm2 = kBuf + 0x440, kT = kBuf + 0x480;
+                const std::int32_t f[11] = {0, 0, 12, 15, 6 /*July*/, 125 /*2025*/, 0, 0, -1,
+                                            0x7777, 0};
+                std::memcpy(rt.H(kTm), f, sizeof f);
+                const std::uint32_t mk[4] = {kTm, 0, 0, 0};
+                const std::uint32_t t = abr::RuntimeTestAccess::Call(rt, 140, mk);
+                std::memcpy(rt.H(kT), &t, 4);
+                const std::uint32_t lt[4] = {kT, kTm2, 0, 0};
+                abr::RuntimeTestAccess::Call(rt, 141, lt);
+                std::int32_t off1 = 0x7777, off2 = 0;
+                std::uint32_t z1 = 0, z2 = 0;
+                std::memcpy(&off1, rt.H(kTm + 36), 4);
+                std::memcpy(&off2, rt.H(kTm2 + 36), 4);
+                std::memcpy(&z1, rt.H(kTm + 40), 4);
+                std::memcpy(&z2, rt.H(kTm2 + 40), 4);
+                struct tm h {};
+                const time_t ht = static_cast<time_t>(static_cast<std::int32_t>(t));
+                localtime_r(&ht, &h);
+                Expect("mktime/localtime_r: tm_gmtoff and tm_zone filled and agreeing",
+                       std::string(off1 == static_cast<std::int32_t>(h.tm_gmtoff) ? "1" : "0") +
+                           (off1 == off2 ? "1" : "0") + (z1 != 0 && z1 == z2 ? "1" : "0") +
+                           (z1 ? (std::string(" ") + rt.H<const char>(z1)) == (std::string(" ") + h.tm_zone) ? "1" : "0" : "0"),
                        "1111");
             }
             // Record locks reach the host with the guest's 32-bit struct
