@@ -3967,7 +3967,26 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 std::printf("[dl] dlopen(\"%s\") -> %08x\n", a0 ? GuestStr(a0) : "NULL", h);
             }
             if (!h) {
-                dl_error = std::string("dlopen failed: library \"") + GuestStr(a0) + "\" not found";
+                const std::string want = GuestStr(a0);
+                dl_error = "dlopen failed: library \"" + want + "\" not found";
+                // "Not found" is the device's answer only if the library is
+                // not on the device: a system library the host does not hold
+                // (or a path that exists) makes it an invented one. Looked up
+                // on this failure only, once per name.
+                const std::string base = want.substr(want.find_last_of('/') + 1);
+                bool on_device = !want.empty() && want[0] == '/' && ::access(want.c_str(), F_OK) == 0;
+                for (const char* dir : {"/system/lib/", "/system/lib64/", "/vendor/lib/", "/vendor/lib64/"}) {
+                    on_device = on_device || (!base.empty() && ::access((std::string(dir) + base).c_str(), F_OK) == 0);
+                }
+                if (on_device) {
+                    static std::mutex said_mu;
+                    static std::set<std::string> said;
+                    std::lock_guard<std::mutex> lk(said_mu);
+                    if (said.insert(want).second) {
+                        std::printf("[dl] LOUD dlopen(\"%s\"): the device has it, the host does not serve it -> NULL\n",
+                                    want.c_str());
+                    }
+                }
             }
             Ret(regs, h);
             return;
