@@ -480,36 +480,6 @@ extern "C" void Java_com_rovio_fusion_MyRenderer_nativeResume(JNIEnv* env, jobje
 extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeUpdate", "()Z", env, thiz);
 }
-extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
-    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts", "(JZ)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jboolean a2) {
-    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse", "(J[Lcom/amazon/device/iap/model/Product;Z)V", env, thiz, a0, a1, a2); return;
-}
-extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
-    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
-}
-extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
-    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
-}
-extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
-    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone", "(J)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jdouble a4) {
-    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement", "(JILjava/lang/String;ZD)V", env, thiz, a0, a1, a2, a3, a4); return;
-}
-extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
-    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone", "(JI)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged(JNIEnv* env, jobject thiz, jboolean a0) {
-    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged", "(Z)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
-    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
-}
-extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
-    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
-}
 extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
 }
@@ -521,6 +491,21 @@ extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeConfig(JNIEnv* env, j
 }
 extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInputAxis(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInputAxis", "(IFI)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_initFinished(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_initFinished", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_paymentFinished(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jint a2, jobject a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_paymentFinished", "(JLjava/lang/String;ILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_restoreDone", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_restoreFailed(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_restoreFailed", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/fusion/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
 }
 extern "C" void Java_com_rovio_skynest_AdsSdk_onAdHidden(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdHidden", "(JI)V", env, thiz, a0, a1); return;
@@ -567,26 +552,17 @@ extern "C" void Java_com_rovio_skynest_IdentityLoginUI_onSignInClicked(JNIEnv* e
 extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onCustomControlClicked(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jfloat a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onCustomControlClicked", "(JLjava/lang/String;F)V", env, thiz, a0, a1, a2); return;
 }
-extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
-    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
-    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady", "(JZ)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
-    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
-}
 extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onVideoEnded(JNIEnv* env, jobject thiz, jlong a0, jboolean a1, jfloat a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onVideoEnded", "(JZF)V", env, thiz, a0, a1, a2); return;
 }
 extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onVideoTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onVideoTrackEvent", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
 }
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_callNativeCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_callNativeCallback", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
 extern "C" void Java_com_rovio_skynest_WebViewWrapper_linkClickedCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_linkClickedCallback", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
-    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
 }
 extern "C" void Java_com_rovio_skynest_WebViewWrapper_urlLoadedCallback(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_urlLoadedCallback", "(JZ)V", env, thiz, a0, a1); return;
@@ -599,21 +575,6 @@ extern "C" void Java_com_rovio_skynest_WebViewWrapper_viewExpandedCallback(JNIEn
 }
 extern "C" void Java_com_rovio_skynest_WebViewWrapper_viewHiddenCallback(JNIEnv* env, jobject thiz, jlong a0) {
     abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_viewHiddenCallback", "(J)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
-    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished", "(JZ)V", env, thiz, a0, a1); return;
-}
-extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jint a2, jobject a3, jobject a4) {
-    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished", "(JLjava/lang/String;ILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
-}
-extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
-    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone", "(J)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed(JNIEnv* env, jclass thiz, jlong a0) {
-    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed", "(J)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
-    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/skynest/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
 }
 extern "C" void Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetFriendsCallback(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialManagerWrapper_onGetFriendsCallback", "(JLjava/lang/String;I)V", env, thiz, a0, a1, a2); return;
@@ -636,4 +597,61 @@ extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_on
 extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared", "(J[Ljava/lang/String;[Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
 }
-// GEN_COUNT=212
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jboolean a2) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_itemDataResponse", "(J[Lcom/amazon/device/iap/model/Product;Z)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jobject a2, jobject a3, jboolean a4, jboolean a5) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_purchaseUpdatesResponse", "(JLjava/lang/String;Ljava/lang/String;Lcom/amazon/device/iap/model/Receipt;ZZ)V", env, thiz, a0, a1, a2, a3, a4, a5); return;
+}
+extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPurchasingListener_restoreDone", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jdouble a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncement", "(JILjava/lang/String;ZD)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_achievementStatusAnnouncementsDone", "(JI)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged(JNIEnv* env, jobject thiz, jboolean a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_authenticationStatusChanged", "(Z)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_postAchievementAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jboolean a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreAnnouncement", "(JILjava/lang/String;ZLjava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick(JNIEnv* env, jobject thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardClick", "(JLjava/lang/String;)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardReady", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_VideoPlayerBridge_onEndCardTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
+    abr::AppHost_Call("Java_com_rovio_skynest_WebViewWrapper_rovioTrackEvent", "(JLjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_initFinished", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished(JNIEnv* env, jclass thiz, jlong a0, jobject a1, jint a2, jobject a3, jobject a4) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_paymentFinished", "(JLjava/lang/String;ILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3, a4); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreDone", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed(JNIEnv* env, jclass thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_restoreFailed", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
+    abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/skynest/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
+}
+// GEN_COUNT=218
