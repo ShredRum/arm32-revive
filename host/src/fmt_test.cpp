@@ -525,6 +525,8 @@ int main() {
     mod.imports.push_back(abr::Import{"pthread_create", true, 0, 0, 0});  // 135
     mod.imports.push_back(abr::Import{"pthread_join", true, 0, 0, 0});    // 136
     mod.imports.push_back(abr::Import{"pthread_attr_setdetachstate", true, 0, 0, 0});  // 137
+    mod.imports.push_back(abr::Import{"__srget", true, 0, 0, 0});  // 138
+    mod.imports.push_back(abr::Import{"tmpnam", true, 0, 0, 0});   // 139
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -3384,6 +3386,57 @@ int main() {
                        abr::RuntimeTestAccess::TakeStopped(rt) ? "1" : "0", "1");
                 const std::uint32_t rc2[4] = {rf2, 0, 0, 0};
                 abr::RuntimeTestAccess::Call(rt, 22, rc2);
+            }
+            // The 2011 bionic's inline stdio (Rio 1.0.0): getc is
+            // `--fp->_r < 0 ? __srget(fp) : *fp->_p++`, feof and ferror read
+            // fp->_flags (+12: __SEOF 0x20, __SERR 0x40). The host must keep
+            // _r at 0 and those two bits true, or `while (!feof(fp))` never ends.
+            {
+                put(kP, "/data/data/abr.errno/files/small.bin");
+                put(kBuf, "r");
+                const std::uint32_t fo[4] = {kP, kBuf, 0, 0};
+                const std::uint32_t f = abr::RuntimeTestAccess::Call(rt, 21, fo);
+                const std::uint32_t fa[4] = {f, 0, 0, 0};
+                const auto flags = [&]() {
+                    std::uint16_t v = 0;
+                    std::memcpy(&v, rt.H(f + 12), 2);
+                    return static_cast<unsigned>(v & 0x60u);
+                };
+                std::string got;
+                std::int32_t minus_one = -1;
+                std::memcpy(rt.H(f + 4), &minus_one, 4);  // what the inline --_r leaves
+                for (int i = 0; i < 10; i++) {
+                    got += static_cast<char>(abr::RuntimeTestAccess::Call(rt, 138, fa));
+                }
+                std::int32_t r_after = 7;
+                std::memcpy(&r_after, rt.H(f + 4), 4);
+                const unsigned before_end = flags();
+                const std::int32_t at_end = static_cast<std::int32_t>(abr::RuntimeTestAccess::Call(rt, 138, fa));
+                const unsigned at_end_flags = flags();
+                const std::uint32_t sk[4] = {f, 0, 0 /*SEEK_SET*/, 0};
+                abr::RuntimeTestAccess::Call(rt, 30, sk);
+                const unsigned after_seek = flags();
+                Expect("__srget: bytes, _r, EOF and the feof bit; fseek clears it",
+                       got + " " + std::to_string(r_after) + " " + std::to_string(before_end) + " " +
+                           std::to_string(at_end) + " " + std::to_string(at_end_flags) + " " +
+                           std::to_string(after_seek),
+                       "0123456789 0 0 -1 32 0");
+                abr::RuntimeTestAccess::Call(rt, 22, fa);
+                // tmpnam: a new name each call, in the caller's buffer or the
+                // static one; nothing is written past the name.
+                std::memset(rt.H(kBuf + 0x100), 0x55, 0x200);
+                const std::uint32_t t0[4] = {0, 0, 0, 0};
+                const std::uint32_t n1 = abr::RuntimeTestAccess::Call(rt, 139, t0);
+                const std::string s1 = n1 ? std::string(rt.H<const char>(n1)) : std::string();
+                const std::uint32_t t1[4] = {kBuf + 0x100, 0, 0, 0};
+                const std::uint32_t n2 = abr::RuntimeTestAccess::Call(rt, 139, t1);
+                const std::string s2 = std::string(rt.H<const char>(kBuf + 0x100));
+                Expect("tmpnam: static buffer, caller's buffer, distinct names, no overrun",
+                       std::string(n1 != 0 && !s1.empty() ? "1" : "0") + (n2 == kBuf + 0x100 ? "1" : "0") +
+                           (s1 != s2 && !s2.empty() ? "1" : "0") +
+                           (static_cast<unsigned char>(*rt.H(kBuf + 0x100 + s2.size() + 1)) == 0x55 ? "1" : "0") +
+                           (abr::RuntimeTestAccess::TakeStopped(rt) ? " halted" : ""),
+                       "1111");
             }
             // Record locks reach the host with the guest's 32-bit struct
             // flock converted; an unknown command is EINVAL, not "success".

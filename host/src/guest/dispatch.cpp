@@ -4917,6 +4917,20 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             const auto it = file_map_.find(h);
             return it == file_map_.end() ? nullptr : it->second.f;
         };
+        // A guest built against the 2011 bionic (Rio 1.0.0) has feof, ferror
+        // and getc as inline macros over its FILE: `_flags` is the short at
+        // +12, __SEOF 0x20, __SERR 0x40 (BSD stdio, <stdio.h> of that NDK).
+        // Such a guest never asks the host, so after every call that can
+        // change them the host stream's two indicators are copied there. `h`
+        // is a handle file_of() accepted: the 96-byte block (or __sF entry)
+        // is the host's own.
+        auto mirror_file_flags = [&](std::uint32_t h, FILE* f) {
+            std::uint16_t fl = 0;
+            std::memcpy(&fl, H(h + 12), 2);
+            fl = static_cast<std::uint16_t>((fl & ~0x60u) | (std::feof(f) ? 0x20u : 0u) |
+                                            (std::ferror(f) ? 0x40u : 0u));
+            std::memcpy(H(h + 12), &fl, 2);
+        };
         auto new_file_handle = [&]() -> std::uint32_t {
             const std::uint32_t h = GuestMalloc(96);  // opaque, Bionic-compatible size
             if (!h) {
@@ -5314,6 +5328,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     goto bad_ptr;
                 }
             }
+            mirror_file_flags(a3, f);
             Ret(regs, static_cast<std::uint32_t>(got_bytes / a1));
             return;
         }
@@ -5351,6 +5366,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             if (r != 0) {
                 SetGuestErrno(errno);
             }
+            mirror_file_flags(a0, f);  // a successful seek clears the end-of-file indicator
             if (EnvOn("HARNESS_PATHLOG")) {
                 static std::atomic<int> said{0};
                 if (said.fetch_add(1) < 4000) {
@@ -5373,6 +5389,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 Ret(regs, (std::uint32_t)std::ferror(f));
             } else if (id == I::clearerr_) {
                 std::clearerr(f);
+                mirror_file_flags(a0, f);
                 Ret(regs, 0);
             } else {
                 // Return the guest fd stored at +14 (matches inline reads).
@@ -5391,6 +5408,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                     return;
                 }
                 char* r = std::fgets(reinterpret_cast<char*>(H(a0)), (int)std::min<std::uint32_t>(a1, 0x7FFFFFFFu), f);
+                mirror_file_flags(a2, f);
                 Ret(regs, r ? a0 : 0u);
                 return;
             }
@@ -5415,25 +5433,37 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
                 return;
             }
             if (id == I::ungetc_) {
-                Ret(regs, static_cast<std::uint32_t>(std::ungetc((int)a0, f)));
+                const int r = std::ungetc((int)a0, f);
+                mirror_file_flags(a1, f);  // a pushed-back character clears end-of-file
+                Ret(regs, static_cast<std::uint32_t>(r));
                 return;
             }
-            Ret(regs, static_cast<std::uint32_t>(std::fgetc(f)));
+            const int c = std::fgetc(f);
+            mirror_file_flags(a0, f);
+            Ret(regs, static_cast<std::uint32_t>(c));
             return;
         }
         if (id == I::__srget_) {
+            // The refill behind the 2011 bionic's inline getc:
+            //   --fp->_r < 0 ? __srget(fp) : *fp->_p++
+            // The host keeps no buffer in the guest's FILE, so every inline
+            // getc must land here: `_r` (the int at +4) is put back to 0. A
+            // guest that cleared the indicators itself (inline clearerr) is
+            // followed first, as its libc would read again.
             FILE* f = file_of(a0);
             if (!f) {
                 Ret(regs, static_cast<std::uint32_t>(-1));
                 return;
             }
-            if (!CheckRange(a0 + 4, 4, true)) {
-                goto bad_ptr;
+            std::uint16_t fl = 0;
+            std::memcpy(&fl, H(a0 + 12), 2);
+            if ((fl & 0x60u) == 0 && (std::feof(f) || std::ferror(f))) {
+                std::clearerr(f);
             }
             const int c = std::fgetc(f);
-            // Keep _r at 0 so inline getc continues to call __srget
-            std::uint32_t zero = 0;
+            const std::uint32_t zero = 0;
             std::memcpy(H(a0 + 4), &zero, 4);
+            mirror_file_flags(a0, f);
             Ret(regs, static_cast<std::uint32_t>(c));
             return;
         }
@@ -5550,20 +5580,30 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             return;
         }
         if (id == I::tmpnam_) {
-            static std::uint32_t s_buf = 0;
-            if (!s_buf) {
-                s_buf = GuestMalloc(64);
+            // tmpnam(s): a name no file has yet, in the title's files
+            // directory (bionic's /tmp does not exist on a device). With
+            // s == NULL the name goes to one static buffer, as in libc; it
+            // has the guest's L_tmpnam bytes (1024 in the 2011 bionic, which
+            // is also what a caller's own buffer holds).
+            constexpr std::uint32_t kGuestLTmpnam = 1024;
+            static std::atomic<std::uint32_t> s_seq{1};
+            const std::string name = (files_prefix_.empty() ? std::string("/tmp") : files_prefix_) +
+                                     "/tmp_" + std::to_string(GuestTid()) + "_" +
+                                     std::to_string(s_seq.fetch_add(1));
+            std::uint32_t dst = a0;
+            if (!dst) {
+                static std::mutex s_mu;
+                static std::uint32_t s_buf = 0;
+                std::lock_guard<std::mutex> lk(s_mu);
+                if (!s_buf) {
+                    s_buf = GuestMalloc(kGuestLTmpnam);
+                }
+                dst = s_buf;
             }
-            std::uint32_t dst = a0 ? a0 : s_buf;
-            if (!dst || !CheckRange(dst, 64, true)) {
+            if (!dst || name.size() + 1 > kGuestLTmpnam || !CheckRange(dst, name.size() + 1, true)) {
                 goto bad_ptr;
             }
-            static std::atomic<std::uint32_t> s_seq{1};
-            std::string prefix = files_prefix_.empty() ? "/tmp" : files_prefix_;
-            char name_buf[64];
-            std::snprintf(name_buf, sizeof(name_buf), "%s/tmp_%u_%u",
-                          prefix.c_str(), GuestTid(), s_seq.fetch_add(1));
-            std::memcpy(H(dst), name_buf, std::strlen(name_buf) + 1);
+            std::memcpy(H(dst), name.c_str(), name.size() + 1);
             Ret(regs, dst);
             return;
         }
