@@ -375,6 +375,111 @@ extern "C" void Java_com_rovio_ka3d_WebViewWrapper_urlLoadedCallback(JNIEnv* env
 extern "C" void Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback(JNIEnv* env, jobject thiz, jlong a0, jlong a1, jint a2, jint a3) {
     abr::AppHost_Call("Java_com_rovio_fusion_ShowAlertResultRunnable_showAlertResultCallback", "(JJII)V", env, thiz, a0, a1, a2, a3); return;
 }
+extern "C" void Java_com_rovio_fusion_BannerAdWrapper_onBannerAdRequestCompleted(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_BannerAdWrapper_onBannerAdRequestCompleted", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_BannerAdWrapper_onBannerAdSizeChanged(JNIEnv* env, jobject thiz, jlong a0, jint a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_BannerAdWrapper_onBannerAdSizeChanged", "(JII)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_BannerAdWrapper_onBannerAdWasHidden(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_BannerAdWrapper_onBannerAdWasHidden", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdRequestCompleted(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdRequestCompleted", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdSizeChanged(JNIEnv* env, jobject thiz, jlong a0, jint a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdSizeChanged", "(JII)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdWasHidden(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdWasHidden", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdWillExpand(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_ExpandableAdWrapper_onExpandableAdWillExpand", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_InterstitialAdWrapper_onInterstitialAdHidden(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_InterstitialAdWrapper_onInterstitialAdHidden", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_InterstitialAdWrapper_onInterstitialAdRequestCompleted(JNIEnv* env, jobject thiz, jlong a0, jboolean a1) {
+    abr::AppHost_Call("Java_com_rovio_fusion_InterstitialAdWrapper_onInterstitialAdRequestCompleted", "(JZ)V", env, thiz, a0, a1); return;
+}
+extern "C" void Java_com_rovio_fusion_MediaPlayerWrapper_onVideoEnded(JNIEnv* env, jobject thiz, jlong a0, jint a1, jfloat a2, jfloat a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MediaPlayerWrapper_onVideoEnded", "(JIFF)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MediaPlayerWrapper_onVideoStarted(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MediaPlayerWrapper_onVideoStarted", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit", "()V", env, thiz); return;
+}
+extern "C" jint Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeInit__IILjava_lang_String_2(JNIEnv* env, jobject thiz, jint a0, jint a1, jobject a2) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInit", "(IILjava/lang/String;)Z", env, thiz, a0, a1, a2);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeInit__II(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput__III(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput", "(III)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput__IIII(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativePause(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativePause", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResume", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate", "()Z", env, thiz);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeDeinit", "()V", env, thiz); return;
+}
+extern "C" jint Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
+    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeInit__IILjava_lang_String_2(JNIEnv* env, jobject thiz, jint a0, jint a1, jobject a2) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInit", "(IILjava/lang/String;)Z", env, thiz, a0, a1, a2);
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeInit__II(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeKeyInput__III(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeKeyInput", "(III)V", env, thiz, a0, a1, a2); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeKeyInput__IIII(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativePause(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativePause", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
+}
+extern "C" void Java_com_rovio_fusion_MyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
+    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResume", "()V", env, thiz); return;
+}
+extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
+    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeUpdate", "()Z", env, thiz);
+}
 extern "C" void Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts(JNIEnv* env, jclass thiz, jlong a0, jboolean a1) {
     abr::AppHost_Call("Java_com_rovio_rcs_payment_amazon_AmazonPaymentProvider_requestProducts", "(JZ)V", env, thiz, a0, a1); return;
 }
@@ -408,74 +513,14 @@ extern "C" void Java_com_rovio_fusion_GooglePlayGameServicesWrapper_submitScoreA
 extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
 }
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeDeinit", "()V", env, thiz); return;
-}
-extern "C" jint Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
-    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
-}
-extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeInit(JNIEnv* env, jobject thiz, jint a0, jint a1) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
-}
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
-}
 extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeInputAxis(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeInputAxis", "(IFI)V", env, thiz, a0, a1, a2); return;
-}
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
-}
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativePause(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativePause", "()V", env, thiz); return;
-}
-extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
-}
-extern "C" void Java_com_rovio_fusion_MyLegacyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeResume", "()V", env, thiz); return;
-}
-extern "C" jboolean Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyLegacyRenderer_nativeUpdate", "()Z", env, thiz);
 }
 extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeConfig(JNIEnv* env, jobject thiz, jobject a0) {
     return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeConfig", "(Ljava/lang/String;)Z", env, thiz, a0);
 }
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativeDeinit(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeDeinit", "()V", env, thiz); return;
-}
-extern "C" jint Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations(JNIEnv* env, jobject thiz) {
-    return (jint)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeGetPossibleOrientations", "()I", env, thiz);
-}
-extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeInit(JNIEnv* env, jobject thiz, jint a0, jint a1) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInit", "(II)Z", env, thiz, a0, a1);
-}
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInput(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jfloat a2, jint a3) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInput", "(IFFI)V", env, thiz, a0, a1, a2, a3); return;
-}
 extern "C" void Java_com_rovio_fusion_MyRenderer_nativeInputAxis(JNIEnv* env, jobject thiz, jint a0, jfloat a1, jint a2) {
     abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeInputAxis", "(IFI)V", env, thiz, a0, a1, a2); return;
-}
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativeKeyInput(JNIEnv* env, jobject thiz, jint a0, jint a1, jint a2, jint a3) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeKeyInput", "(IIII)V", env, thiz, a0, a1, a2, a3); return;
-}
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl(JNIEnv* env, jobject thiz, jobject a0) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeLoadFromUrl", "(Ljava/lang/String;)V", env, thiz, a0); return;
-}
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativePause(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativePause", "()V", env, thiz); return;
-}
-extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeResize(JNIEnv* env, jobject thiz, jint a0, jint a1) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResize", "(II)Z", env, thiz, a0, a1);
-}
-extern "C" void Java_com_rovio_fusion_MyRenderer_nativeResume(JNIEnv* env, jobject thiz) {
-    abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeResume", "()V", env, thiz); return;
-}
-extern "C" jboolean Java_com_rovio_fusion_MyRenderer_nativeUpdate(JNIEnv* env, jobject thiz) {
-    return (jboolean)abr::AppHost_Call("Java_com_rovio_fusion_MyRenderer_nativeUpdate", "()Z", env, thiz);
 }
 extern "C" void Java_com_rovio_skynest_AdsSdk_onAdHidden(JNIEnv* env, jobject thiz, jlong a0, jint a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_AdsSdk_onAdHidden", "(JI)V", env, thiz, a0, a1); return;
@@ -591,4 +636,4 @@ extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_on
 extern "C" void Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared(JNIEnv* env, jobject thiz, jlong a0, jobject a1, jobject a2) {
     abr::AppHost_Call("Java_com_rovio_skynest_socialnetwork_SocialSharingViewWrapper_onSharingViewShared", "(J[Ljava/lang/String;[Ljava/lang/String;)V", env, thiz, a0, a1, a2); return;
 }
-// GEN_COUNT=197
+// GEN_COUNT=212

@@ -216,9 +216,27 @@ for path in sorted(glob.glob(res + "/values*/strings.xml")):
     if n:
         open(path, "w").write(new)
         done += n
-if done == 0:
-    sys.exit(f"build-apk: no app_name string under {res}")
-print(f"app label -> {label} ({done} string(s))")
+print(f"app label -> {label} ({done} app_name string(s))")
+PYEOF
+    # The launcher shows the manifest's labels, which may be text of their
+    # own rather than @string/app_name (Seasons 3.1.1: android:label="Angry
+    # Birds"). Every literal label equal to the application's becomes the
+    # new one; a label pointing at a resource follows the strings above.
+    python3 - "$TREE/AndroidManifest.xml" "$LABEL" << 'PYEOF'
+import re
+import sys
+from xml.sax.saxutils import quoteattr
+
+path, label = sys.argv[1:3]
+text = open(path).read()
+m = re.search(r'<application\b[^>]*?\bandroid:label="([^"]*)"', text)
+if m and not m.group(1).startswith("@"):
+    old = m.group(1)
+    text, n = re.subn(r'\bandroid:label="' + re.escape(old) + '"', "android:label=" + quoteattr(label), text)
+    open(path, "w").write(text)
+    print(f"manifest label {old!r} -> {label!r} ({n} place(s))")
+elif not m:
+    sys.exit("build-apk: the manifest's <application> has no android:label")
 PYEOF
 fi
 

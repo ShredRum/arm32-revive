@@ -3923,6 +3923,7 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
         return;
     }
     case I::dlclose_:
+    case I::dladdr_:
     case I::dlerror_:
     case I::dlopen_:
     case I::dlsym_:
@@ -4052,6 +4053,58 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             Ret(regs, v);
             return;
         }
+        if (id == I::dladdr_) {
+            // dladdr(addr, Dl_info*): the guest library holding addr and its
+            // nearest exported symbol at or below it. 32-bit Dl_info: four
+            // words, dli_fname, dli_fbase, dli_sname, dli_saddr.
+            if (!CheckRange(a1, 16, true)) {
+                goto bad_ptr;
+            }
+            int lib = -1;
+            std::uint32_t base = 0;
+            std::string path;
+            if (a0 >= mod_.span_lo && a0 < mod_.span_hi) {
+                lib = 0, base = mod_.bias, path = mod_.path;
+            }
+            for (std::size_t i = 0; lib < 0 && i < mod_.more.size(); i++) {
+                if (a0 >= mod_.more[i].span_lo && a0 < mod_.more[i].span_hi) {
+                    lib = static_cast<int>(i + 1), base = mod_.more[i].bias, path = mod_.more[i].path;
+                }
+            }
+            if (lib < 0) {
+                dl_error = "dladdr: address not in a loaded library";
+                Ret(regs, 0);
+                return;
+            }
+            std::string sname;
+            std::uint32_t saddr = 0;
+            if (static_cast<std::size_t>(lib) < mod_.lib_defined.size()) {
+                for (const auto& [nm, va] : mod_.lib_defined[static_cast<std::size_t>(lib)]) {
+                    const std::uint32_t v = va & ~1u;  // a Thumb function's address has bit 0
+                    if (v <= a0 && v >= saddr) {
+                        saddr = v;
+                        sname = nm;
+                    }
+                }
+            }
+            const auto guest_string = [&](const std::string& t) -> std::uint32_t {
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
+                auto it = dladdr_strings_.find(t);
+                if (it == dladdr_strings_.end()) {
+                    const std::uint32_t g = GuestMalloc(static_cast<std::uint32_t>(t.size() + 1));
+                    if (g) {
+                        std::memcpy(H(g), t.c_str(), t.size() + 1);
+                    }
+                    it = dladdr_strings_.emplace(t, g).first;
+                }
+                return it->second;
+            };
+            const std::uint32_t info[4] = {guest_string(path), base,
+                                           sname.empty() ? 0u : guest_string(sname), saddr};
+            std::memcpy(H(a1), info, 16);
+            Ret(regs, 1);
+            return;
+        }
         if (id == I::dlerror_) {
             // The message once, then NULL until the next failure; the text
             // lives in a per-thread guest buffer.
@@ -4114,6 +4167,32 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
             SetGuestErrno(ENOMEM);
         }
         Ret(regs, blk);
+        return;
+    }
+    case I::strlcat_:
+    if (id == I::strlcat_) {
+        // strlcat(dst, src, size): appends to the string in dst while the
+        // whole stays under size bytes, NUL-terminated; returns the length
+        // it tried to make, strlen(dst) + strlen(src). A dst with no NUL in
+        // its size bytes is left alone and counts as size.
+        std::uint32_t slen = 0, dlen = 0;
+        if (!GuestStrnlen(a1, 0xFFFFFFFFu, &slen)) {
+            goto bad_ptr;
+        }
+        if (a2 != 0 && !GuestStrnlen(a0, a2, &dlen)) {
+            goto bad_ptr;
+        }
+        if (dlen >= a2) {
+            Ret(regs, a2 + slen);
+            return;
+        }
+        const std::uint32_t c = slen < a2 - dlen - 1 ? slen : a2 - dlen - 1;
+        if (!CheckRange(a0 + dlen, c + 1, true)) {
+            goto bad_ptr;
+        }
+        std::memmove(H(a0 + dlen), H(a1), c);
+        *H<std::uint8_t>(a0 + dlen + c) = 0;
+        Ret(regs, dlen + slen);
         return;
     }
     case I::strlcpy_:

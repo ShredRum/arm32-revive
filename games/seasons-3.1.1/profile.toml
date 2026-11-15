@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ab-port game profile — Angry Birds Seasons 3.1.1 (2013)
+# VERIFIED data only (aapt2 / apksigner / readelf / sha256sum). History: JOURNAL.md
+# ─────────────────────────────────────────────────────────────────────────────
+id           = "seasons-3.1.1"
+title        = "Angry Birds Seasons (3.1.1)"
+status       = "in-progress"    # shipped | in-progress | planned
+strategy     = "jit"
+
+[apk]
+# The same package as the title `seasons` (6.6.2): the port installs this
+# version under its own name, next to it (build-apk.sh, "package name").
+package      = "com.rovio.angrybirdsseasons311"
+original_package = "com.rovio.angrybirdsseasons"
+label        = "Angry Birds Seasons 3.1.1"
+version_name = "3.1.1"
+version_code = 3101
+min_sdk      = 8
+target_sdk   = 26
+original     = "original/AngryBirdsSeasons_v3.1.1.apk"
+# Not Rovio's signature: the APK a forum user sent is re-signed with the
+# public AOSP test key, so it was rebuilt by someone; there is no Rovio
+# 3.1.1 to compare the guest library with.
+signer_dn    = "EMAILADDRESS=android@android.com, CN=Android, OU=Android, O=Android, L=Mountain View, ST=California, C=US"
+signer_sha256 = "a40da80a59d170caa950cf15c18c454d47a39b26989d8b640ecd745ba71bf5dc"
+
+[guest]
+abi    = "armeabi-v7a"
+lib    = "libAngryBirdsSeasons.so"
+size   = 3213976
+sha256 = "38a436c8ded22e6e70697ece70aa84d7405f19408acb52118c92c8c09433937b"
+md5    = "a851bbeac308e987b7cca7f8e69235cc"
+
+[host]
+abi          = "arm64-v8a"
+lib          = "libabhost.so"
+jni_package  = "com.rovio.fusion"
+network      = "offline"       # engine network: offline (default) | online; REVIEW R-005
+
+[strip]
+libs = []
+
+[tree]
+smali_lib_name_orig = "AngryBirdsSeasons"
