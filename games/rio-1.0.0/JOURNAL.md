@@ -107,3 +107,24 @@ of the other titles.
 The phone APK the owner tested earlier was a renamed clone made by hand
 outside git (`work/apk_clone`). The build now does the same rename itself,
 so that APK is reproducible.
+
+## 2026-11-15: second review, sandbox gate and speed
+
+A second `/code-review medium` over the fixes (`88b5f03..rio-1.0.0`): ten
+findings, nine fixed (commits `ce0bac7`..`e8c8a99`); the tenth was about the
+earlier commits bundling several changes, which are already history.
+
+Sandbox, build marker `Nov 15 2026 16:26`, then the final build: this title
+boots to its menu as `com.rovio.angrybirdsrio100`; after HOME and a return
+the same process runs on, LOUD 0, `death.log` empty (both builds). The eight
+other titles reach their menus, all markers 0, no tombstones (first build).
+
+Speed, SW2 main menu, master vs branch, interleaved, other titles stopped
+(`speed.sh` did not stop them before `e8c8a99`, and a first run was spoiled
+by 99 Bricks left running): four rounds, master 9.85 / 9.76 / 10.05 / 10.69,
+branch 9.40 / 9.86 / 10.18 / 10.62 ms CPU per frame. Both rise with the
+device's heat; per pair no difference that four rounds resolve (±0.1 ms).
+Stopped after four rounds on purpose.
+
+Not yet: the owner's play on the phone with this build (levels, saves,
+pause/resume).
