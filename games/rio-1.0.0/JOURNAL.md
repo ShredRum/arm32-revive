@@ -58,5 +58,48 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   - `prepare-tree.sh rio-1.0.0 --force` cleanly applies `smali.patch` with zero rejects.
   - Sandbox devgate passed clean: 0 halts, 0 LOUD markers, 0 crashes (`death=0`).
   - Phone build verified and signed.
-  - Real device verified (Samsung Galaxy A56 5G, Android 17 / API 35/36, arm64-only): boots clean, main menu, level selection, full level gameplay, slingshot, physics, audio and collisions confirmed working without crashes or freezes.
+  - Real device verified (Samsung Galaxy A56 5G, Android 15, arm64-only): boots clean, main menu, level selection, full level gameplay, slingshot, physics, audio and collisions confirmed working without crashes or freezes.
 
+## 2026-11-15: code review of the branch (Claude) and what was done with it
+
+`/code-review medium` over `master...rio-1.0.0`, ten findings; fixed:
+
+- **GL client arrays after a context change.** The tracking was never reset,
+  so after pause/resume it described arrays the new context does not have.
+  It is now re-read from the driver (`SyncClientArrays`) after every
+  `ForgetGlBindings`. `glClientActiveTexture` with a unit the host does not
+  track is read back the same way instead of being taken for unit 0.
+- **Text relocations.** One helper (`WriteDataSlot`) instead of three copies;
+  the RW window covers the pages the word touches (a word across a page
+  boundary crashed the host) and is opened only for slots in a read-only LOAD,
+  so the other titles do no extra `mprotect` at boot.
+- **Inline stdio.** `__srget` returned EOF without the `__SEOF` bit that the
+  guest's inline `feof` reads; the FILE's two indicator bits now follow the
+  host stream after every call that can change them. `tmpnam` no longer cuts
+  the name at 64 bytes.
+- **`devgate.sh`.** `rio` and `rio-1.0.0` are one package: a different
+  installed version is uninstalled first (data wiped, the gate says so)
+  instead of being downgraded in place onto the other version's saves.
+- **`smali.patch`.** The three Runnables the patched wrappers no longer create
+  are left as they were (about 200 lines less to keep applying). The web
+  view's title is no longer replaced by "": `WebViewWrapper$8` reads it in its
+  constructor, which runs on the UI thread, and `run()` passes it on.
+
+Left as it is, on purpose: `glDrawElements` with an element buffer bound and
+vertex arrays in guest memory halts LOUD (`MIXEDIBO`). The combination is
+legal, but checking the vertex range needs the buffer's contents; the game
+did not use it in play. If the line ever appears, track the element buffer's
+data at `glBufferData`. The per-draw scan of client index arrays stays too
+(this title only).
+
+Verified on PC only: builds for PC, sandbox and phone; `fmt_test` ALL OK with
+new tests for `__srget` and `tmpnam`; harness of eight guests, LOUD 0;
+`prepare-tree.sh --force` applies the patch; `build-apk.sh` assembles it.
+**Not yet run on a device after these fixes**: the GLES 1.1 path, the new
+`WebViewWrapper$8` (ART verifies it when the first page loads) and the gate
+of the other titles.
+
+The phone APK the owner tested earlier was a renamed clone
+(`com.rovio.angrybirdsrio100`, `work/apk_clone`, made by hand outside git) so
+that it installs next to `rio`. The repository builds the original package
+name only.

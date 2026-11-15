@@ -20,8 +20,8 @@ library `libabhost.so`:
 - Dynarmic (`thirdparty/dynarmic`, A32 frontend, arm64 backend) JIT-translates the
   guest code; fastmem is on.
 - `host/src/guest/dispatch.cpp` implements every guest import: libc, pthread,
-  files/stdio, sockets, time, AAsset, GLES2 (forwarded to the real driver via
-  `realgl.cpp`), and a 32-bit JNI function table that delegates to the real JVM
+  files/stdio, sockets, time, AAsset, GLES2 and GLES 1.1 (forwarded to the real
+  driver via `realgl.cpp`), and a 32-bit JNI function table that delegates to the real JVM
   where needed. Guest heap = dlmalloc mspace (1 GB virtual).
 - `host/src/apphost.cpp` = `JNI_OnLoad`, per-thread JIT/stack, boot sequence, and
   the generated `Java_*` forwarders (`apphost_gen.inc`, from `host/gen_apphost.py`).
@@ -29,12 +29,22 @@ library `libabhost.so`:
   and a title's `games/<id>/smali.patch` when it has one (applied by
   `prepare-tree.sh`; MCSM: the launcher activity, the expansion downloader
   only checked for an OBB file whose servers are dead; Stella: the Zappar
-  scanner button shows "not available" instead of loading ARM32 libraries).
+  scanner button shows "not available" instead of loading ARM32 libraries;
+  Rio 1.0.0: the 2011 AdMob SDK is answered "no ad" because it crashes on
+  Android 7+, and the web view's title is read on the UI thread).
 
 Titles (`games/<id>/`, each with `profile.toml` + `JOURNAL.md`): rio, seasons,
-space, star-wars, star-wars-ii, star-wars-ii-amz, stella. One shared host core.
-Plain `star-wars-ii` is retired (its content servers are dead, R-004): not built,
-not gated; the folder stays. "All titles" below means the other six.
+space, star-wars, star-wars-ii, star-wars-ii-amz, stella, classic, 99-bricks,
+mcsm, rio-1.0.0. One shared host core. Plain `star-wars-ii` is retired (its
+content servers are dead, R-004): not built, not gated; the folder stays.
+"All titles" below means the nine the sandbox gate runs: rio, seasons, space,
+star-wars, star-wars-ii-amz, stella, classic, 99-bricks, rio-1.0.0 (MCSM is a
+5.6 GB split set, `scripts/pack_apks.py`; see its journal).
+
+`rio-1.0.0` is the 2011 release of Rio: the old `com.rovio.ka3d` Java
+framework and OpenGL ES 1.1 (the GLES 1.1 part of `realgl.cpp`). It has the
+same package as `rio`, so only one of the two can be installed on a device;
+`devgate.sh` removes the other version, with its data, and says so.
 
 ## 2. Layout
 
@@ -61,7 +71,7 @@ not gated; the folder stays. "All titles" below means the other six.
 scripts/build-lib.sh --native          # PC: harness, fmt_test, other tests
 ./host/build-native/fmt_test           # expect "ALL OK"
 ./host/build-native/harness <guest.so> # expect the init line from REVIEW.md
-scripts/harness-all.sh                 # the same for all six titles, with LOUD counts
+scripts/harness-all.sh                 # the same for every title it lists, with LOUD counts
 scripts/deploy.sh <id>                 # arm64 lib + signed APK + device commands
 scripts/build-lib.sh && scripts/swap-lib.sh <id>...   # host-only change: ~1 s per APK
 scripts/devgate.sh <id> [seconds]      # sandbox install + boot gate (default 40 s) + screenshot
@@ -77,7 +87,7 @@ sandbox: `scripts/build-lib.sh --sandbox && SANDBOX=1 scripts/swap-lib.sh
 there. APKs for the phone always carry the phone build.
 
 Device gate policy: an ordinary change -> rio + seasons; a core-wide change
-(memory, threads, JNI, loader, network) -> all six live titles. Always look at the
+(memory, threads, JNI, loader, network, GL) -> all titles. Always look at the
 screenshots: a wrong game state (dialog, black screen) does not raise markers.
 
 Guest `.so` for the harness: `unzip -p <original apk> lib/armeabi-v7a/<lib>`, or

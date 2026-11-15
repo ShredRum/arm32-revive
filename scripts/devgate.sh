@@ -41,7 +41,17 @@ for prof in games/*/profile.toml; do
     [ -n "$op" ] && [ "$op" != "$PKG" ] && OTHERS="$OTHERS $op"
 done
 scp -q -P $P $APK $DEV:ab_gate.apk || exit 1
-$S "for o in $OTHERS; do sudo /system/bin/am force-stop \$o; done; sudo /system/bin/am force-stop $PKG; OUT=\$(sudo pm install -r -d ~/ab_gate.apk 2>&1); if [ \$? -ne 0 ]; then if echo \"\$OUT\" | grep -q \"INSTALL_FAILED_VERSION_DOWNGRADE\"; then sudo pm uninstall $PKG >/dev/null 2>&1 && sudo pm install ~/ab_gate.apk >/dev/null || exit 1; else echo \"\$OUT\" >&2; exit 1; fi; fi; rm -f ~/ab_gate.apk" || exit 1
+# Two titles can be two versions of one package (rio and rio-1.0.0): they
+# cannot be installed together, and one must not boot on the other's saves.
+# So a different installed version is removed first, data included, and the
+# gate says so; the same version is replaced in place and keeps its data.
+VC=$(python3 scripts/profile.py $G apk.version_code)
+HAVE=$($S "sudo dumpsys package $PKG | grep -m1 -o 'versionCode=[0-9]*' | cut -d= -f2" || true)
+if [ -n "$HAVE" ] && [ "$HAVE" != "$VC" ]; then
+    echo "devgate: $PKG is installed as version $HAVE, $G is $VC -- uninstalling it (its data on the sandbox is wiped)"
+    $S "sudo /system/bin/am force-stop $PKG; sudo pm uninstall $PKG >/dev/null" || exit 1
+fi
+$S "for o in $OTHERS; do sudo /system/bin/am force-stop \$o; done; sudo /system/bin/am force-stop $PKG; sudo pm install -r ~/ab_gate.apk >/dev/null && rm ~/ab_gate.apk" || exit 1
 GOT=$($S "A=\$(pm path $PKG | sed 's/^package://'); sudo unzip -p \$A lib/arm64-v8a/$HOSTLIB | md5sum" | cut -c1-32)
 echo "lib want=$WANT installed=$GOT $([ "$WANT" = "$GOT" ] && echo OK || echo MISMATCH)"
 [ "$WANT" = "$GOT" ] || { echo "devgate: installed lib differs from the APK -- stopping" >&2; exit 1; }

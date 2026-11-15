@@ -37,5 +37,7 @@ libs = []
 [tree]
 # Edit set: lib/armeabi-v7a/libangrybirds.so -> assets/guestlib/armeabi-v7a (STORED),
 # rm lib/armeabi-v7a lib/armeabi, host as lib/arm64-v8a/libangrybirds.so.
-# Java loads "angrybirds" directly via getString(R.string.library_name); no smali edit needed.
+# Java loads "angrybirds" via getString(R.string.library_name), so the loaded
+# name needs no smali edit. The title's own Java edits are in smali.patch
+# (dead AdMob answered "no ad"; the web view title read on the UI thread).
 smali_lib_name_orig = ""
