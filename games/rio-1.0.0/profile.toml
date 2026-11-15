@@ -8,7 +8,11 @@ status       = "in-progress"    # shipped | in-progress | planned
 strategy     = "jit"            # jit = Dynarmic host emulating the ARM32 guest
 
 [apk]
-package      = "com.rovio.angrybirdsrio"
+# The same package as the title `rio` (2.6.13): the port installs this
+# version under its own name, next to it (build-apk.sh, "package name").
+package      = "com.rovio.angrybirdsrio100"
+original_package = "com.rovio.angrybirdsrio"
+label        = "Angry Birds Rio 1.0"
 version_name = "1.0.0"
 version_code = 100
 min_sdk      = 4

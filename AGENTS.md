@@ -42,9 +42,11 @@ star-wars, star-wars-ii-amz, stella, classic, 99-bricks, rio-1.0.0 (MCSM is a
 5.6 GB split set, `scripts/pack_apks.py`; see its journal).
 
 `rio-1.0.0` is the 2011 release of Rio: the old `com.rovio.ka3d` Java
-framework and OpenGL ES 1.1 (the GLES 1.1 part of `realgl.cpp`). It has the
-same package as `rio`, so only one of the two can be installed on a device;
-`devgate.sh` removes the other version, with its data, and says so.
+framework and OpenGL ES 1.1 (the GLES 1.1 part of `realgl.cpp`). Its original
+package is the same as `rio`'s, so the port installs it under its own name,
+`com.rovio.angrybirdsrio100` (`apk.original_package` and `apk.label` in the
+profile; `build-apk.sh` rewrites the manifest's package attribute), and the
+two live side by side.
 
 ## 2. Layout
 

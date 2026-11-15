@@ -155,6 +155,54 @@ PYEOF
 sed -i "s/^\([[:space:]]*minSdkVersion:[[:space:]]*\).*/\1$MIN_SDK/" "$TREE/apktool.yml"
 sed -i "s/^\([[:space:]]*targetSdkVersion:[[:space:]]*\).*/\1$TARGET_SDK/" "$TREE/apktool.yml"
 
+# A title that is another version of an installed title's package (Rio 1.0.0
+# and Rio) gets its own package name, so the two install side by side and
+# never share a data directory: apk.package is the name the port installs,
+# apk.original_package the one in the original manifest. Only the manifest's
+# package attribute changes; the R classes keep their Java package, and the
+# check below refuses a manifest that depends on the name anywhere else
+# (relative component names, authorities, permissions). apk.label, when set,
+# is the launcher name (two icons with one name cannot be told apart).
+ORIG_PKG="$("${PROF[@]}" apk.original_package 2>/dev/null || true)"
+LABEL="$("${PROF[@]}" apk.label 2>/dev/null || true)"
+if [ -n "$ORIG_PKG" ] && [ "$ORIG_PKG" != "$PKG" ]; then
+    echo "== package name =="
+    python3 - "$TREE/AndroidManifest.xml" "$ORIG_PKG" "$PKG" << 'PYEOF'
+import re
+import sys
+
+path, orig, new = sys.argv[1:4]
+text = open(path).read()
+m = re.search(r'(<manifest\b[^>]*\bpackage=")([^"]*)(")', text)
+if not m:
+    sys.exit("build-apk: no package attribute in the manifest")
+if m.group(2) not in (orig, new):
+    sys.exit(f"build-apk: manifest package is {m.group(2)}, expected {orig}")
+rest = text[:m.start(2)] + text[m.end(2):]
+if orig in rest or re.search(r'android:name="\.', rest):
+    sys.exit("build-apk: the manifest uses the package name outside the package attribute "
+             "(relative component name, authority or permission): renaming it needs more than this")
+open(path, "w").write(text[:m.start(2)] + new + text[m.end(2):])
+print(f"manifest package {m.group(2)} -> {new}")
+PYEOF
+fi
+if [ -n "$LABEL" ]; then
+    python3 - "$TREE/res/values/strings.xml" "$LABEL" << 'PYEOF'
+import re
+import sys
+from xml.sax.saxutils import escape
+
+path, label = sys.argv[1:3]
+text = open(path).read()
+new, n = re.subn(r'(<string name="app_name">)[^<]*(</string>)',
+                 lambda m: m.group(1) + escape(label) + m.group(2), text)
+if n != 1:
+    sys.exit(f"build-apk: expected one app_name string in {path}, found {n}")
+open(path, "w").write(new)
+print(f"app label -> {label}")
+PYEOF
+fi
+
 echo "== apktool b =="
 # Guest fingerprint: the packaging step writes the guest .so's SHA-256 next to
 # it, and the harness verifies it at start-up. The Seasons and Space images

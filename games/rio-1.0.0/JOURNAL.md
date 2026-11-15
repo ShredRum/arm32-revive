@@ -77,9 +77,14 @@ TargetSdk 8, minSdk 4, package `com.rovio.angrybirdsrio`.
   guest's inline `feof` reads; the FILE's two indicator bits now follow the
   host stream after every call that can change them. `tmpnam` no longer cuts
   the name at 64 bytes.
-- **`devgate.sh`.** `rio` and `rio-1.0.0` are one package: a different
-  installed version is uninstalled first (data wiped, the gate says so)
-  instead of being downgraded in place onto the other version's saves.
+- **One package, two titles.** `rio` and `rio-1.0.0` had the same package,
+  so the gate installed one over the other's saves. The port now installs
+  this title as `com.rovio.angrybirdsrio100`, labelled "Angry Birds Rio 1.0"
+  (profile keys `apk.original_package`, `apk.label`; `build-apk.sh` changes
+  the manifest's package attribute only and refuses a manifest that uses the
+  name anywhere else). Neither the engine nor the Java side reads the package
+  name: the files directory comes from `getFilesDir()`. `devgate.sh` is back
+  to what master has.
 - **`smali.patch`.** The three Runnables the patched wrappers no longer create
   are left as they were (about 200 lines less to keep applying). The web
   view's title is no longer replaced by "": `WebViewWrapper$8` reads it in its
@@ -99,7 +104,6 @@ new tests for `__srget` and `tmpnam`; harness of eight guests, LOUD 0;
 `WebViewWrapper$8` (ART verifies it when the first page loads) and the gate
 of the other titles.
 
-The phone APK the owner tested earlier was a renamed clone
-(`com.rovio.angrybirdsrio100`, `work/apk_clone`, made by hand outside git) so
-that it installs next to `rio`. The repository builds the original package
-name only.
+The phone APK the owner tested earlier was a renamed clone made by hand
+outside git (`work/apk_clone`). The build now does the same rename itself,
+so that APK is reproducible.
