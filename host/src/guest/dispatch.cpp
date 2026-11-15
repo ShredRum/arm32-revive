@@ -129,6 +129,14 @@ thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
+// Set by DeliverPendingSignals when a handler it ran lacks SA_RESTART. A
+// blocking call the kernel restarts after an SA_RESTART handler (a futex
+// wait: bionic's mutexes, condition variables and semaphores) goes on
+// waiting instead of returning; one interrupted by any other handler returns
+// as it does on a device (EINTR, or 0 for a condition wait).
+thread_local bool t_sig_interrupts = false;
+// The SA_RESTART bit of the guest's struct sigaction (arm32 Linux).
+constexpr std::uint32_t kSaRestart = 0x10000000u;
 
 extern "C" {
 typedef void* dl_mspace;
@@ -1084,8 +1092,9 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
                 break;
             }
             if (SignalDeliverable()) {
+                t_sig_interrupts = false;
                 DeliverPendingSignals();
-                if (eintr) {
+                if (eintr && t_sig_interrupts) {
                     errno = EINTR;
                     r = -1;
                     break;
@@ -1122,10 +1131,14 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
                 break;
             }
             if (SignalDeliverable()) {
+                t_sig_interrupts = false;
                 DeliverPendingSignals();
-                errno = EINTR;
-                r = -1;
-                break;
+                if (t_sig_interrupts) {
+                    errno = EINTR;
+                    r = -1;
+                    break;
+                }
+                continue;  // an SA_RESTART handler: the kernel waits on
             }
             if (errno == ETIMEDOUT && !Before(slice, ts)) {
                 break;  // the caller's deadline
@@ -9379,10 +9392,10 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
     // The wait: queued under the cond's own lock BEFORE the guest mutex is
     // let go, so a wake that follows the caller's unlock reaches it. While
     // guest signals are in use it sleeps in short slices; a pending signal
-    // runs its handler and the wait returns 0, as bionic's does when the
-    // futex wait is interrupted (EINTR -> 0), and the caller's predicate loop
-    // looks again. A sleeper leaving without a wake (timeout, handler) leaves
-    // the queue; a wake that came first is taken instead.
+    // runs its handler, then the wait goes on (SA_RESTART) or returns 0 (as
+    // bionic's does when the futex wait is interrupted, EINTR -> 0). A
+    // sleeper leaving without a wake (timeout, handler) leaves the queue; a
+    // wake that came first is taken instead.
     auto wait = [&](const struct timespec* deadline_mono) -> int {
         Waiter me;
         pthread_condattr_t attr;
@@ -9391,9 +9404,17 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         pthread_cond_init(&me.cv, &attr);
         pthread_condattr_destroy(&attr);
         pthread_mutex_lock(&hc->m);
-        me.prev = hc->tail;
-        (hc->tail ? hc->tail->next : hc->head) = &me;
-        hc->tail = &me;
+        auto enqueue = [&] {
+            me.prev = hc->tail;
+            me.next = nullptr;
+            (hc->tail ? hc->tail->next : hc->head) = &me;
+            hc->tail = &me;
+        };
+        enqueue();
+        // Any wake handed out after this point means the condition may have
+        // changed: bionic's restarted futex wait sees the cond's sequence
+        // move and returns, so the caller looks at its predicate again.
+        const std::uint64_t wakes_at_sleep = hc->wakes;
         if (t_sig) {
             t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
             t_sig->wait_cv.store(hc.get());
@@ -9404,50 +9425,75 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         mx->holder.store(0, std::memory_order_relaxed);
         pthread_mutex_unlock(&mx->m);
         int r = 0;
-        while (!me.woken) {
-            struct timespec now {};
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            if (deadline_mono && !Before(now, *deadline_mono)) {
-                r = ETIMEDOUT;
+        for (;;) {
+            bool signalled = false;
+            while (!me.woken) {
+                struct timespec now {};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (deadline_mono && !Before(now, *deadline_mono)) {
+                    r = ETIMEDOUT;
+                    break;
+                }
+                const struct timespec* until = deadline_mono;
+                struct timespec slice {};
+                if (SignalsInUse()) {
+                    slice = now;
+                    slice.tv_nsec += kSigSliceNs;
+                    if (slice.tv_nsec >= 1000000000L) {
+                        slice.tv_nsec -= 1000000000L;
+                        slice.tv_sec++;
+                    }
+                    if (!deadline_mono || Before(slice, *deadline_mono)) {
+                        until = &slice;
+                    }
+                }
+                if (until) {
+                    pthread_cond_timedwait(&me.cv, &hc->m, until);
+                } else {
+                    pthread_cond_wait(&me.cv, &hc->m);
+                }
+                if (!me.woken && SignalDeliverable()) {
+                    signalled = true;
+                    break;
+                }
+            }
+            if (me.woken) {
+                r = 0;
                 break;
             }
-            const struct timespec* until = deadline_mono;
-            struct timespec slice {};
-            if (SignalsInUse()) {
-                slice = now;
-                slice.tv_nsec += kSigSliceNs;
-                if (slice.tv_nsec >= 1000000000L) {
-                    slice.tv_nsec -= 1000000000L;
-                    slice.tv_sec++;
-                }
-                if (!deadline_mono || Before(slice, *deadline_mono)) {
-                    until = &slice;
-                }
-            }
-            if (until) {
-                pthread_cond_timedwait(&me.cv, &hc->m, until);
-            } else {
-                pthread_cond_wait(&me.cv, &hc->m);
-            }
-            if (!me.woken && SignalDeliverable()) {
-                r = -1;  // a handler to run first
-                break;
-            }
-        }
-        if (me.woken) {
-            r = 0;
-        } else {
             unlink(&me);
+            if (!signalled) {
+                break;  // the deadline
+            }
+            // A handler to run, outside the cond's lock (it may wait on
+            // this cond itself). The futex wait it interrupts is restarted
+            // by the kernel after an SA_RESTART handler (Boehm's suspend
+            // handler is one): then the wait goes on here too, unless a wake
+            // came meanwhile. A handler without SA_RESTART ends the wait
+            // with 0, as bionic's (EINTR -> 0). It used to end it always,
+            // and Unity 4.3 read that as "the background read is late" and
+            // read the APK itself at a stale position (SpongeBob's resS).
+            if (t_sig) {
+                t_sig->wait_cv.store(nullptr);
+            }
+            pthread_mutex_unlock(&hc->m);
+            t_sig_interrupts = false;
+            DeliverPendingSignals();
+            pthread_mutex_lock(&hc->m);
+            r = 0;
+            if (t_sig_interrupts || hc->wakes != wakes_at_sleep) {
+                break;
+            }
+            enqueue();
+            if (t_sig) {
+                t_sig->wait_cv.store(hc.get());
+            }
         }
         if (t_sig) {
             t_sig->wait_cv.store(nullptr);
         }
         pthread_mutex_unlock(&hc->m);
         pthread_cond_destroy(&me.cv);
-        if (r < 0) {
-            DeliverPendingSignals();
-            r = 0;
-        }
         relock();
         mx->holder.store(GuestTid(), std::memory_order_relaxed);
         mx->depth.store(held_depth > 0 ? held_depth : 1, std::memory_order_relaxed);
@@ -12388,6 +12434,9 @@ bool Runtime::DeliverPendingSignals() {
         }
         if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
             continue;  // SIG_IGN, or ignored by default
+        }
+        if (!(act.flags & kSaRestart)) {
+            t_sig_interrupts = true;
         }
         if (act.handler == 0) {
             std::printf("[signal] FATAL signal %u with the default action -- halting\n", sig);
