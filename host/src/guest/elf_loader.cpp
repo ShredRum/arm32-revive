@@ -773,17 +773,17 @@ const LoadSegment* ReadOnlySegmentAt(const LoadedModule& mod, std::uint32_t va) 
 
 void WriteDataSlot(GuestMemory& mem, const LoadedModule& mod, std::uint32_t loc_va,
                    std::uint32_t value) {
-    // The window is whole guest pages: LOADs are page-aligned, so every page
-    // of it belongs to the read-only segment, and the word may cross a page.
+    // The window is the whole read-only LOAD, as in Load: GuestMemory keeps
+    // one protection per host page and gives a partly covered page the union,
+    // so on a 16 KiB-page host a window of 4 KiB guest pages could be opened
+    // but never closed again.
     const LoadSegment* ro = ReadOnlySegmentAt(mod, loc_va);
-    const std::uint32_t start = AlignDown(loc_va, 0x1000);
-    const std::uint32_t size = AlignUp(loc_va + 4, 0x1000) - start;
     if (ro) {
-        mem.Protect(start, size, ro->prot | PROT_WRITE);
+        mem.Protect(ro->start, ro->size, ro->prot | PROT_WRITE);
     }
     std::memcpy(mem.host(loc_va), &value, 4);
     if (ro) {
-        mem.Protect(start, size, ro->prot);
+        mem.Protect(ro->start, ro->size, ro->prot);
     }
 }
 
