@@ -179,27 +179,46 @@ if not m:
 if m.group(2) not in (orig, new):
     sys.exit(f"build-apk: manifest package is {m.group(2)}, expected {orig}")
 rest = text[:m.start(2)] + text[m.end(2):]
-if orig in rest or re.search(r'android:name="\.', rest):
+# Android resolves a component name that starts with a dot, or has no dot at
+# all, against the package: such a class would no longer be found.
+relative = [n for tag, n in re.findall(
+    r'<(application|activity|activity-alias|service|receiver|provider)\b[^>]*?\bandroid:name="([^"]+)"', rest)
+    if n.startswith(".") or "." not in n]
+if orig in rest or relative:
     sys.exit("build-apk: the manifest uses the package name outside the package attribute "
-             "(relative component name, authority or permission): renaming it needs more than this")
+             f"(relative component names {relative}, an authority or a permission): "
+             "renaming it needs more than this")
 open(path, "w").write(text[:m.start(2)] + new + text[m.end(2):])
 print(f"manifest package {m.group(2)} -> {new}")
 PYEOF
+    # Resource XML can name the package too (custom attributes:
+    # xmlns ".../apk/res/<package>"); those would resolve to nothing.
+    if grep -rlF "apk/res/$ORIG_PKG" "$TREE/res" >/dev/null 2>&1; then
+        echo "build-apk: resource XML refers to apk/res/$ORIG_PKG: renaming the package needs more than this" >&2
+        grep -rlF "apk/res/$ORIG_PKG" "$TREE/res" | head -5 >&2
+        exit 1
+    fi
 fi
 if [ -n "$LABEL" ]; then
-    python3 - "$TREE/res/values/strings.xml" "$LABEL" << 'PYEOF'
+    # Every locale's app_name, or a device in that language shows the old one.
+    python3 - "$TREE/res" "$LABEL" << 'PYEOF'
+import glob
 import re
 import sys
 from xml.sax.saxutils import escape
 
-path, label = sys.argv[1:3]
-text = open(path).read()
-new, n = re.subn(r'(<string name="app_name">)[^<]*(</string>)',
-                 lambda m: m.group(1) + escape(label) + m.group(2), text)
-if n != 1:
-    sys.exit(f"build-apk: expected one app_name string in {path}, found {n}")
-open(path, "w").write(new)
-print(f"app label -> {label}")
+res, label = sys.argv[1:3]
+done = 0
+for path in sorted(glob.glob(res + "/values*/strings.xml")):
+    text = open(path).read()
+    new, n = re.subn(r'(<string name="app_name">)[^<]*(</string>)',
+                     lambda m: m.group(1) + escape(label) + m.group(2), text)
+    if n:
+        open(path, "w").write(new)
+        done += n
+if done == 0:
+    sys.exit(f"build-apk: no app_name string under {res}")
+print(f"app label -> {label} ({done} string(s))")
 PYEOF
 fi
 
