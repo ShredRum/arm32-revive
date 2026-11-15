@@ -529,6 +529,8 @@ int main() {
     mod.imports.push_back(abr::Import{"tmpnam", true, 0, 0, 0});   // 139
     mod.imports.push_back(abr::Import{"mktime", true, 0, 0, 0});        // 140
     mod.imports.push_back(abr::Import{"localtime_r", true, 0, 0, 0});   // 141
+    mod.imports.push_back(abr::Import{"strlcat", true, 0, 0, 0});       // 142
+    mod.imports.push_back(abr::Import{"dladdr", true, 0, 0, 0});        // 143
     // Every fast-math function twice: through the name chain (fast_math 0)
     // and through the load-time table (fast_math = index + 1).
     const std::uint32_t kMathBase = static_cast<std::uint32_t>(mod.imports.size());
@@ -3477,6 +3479,28 @@ int main() {
                            (off1 == off2 ? "1" : "0") + (z1 != 0 && z1 == z2 ? "1" : "0") +
                            (z1 ? (std::string(" ") + rt.H<const char>(z1)) == (std::string(" ") + h.tm_zone) ? "1" : "0" : "0"),
                        "1111");
+            }
+            // strlcat: appends within size, always terminates, returns the
+            // length it tried to make; a dst with no NUL in size is left alone.
+            {
+                const std::uint32_t kD = kBuf + 0x500, kS = kBuf + 0x540;
+                put(kD, "abc");
+                put(kS, "defgh");
+                std::memset(rt.H(kD + 4), 0x55, 8);
+                const std::uint32_t c1[4] = {kD, kS, 6, 0};
+                const std::uint32_t r1 = abr::RuntimeTestAccess::Call(rt, 142, c1);
+                const std::string s1 = rt.H<const char>(kD);
+                const unsigned past = *rt.H(kD + 6);
+                const std::uint32_t c2[4] = {kD, kS, 3, 0};  // no NUL within 3 bytes
+                const std::uint32_t r2 = abr::RuntimeTestAccess::Call(rt, 142, c2);
+                // dladdr of an address in no guest library: 0, no halt.
+                const std::uint32_t c3[4] = {0x7FFFFFF0u, kBuf + 0x580, 0, 0};
+                const std::uint32_t r3 = abr::RuntimeTestAccess::Call(rt, 143, c3);
+                Expect("strlcat clamps and terminates; dladdr outside libraries",
+                       s1 + " " + std::to_string(r1) + " " + std::to_string(past) + " " +
+                           std::to_string(r2) + " " + std::to_string(r3) +
+                           (abr::RuntimeTestAccess::TakeStopped(rt) ? " halted" : ""),
+                       "abcde 8 85 8 0");
             }
             // Record locks reach the host with the guest's 32-bit struct
             // flock converted; an unknown command is EINVAL, not "success".
