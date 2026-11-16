@@ -372,7 +372,8 @@ public:
     std::vector<std::uint32_t> ptr_free_;
     std::uint32_t ptr_next_ = 0xF2000000u;
     // Guest copies of the device's sensor list and of each sensor's name
-    // and vendor (by sensor handle), made once.
+    // and vendor (by sensor handle), made once. sensor_mu_ also guards the
+    // looper callback contexts below.
     std::mutex sensor_mu_;
     std::uint32_t sensor_list_guest_ = 0;
     std::unordered_map<std::uint32_t, std::uint32_t> sensor_names_;
@@ -386,6 +387,10 @@ public:
     };
     static int RunGuestLooperCb(int fd, int events, void* data);
     std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> sensor_cbs_;  // by ASensorEventQueue*
+    // Contexts of destroyed queues: a callback still running keeps using its
+    // own (a handful per process, never freed).
+    std::vector<std::unique_ptr<GuestLooperCb>> looper_cbs_done_;
+    std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> input_cbs_;  // by AInputQueue*
 #endif
     // The real AAssetManager behind a guest asset manager handle.
     std::unordered_map<std::uint32_t, void*> real_asset_mgrs_;

@@ -8520,6 +8520,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::ASensorManager_getDefaultSensor_:
     case I::ASensorManager_getInstance_:
     case I::ASensorManager_getSensorList_:
+    case I::ASensorEventQueue_disableSensor_:
+    case I::ASensorEventQueue_enableSensor_:
+    case I::ASensorEventQueue_setEventRate_:
+    case I::ASensor_getMinDelay_:
+    case I::ASensor_getName_:
+    case I::ASensor_getResolution_:
+    case I::ASensor_getType_:
+    case I::ASensor_getVendor_:
     if (n[0] == 'A' && NdkCall(id, n, regs)) {
         return;
     }
@@ -11909,19 +11917,24 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
     }
     // --- input queue
     if (id == I::AInputQueue_attachLooper_) {
-        // (queue, looper, ident, callback, data@[sp]). A guest callback
-        // cannot be a host ALooper callback: the queue is polled by ident.
+        // (queue, looper, ident, callback, data@[sp]). A guest callback runs
+        // through a host one (RunGuestLooperCb), as for a sensor queue.
         std::uint32_t data = 0;
         if (CheckRange(regs[13], 4, false)) {
             std::memcpy(&data, H(regs[13]), 4);
         }
-        if (a3 != 0) {
-            std::printf("[ndk] LOUD AInputQueue_attachLooper with a callback (%08x): polled by "
-                        "ident %d instead\n", a3, static_cast<int>(a2));
-        }
         auto* q = static_cast<AInputQueue*>(PtrOf(a0));
         auto* l = static_cast<ALooper*>(PtrOf(a1));
-        if (q && l) {
+        if (q && l && a3) {
+            auto ctx = std::make_unique<GuestLooperCb>(GuestLooperCb{this, a3, data});
+            ::AInputQueue_attachLooper(q, l, static_cast<int>(a2), &Runtime::RunGuestLooperCb, ctx.get());
+            std::lock_guard<std::mutex> lk(sensor_mu_);
+            auto& slot = input_cbs_[q];
+            if (slot) {
+                looper_cbs_done_.push_back(std::move(slot));  // attached again: the old may still run
+            }
+            slot = std::move(ctx);
+        } else if (q && l) {
             ::AInputQueue_attachLooper(q, l, static_cast<int>(a2), nullptr,
                                        reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)));
         }
@@ -11931,6 +11944,12 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
     if (id == I::AInputQueue_detachLooper_) {
         if (auto* q = static_cast<AInputQueue*>(PtrOf(a0))) {
             ::AInputQueue_detachLooper(q);
+            std::lock_guard<std::mutex> lk(sensor_mu_);
+            const auto it = input_cbs_.find(q);
+            if (it != input_cbs_.end()) {
+                looper_cbs_done_.push_back(std::move(it->second));
+                input_cbs_.erase(it);
+            }
         }
         RetVoid(regs);
         return true;
@@ -12105,6 +12124,10 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
             std::lock_guard<std::mutex> l(sensor_mu_);
             if (!sensor_list_guest_ && cnt > 0 && list) {
                 sensor_list_guest_ = GuestMalloc(static_cast<std::uint32_t>(cnt) * 4);
+                if (!sensor_list_guest_) {
+                    std::printf("[ndk] LOUD ASensorManager_getSensorList: no guest memory for %d "
+                                "sensors -- the guest gets none\n", cnt);
+                }
                 for (int i = 0; sensor_list_guest_ && i < cnt; i++) {
                     const std::uint32_t h = PtrHandle(const_cast<ASensor*>(list[i]));
                     std::memcpy(H(sensor_list_guest_ + static_cast<std::uint32_t>(i) * 4), &h, 4);
@@ -12155,8 +12178,14 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         auto* q = static_cast<ASensorEventQueue*>(PtrOf(a1));
         const int r = (m && q) ? ::ASensorManager_destroyEventQueue(m, q) : -22;
         if (q) {
+            // The callback may be running (the guest destroys its queue
+            // from it): its context is kept, not freed.
             std::lock_guard<std::mutex> lk(sensor_mu_);
-            sensor_cbs_.erase(q);
+            const auto it = sensor_cbs_.find(q);
+            if (it != sensor_cbs_.end()) {
+                looper_cbs_done_.push_back(std::move(it->second));
+                sensor_cbs_.erase(it);
+            }
         }
         DropHandle(a1);
         Ret(regs, static_cast<std::uint32_t>(r));
@@ -12186,27 +12215,27 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         Ret(regs, static_cast<std::uint32_t>(got));
         return true;
     }
-    if (n == "ASensorEventQueue_enableSensor" || n == "ASensorEventQueue_disableSensor") {
+    if (id == I::ASensorEventQueue_enableSensor_ || id == I::ASensorEventQueue_disableSensor_) {
         auto* q = sensor_queue();
         const ASensor* s = sensor(a1);
         int r = -22;
         if (q && s) {
-            r = n == "ASensorEventQueue_enableSensor" ? ::ASensorEventQueue_enableSensor(q, s)
+            r = id == I::ASensorEventQueue_enableSensor_ ? ::ASensorEventQueue_enableSensor(q, s)
                                                       : ::ASensorEventQueue_disableSensor(q, s);
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "ASensorEventQueue_setEventRate") {
+    if (id == I::ASensorEventQueue_setEventRate_) {
         auto* q = sensor_queue();
         const ASensor* s = sensor(a1);
         const int r = (q && s) ? ::ASensorEventQueue_setEventRate(q, s, static_cast<int32_t>(a2)) : -22;
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "ASensor_getName" || n == "ASensor_getVendor") {
+    if (id == I::ASensor_getName_ || id == I::ASensor_getVendor_) {
         const ASensor* s = sensor(a0);
-        const bool name = n == "ASensor_getName";
+        const bool name = id == I::ASensor_getName_;
         std::uint32_t g = 0;
         if (s) {
             std::lock_guard<std::mutex> l(sensor_mu_);
@@ -12221,28 +12250,32 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
                 if (g) {
                     std::memcpy(H(g), t ? t : "", len + 1);
                     cache[a0] = g;
+                } else {
+                    std::printf("[ndk] LOUD %s: no guest memory -- the guest gets NULL\n", n.c_str());
                 }
             }
         }
         Ret(regs, g);
         return true;
     }
-    if (n == "ASensor_getType" || n == "ASensor_getMinDelay") {
+    if (id == I::ASensor_getType_ || id == I::ASensor_getMinDelay_) {
         const ASensor* s = sensor(a0);
         int r = 0;
         if (s) {
-            r = n == "ASensor_getType" ? ::ASensor_getType(s) : ::ASensor_getMinDelay(s);
+            r = id == I::ASensor_getType_ ? ::ASensor_getType(s) : ::ASensor_getMinDelay(s);
         }
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (n == "ASensor_getResolution") {
+    if (id == I::ASensor_getResolution_) {
         const ASensor* s = sensor(a0);
         ret_f(s ? ::ASensor_getResolution(s) : 0.0f);
         return true;
     }
-    std::printf("[ndk] LOUD %s: not forwarded -- the guest gets -22\n", n.c_str());
-    Ret(regs, static_cast<std::uint32_t>(-22));
+    // Not forwarded (a pointer for some, a status for others): 0, as a
+    // device without that sensor answers the accessors.
+    std::printf("[ndk] LOUD %s: not forwarded -- the guest gets 0\n", n.c_str());
+    Ret(regs, 0);
     return true;
 #endif
 }
