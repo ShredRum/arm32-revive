@@ -23,3 +23,18 @@ cannot be checked: there is no Rovio 1.8.1 here.
   play is not known yet.
 
 Not yet: levels and sound played, the phone.
+
+## 2026-11-16: crash after a few level restarts — fixed (331ca42)
+
+The owner saw it on the phone and again on the sandbox by restarting one
+level: the host halted with `[jni] LOUD object-handle arena exhausted`. The
+engine asks GetStaticMethodID again for every file it checks or reads (one
+45 s boot: FileReader.exists 5607, CameraWrapper.isSupported/isAvailable
+2037 each, readFile 1149), and the host made a new handle per ask; this
+mod reads more files than the originals, so the ~13k handles ran out. Not
+the mod's fault and not a regression (the allocation dates from the first
+JNI bridge). Now one ID per member. Sandbox: 120 s from boot alive at the
+menu, LOUD 0, past the string count where it used to die.
+
+Still growing, harmless for hours: the engine's file-name jstrings are kept
+(R-003, owner's wontfix): ~85 KB per 10 s while loading here.
