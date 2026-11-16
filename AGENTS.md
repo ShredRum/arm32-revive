@@ -149,8 +149,8 @@ reuse only hides a use-after-free).
   in PC bit 0 for `FinishSvc`; `HARNESS_NOJITCALLBACKS=1` goes back to the
   thread_local path. `FMT_BENCH=1 fmt_test` prints the cost of one call.
 
-- `strfree=on`: a string the guest makes with NewStringUTF is a local
-  reference, as on a JVM: it goes at DeleteLocalRef or when its local frame
+- `strfree=on`: a string the guest makes with NewStringUTF, or a Java
+  method returns to it, is a local reference, as on a JVM: it goes at DeleteLocalRef or when its local frame
   ends, unless its text is out (GetStringUTFChars until Release), a global
   holds it, or it is a monitor (`Runtime::JniStrLife`, REVIEW R-003);
   `HARNESS_NOSTRFREE=1` keeps every one, as before. The `[strings]` line

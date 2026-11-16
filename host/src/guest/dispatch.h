@@ -145,7 +145,7 @@ inline bool JitShareOn() { return !EnvOn("HARNESS_NOJITSHARE"); }
 // pthread_getspecific answered in guest code (Runtime::BindTls); with
 // HARNESS_NOTLSTHUNK=1 no Jit gets a block, so every call is a host call.
 inline bool TlsThunkOn() { return !EnvOn("HARNESS_NOTLSTHUNK"); }
-// The guest's NewStringUTF strings go when their local reference does (R-003,
+// The guest's strings (NewStringUTF, Java method results) go when their local reference does (R-003,
 // Runtime::JniStrLife); HARNESS_NOSTRFREE=1 keeps every one, as before.
 inline bool StrFreeOn() { return !EnvOn("HARNESS_NOSTRFREE"); }
 
@@ -607,7 +607,7 @@ public:
     // lock is busy (a watchdog never waits for it).
     long WrappedObjectCount();
     bool JniStringStats(std::size_t* count, std::size_t* bytes);
-    // Strings kept for good because a Java method returned them.
+    // Strings a Java method returned (local references, R-003), counted.
     std::atomic<std::uint64_t> jni_string_results_{0};
     void* UnwrapObject(std::uint32_t mock);
     // A guest reference as a real Java reference (a native's return value):
@@ -1192,7 +1192,8 @@ private:
     std::unordered_map<std::string, std::uint32_t> jni_member_cookies_;  // text -> cookie
 public:
     // R-003: a string the guest made with NewStringUTF (on the guest heap,
-    // past the boot arena) is a local reference, as on a JVM: it goes at
+    // past the boot arena), or a Java method returned to it, is a local
+    // reference, as on a JVM: it goes at
     // DeleteLocalRef or when the local frame it was made in ends (the Java ->
     // native call, a guest PushLocalFrame). Its handle is also its UTF-8
     // text (GetStringUTFChars returns it), so it stays while that text is

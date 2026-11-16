@@ -14928,11 +14928,13 @@ bool Runtime::RealCallObject(std::uint32_t fn, std::uint32_t a0, std::uint32_t a
             if (!g) {
                 return false;
             }
-            // Intern the delegated copy (see above).
+            // Intern the delegated copy (see above). A local reference of
+            // the call that got it, as the guest's own strings (R-003).
             {
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 jni_strings_[g] = content;
             }
+            JniStrMade(g);
             jni_string_results_.fetch_add(1, std::memory_order_relaxed);
             Ret(regs, g);
             return true;
@@ -15476,8 +15478,8 @@ std::uint32_t Runtime::JniNewString(const std::string& s) {
         // jstrings during play (~24 B/s measured on device, 2026-10-25) and
         // filled it in 160 s, which halted nativeUpdate -> app closed. Past the
         // arena, strings go to the guest heap, like the delegated real-String
-        // copies already do. The guest's NewStringUTF strings among them go
-        // with their local references (R-003, JniStrLife); the rest stay.
+        // copies already do. They go with their local references (R-003,
+        // JniStrLife).
         out = GuestMalloc(static_cast<std::uint32_t>(len));
         if (!out) {
             std::printf("[jni] LOUD string alloc failed len=%zu -- halting\n", len);
