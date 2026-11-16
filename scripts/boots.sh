@@ -8,7 +8,10 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 G=$1; N=$2; WAIT=${3:-30}; TAG=${4:-run}
-DEV=${DEV:-u0_a41@192.168.1.202}; P=8022
+# The sandbox: DEV (user@host) and P (ssh port) from the environment or
+# scripts/local.env (gitignored; see scripts/local.env.example).
+[ -f scripts/local.env ] && . scripts/local.env
+DEV=${DEV:?set DEV=user@host (or put it in scripts/local.env)}; P=${P:-8022}
 PKG=$(python3 scripts/profile.py "$G" apk.package)
 ACT=$(python3 scripts/profile.py "$G" apk.activity 2>/dev/null || echo com.rovio.fusion.App)
 S="ssh -o BatchMode=yes -p $P $DEV"

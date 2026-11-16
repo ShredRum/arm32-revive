@@ -12,7 +12,10 @@ set -u
 cd "$(dirname "$0")/.."
 ID=$1; ROUNDS=$2; shift 2
 PKG=$(python3 scripts/profile.py "$ID" apk.package)
-DEV=${DEV:-u0_a41@192.168.1.202}; P=${P:-8022}
+# The sandbox: DEV (user@host) and P (ssh port) from the environment or
+# scripts/local.env (gitignored; see scripts/local.env.example).
+[ -f scripts/local.env ] && . scripts/local.env
+DEV=${DEV:?set DEV=user@host (or put it in scripts/local.env)}; P=${P:-8022}
 S="ssh -o BatchMode=yes -o ConnectTimeout=8 -p $P $DEV"
 BOOT=${BOOT:-50}; SECS=${SECS:-30}
 F=/data/data/$PKG/files

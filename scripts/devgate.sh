@@ -3,9 +3,12 @@
 # launch, wait, then report pid / markers / death.log and pull a screenshot.
 # Never writes to /storage/emulated (host phone storage).
 set -euo pipefail
-cd "/home/shredrum/Рабочий стол/ab-port"
+cd "$(dirname "$0")/.."
 G=$1; WAIT=${2:-40}
-DEV=${DEV:-u0_a41@192.168.1.202}; P=8022
+# The sandbox: DEV (user@host) and P (ssh port) from the environment or
+# scripts/local.env (gitignored; see scripts/local.env.example).
+[ -f scripts/local.env ] && . scripts/local.env
+DEV=${DEV:?set DEV=user@host (or put it in scripts/local.env)}; P=${P:-8022}
 PKG=$(python3 scripts/profile.py $G apk.package)
 APK=${GATE_APK:-games/$G/work/apk_signed.apk}   # GATE_APK: e.g. the DIAG=1 twin
 HOSTLIB=$(python3 scripts/profile.py $G host.lib)

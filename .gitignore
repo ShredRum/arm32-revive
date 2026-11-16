@@ -39,3 +39,6 @@ Ghidra_AngryBirdsStarWars/
 Ghidra_AngryBirdsStarWars2/
 Ghidra_99Bricks/
 Ghidra_Stella/
+
+# ---- local device settings (scripts/local.env.example) ----
+scripts/local.env
