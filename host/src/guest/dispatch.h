@@ -312,6 +312,7 @@ public:
         // in a handler or a proxy cannot hide one from it).
         std::atomic<std::uint32_t> handlers_run{0};
         std::atomic<std::uint32_t> handlers_run_nonrestart{0};
+        std::atomic<std::uint32_t> delivery_halts{0};  // deliveries that halted it
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,

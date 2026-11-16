@@ -136,13 +136,14 @@ thread_local Runtime* t_rt = nullptr;
 // counts are SigThread::handlers_run[_nonrestart], so a handler run by a
 // proxy or inside a nested wait counts too.
 struct SigWaitMark {
-    std::uint32_t any = 0, nonrestart = 0;
+    std::uint32_t any = 0, nonrestart = 0, halts = 0;
 };
 SigWaitMark SigMarkNow() {
     SigWaitMark m;
     if (t_sig) {
         m.any = t_sig->handlers_run.load(std::memory_order_acquire);
         m.nonrestart = t_sig->handlers_run_nonrestart.load(std::memory_order_acquire);
+        m.halts = t_sig->delivery_halts.load(std::memory_order_acquire);
     }
     return m;
 }
@@ -156,9 +157,23 @@ bool SigEndsWait(const SigWaitMark& m, bool timed) {
     }
     return timed && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
 }
+// True if a delivery since `m` halted the thread: every wait ends then.
+bool SigHaltedSince(const SigWaitMark& m) {
+    return t_sig && t_sig->delivery_halts.load(std::memory_order_acquire) != m.halts;
+}
 // True if any handler ran since `m` (a proxy may have run it meanwhile).
 bool SigRanSince(const SigWaitMark& m) {
     return t_sig && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
+}
+// A delivery that halts the thread (a default-action signal, no room for a
+// frame) ends its wait as a non-SA_RESTART handler would: the thread goes
+// back to guest code, where the halt is taken.
+void NoteWaitEnding() {
+    if (t_sig) {
+        t_sig->delivery_halts.fetch_add(1, std::memory_order_acq_rel);
+        t_sig->handlers_run_nonrestart.fetch_add(1, std::memory_order_acq_rel);
+        t_sig->handlers_run.fetch_add(1, std::memory_order_acq_rel);
+    }
 }
 // The SA_RESTART bit of the guest's struct sigaction (arm32 Linux).
 constexpr std::uint32_t kSaRestart = 0x10000000u;
@@ -1121,7 +1136,7 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
             if (SignalDeliverable()) {
                 DeliverPendingSignals();
             }
-            if (eintr && SigEndsWait(mark, false)) {
+            if ((eintr && SigEndsWait(mark, false)) || SigHaltedSince(mark)) {
                 errno = EINTR;
                 r = -1;
                 break;
@@ -9523,7 +9538,12 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
             if (SigEndsWait(mark, deadline_mono != nullptr) || hc->seq != seq_at_sleep) {
                 break;
             }
-            mark = SigMarkNow();  // SA_RESTART handlers only: the wait goes on
+            // SA_RESTART handlers only: the wait goes on. Only the count of
+            // all handlers moves on (so they are not seen again); a
+            // non-SA_RESTART one finished meanwhile still ends the wait.
+            if (t_sig) {
+                mark.any = t_sig->handlers_run.load(std::memory_order_acquire);
+            }
             enqueue();
             if (t_sig) {
                 t_sig->wait_cv.store(hc.get());
@@ -12628,6 +12648,7 @@ bool Runtime::DeliverPendingSignals() {
         if (act.handler == 0) {
             std::printf("[signal] FATAL signal %u with the default action -- halting\n", sig);
             HaltGuest();
+            NoteWaitEnding();
             return false;
         }
         Dynarmic::A32::Jit* cur = t_hot.active_jit;
@@ -12649,6 +12670,7 @@ bool Runtime::DeliverPendingSignals() {
             std::printf("[signal] LOUD no room for a signal frame below sp=%08x -- halting\n",
                         regs[13]);
             HaltGuest();
+            NoteWaitEnding();
             return false;
         }
         std::memset(H(uc), 0, kUc + kInfo);
