@@ -535,8 +535,16 @@ void Watchdog() {
             static std::uint64_t last_swaps = 0;
             const std::uint64_t sw = g_rt->egl_swaps_.load(std::memory_order_relaxed);
             if (sw != last_swaps) {
-                Log("[frames] %llu presented in the last 10 s, %ld wrapped Java objects",
-                    (unsigned long long)(sw - last_swaps), g_rt->WrappedObjectCount());
+                const auto take = [](std::atomic<std::uint64_t>& a) {
+                    return (unsigned long long)a.exchange(0, std::memory_order_relaxed);
+                };
+                const unsigned long long gap = take(g_rt->frame_gap_max_us_), lng = take(g_rt->frames_long_);
+                const unsigned long long gcn = take(g_rt->gc_stops_), gcmax = take(g_rt->gc_stop_max_us_),
+                                         gcsum = take(g_rt->gc_stop_total_us_);
+                Log("[frames] %llu presented in the last 10 s, %ld wrapped Java objects; longest frame "
+                    "%.1f ms, %llu over 33 ms; GC stops %llu, longest %.1f ms, total %.1f ms",
+                    (unsigned long long)(sw - last_swaps), g_rt->WrappedObjectCount(), gap / 1000.0, lng, gcn,
+                    gcmax / 1000.0, gcsum / 1000.0);
                 last_swaps = sw;
             }
         }

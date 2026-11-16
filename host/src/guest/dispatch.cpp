@@ -135,6 +135,11 @@ thread_local Runtime* t_rt = nullptr;
 // wait); a timed one ends after any handler (ERESTART_RESTARTBLOCK). The
 // counts are SigThread::handlers_run[_nonrestart], so a handler run by a
 // proxy or inside a nested wait counts too.
+std::uint64_t MonoNowNs() {
+    struct timespec t {};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return static_cast<std::uint64_t>(t.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(t.tv_nsec);
+}
 struct SigWaitMark {
     std::uint32_t any = 0, nonrestart = 0, halts = 0;
 };
@@ -12482,6 +12487,19 @@ bool Runtime::EglCall(ImportId id, const std::string& n, std::array<std::uint32_
     }
     if (id == I::eglSwapBuffers_) {
         egl_swaps_.fetch_add(1, std::memory_order_relaxed);
+        {
+            const std::uint64_t now = MonoNowNs();
+            const std::uint64_t prev = last_swap_ns_.exchange(now, std::memory_order_relaxed);
+            if (prev) {
+                const std::uint64_t us = (now - prev) / 1000;
+                if (us > 33000) {
+                    frames_long_.fetch_add(1, std::memory_order_relaxed);
+                }
+                std::uint64_t m = frame_gap_max_us_.load(std::memory_order_relaxed);
+                while (us > m && !frame_gap_max_us_.compare_exchange_weak(m, us, std::memory_order_relaxed)) {
+                }
+            }
+        }
         Ret(regs, ::eglSwapBuffers(dpy(a0), static_cast<EGLSurface>(PtrOf(a1))));
         adpf::FrameDone();  // the guest presents its own frames
         return true;
@@ -12852,6 +12870,22 @@ std::uint32_t Runtime::GuestSendSignal(std::uint32_t tid, std::uint32_t sig) {
     }
     if (!signals_in_use_.exchange(true, std::memory_order_acq_rel)) {
         std::printf("[signal] first signal sent (%u to tid %u): interruptible waits on\n", sig, tid);
+    }
+    // Boehm's stop-the-world, timed for the [frames] line: the first
+    // suspend (30) to the first restart (24).
+    if (sig == 30) {
+        std::uint64_t zero = 0;
+        gc_stop_start_ns_.compare_exchange_strong(zero, MonoNowNs(), std::memory_order_relaxed);
+    } else if (sig == 24) {
+        const std::uint64_t start = gc_stop_start_ns_.exchange(0, std::memory_order_relaxed);
+        if (start) {
+            const std::uint64_t us = (MonoNowNs() - start) / 1000;
+            gc_stops_.fetch_add(1, std::memory_order_relaxed);
+            gc_stop_total_us_.fetch_add(us, std::memory_order_relaxed);
+            std::uint64_t m = gc_stop_max_us_.load(std::memory_order_relaxed);
+            while (us > m && !gc_stop_max_us_.compare_exchange_weak(m, us, std::memory_order_relaxed)) {
+            }
+        }
     }
     const std::shared_ptr<SigThread> st = it->second;
     st->pending.fetch_or(kSigBit(sig), std::memory_order_acq_rel);

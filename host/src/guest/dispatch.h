@@ -430,6 +430,17 @@ public:
     // False when `n` is not an EGL import; a wild pointer halts inside.
     bool EglCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs);
     std::atomic<std::uint64_t> egl_swaps_{0};  // frames a guest presented
+    // Frame pacing and GC pauses for the [frames] line (reset each report):
+    // the longest gap between two presents and how many were over 33 ms;
+    // Boehm's stop-the-world (a suspend signal 30 to the first restart 24):
+    // how many, the longest, their sum.
+    std::atomic<std::uint64_t> last_swap_ns_{0};
+    std::atomic<std::uint64_t> frame_gap_max_us_{0};
+    std::atomic<std::uint64_t> frames_long_{0};
+    std::atomic<std::uint64_t> gc_stop_start_ns_{0};
+    std::atomic<std::uint64_t> gc_stops_{0};
+    std::atomic<std::uint64_t> gc_stop_max_us_{0};
+    std::atomic<std::uint64_t> gc_stop_total_us_{0};
     // A guest AAssetManager over our APK (what AAssetManager_fromJava gives),
     // for a host that hands one to the guest itself (ANativeActivity); 0 when
     // the APK cannot be indexed.
