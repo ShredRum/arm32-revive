@@ -18132,7 +18132,12 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             }
             const bool data = !parts.empty() && parts[0] == "data";
             const bool user = !parts.empty() && parts[0] == "user";
-            if (ok && ((data && parts.size() == 2) || (user && parts.size() == 3))) {
+            // The package root: this app's only (from the files prefix,
+            // /data/{data,user/<N>}/<pkg>/files); another app's stays unmapped.
+            const std::string own = std::filesystem::path(files_prefix_).parent_path().filename().string();
+            const std::string& pkg = parts.empty() ? own : parts.back();
+            if (ok && ((data && parts.size() == 2) || (user && parts.size() == 3)) &&
+                (own.empty() || pkg == own)) {
                 return std::filesystem::path(files_hostbase_).parent_path().string();
             }
             if (ok && (parts.empty() || ((data || user) && parts.size() == 1) ||

@@ -2099,6 +2099,8 @@ int main() {
                    : "0",
                "1");
         Expect("/data/app stays unmapped", rt.MapGuestPathString("/data/app"), "");
+        Expect("another app's package root stays unmapped",
+               rt.MapGuestPathString("/data/user/0/abr.other"), "");
         Expect("/database is not /data", rt.MapGuestPathString("/database"), "");
     }
 
