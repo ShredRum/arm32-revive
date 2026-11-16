@@ -2082,6 +2082,24 @@ int main() {
                std::filesystem::is_directory(ext) ? "1" : "0", "1");
         Expect("another app's external dir stays unmapped",
                rt.MapGuestPathString("/storage/emulated/0/Android/data/abr.statx/files"), "");
+        // Unity lstat's each directory above its cache dir: the package
+        // root and the directories above it exist, as on a device.
+        const std::string data_root = std::filesystem::path(host_dir).parent_path().string();
+        Expect("package root /data/user/0/<pkg> maps to the data dir",
+               rt.MapGuestPathString("/data/user/0/abr.stat"), data_root);
+        Expect("package root /data/data/<pkg>/ maps to the data dir",
+               rt.MapGuestPathString("/data/data/abr.stat/"), data_root + "/");
+        const std::string above = rt.MapGuestPathString("/data/user/0");
+        Expect("/data/user/0 is an existing directory",
+               !above.empty() && std::filesystem::is_directory(above) ? "1" : "0", "1");
+        Expect("/data, /data/user and /data/data are the same stand-in",
+               rt.MapGuestPathString("/data") == above && rt.MapGuestPathString("/data/user") == above &&
+                       rt.MapGuestPathString("/data/data") == above
+                   ? "1"
+                   : "0",
+               "1");
+        Expect("/data/app stays unmapped", rt.MapGuestPathString("/data/app"), "");
+        Expect("/database is not /data", rt.MapGuestPathString("/database"), "");
     }
 
     // --- fseek: the guest long is signed 32-bit; a negative offset must

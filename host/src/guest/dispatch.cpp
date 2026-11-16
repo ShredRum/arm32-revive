@@ -17948,6 +17948,44 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
                        g.substr(pk);
             }
         }
+        // The package data root itself and the directories above it exist on
+        // a device. Unity checks each one with lstat, from the cache dir up,
+        // before it gives temporaryCachePath to C# (empty if one is missing;
+        // SpongeBob Doodle Jump then never loads a level). The root is
+        // parent(files host); each directory above it is an empty host one.
+        if (!files_hostbase_.empty() && g.compare(0, 5, "/data") == 0) {
+            std::string d = g;
+            while (d.size() > 1 && d.back() == '/') {
+                d.pop_back();
+            }
+            // Path components after "/data": data/<pkg> or user/<N>/<pkg>.
+            std::vector<std::string> parts;
+            bool ok = d.size() == 5 || d[5] == '/';
+            for (std::size_t i = 6; ok && i <= d.size();) {
+                const std::size_t j = std::min(d.find('/', i), d.size());
+                parts.push_back(d.substr(i, j - i));
+                ok = !parts.back().empty();
+                i = j + 1;
+            }
+            if (ok && d.size() == 5) {
+                parts.clear();
+            }
+            const bool data = !parts.empty() && parts[0] == "data";
+            const bool user = !parts.empty() && parts[0] == "user";
+            if (ok && ((data && parts.size() == 2) || (user && parts.size() == 3))) {
+                return std::filesystem::path(files_hostbase_).parent_path().string();
+            }
+            if (ok && (parts.empty() || ((data || user) && parts.size() == 1) ||
+                       (user && parts.size() == 2))) {
+                const std::string base =
+                    std::filesystem::path(files_hostbase_).parent_path().string() + "/data_parent";
+                std::call_once(data_parent_made_, [&base] {
+                    std::error_code ec;
+                    std::filesystem::create_directories(base, ec);
+                });
+                return base;
+            }
+        }
         // The app's own external dir under any storage root
         // (/storage/emulated/<N>, /sdcard, /mnt/sdcard ...): the guest keeps
         // the path Android gave it, the bytes live in the app's data dir

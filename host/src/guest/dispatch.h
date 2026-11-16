@@ -1162,6 +1162,7 @@ private:
     bool private_sdcard_ = false;
     std::once_flag sdcard_made_;
     std::once_flag storage_parent_made_;
+    std::once_flag data_parent_made_;
     struct HostFile {
         FILE* f = nullptr;
         std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*
