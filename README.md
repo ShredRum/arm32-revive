@@ -1,4 +1,4 @@
-# ab-port
+# arm32-revive
 
 **Run classic 32-bit Android games on 64-bit-only phones, with the games'
 own code left untouched.**
@@ -10,7 +10,10 @@ series, which their publisher withdrew and never rebuilt. The only
 alternative was a paid subscription "virtual phone". ab-port makes the
 original APKs run again, natively and offline, as ordinary installed apps.
 
-> **Русский.** ab-port запускает старые 32-битные Android-игры (классические
+(The working name of the project, still used inside the code and scripts, is
+`ab-port`.)
+
+> **Русский.** arm32-revive запускает старые 32-битные Android-игры (классические
 > Angry Birds и другие) на новых телефонах, которые умеют только 64-битный
 > код. Код самих игр не меняется: он выполняется внутри нашей 64-битной
 > библиотеки через транслятор dynarmic. Файлов игр здесь нет, нужен свой
