@@ -125,6 +125,9 @@ thread_local std::uint32_t t_proxy_cpsr = 0x10;
 // made in each, released when it is popped; guest_frames = how many of them
 // the guest pushed (PushLocalFrame) on top of the host's.
 thread_local std::vector<std::vector<std::uint32_t>> t_local_frames;
+// The guest's NewStringUTF strings made in each of those frames (R-003):
+// (handle, serial), parallel to t_local_frames.
+thread_local std::vector<std::vector<std::pair<std::uint32_t, std::uint64_t>>> t_frame_strings;
 thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
@@ -13976,6 +13979,48 @@ void Runtime::DropLocalLocked(std::uint32_t h) {
 
 void Runtime::PushLocalFrame() {
     t_local_frames.emplace_back();
+    t_frame_strings.emplace_back();
+}
+
+void Runtime::JniStrMade(std::uint32_t h) {
+    static const bool on = StrFreeOn();
+    // Only heap strings: the boot arena is a bump region and never reused.
+    if (!on || !h || (h >= kJniStringStart && h < kJniStringLimit)) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    JniStrLife& l = jni_str_life_[h];
+    l = JniStrLife{};
+    l.serial = ++jni_str_serial_;
+    if (!t_frame_strings.empty()) {
+        t_frame_strings.back().emplace_back(h, l.serial);
+    }
+    // Outside any frame (a guest worker thread): only DeleteLocalRef frees
+    // it, as a native-attached thread keeps locals until it detaches.
+}
+
+void Runtime::JniStrLocalGone(std::uint32_t h, std::uint64_t serial) {
+    const auto it = jni_str_life_.find(h);
+    if (it == jni_str_life_.end() || (serial && it->second.serial != serial)) {
+        return;  // freed already, or the address now holds a newer string
+    }
+    it->second.local_gone = true;
+    JniStrMaybeFree(h);
+}
+
+void Runtime::JniStrMaybeFree(std::uint32_t h) {
+    const auto it = jni_str_life_.find(h);
+    if (it == jni_str_life_.end()) {
+        return;
+    }
+    const JniStrLife& l = it->second;
+    if (!l.local_gone || l.pins || l.globals || l.keep) {
+        return;
+    }
+    jni_str_life_.erase(it);
+    jni_strings_.erase(h);
+    GuestFree(h);
+    jni_strings_freed_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Runtime::PopLocalFrame() {
@@ -13986,11 +14031,19 @@ void Runtime::PopLocalFrame() {
     FlushDirectFrom(t_local_frames.size());
     std::vector<std::uint32_t> frame = std::move(t_local_frames.back());
     t_local_frames.pop_back();
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> strings;
+    if (!t_frame_strings.empty()) {
+        strings = std::move(t_frame_strings.back());
+        t_frame_strings.pop_back();
+    }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const std::uint32_t h : frame) {
         if (!obj_permanent_.count(h)) {
             ReleaseHandleLocked(h);
         }
+    }
+    for (const auto& [h, serial] : strings) {
+        JniStrLocalGone(h, serial);
     }
 }
 
@@ -14358,6 +14411,9 @@ void* Runtime::StringMonitorObject(std::uint32_t handle) {
     const auto it = jni_string_monitors_.find(handle);
     if (it != jni_string_monitors_.end()) {
         return it->second;
+    }
+    if (const auto lt = jni_str_life_.find(handle); lt != jni_str_life_.end()) {
+        lt->second.keep = true;  // the monitor is kept per handle, for good
     }
     jobject local = re->NewStringUTF(js->second.c_str());
     void* global = local ? re->NewGlobalRef(local) : nullptr;
@@ -15420,9 +15476,8 @@ std::uint32_t Runtime::JniNewString(const std::string& s) {
         // jstrings during play (~24 B/s measured on device, 2026-10-25) and
         // filled it in 160 s, which halted nativeUpdate -> app closed. Past the
         // arena, strings go to the guest heap, like the delegated real-String
-        // copies already do. They are never freed: the mock Delete*Ref are
-        // no-ops and NewGlobalRef returns the same handle, so freeing on
-        // DeleteLocalRef would free a live global.
+        // copies already do. The guest's NewStringUTF strings among them go
+        // with their local references (R-003, JniStrLife); the rest stay.
         out = GuestMalloc(static_cast<std::uint32_t>(len));
         if (!out) {
             std::printf("[jni] LOUD string alloc failed len=%zu -- halting\n", len);
@@ -15627,7 +15682,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             }
             s.assign(reinterpret_cast<const char*>(H(a1)), len);
         }
-        Ret(regs, JniNewString(s));
+        const std::uint32_t js = JniNewString(s);
+        JniStrMade(js);
+        Ret(regs, js);
         return;
     }
     case 168: {  // GetStringUTFLength(env, str) -> jsize (bytes, no NUL)
@@ -15696,6 +15753,9 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         }
         if (a2 && CheckRange(a2, 1, true)) {  // jboolean* isCopy: 1 byte (jni.h)
             *H<std::uint8_t>(a2) = 0;
+        }
+        if (const auto lt = jni_str_life_.find(a1); lt != jni_str_life_.end()) {
+            lt->second.pins++;  // the text is out until ReleaseStringUTFChars
         }
         Ret(regs, a1);  // handle IS the UTF-8 buffer
         return;
@@ -15840,6 +15900,13 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (a2) {
             std::lock_guard<std::recursive_mutex> lock(mutex_);
             tracked = jni_utf_chars_.erase(a2) != 0;
+            // A guest string's text is the handle itself (R-003).
+            if (const auto lt = jni_str_life_.find(a2); !tracked && lt != jni_str_life_.end()) {
+                if (lt->second.pins) {
+                    lt->second.pins--;
+                }
+                JniStrMaybeFree(a2);
+            }
         }
         if (tracked) {
 #ifdef ABR_DIAG_COUNTERS
@@ -15978,6 +16045,15 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
                 } else {
                     ReleaseHandleLocked(a1);
                 }
+            } else if (const auto lt = jni_str_life_.find(a1); a1 && lt != jni_str_life_.end()) {
+                if (fn == 23) {
+                    JniStrLocalGone(a1, 0);
+                } else {
+                    if (lt->second.globals) {
+                        lt->second.globals--;
+                    }
+                    JniStrMaybeFree(a1);
+                }
             }
         }
         Ret(regs, 0);
@@ -15995,6 +16071,16 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (void* real = UnwrapObject(a1)) {
             Ret(regs, WrapObject(real, fn != 25));
             return;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (const auto lt = jni_str_life_.find(a1); a1 && lt != jni_str_life_.end()) {
+                if (fn == 25) {
+                    lt->second.keep = true;  // two locals, one handle: keep it
+                } else {
+                    lt->second.globals++;
+                }
+            }
         }
         Ret(regs, a1);
         return;
@@ -16557,7 +16643,22 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
             keep = re->NewGlobalRef(static_cast<jobject>(real));
         }
 #endif
+        // A guest string as the result moves to the outer frame (R-003).
+        std::uint64_t moved = 0;
+        if (a1 && !t_frame_strings.empty()) {
+            auto& fs = t_frame_strings.back();
+            for (auto at = fs.begin(); at != fs.end(); ++at) {
+                if (at->first == a1) {
+                    moved = at->second;
+                    fs.erase(at);
+                    break;
+                }
+            }
+        }
         PopLocalFrame();
+        if (moved && !t_frame_strings.empty()) {
+            t_frame_strings.back().emplace_back(a1, moved);
+        }
         std::uint32_t out = keep ? 0u : a1;
 #ifdef __ANDROID__
         if (keep) {

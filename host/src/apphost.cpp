@@ -568,8 +568,9 @@ void Watchdog() {
             }
         }
         {
-            // jni_strings_ is never freed, and handles held by real objects
-            // are global refs with a limit: a line when either has grown.
+            // Guest strings go with their local references (R-003), and
+            // handles held by real objects are global refs with a limit: a
+            // line when either has changed.
             static std::size_t last_strings = 0;
             static long top_objects = 0;
             std::size_t n = 0, bytes = 0;
@@ -577,9 +578,10 @@ void Watchdog() {
             if (g_rt->JniStringStats(&n, &bytes) && (n != last_strings || objects > top_objects)) {
                 last_strings = n;
                 top_objects = std::max(top_objects, objects);
-                Log("[strings] %zu jstrings kept, %zu bytes; %llu from Java method results; %ld wrapped Java objects",
-                    n, bytes, (unsigned long long)g_rt->jni_string_results_.load(std::memory_order_relaxed),
-                    objects);
+                Log("[strings] %zu jstrings kept, %zu bytes; %llu freed; %llu from Java method results; %ld wrapped "
+                    "Java objects",
+                    n, bytes, (unsigned long long)g_rt->jni_strings_freed_.load(std::memory_order_relaxed),
+                    (unsigned long long)g_rt->jni_string_results_.load(std::memory_order_relaxed), objects);
             }
         }
         const unsigned cn = g_rt->HeapCorruptionCount();
@@ -1765,12 +1767,12 @@ static bool Boot(JavaVM* vm) {
     abr::prof::g_enabled = EnvOn("HARNESS_PROF");  // diagnostics: slow-frame breakdown
     // Every switch is final here (no Jit exists yet): the line states what runs.
     Log("flags: fastmem=%s diag=%s jitopt=%s jitshare=%s tlsthunk=%s fastdispatch=%s hostfpsr=%s "
-        "jitcallbacks=%s",
+        "jitcallbacks=%s strfree=%s",
         JitFastmemOn() ? "on" : "off",
         diag ? "on" : "off",
         JitSafeOpts() ? "safe" : "none", JitShareOn() ? "on" : "off",
         TlsThunkOn() ? "on" : "off", FastDispatchOn() ? "on" : "off",
-        JitUnsafeOptimizations() ? "on" : "off", JitCallbacksOn() ? "on" : "off");
+        JitUnsafeOptimizations() ? "on" : "off", JitCallbacksOn() ? "on" : "off", StrFreeOn() ? "on" : "off");
     abr::adpf::Init(RealEnvForThread);  // after abflags: HARNESS_NOADPF
     static GuestCallbacks callbacks(g_rt);
     g_cb = &callbacks;

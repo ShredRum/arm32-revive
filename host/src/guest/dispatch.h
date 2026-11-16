@@ -145,6 +145,9 @@ inline bool JitShareOn() { return !EnvOn("HARNESS_NOJITSHARE"); }
 // pthread_getspecific answered in guest code (Runtime::BindTls); with
 // HARNESS_NOTLSTHUNK=1 no Jit gets a block, so every call is a host call.
 inline bool TlsThunkOn() { return !EnvOn("HARNESS_NOTLSTHUNK"); }
+// The guest's NewStringUTF strings go when their local reference does (R-003,
+// Runtime::JniStrLife); HARNESS_NOSTRFREE=1 keeps every one, as before.
+inline bool StrFreeOn() { return !EnvOn("HARNESS_NOSTRFREE"); }
 
 // G1.1 (2026-10-18, PLAN.md): JIT cycle counting is pure overhead here. The
 // A32 callbacks make AddTicks a no-op and GetTicksRemaining return a constant
@@ -1187,6 +1190,31 @@ private:
     // 2.1). Caller holds mutex_; false after LOUD-halting.
     bool JniMemberCookie(const std::string& text, std::uint32_t* out);
     std::unordered_map<std::string, std::uint32_t> jni_member_cookies_;  // text -> cookie
+public:
+    // R-003: a string the guest made with NewStringUTF (on the guest heap,
+    // past the boot arena) is a local reference, as on a JVM: it goes at
+    // DeleteLocalRef or when the local frame it was made in ends (the Java ->
+    // native call, a guest PushLocalFrame). Its handle is also its UTF-8
+    // text (GetStringUTFChars returns it), so it stays while that text is
+    // out (until ReleaseStringUTFChars), while a global reference holds it
+    // (NewGlobalRef returns the same handle), and for good once it is a
+    // monitor or got a second local (NewLocalRef). A later use of a freed
+    // handle finds no string and halts LOUD, never reads stale memory.
+    struct JniStrLife {
+        std::uint64_t serial = 0;  // matches the frame record that made it
+        std::uint32_t pins = 0;    // GetStringUTFChars not released yet
+        std::uint32_t globals = 0;
+        bool keep = false;
+        bool local_gone = false;
+    };
+    // Frame records: (handle, serial) per local frame of this thread.
+    void JniStrMade(std::uint32_t h);
+    void JniStrLocalGone(std::uint32_t h, std::uint64_t serial);  // under mutex_
+    void JniStrMaybeFree(std::uint32_t h);                         // under mutex_
+    std::atomic<std::uint64_t> jni_strings_freed_{0};
+private:
+    std::unordered_map<std::uint32_t, JniStrLife> jni_str_life_;
+    std::uint64_t jni_str_serial_ = 0;
   public:
     std::unordered_map<std::uint32_t, std::string> jni_classes_;  // handle -> name
     std::unordered_map<std::uint32_t, std::string> jni_methods_;  // cookie -> desc

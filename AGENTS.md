@@ -122,7 +122,7 @@ marker and verify the md5 of the lib **extracted from the installed APK**.
 
 The boot line `flags:` in `apphost.log` is the source of truth, currently
 `fastmem=on diag=off jitopt=safe jitshare=on tlsthunk=on
-fastdispatch=on hostfpsr=on jitcallbacks=on`. There is no heap quarantine (REVIEW R-013: a delay before
+fastdispatch=on hostfpsr=on jitcallbacks=on strfree=on`. There is no heap quarantine (REVIEW R-013: a delay before
 reuse only hides a use-after-free).
 
 - `jitshare=on`: every guest Jit runs from one code cache (`Runtime::NewJit`,
@@ -148,6 +148,13 @@ reuse only hides a use-after-free).
   call knows its Jit without a thread_local, and `Ret` leaves the Thumb bit
   in PC bit 0 for `FinishSvc`; `HARNESS_NOJITCALLBACKS=1` goes back to the
   thread_local path. `FMT_BENCH=1 fmt_test` prints the cost of one call.
+
+- `strfree=on`: a string the guest makes with NewStringUTF is a local
+  reference, as on a JVM: it goes at DeleteLocalRef or when its local frame
+  ends, unless its text is out (GetStringUTFChars until Release), a global
+  holds it, or it is a monitor (`Runtime::JniStrLife`, REVIEW R-003);
+  `HARNESS_NOSTRFREE=1` keeps every one, as before. The `[strings]` line
+  counts the freed ones.
 
 - ADPF (`host/src/guest/adpf.h`, Android 13+): the frame thread reports
   each frame's CPU time to a performance hint session whose target is the

@@ -134,6 +134,7 @@ struct RuntimeTestAccess {
         rt.CallJni(fn, regs);
     }
     static std::size_t JniStringCount(Runtime& rt) { return rt.jni_strings_.size(); }
+    static bool JniStrAlive(Runtime& rt, std::uint32_t h) { return rt.jni_strings_.count(h) != 0; }
     static std::size_t UtfCharCount(Runtime& rt) { return rt.jni_utf_chars_.size(); }
     static void TrackUtfChars(Runtime& rt, std::uint32_t g) { rt.jni_utf_chars_.insert(g); }
     static std::size_t AssetMapSize(Runtime& rt) { return rt.asset_map_.size(); }
@@ -1886,6 +1887,71 @@ int main() {
         const std::uint32_t f1 = abr::RuntimeTestAccess::Jni(rt, 94, q);
         Expect("GetFieldID: the same member, the same ID",
                std::to_string(f1 != 0 && abr::RuntimeTestAccess::Jni(rt, 94, q) == f1), "1");
+    }
+
+    // --- R-003: the guest's NewStringUTF strings are local references: they
+    //     go when their frame ends or at DeleteLocalRef, and stay while their
+    //     text is out, while a global holds them, or when a guest
+    //     PopLocalFrame hands them to the outer frame.
+    {
+        using A = abr::RuntimeTestAccess;
+        const std::uint32_t txt = kScratch + 0xA00;
+        std::memcpy(rt.H(txt), "a guest file name/levels/level_01.lua", 38);
+        auto make = [&]() {  // NewStringUTF; past the boot arena, as in play
+            const std::uint32_t a[4] = {0, txt, 0, 0};
+            std::uint32_t h = 0;
+            for (int i = 0; i < 400; i++) {
+                h = A::Jni(rt, 167, a);
+                if (h < abr::kJniStringStart || h >= abr::kJniStringLimit) {
+                    break;
+                }
+            }
+            return h;
+        };
+        auto alive = [&](std::uint32_t h) { return A::JniStrAlive(rt, h); };
+        const std::uint32_t z[4] = {0, 0, 0, 0};
+
+        abr::Runtime::PushLocalFrame();
+        const std::uint32_t s1 = make();
+        Expect("R-003: a guest string lands on the heap", std::to_string(s1 < abr::kJniStringStart || s1 >= abr::kJniStringLimit), "1");
+        Expect("R-003: alive inside its frame", std::to_string(alive(s1)), "1");
+        rt.PopLocalFrame();
+        Expect("R-003: gone when its frame ends", std::to_string(alive(s1)), "0");
+
+        abr::Runtime::PushLocalFrame();
+        const std::uint32_t s2 = make();
+        const std::uint32_t g2[4] = {0, s2, 0, 0};
+        const std::uint32_t chars = A::Jni(rt, 169, g2);  // GetStringUTFChars
+        rt.PopLocalFrame();
+        Expect("R-003: stays while its text is out", std::to_string(alive(s2)), "1");
+        const std::uint32_t r2[4] = {0, s2, chars, 0};
+        A::Jni(rt, 170, r2);  // ReleaseStringUTFChars
+        Expect("R-003: gone at ReleaseStringUTFChars after its frame", std::to_string(alive(s2)), "0");
+
+        abr::Runtime::PushLocalFrame();
+        const std::uint32_t s3 = make();
+        const std::uint32_t n3[4] = {0, s3, 0, 0};
+        const std::uint32_t g3 = A::Jni(rt, 21, n3);  // NewGlobalRef
+        rt.PopLocalFrame();
+        Expect("R-003: a global keeps it", std::to_string(g3 == s3 && alive(s3)), "1");
+        A::Jni(rt, 22, n3);  // DeleteGlobalRef
+        Expect("R-003: gone at DeleteGlobalRef after its frame", std::to_string(alive(s3)), "0");
+
+        const std::uint32_t s4 = make();  // no frame: a worker thread's local
+        const std::uint32_t d4[4] = {0, s4, 0, 0};
+        Expect("R-003: outside a frame it stays", std::to_string(alive(s4)), "1");
+        A::Jni(rt, 23, d4);  // DeleteLocalRef
+        Expect("R-003: gone at DeleteLocalRef", std::to_string(alive(s4)), "0");
+
+        abr::Runtime::PushLocalFrame();                     // the host's frame
+        A::Jni(rt, 19, z);                                  // guest PushLocalFrame
+        const std::uint32_t s5 = make();
+        const std::uint32_t p5[4] = {0, s5, 0, 0};
+        Expect("R-003: PopLocalFrame returns the same handle", std::to_string(A::Jni(rt, 20, p5) == s5), "1");
+        Expect("R-003: the result lives on in the outer frame", std::to_string(alive(s5)), "1");
+        rt.PopLocalFrame();
+        Expect("R-003: and goes with it", std::to_string(alive(s5)), "0");
+
     }
 
     // --- GetStringUTFChars: a mock jstring returns its own handle and
