@@ -15113,6 +15113,7 @@ void Runtime::SetFilesDir(const std::string& guest_prefix, const std::string& ho
     if (gp.filename() == "files" && gp.has_parent_path()) {
         pkg = gp.parent_path().filename().string();
     }
+    own_pkg_ = pkg;
     if (!pkg.empty() && !host_base.empty()) {
         ext_tail_ = "/Android/data/" + pkg;
         ext_hostbase_ = std::filesystem::path(host_base).parent_path().string() + "/ext";
@@ -18131,72 +18132,47 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             !files_hostbase_.empty()) {
             return files_hostbase_ + g.substr(files_prefix_.size());
         }
-        // Any guest path shaped /data/{data,user/<N>}/<pkg>/files<rest> is
-        // this app's files dir. We host exactly one guest, so the package
-        // component need not be known here: the offline harness has no
-        // cmdline package (its SetFilesDir prefix is a caller choice), and
-        // on a real device the guest can only reach its own package's dir.
-        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                         g.compare(0, 11, "/data/user/") == 0)) {
-            const std::size_t at = g.find("/files");
-            if (at != std::string::npos && (g.size() == at + 6 || g[at + 6] == '/')) {
-                return files_hostbase_ + g.substr(at + 6);
-            }
-        }
-        // Package data root: breakpad (HockeyApp) builds its minidump path
-        // as dirname(FILES_PATH)/hockeyapp_errors_XXXXXX, i.e.
-        // /data/data/<pkg>/... — one level ABOVE the files dir, so the
-        // /files rule above does not match. Map it to parent(files host).
-        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                         g.compare(0, 11, "/data/user/") == 0)) {
-            std::size_t pk = std::string::npos;
-            if (g.compare(0, 11, "/data/data/") == 0) {
-                pk = g.find('/', 11);
-            } else {
-                const std::size_t u = g.find('/', 11);  // after the user id
-                if (u != std::string::npos) {
-                    pk = g.find('/', u + 1);  // after the package
-                }
-            }
-            if (pk != std::string::npos) {
-                return std::filesystem::path(files_hostbase_).parent_path().string() +
-                       g.substr(pk);
-            }
-        }
-        // The package data root itself and the directories above it exist on
-        // a device. Unity checks each one with lstat, from the cache dir up,
-        // before it gives temporaryCachePath to C# (empty if one is missing;
-        // SpongeBob Doodle Jump then never loads a level). The root is
-        // parent(files host); each directory above it is an empty host one.
-        if (!files_hostbase_.empty() && g.compare(0, 5, "/data") == 0) {
+        // The app's data dir as a device names it: /data/data/<pkg><rest> or
+        // /data/user/<N>/<pkg><rest>, for this app's package only (another
+        // app's stays unmapped; with no package known, as in a harness run
+        // with a prefix of another shape, any). <pkg>/files<rest> is the
+        // files dir; anything else under <pkg> is parent(files host), where
+        // breakpad (HockeyApp) puts its minidumps and Unity's getCacheDir
+        // points. The package root and the directories above it exist on a
+        // device: Unity lstat's each one, from its cache dir up, before it
+        // gives temporaryCachePath to C# (empty if one is missing; SpongeBob
+        // Doodle Jump then never loads a level). Each directory above the
+        // root is one empty host directory; /data/app stays unmapped.
+        if (!files_hostbase_.empty() && (g == "/data" || g.compare(0, 6, "/data/") == 0)) {
             std::string d = g;
             while (d.size() > 1 && d.back() == '/') {
                 d.pop_back();
             }
-            // Path components after "/data": data/<pkg> or user/<N>/<pkg>.
+            // Components after "/data", and where each one ends in g.
             std::vector<std::string> parts;
-            bool ok = d.size() == 5 || d[5] == '/';
-            for (std::size_t i = 6; ok && i <= d.size();) {
+            std::vector<std::size_t> ends;
+            bool ok = true;
+            for (std::size_t i = 6; i <= d.size() && d.size() > 5;) {
                 const std::size_t j = std::min(d.find('/', i), d.size());
+                if (j == i) {
+                    ok = false;  // an empty component ("//")
+                    break;
+                }
                 parts.push_back(d.substr(i, j - i));
-                ok = !parts.back().empty();
+                ends.push_back(j);
                 i = j + 1;
             }
-            if (ok && d.size() == 5) {
-                parts.clear();
+            const bool data = ok && !parts.empty() && parts[0] == "data";
+            const bool user = ok && !parts.empty() && parts[0] == "user";
+            const std::size_t pk = data ? 1 : user ? 2 : 0;  // the package's index
+            if ((data || user) && parts.size() > pk && (own_pkg_.empty() || parts[pk] == own_pkg_)) {
+                const std::string rest = g.substr(ends[pk]);  // "", "/" or "/..."
+                if (rest.compare(0, 6, "/files") == 0 && (rest.size() == 6 || rest[6] == '/')) {
+                    return files_hostbase_ + rest.substr(6);
+                }
+                return std::filesystem::path(files_hostbase_).parent_path().string() + rest;
             }
-            const bool data = !parts.empty() && parts[0] == "data";
-            const bool user = !parts.empty() && parts[0] == "user";
-            // The package root: this app's only (from the files prefix,
-            // /data/{data,user/<N>}/<pkg>/files); another app's stays unmapped.
-            const std::string own = std::filesystem::path(files_prefix_).parent_path().filename().string();
-            const std::string& pkg = parts.empty() ? own : parts.back();
-            if (ok && ((data && parts.size() == 2) || (user && parts.size() == 3)) &&
-                (own.empty() || pkg == own)) {
-                return std::filesystem::path(files_hostbase_).parent_path().string();
-            }
-            if (ok && (parts.empty() || ((data || user) && parts.size() == 1) ||
-                       (user && parts.size() == 2))) {
+            if (ok && (parts.empty() || ((data || user) && parts.size() == 1) || (user && parts.size() == 2))) {
                 const std::string base =
                     std::filesystem::path(files_hostbase_).parent_path().string() + "/data_parent";
                 std::call_once(data_parent_made_, [&base] {

@@ -2101,6 +2101,14 @@ int main() {
         Expect("/data/app stays unmapped", rt.MapGuestPathString("/data/app"), "");
         Expect("another app's package root stays unmapped",
                rt.MapGuestPathString("/data/user/0/abr.other"), "");
+        Expect("another app's package root with a slash stays unmapped",
+               rt.MapGuestPathString("/data/user/0/abr.other/"), "");
+        Expect("another app's files stay unmapped",
+               rt.MapGuestPathString("/data/data/abr.other/shared_prefs/x.xml"), "");
+        Expect("this app's other dirs map under the data dir",
+               rt.MapGuestPathString("/data/user/0/abr.stat/cache/m.mp4"), data_root + "/cache/m.mp4");
+        Expect("this app's files via /data/user map to the files dir",
+               rt.MapGuestPathString("/data/user/0/abr.stat/files/sz"), host_dir + "/sz");
         Expect("/database is not /data", rt.MapGuestPathString("/database"), "");
     }
 
