@@ -129,6 +129,54 @@ thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
+// What ends a guest wait interrupted by a signal, as the kernel does with the
+// futex wait under it: an untimed one is restarted after an SA_RESTART
+// handler (ERESTARTSYS) and ends after any other (EINTR, 0 for a condition
+// wait); a timed one ends after any handler (ERESTART_RESTARTBLOCK). The
+// counts are SigThread::handlers_run[_nonrestart], so a handler run by a
+// proxy or inside a nested wait counts too.
+struct SigWaitMark {
+    std::uint32_t any = 0, nonrestart = 0, halts = 0;
+};
+SigWaitMark SigMarkNow() {
+    SigWaitMark m;
+    if (t_sig) {
+        m.any = t_sig->handlers_run.load(std::memory_order_acquire);
+        m.nonrestart = t_sig->handlers_run_nonrestart.load(std::memory_order_acquire);
+        m.halts = t_sig->delivery_halts.load(std::memory_order_acquire);
+    }
+    return m;
+}
+// True if a handler since `m` ends a wait (timed or not).
+bool SigEndsWait(const SigWaitMark& m, bool timed) {
+    if (!t_sig) {
+        return false;
+    }
+    if (t_sig->handlers_run_nonrestart.load(std::memory_order_acquire) != m.nonrestart) {
+        return true;
+    }
+    return timed && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
+}
+// True if a delivery since `m` halted the thread: every wait ends then.
+bool SigHaltedSince(const SigWaitMark& m) {
+    return t_sig && t_sig->delivery_halts.load(std::memory_order_acquire) != m.halts;
+}
+// True if any handler ran since `m` (a proxy may have run it meanwhile).
+bool SigRanSince(const SigWaitMark& m) {
+    return t_sig && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
+}
+// A delivery that halts the thread (a default-action signal, no room for a
+// frame) ends its wait as a non-SA_RESTART handler would: the thread goes
+// back to guest code, where the halt is taken.
+void NoteWaitEnding() {
+    if (t_sig) {
+        t_sig->delivery_halts.fetch_add(1, std::memory_order_acq_rel);
+        t_sig->handlers_run_nonrestart.fetch_add(1, std::memory_order_acq_rel);
+        t_sig->handlers_run.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+// The SA_RESTART bit of the guest's struct sigaction (arm32 Linux).
+constexpr std::uint32_t kSaRestart = 0x10000000u;
 
 extern "C" {
 typedef void* dl_mspace;
@@ -1070,13 +1118,15 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
             std::memcpy(H(a1), &v, 4);
         }
     } else if (id == I::sem_wait_ && SignalsInUse()) {
-        // Interruptible: a handler runs between slices, then EINTR (sem_wait
-        // is never restarted after a handler, whatever SA_RESTART says) --
-        // for an app targeting 24 or later. Below that bionic waits on
+        // Interruptible: a handler runs between slices. The kernel restarts
+        // this untimed futex wait after an SA_RESTART handler; after any
+        // other one it is EINTR -- for an app targeting 24 or later. Below
+        // that bionic waits on
         // (semaphore.cpp, the target-SDK check in sem_wait), and an engine
         // built then takes a -1 for "not acquired" (Unity's Semaphore logs
         // "Failed to wait on a semaphore" and runs on without it).
         const bool eintr = guest_target_sdk_ == 0 || guest_target_sdk_ >= 24;
+        const SigWaitMark mark = SigMarkNow();
         for (;;) {
             const struct timespec slice = RealtimeIn(kSigSliceNs);
             r = ::sem_timedwait(s.get(), &slice);
@@ -1085,11 +1135,11 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
             }
             if (SignalDeliverable()) {
                 DeliverPendingSignals();
-                if (eintr) {
-                    errno = EINTR;
-                    r = -1;
-                    break;
-                }
+            }
+            if ((eintr && SigEndsWait(mark, false)) || SigHaltedSince(mark)) {
+                errno = EINTR;
+                r = -1;
+                break;
             }
         }
     } else if (id == I::sem_wait_) {
@@ -1109,6 +1159,7 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
         struct timespec ts {};
         ts.tv_sec = g[0];
         ts.tv_nsec = g[1];
+        const SigWaitMark mark = SigMarkNow();
         for (;;) {
             struct timespec slice = ts;
             if (SignalsInUse()) {
@@ -1123,6 +1174,10 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
             }
             if (SignalDeliverable()) {
                 DeliverPendingSignals();
+            }
+            if (SigEndsWait(mark, true)) {
+                // A timed futex wait is not restarted after any handler
+                // (ERESTART_RESTARTBLOCK): bionic's sem_timedwait is EINTR.
                 errno = EINTR;
                 r = -1;
                 break;
@@ -8480,6 +8535,14 @@ void Runtime::CallImport(std::uint32_t idx, Regs& regs) {
     case I::ASensorManager_getDefaultSensor_:
     case I::ASensorManager_getInstance_:
     case I::ASensorManager_getSensorList_:
+    case I::ASensorEventQueue_disableSensor_:
+    case I::ASensorEventQueue_enableSensor_:
+    case I::ASensorEventQueue_setEventRate_:
+    case I::ASensor_getMinDelay_:
+    case I::ASensor_getName_:
+    case I::ASensor_getResolution_:
+    case I::ASensor_getType_:
+    case I::ASensor_getVendor_:
     if (n[0] == 'A' && NdkCall(id, n, regs)) {
         return;
     }
@@ -9335,6 +9398,7 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         // The oldest sleeper (a broadcast: every sleeper) takes a wake; with
         // nobody asleep the wake is gone, as POSIX says.
         pthread_mutex_lock(&hc->m);
+        hc->seq++;
         if (hc->head) {
             hc->last_tid.store(GuestTid(), std::memory_order_relaxed);
         }
@@ -9379,10 +9443,11 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
     // The wait: queued under the cond's own lock BEFORE the guest mutex is
     // let go, so a wake that follows the caller's unlock reaches it. While
     // guest signals are in use it sleeps in short slices; a pending signal
-    // runs its handler and the wait returns 0, as bionic's does when the
-    // futex wait is interrupted (EINTR -> 0), and the caller's predicate loop
-    // looks again. A sleeper leaving without a wake (timeout, handler) leaves
-    // the queue; a wake that came first is taken instead.
+    // runs its handler, then an untimed wait goes on (SA_RESTART) and any
+    // other returns 0 (as bionic's does when the futex wait is interrupted,
+    // EINTR -> 0). A
+    // sleeper leaving without a wake (timeout, handler) leaves the queue; a
+    // wake that came first is taken instead.
     auto wait = [&](const struct timespec* deadline_mono) -> int {
         Waiter me;
         pthread_condattr_t attr;
@@ -9391,9 +9456,18 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         pthread_cond_init(&me.cv, &attr);
         pthread_condattr_destroy(&attr);
         pthread_mutex_lock(&hc->m);
-        me.prev = hc->tail;
-        (hc->tail ? hc->tail->next : hc->head) = &me;
-        hc->tail = &me;
+        auto enqueue = [&] {
+            me.prev = hc->tail;
+            me.next = nullptr;
+            (hc->tail ? hc->tail->next : hc->head) = &me;
+            hc->tail = &me;
+        };
+        enqueue();
+        // Any wake handed out after this point means the condition may have
+        // changed: bionic's restarted futex wait sees the cond's sequence
+        // move and returns, so the caller looks at its predicate again.
+        const std::uint64_t seq_at_sleep = hc->seq;
+        SigWaitMark mark = SigMarkNow();
         if (t_sig) {
             t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
             t_sig->wait_cv.store(hc.get());
@@ -9404,50 +9478,82 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         mx->holder.store(0, std::memory_order_relaxed);
         pthread_mutex_unlock(&mx->m);
         int r = 0;
-        while (!me.woken) {
-            struct timespec now {};
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            if (deadline_mono && !Before(now, *deadline_mono)) {
-                r = ETIMEDOUT;
+        for (;;) {
+            bool signalled = false;
+            while (!me.woken) {
+                struct timespec now {};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (deadline_mono && !Before(now, *deadline_mono)) {
+                    r = ETIMEDOUT;
+                    break;
+                }
+                const struct timespec* until = deadline_mono;
+                struct timespec slice {};
+                if (SignalsInUse()) {
+                    slice = now;
+                    slice.tv_nsec += kSigSliceNs;
+                    if (slice.tv_nsec >= 1000000000L) {
+                        slice.tv_nsec -= 1000000000L;
+                        slice.tv_sec++;
+                    }
+                    if (!deadline_mono || Before(slice, *deadline_mono)) {
+                        until = &slice;
+                    }
+                }
+                if (until) {
+                    pthread_cond_timedwait(&me.cv, &hc->m, until);
+                } else {
+                    pthread_cond_wait(&me.cv, &hc->m);
+                }
+                if (!me.woken && (SignalDeliverable() || SigRanSince(mark))) {
+                    signalled = true;  // a handler to run, or one a proxy ran
+                    break;
+                }
+            }
+            if (me.woken) {
+                r = 0;
                 break;
             }
-            const struct timespec* until = deadline_mono;
-            struct timespec slice {};
-            if (SignalsInUse()) {
-                slice = now;
-                slice.tv_nsec += kSigSliceNs;
-                if (slice.tv_nsec >= 1000000000L) {
-                    slice.tv_nsec -= 1000000000L;
-                    slice.tv_sec++;
-                }
-                if (!deadline_mono || Before(slice, *deadline_mono)) {
-                    until = &slice;
-                }
-            }
-            if (until) {
-                pthread_cond_timedwait(&me.cv, &hc->m, until);
-            } else {
-                pthread_cond_wait(&me.cv, &hc->m);
-            }
-            if (!me.woken && SignalDeliverable()) {
-                r = -1;  // a handler to run first
-                break;
-            }
-        }
-        if (me.woken) {
-            r = 0;
-        } else {
             unlink(&me);
+            if (!signalled) {
+                break;  // the deadline
+            }
+            // A handler to run, outside the cond's lock (it may wait on
+            // this cond itself). As the kernel does with the futex wait it
+            // interrupts: an untimed one is restarted after an SA_RESTART
+            // handler (Boehm's suspend handler is one), so the wait goes on
+            // here too unless a wake came meanwhile (the restarted futex
+            // sees the sequence moved); a timed one (ERESTART_RESTARTBLOCK)
+            // and any wait under a handler without SA_RESTART end with
+            // EINTR, which bionic returns as 0.
+            if (t_sig) {
+                t_sig->wait_cv.store(nullptr);
+            }
+            pthread_mutex_unlock(&hc->m);
+            if (SignalDeliverable()) {
+                DeliverPendingSignals();
+            }
+            pthread_mutex_lock(&hc->m);
+            r = 0;
+            if (SigEndsWait(mark, deadline_mono != nullptr) || hc->seq != seq_at_sleep) {
+                break;
+            }
+            // SA_RESTART handlers only: the wait goes on. Only the count of
+            // all handlers moves on (so they are not seen again); a
+            // non-SA_RESTART one finished meanwhile still ends the wait.
+            if (t_sig) {
+                mark.any = t_sig->handlers_run.load(std::memory_order_acquire);
+            }
+            enqueue();
+            if (t_sig) {
+                t_sig->wait_cv.store(hc.get());
+            }
         }
         if (t_sig) {
             t_sig->wait_cv.store(nullptr);
         }
         pthread_mutex_unlock(&hc->m);
         pthread_cond_destroy(&me.cv);
-        if (r < 0) {
-            DeliverPendingSignals();
-            r = 0;
-        }
         relock();
         mx->holder.store(GuestTid(), std::memory_order_relaxed);
         mx->depth.store(held_depth > 0 ? held_depth : 1, std::memory_order_relaxed);
@@ -11751,6 +11857,35 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
     return va;
 }
 
+#ifdef __ANDROID__
+// An ALooper callback that runs the guest's: its 1 keeps the source, 0
+// removes it. Inside the guest's own poll (this thread is in a guest call)
+// it runs nested, as a comparator does; on a thread the framework polls (a
+// looper of the UI thread) through g_call_guest_hook, which binds the
+// thread to the guest first. A callback that does not return cleanly halts
+// the guest thread that polled, LOUD.
+int Runtime::RunGuestLooperCb(int fd, int events, void* data) {
+    auto* c = static_cast<GuestLooperCb*>(data);
+    const std::uint32_t args[3] = {static_cast<std::uint32_t>(fd), static_cast<std::uint32_t>(events), c->data};
+    if (t_hot.active_jit && t_rt == c->rt) {
+        std::int32_t out = 0;
+        if (!c->rt->RunNested(c->fn, args[0], args[1], args[2], 0, nullptr, out)) {
+            std::printf("[ndk] LOUD looper callback %08x did not return cleanly -- halting\n", c->fn);
+            c->rt->HaltGuest();
+            return 0;
+        }
+        return out;
+    }
+    if (!g_call_guest_hook) {
+        std::printf("[ndk] LOUD looper callback %08x on a host thread: no guest call -- source removed\n",
+                    c->fn);
+        return 0;
+    }
+    return static_cast<int>(static_cast<std::uint32_t>(
+        g_call_guest_hook("looper callback", c->fn, {args[0], args[1], args[2]})));
+}
+#endif
+
 bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_t, 16>& regs) {
     using I = ImportId;
     const bool ours = n.compare(0, 7, "ALooper") == 0 || n.compare(0, 11, "AInputQueue") == 0 ||
@@ -11804,10 +11939,30 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         void* data = nullptr;
         // pollAll is pollOnce repeated while it only ran callbacks (the
         // NDK no longer declares pollAll itself).
+        // Each pollOnce after a callback waits only what is left of the
+        // timeout, as Looper::pollAll does: a source firing more often than
+        // the timeout must not keep the call from timing out.
+        const int timeout = static_cast<int>(a0);
+        struct timespec start {};
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        int left = timeout;
         int r = 0;
-        do {
-            r = ::ALooper_pollOnce(static_cast<int>(a0), &fd, &events, &data);
-        } while (id == I::ALooper_pollAll_ && r == ALOOPER_POLL_CALLBACK);
+        for (;;) {
+            r = ::ALooper_pollOnce(left, &fd, &events, &data);
+            if (id != I::ALooper_pollAll_ || r != ALOOPER_POLL_CALLBACK) {
+                break;
+            }
+            if (timeout > 0) {
+                struct timespec now {};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                const long long ms = (now.tv_sec - start.tv_sec) * 1000LL + (now.tv_nsec - start.tv_nsec) / 1000000;
+                if (ms >= timeout) {
+                    r = ALOOPER_POLL_TIMEOUT;
+                    break;
+                }
+                left = timeout - static_cast<int>(ms);
+            }
+        }
         out32(a1, static_cast<std::uint32_t>(fd));
         out32(a2, static_cast<std::uint32_t>(events));
         out32(a3, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(data)));
@@ -11816,19 +11971,24 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
     }
     // --- input queue
     if (id == I::AInputQueue_attachLooper_) {
-        // (queue, looper, ident, callback, data@[sp]). A guest callback
-        // cannot be a host ALooper callback: the queue is polled by ident.
+        // (queue, looper, ident, callback, data@[sp]). A guest callback runs
+        // through a host one (RunGuestLooperCb), as for a sensor queue.
         std::uint32_t data = 0;
         if (CheckRange(regs[13], 4, false)) {
             std::memcpy(&data, H(regs[13]), 4);
         }
-        if (a3 != 0) {
-            std::printf("[ndk] LOUD AInputQueue_attachLooper with a callback (%08x): polled by "
-                        "ident %d instead\n", a3, static_cast<int>(a2));
-        }
         auto* q = static_cast<AInputQueue*>(PtrOf(a0));
         auto* l = static_cast<ALooper*>(PtrOf(a1));
-        if (q && l) {
+        if (q && l && a3) {
+            auto ctx = std::make_unique<GuestLooperCb>(GuestLooperCb{this, a3, data});
+            ::AInputQueue_attachLooper(q, l, static_cast<int>(a2), &Runtime::RunGuestLooperCb, ctx.get());
+            std::lock_guard<std::mutex> lk(sensor_mu_);
+            auto& slot = input_cbs_[q];
+            if (slot) {
+                looper_cbs_done_.push_back(std::move(slot));  // attached again: the old may still run
+            }
+            slot = std::move(ctx);
+        } else if (q && l) {
             ::AInputQueue_attachLooper(q, l, static_cast<int>(a2), nullptr,
                                        reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)));
         }
@@ -11838,6 +11998,12 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
     if (id == I::AInputQueue_detachLooper_) {
         if (auto* q = static_cast<AInputQueue*>(PtrOf(a0))) {
             ::AInputQueue_detachLooper(q);
+            std::lock_guard<std::mutex> lk(sensor_mu_);
+            const auto it = input_cbs_.find(q);
+            if (it != input_cbs_.end()) {
+                looper_cbs_done_.push_back(std::move(it->second));
+                input_cbs_.erase(it);
+            }
         }
         RetVoid(regs);
         return true;
@@ -11993,35 +12159,77 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
                         : -22));
         return true;
     }
-    // --- sensors: none is offered (the device reads as having no sensor
-    //     of any type); the event queue itself is real and stays empty.
-    {
-        static std::atomic<bool> said{false};
-        if (!said.exchange(true)) {
-            std::printf("[ndk] sensors: none offered to the guest\n");
-        }
-    }
+    // --- sensors: the device's own, forwarded. An ASensor* is an opaque
+    //     handle; its name and vendor are guest copies made once.
+    auto sensor = [&](std::uint32_t h) { return static_cast<const ASensor*>(PtrOf(h)); };
+    auto sensor_queue = [&]() { return static_cast<ASensorEventQueue*>(PtrOf(a0)); };
     if (id == I::ASensorManager_getInstance_) {
         Ret(regs, PtrHandle(::ASensorManager_getInstance()));
         return true;
     }
     if (id == I::ASensorManager_getSensorList_) {
-        out32(a1, 0);
-        Ret(regs, 0);
+        // (manager, ASensorList* out) -> count: a guest array of handles,
+        // filled on each call. It grows when the list does (a dynamic sensor
+        // connected); a smaller array is not freed, the guest may hold it.
+        auto* m = static_cast<ASensorManager*>(PtrOf(a0));
+        ASensorList list = nullptr;
+        const int cnt = m ? ::ASensorManager_getSensorList(m, &list) : 0;
+        std::uint32_t g = 0;
+        if (cnt > 0 && list) {
+            std::lock_guard<std::mutex> l(sensor_mu_);
+            if (static_cast<std::uint32_t>(cnt) > sensor_list_cap_) {
+                const std::uint32_t grown = GuestMalloc(static_cast<std::uint32_t>(cnt) * 4);
+                if (grown) {
+                    sensor_list_guest_ = grown;
+                    sensor_list_cap_ = static_cast<std::uint32_t>(cnt);
+                } else {
+                    std::printf("[ndk] LOUD ASensorManager_getSensorList: no guest memory for %d "
+                                "sensors -- the guest gets none\n", cnt);
+                }
+            }
+            if (static_cast<std::uint32_t>(cnt) <= sensor_list_cap_) {
+                for (int i = 0; i < cnt; i++) {
+                    const std::uint32_t h = PtrHandle(const_cast<ASensor*>(list[i]));
+                    std::memcpy(H(sensor_list_guest_ + static_cast<std::uint32_t>(i) * 4), &h, 4);
+                }
+                g = sensor_list_guest_;
+            }
+        }
+        out32(a1, g);
+        Ret(regs, static_cast<std::uint32_t>(g ? cnt : 0));
+        return true;
+    }
+    if (id == I::ASensorManager_getDefaultSensor_) {
+        auto* m = static_cast<ASensorManager*>(PtrOf(a0));
+        const ASensor* s = m ? ::ASensorManager_getDefaultSensor(m, static_cast<int>(a1)) : nullptr;
+        Ret(regs, PtrHandle(const_cast<ASensor*>(s)));
         return true;
     }
     if (id == I::ASensorManager_createEventQueue_) {
-        // (manager, looper, ident, callback, data@[sp])
+        // (manager, looper, ident, callback, data@[sp]). A guest callback
+        // (int cb(int fd, int events, void* data)) is run by a host one
+        // when the looper finds events: Unity's main loop only drains the
+        // queue there, and a queue polled by ident instead stays ready, so
+        // ALooper_pollAll(0) never returns a timeout and no frame is drawn.
         std::uint32_t data = 0;
         if (CheckRange(regs[13], 4, false)) {
             std::memcpy(&data, H(regs[13]), 4);
         }
         auto* m = static_cast<ASensorManager*>(PtrOf(a0));
         auto* l = static_cast<ALooper*>(PtrOf(a1));
-        ASensorEventQueue* q = (m && l) ? ::ASensorManager_createEventQueue(
-                                              m, l, static_cast<int>(a2), nullptr,
-                                              reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)))
-                                        : nullptr;
+        ASensorEventQueue* q = nullptr;
+        if (m && l && a3) {
+            auto ctx = std::make_unique<GuestLooperCb>(GuestLooperCb{this, a3, data});
+            q = ::ASensorManager_createEventQueue(m, l, static_cast<int>(a2), &Runtime::RunGuestLooperCb,
+                                                  ctx.get());
+            if (q) {
+                std::lock_guard<std::mutex> lk(sensor_mu_);
+                sensor_cbs_[q] = std::move(ctx);
+            }
+        } else if (m && l) {
+            q = ::ASensorManager_createEventQueue(m, l, static_cast<int>(a2), nullptr,
+                                                  reinterpret_cast<void*>(static_cast<std::uintptr_t>(data)));
+        }
         Ret(regs, PtrHandle(q));
         return true;
     }
@@ -12029,18 +12237,104 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         auto* m = static_cast<ASensorManager*>(PtrOf(a0));
         auto* q = static_cast<ASensorEventQueue*>(PtrOf(a1));
         const int r = (m && q) ? ::ASensorManager_destroyEventQueue(m, q) : -22;
-        DropHandle(a1);
+        if (q) {
+            // The callback may be running (the guest destroys its queue
+            // from it): its context is kept, not freed.
+            std::lock_guard<std::mutex> lk(sensor_mu_);
+            const auto it = sensor_cbs_.find(q);
+            if (it != sensor_cbs_.end()) {
+                looper_cbs_done_.push_back(std::move(it->second));
+                sensor_cbs_.erase(it);
+            }
+        }
+        // The handle is not given back for reuse: a callback still running
+        // may use it, and it must not name another host object by then.
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
-    if (id == I::ASensorEventQueue_hasEvents_ || id == I::ASensorEventQueue_getEvents_ ||
-        id == I::ASensorManager_getDefaultSensor_) {
-        Ret(regs, 0);  // no sensor: no events
+    if (id == I::ASensorEventQueue_hasEvents_) {
+        auto* q = sensor_queue();
+        Ret(regs, static_cast<std::uint32_t>(q ? ::ASensorEventQueue_hasEvents(q) : -22));
         return true;
     }
-    // enable/disable/setEventRate on a sensor the guest cannot have, and
-    // the ASensor_get* accessors of one.
-    Ret(regs, n.compare(0, 8, "ASensor_") == 0 ? 0u : static_cast<std::uint32_t>(-22));
+    if (id == I::ASensorEventQueue_getEvents_) {
+        // (queue, ASensorEvent* events, size_t count) -> count read, into
+        // the guest's array itself: the struct is 104 bytes with the same
+        // layout on ARM32 (AAPCS32 aligns its int64 timestamp to 8; the NDK's
+        // ADynamicSensorEvent is two int32s, no pointer).
+        static_assert(sizeof(ASensorEvent) == 104, "ASensorEvent layout");
+        static_assert(sizeof(ADynamicSensorEvent) == 8, "ADynamicSensorEvent layout");
+        auto* q = sensor_queue();
+        const std::uint64_t bytes = std::uint64_t(a2) * 104;
+        if (!q || (a2 && (bytes > 0xFFFFFFFFu || !CheckRange(a1, static_cast<std::uint32_t>(bytes), true)))) {
+            Ret(regs, static_cast<std::uint32_t>(-22));
+            return true;
+        }
+        const ssize_t got = a2 ? ::ASensorEventQueue_getEvents(q, reinterpret_cast<ASensorEvent*>(H(a1)), a2) : 0;
+        Ret(regs, static_cast<std::uint32_t>(got));
+        return true;
+    }
+    if (id == I::ASensorEventQueue_enableSensor_ || id == I::ASensorEventQueue_disableSensor_) {
+        auto* q = sensor_queue();
+        const ASensor* s = sensor(a1);
+        int r = -22;
+        if (q && s) {
+            r = id == I::ASensorEventQueue_enableSensor_ ? ::ASensorEventQueue_enableSensor(q, s)
+                                                      : ::ASensorEventQueue_disableSensor(q, s);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (id == I::ASensorEventQueue_setEventRate_) {
+        auto* q = sensor_queue();
+        const ASensor* s = sensor(a1);
+        const int r = (q && s) ? ::ASensorEventQueue_setEventRate(q, s, static_cast<int32_t>(a2)) : -22;
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (id == I::ASensor_getName_ || id == I::ASensor_getVendor_) {
+        const ASensor* s = sensor(a0);
+        const bool name = id == I::ASensor_getName_;
+        std::uint32_t g = 0;
+        if (s) {
+            std::lock_guard<std::mutex> l(sensor_mu_);
+            auto& cache = name ? sensor_names_ : sensor_vendors_;
+            const auto it = cache.find(a0);
+            if (it != cache.end()) {
+                g = it->second;
+            } else {
+                const char* t = name ? ::ASensor_getName(s) : ::ASensor_getVendor(s);
+                const std::size_t len = t ? std::strlen(t) : 0;
+                g = GuestMalloc(static_cast<std::uint32_t>(len + 1));
+                if (g) {
+                    std::memcpy(H(g), t ? t : "", len + 1);
+                    cache[a0] = g;
+                } else {
+                    std::printf("[ndk] LOUD %s: no guest memory -- the guest gets NULL\n", n.c_str());
+                }
+            }
+        }
+        Ret(regs, g);
+        return true;
+    }
+    if (id == I::ASensor_getType_ || id == I::ASensor_getMinDelay_) {
+        const ASensor* s = sensor(a0);
+        int r = 0;
+        if (s) {
+            r = id == I::ASensor_getType_ ? ::ASensor_getType(s) : ::ASensor_getMinDelay(s);
+        }
+        Ret(regs, static_cast<std::uint32_t>(r));
+        return true;
+    }
+    if (id == I::ASensor_getResolution_) {
+        const ASensor* s = sensor(a0);
+        ret_f(s ? ::ASensor_getResolution(s) : 0.0f);
+        return true;
+    }
+    // Not forwarded (a pointer for some, a status for others): 0, as a
+    // device without that sensor answers the accessors.
+    std::printf("[ndk] LOUD %s: not forwarded -- the guest gets 0\n", n.c_str());
+    Ret(regs, 0);
     return true;
 #endif
 }
@@ -12389,9 +12683,11 @@ bool Runtime::DeliverPendingSignals() {
         if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
             continue;  // SIG_IGN, or ignored by default
         }
+
         if (act.handler == 0) {
             std::printf("[signal] FATAL signal %u with the default action -- halting\n", sig);
             HaltGuest();
+            NoteWaitEnding();
             return false;
         }
         Dynarmic::A32::Jit* cur = t_hot.active_jit;
@@ -12413,6 +12709,7 @@ bool Runtime::DeliverPendingSignals() {
             std::printf("[signal] LOUD no room for a signal frame below sp=%08x -- halting\n",
                         regs[13]);
             HaltGuest();
+            NoteWaitEnding();
             return false;
         }
         std::memset(H(uc), 0, kUc + kInfo);
@@ -12444,6 +12741,12 @@ bool Runtime::DeliverPendingSignals() {
         const bool ok = RunNestedOnStack(act.handler, sig, info, uc, uc & ~7u, saved);
         t_proxy_regs = proxy_regs;
         t_sig->blocked.store(old_blocked, std::memory_order_relaxed);
+        // Counted once the handler is over: a wait of this thread then sees
+        // whether it ends (SigEndsWait), whoever ran the handler.
+        if (!(act.flags & kSaRestart)) {
+            t_sig->handlers_run_nonrestart.fetch_add(1, std::memory_order_acq_rel);
+        }
+        t_sig->handlers_run.fetch_add(1, std::memory_order_acq_rel);
         if (!ok) {
             std::printf("[signal] LOUD handler %08x for signal %u did not return (hr=%d) -- "
                         "halting\n", act.handler, sig, cb_last_hr_);
@@ -14849,6 +15152,7 @@ void Runtime::SetFilesDir(const std::string& guest_prefix, const std::string& ho
     if (gp.filename() == "files" && gp.has_parent_path()) {
         pkg = gp.parent_path().filename().string();
     }
+    own_pkg_ = pkg;
     if (!pkg.empty() && !host_base.empty()) {
         ext_tail_ = "/Android/data/" + pkg;
         ext_hostbase_ = std::filesystem::path(host_base).parent_path().string() + "/ext";
@@ -17867,36 +18171,54 @@ std::string Runtime::MapGuestPathString(const std::string& g) {
             !files_hostbase_.empty()) {
             return files_hostbase_ + g.substr(files_prefix_.size());
         }
-        // Any guest path shaped /data/{data,user/<N>}/<pkg>/files<rest> is
-        // this app's files dir. We host exactly one guest, so the package
-        // component need not be known here: the offline harness has no
-        // cmdline package (its SetFilesDir prefix is a caller choice), and
-        // on a real device the guest can only reach its own package's dir.
-        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                         g.compare(0, 11, "/data/user/") == 0)) {
-            const std::size_t at = g.find("/files");
-            if (at != std::string::npos && (g.size() == at + 6 || g[at + 6] == '/')) {
-                return files_hostbase_ + g.substr(at + 6);
+        // The app's data dir as a device names it: /data/data/<pkg><rest> or
+        // /data/user/<N>/<pkg><rest>, for this app's package only (another
+        // app's stays unmapped; with no package known, as in a harness run
+        // with a prefix of another shape, any). <pkg>/files<rest> is the
+        // files dir; anything else under <pkg> is parent(files host), where
+        // breakpad (HockeyApp) puts its minidumps and Unity's getCacheDir
+        // points. The package root and the directories above it exist on a
+        // device: Unity lstat's each one, from its cache dir up, before it
+        // gives temporaryCachePath to C# (empty if one is missing; SpongeBob
+        // Doodle Jump then never loads a level). Each directory above the
+        // root is one empty host directory; /data/app stays unmapped.
+        if (!files_hostbase_.empty() && (g == "/data" || g.compare(0, 6, "/data/") == 0)) {
+            std::string d = g;
+            while (d.size() > 1 && d.back() == '/') {
+                d.pop_back();
             }
-        }
-        // Package data root: breakpad (HockeyApp) builds its minidump path
-        // as dirname(FILES_PATH)/hockeyapp_errors_XXXXXX, i.e.
-        // /data/data/<pkg>/... — one level ABOVE the files dir, so the
-        // /files rule above does not match. Map it to parent(files host).
-        if (!files_hostbase_.empty() && (g.compare(0, 11, "/data/data/") == 0 ||
-                                         g.compare(0, 11, "/data/user/") == 0)) {
-            std::size_t pk = std::string::npos;
-            if (g.compare(0, 11, "/data/data/") == 0) {
-                pk = g.find('/', 11);
-            } else {
-                const std::size_t u = g.find('/', 11);  // after the user id
-                if (u != std::string::npos) {
-                    pk = g.find('/', u + 1);  // after the package
+            // Components after "/data", and where each one ends in g.
+            std::vector<std::string> parts;
+            std::vector<std::size_t> ends;
+            bool ok = true;
+            for (std::size_t i = 6; i <= d.size() && d.size() > 5;) {
+                const std::size_t j = std::min(d.find('/', i), d.size());
+                if (j == i) {
+                    ok = false;  // an empty component ("//")
+                    break;
                 }
+                parts.push_back(d.substr(i, j - i));
+                ends.push_back(j);
+                i = j + 1;
             }
-            if (pk != std::string::npos) {
-                return std::filesystem::path(files_hostbase_).parent_path().string() +
-                       g.substr(pk);
+            const bool data = ok && !parts.empty() && parts[0] == "data";
+            const bool user = ok && !parts.empty() && parts[0] == "user";
+            const std::size_t pk = data ? 1 : user ? 2 : 0;  // the package's index
+            if ((data || user) && parts.size() > pk && (own_pkg_.empty() || parts[pk] == own_pkg_)) {
+                const std::string rest = g.substr(ends[pk]);  // "", "/" or "/..."
+                if (rest.compare(0, 6, "/files") == 0 && (rest.size() == 6 || rest[6] == '/')) {
+                    return files_hostbase_ + rest.substr(6);
+                }
+                return std::filesystem::path(files_hostbase_).parent_path().string() + rest;
+            }
+            if (ok && (parts.empty() || ((data || user) && parts.size() == 1) || (user && parts.size() == 2))) {
+                const std::string base =
+                    std::filesystem::path(files_hostbase_).parent_path().string() + "/data_parent";
+                std::call_once(data_parent_made_, [&base] {
+                    std::error_code ec;
+                    std::filesystem::create_directories(base, ec);
+                });
+                return base;
             }
         }
         // The app's own external dir under any storage root

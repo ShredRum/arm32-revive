@@ -41,9 +41,12 @@ def smali_natives(game):
     for f in glob.glob(f'games/{game}/work/apk_prod/smali*/**/*.smali', recursive=True):
         cls = re.sub(r'^.*?/smali[^/]*/', '', f).replace('/', '_').replace('.smali', '')
         for ln in open(f, errors='ignore'):
-            m = re.search(r'\.method\s+(.*?)\s+native\s+(\w+)\((.*?)\)(.)', ln)
+            # A package-private native has no flag before "native"
+            # (FMOD's `.method native fmodProcessMicData(...)`).
+            m = re.search(r'\.method\s+(?:(.*?)\s+)?native\s+(\w+)\((.*?)\)(.)', ln)
             if m:
                 flags, meth, args, ret = m.groups()
+                flags = flags or ''
                 smali_nat.setdefault(meth, {})[cls] = (ret, 'static' in flags)
     return smali_nat
 

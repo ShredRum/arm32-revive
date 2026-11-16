@@ -1673,6 +1673,19 @@ static bool Boot(JavaVM* vm) {
     g_rt->ProtectRelro(*g_mod);
     g_rt->SetFilesDir(GuestFilesDir(), g_files);
     g_rt->SetApkPath(g_apk);
+    // Mono (Unity titles) turns a NULL dereference in managed code into a
+    // NullReferenceException through its SIGSEGV handler. The host does not
+    // deliver faults to guest signal handlers: a fault halts the guest LOUD
+    // (AGENTS.md). Mono's own option makes it test for NULL in the code it
+    // generates and throw the same exception without a signal, so a C#
+    // try/catch sees what it would see on a device. Spongebob Doodle Jump
+    // hit this at its first proxy call (2026-11-16).
+    for (const GuestLib& gl : multi) {
+        if (gl.name == "libmono.so" && g_rt->GuestGetenv("MONO_DEBUG") == 0) {
+            g_rt->SetGuestEnv("MONO_DEBUG", "explicit-null-checks");
+            Log("mono: MONO_DEBUG=explicit-null-checks (no SIGSEGV delivery to guest handlers)");
+        }
+    }
     // Network policy (R-005): the packaging writes "offline" or "online" from
     // profile.toml into <guestlib dir>/network. Anything else, or no file:
     // offline, the safe side.

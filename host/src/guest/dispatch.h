@@ -306,6 +306,13 @@ public:
         // The HostCond this thread sleeps on in a guest cond wait (dump).
         std::atomic<const void*> wait_cv{nullptr};
         std::atomic<std::uint64_t> wait_wakes{0};  // the cond's wakes handed out when it slept
+        // Handlers run for this thread, by itself or by a proxy standing in
+        // for it: all of them, and those installed without SA_RESTART. A
+        // wait compares them with the values it started with (a nested wait
+        // in a handler or a proxy cannot hide one from it).
+        std::atomic<std::uint32_t> handlers_run{0};
+        std::atomic<std::uint32_t> handlers_run_nonrestart{0};
+        std::atomic<std::uint32_t> delivery_halts{0};  // deliveries that halted it
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
@@ -365,6 +372,29 @@ public:
     std::unordered_map<std::uint32_t, void*> ptr_rev_;
     std::vector<std::uint32_t> ptr_free_;
     std::uint32_t ptr_next_ = 0xF2000000u;
+    // Guest copies of the device's sensor list and of each sensor's name
+    // and vendor (by sensor handle), made once. sensor_mu_ also guards the
+    // looper callback contexts below.
+    std::mutex sensor_mu_;
+    std::uint32_t sensor_list_guest_ = 0;
+    std::uint32_t sensor_list_cap_ = 0;  // handles sensor_list_guest_ holds
+    std::unordered_map<std::uint32_t, std::uint32_t> sensor_names_;
+    std::unordered_map<std::uint32_t, std::uint32_t> sensor_vendors_;
+#ifdef __ANDROID__
+    // A guest ALooper callback (fn, its data) behind a host one.
+    struct GuestLooperCb {
+        Runtime* rt;
+        std::uint32_t fn;
+        std::uint32_t data;
+    };
+    static int RunGuestLooperCb(int fd, int events, void* data);
+    std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> sensor_cbs_;  // by ASensorEventQueue*
+    // Contexts of destroyed or detached queues, never freed: a looper may
+    // still run a callback it had already picked when the source went
+    // (Looper's removeFd says so). One small entry per queue ever attached.
+    std::vector<std::unique_ptr<GuestLooperCb>> looper_cbs_done_;
+    std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> input_cbs_;  // by AInputQueue*
+#endif
     // The real AAssetManager behind a guest asset manager handle.
     std::unordered_map<std::uint32_t, void*> real_asset_mgrs_;
     void SetRealAssetManager(std::uint32_t guest, void* real) {
@@ -740,6 +770,10 @@ public:
         Waiter* head = nullptr;
         Waiter* tail = nullptr;
         std::uint64_t wakes = 0;  // wakes handed out (dump)
+        // Every signal and broadcast, a sleeper or not (bionic's sequence):
+        // a wait that left the queue to run a handler sees one that came
+        // meanwhile.
+        std::uint64_t seq = 0;
         std::atomic<std::uint32_t> last_tid{0};
     };
     // Product host (apphost): bind a caller-created Jit + tid to this thread
@@ -1162,6 +1196,8 @@ private:
     bool private_sdcard_ = false;
     std::once_flag sdcard_made_;
     std::once_flag storage_parent_made_;
+    std::once_flag data_parent_made_;
+    std::string own_pkg_;  // the package of the files prefix (SetFilesDir), or ""
     struct HostFile {
         FILE* f = nullptr;
         std::uint32_t gfd = 0xFFFFFFFFu;  // guest fd bound to this FILE*
