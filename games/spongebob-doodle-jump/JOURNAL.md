@@ -100,3 +100,21 @@ ready forever: the host had dropped the callback and registered the queue by
 ident, which Unity's main loop ignores, so ALooper_pollAll(0) never timed out
 and no frame was drawn. A guest looper callback now runs through a host one
 (RunNested). The owner confirmed tilt works.
+
+## 2026-11-16: micro-freezes in play — measured, not fixed yet
+
+The owner feels micro-freezes on the phone and the sandbox (60 fps on
+average). [frames] (e893cb3) over a minute of play: 1-7 frames over 33 ms per
+10 s; GC stops every 10-20 s, 14-24 ms. HARNESS_PROF with a 35 ms threshold
+(that run only): most slow frames (40-420 ms) are Mono's JIT compiling
+methods in play: per frame up to 25k strcmp, 22k memset, 19k mutex
+lock/unlock host calls and hundreds of cacheflushes; a host call costs
+~0.6-1.1 us (natively ~20-50 ns). The rest are GC stops (tkill, sem_wait up
+to 16 ms waiting for the suspend handshake).
+
+Plan (core work, all titles gain): run the hot libc imports (memset, memcpy,
+strcmp, strlen, an uncontended mutex) in guest code without a host call, as
+tlsthunk does for pthread_getspecific; then a faster GC suspend handshake.
+Also open: the logo hang (Unity's async-read race) hit 2 boots of 3 on the
+phone; a phone log of a hung boot is still wanted. On the phone the game's
+start also closed Termux and Telegram (memory pressure?), not checked.
