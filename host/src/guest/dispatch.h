@@ -365,6 +365,22 @@ public:
     std::unordered_map<std::uint32_t, void*> ptr_rev_;
     std::vector<std::uint32_t> ptr_free_;
     std::uint32_t ptr_next_ = 0xF2000000u;
+    // Guest copies of the device's sensor list and of each sensor's name
+    // and vendor (by sensor handle), made once.
+    std::mutex sensor_mu_;
+    std::uint32_t sensor_list_guest_ = 0;
+    std::unordered_map<std::uint32_t, std::uint32_t> sensor_names_;
+    std::unordered_map<std::uint32_t, std::uint32_t> sensor_vendors_;
+#ifdef __ANDROID__
+    // A guest ALooper callback (fn, its data) behind a host one.
+    struct GuestLooperCb {
+        Runtime* rt;
+        std::uint32_t fn;
+        std::uint32_t data;
+    };
+    static int RunGuestLooperCb(int fd, int events, void* data);
+    std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> sensor_cbs_;  // by ASensorEventQueue*
+#endif
     // The real AAssetManager behind a guest asset manager handle.
     std::unordered_map<std::uint32_t, void*> real_asset_mgrs_;
     void SetRealAssetManager(std::uint32_t guest, void* real) {
