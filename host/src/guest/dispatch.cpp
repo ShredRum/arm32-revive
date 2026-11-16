@@ -11859,16 +11859,30 @@ std::uint32_t Runtime::RuntimeImport(const std::string& name) {
 
 #ifdef __ANDROID__
 // An ALooper callback that runs the guest's: its 1 keeps the source, 0
-// removes it (a guest that did not return cleanly removes it too).
+// removes it. Inside the guest's own poll (this thread is in a guest call)
+// it runs nested, as a comparator does; on a thread the framework polls (a
+// looper of the UI thread) through g_call_guest_hook, which binds the
+// thread to the guest first. A callback that does not return cleanly halts
+// the guest thread that polled, LOUD.
 int Runtime::RunGuestLooperCb(int fd, int events, void* data) {
     auto* c = static_cast<GuestLooperCb*>(data);
-    std::int32_t out = 0;
-    if (!c->rt->RunNested(c->fn, static_cast<std::uint32_t>(fd), static_cast<std::uint32_t>(events),
-                          c->data, 0, nullptr, out)) {
-        std::printf("[ndk] LOUD looper callback %08x did not return cleanly -- source removed\n", c->fn);
+    const std::uint32_t args[3] = {static_cast<std::uint32_t>(fd), static_cast<std::uint32_t>(events), c->data};
+    if (t_hot.active_jit && t_rt == c->rt) {
+        std::int32_t out = 0;
+        if (!c->rt->RunNested(c->fn, args[0], args[1], args[2], 0, nullptr, out)) {
+            std::printf("[ndk] LOUD looper callback %08x did not return cleanly -- halting\n", c->fn);
+            c->rt->HaltGuest();
+            return 0;
+        }
+        return out;
+    }
+    if (!g_call_guest_hook) {
+        std::printf("[ndk] LOUD looper callback %08x on a host thread: no guest call -- source removed\n",
+                    c->fn);
         return 0;
     }
-    return out;
+    return static_cast<int>(static_cast<std::uint32_t>(
+        g_call_guest_hook("looper callback", c->fn, {args[0], args[1], args[2]})));
 }
 #endif
 
@@ -11925,10 +11939,30 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         void* data = nullptr;
         // pollAll is pollOnce repeated while it only ran callbacks (the
         // NDK no longer declares pollAll itself).
+        // Each pollOnce after a callback waits only what is left of the
+        // timeout, as Looper::pollAll does: a source firing more often than
+        // the timeout must not keep the call from timing out.
+        const int timeout = static_cast<int>(a0);
+        struct timespec start {};
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        int left = timeout;
         int r = 0;
-        do {
-            r = ::ALooper_pollOnce(static_cast<int>(a0), &fd, &events, &data);
-        } while (id == I::ALooper_pollAll_ && r == ALOOPER_POLL_CALLBACK);
+        for (;;) {
+            r = ::ALooper_pollOnce(left, &fd, &events, &data);
+            if (id != I::ALooper_pollAll_ || r != ALOOPER_POLL_CALLBACK) {
+                break;
+            }
+            if (timeout > 0) {
+                struct timespec now {};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                const long long ms = (now.tv_sec - start.tv_sec) * 1000LL + (now.tv_nsec - start.tv_nsec) / 1000000;
+                if (ms >= timeout) {
+                    r = ALOOPER_POLL_TIMEOUT;
+                    break;
+                }
+                left = timeout - static_cast<int>(ms);
+            }
+        }
         out32(a1, static_cast<std::uint32_t>(fd));
         out32(a2, static_cast<std::uint32_t>(events));
         out32(a3, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(data)));
@@ -12135,25 +12169,31 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
     }
     if (id == I::ASensorManager_getSensorList_) {
         // (manager, ASensorList* out) -> count: a guest array of handles,
-        // built once (the device's sensor list does not change).
+        // filled on each call. It grows when the list does (a dynamic sensor
+        // connected); a smaller array is not freed, the guest may hold it.
         auto* m = static_cast<ASensorManager*>(PtrOf(a0));
         ASensorList list = nullptr;
         const int cnt = m ? ::ASensorManager_getSensorList(m, &list) : 0;
         std::uint32_t g = 0;
-        {
+        if (cnt > 0 && list) {
             std::lock_guard<std::mutex> l(sensor_mu_);
-            if (!sensor_list_guest_ && cnt > 0 && list) {
-                sensor_list_guest_ = GuestMalloc(static_cast<std::uint32_t>(cnt) * 4);
-                if (!sensor_list_guest_) {
+            if (static_cast<std::uint32_t>(cnt) > sensor_list_cap_) {
+                const std::uint32_t grown = GuestMalloc(static_cast<std::uint32_t>(cnt) * 4);
+                if (grown) {
+                    sensor_list_guest_ = grown;
+                    sensor_list_cap_ = static_cast<std::uint32_t>(cnt);
+                } else {
                     std::printf("[ndk] LOUD ASensorManager_getSensorList: no guest memory for %d "
                                 "sensors -- the guest gets none\n", cnt);
                 }
-                for (int i = 0; sensor_list_guest_ && i < cnt; i++) {
+            }
+            if (static_cast<std::uint32_t>(cnt) <= sensor_list_cap_) {
+                for (int i = 0; i < cnt; i++) {
                     const std::uint32_t h = PtrHandle(const_cast<ASensor*>(list[i]));
                     std::memcpy(H(sensor_list_guest_ + static_cast<std::uint32_t>(i) * 4), &h, 4);
                 }
+                g = sensor_list_guest_;
             }
-            g = sensor_list_guest_;
         }
         out32(a1, g);
         Ret(regs, static_cast<std::uint32_t>(g ? cnt : 0));
@@ -12207,7 +12247,8 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
                 sensor_cbs_.erase(it);
             }
         }
-        DropHandle(a1);
+        // The handle is not given back for reuse: a callback still running
+        // may use it, and it must not name another host object by then.
         Ret(regs, static_cast<std::uint32_t>(r));
         return true;
     }
@@ -12217,21 +12258,19 @@ bool Runtime::NdkCall(ImportId id, const std::string& n, std::array<std::uint32_
         return true;
     }
     if (id == I::ASensorEventQueue_getEvents_) {
-        // (queue, ASensorEvent* events, size_t count) -> count read. The
-        // struct is 104 bytes with the same layout on ARM32 (AAPCS32 aligns
-        // its int64 timestamp to 8), so events are copied as they are.
+        // (queue, ASensorEvent* events, size_t count) -> count read, into
+        // the guest's array itself: the struct is 104 bytes with the same
+        // layout on ARM32 (AAPCS32 aligns its int64 timestamp to 8; the NDK's
+        // ADynamicSensorEvent is two int32s, no pointer).
         static_assert(sizeof(ASensorEvent) == 104, "ASensorEvent layout");
+        static_assert(sizeof(ADynamicSensorEvent) == 8, "ADynamicSensorEvent layout");
         auto* q = sensor_queue();
-        const std::uint32_t want = std::min<std::uint32_t>(a2, 64);
-        if (!q || (want && !CheckRange(a1, want * 104, true))) {
+        const std::uint64_t bytes = std::uint64_t(a2) * 104;
+        if (!q || (a2 && (bytes > 0xFFFFFFFFu || !CheckRange(a1, static_cast<std::uint32_t>(bytes), true)))) {
             Ret(regs, static_cast<std::uint32_t>(-22));
             return true;
         }
-        ASensorEvent buf[64];
-        const ssize_t got = want ? ::ASensorEventQueue_getEvents(q, buf, want) : 0;
-        if (got > 0) {
-            std::memcpy(H(a1), buf, static_cast<std::size_t>(got) * 104);
-        }
+        const ssize_t got = a2 ? ::ASensorEventQueue_getEvents(q, reinterpret_cast<ASensorEvent*>(H(a1)), a2) : 0;
         Ret(regs, static_cast<std::uint32_t>(got));
         return true;
     }

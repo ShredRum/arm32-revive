@@ -377,6 +377,7 @@ public:
     // looper callback contexts below.
     std::mutex sensor_mu_;
     std::uint32_t sensor_list_guest_ = 0;
+    std::uint32_t sensor_list_cap_ = 0;  // handles sensor_list_guest_ holds
     std::unordered_map<std::uint32_t, std::uint32_t> sensor_names_;
     std::unordered_map<std::uint32_t, std::uint32_t> sensor_vendors_;
 #ifdef __ANDROID__
@@ -388,8 +389,9 @@ public:
     };
     static int RunGuestLooperCb(int fd, int events, void* data);
     std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> sensor_cbs_;  // by ASensorEventQueue*
-    // Contexts of destroyed queues: a callback still running keeps using its
-    // own (a handful per process, never freed).
+    // Contexts of destroyed or detached queues, never freed: a looper may
+    // still run a callback it had already picked when the source went
+    // (Looper's removeFd says so). One small entry per queue ever attached.
     std::vector<std::unique_ptr<GuestLooperCb>> looper_cbs_done_;
     std::unordered_map<void*, std::unique_ptr<GuestLooperCb>> input_cbs_;  // by AInputQueue*
 #endif
