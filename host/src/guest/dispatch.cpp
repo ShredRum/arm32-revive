@@ -14307,12 +14307,10 @@ std::uint32_t Runtime::CookieForReflected(std::uint32_t member, bool field) {
     re->ExceptionClear();
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::uint32_t c = 0;
-    if (!JniAllocObjectHandle(&c)) {
+    if (!JniMemberCookie(text, &c)) {
         std::printf("[jni] FromReflected %08x: cannot describe it (step 5)\n", member);
         return 0;
     }
-    std::memcpy(H(c), &c, 4);
-    jni_methods_[c] = text;
     {
         static std::atomic<int> said{0};
         if (said.fetch_add(1) < 60) {
@@ -15253,6 +15251,21 @@ bool JniObjectHandleFits(std::uint32_t next, std::uint32_t* out) {
     if (out) {
         *out = static_cast<std::uint32_t>(aligned);
     }
+    return true;
+}
+
+bool Runtime::JniMemberCookie(const std::string& text, std::uint32_t* out) {
+    const auto it = jni_member_cookies_.find(text);
+    if (it != jni_member_cookies_.end()) {
+        *out = it->second;
+        return true;
+    }
+    if (!JniAllocObjectHandle(out)) {
+        return false;
+    }
+    std::memcpy(H(*out), out, 4);  // self-marked handle word
+    jni_methods_[*out] = text;
+    jni_member_cookies_.emplace(text, *out);
     return true;
 }
 
@@ -17457,22 +17470,20 @@ void Runtime::CallJni(std::uint32_t fn, Regs& regs) {
         if (cname.empty()) {
             cname = "?";
         }
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        std::uint32_t c = 0;
-        if (!JniAllocObjectHandle(&c)) {
-            return;
-        }
-        std::memcpy(H(c), &c, 4);
         // Methods: "Cls.name(sig)ret" (the signature starts with '(').
         // Fields: "field Cls.name:sig" -- a field descriptor follows the name
         // with no delimiter of its own, and ':' can appear in neither a Java
         // identifier nor a type descriptor.
         const bool is_field = (fn == 94 || fn == 144);
-        jni_methods_[c] =
-            (fn == 33 ? std::string("")
-                      : fn == 113 ? std::string("static ")
-                                  : std::string("field ")) +
-            cname + "." + mname + (is_field ? ":" : "") + msig;
+        const std::string text = (fn == 33 ? std::string("")
+                                            : fn == 113 ? std::string("static ")
+                                                        : std::string("field ")) +
+                                 cname + "." + mname + (is_field ? ":" : "") + msig;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::uint32_t c = 0;
+        if (!JniMemberCookie(text, &c)) {
+            return;
+        }
         if (DiagOn()) {
             std::printf("[jni] Get%s%sID %s -> %08x\n", (fn == 33 || fn == 94) ? "" : "Static",
                         (fn == 33 || fn == 113) ? "Method" : "Field", jni_methods_[c].c_str(), c);

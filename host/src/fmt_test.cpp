@@ -1858,6 +1858,36 @@ int main() {
         }
     }
 
+    // --- Method and field IDs are one per member, as a JVM's: the Rovio
+    //     engine asks GetStaticMethodID again for every file it checks, and
+    //     a new handle per call once used up the arena (Star Wars II 2.1).
+    {
+        const std::uint32_t s = kScratch + 0x800;
+        auto put_str = [&](std::uint32_t at, const char* t) { std::memcpy(rt.H(at), t, std::strlen(t) + 1); };
+        put_str(s, "com/rovio/fusion/FileReader");
+        put_str(s + 0x40, "exists");
+        put_str(s + 0x60, "(Ljava/lang/String;)Z");
+        put_str(s + 0x80, "(Ljava/lang/String;)[B");
+        const std::uint32_t fc[4] = {0, s, 0, 0};
+        const std::uint32_t cls = abr::RuntimeTestAccess::Jni(rt, 6, fc);  // FindClass
+        const std::uint32_t q[4] = {0, cls, s + 0x40, s + 0x60};
+        const std::uint32_t first = abr::RuntimeTestAccess::Jni(rt, 113, q);  // GetStaticMethodID
+        std::uint32_t last = first;
+        for (int i = 0; i < 20000; i++) {  // more than the arena's 16384 handles
+            last = abr::RuntimeTestAccess::Jni(rt, 113, q);
+        }
+        Expect("GetStaticMethodID: the same member, the same ID (20000 asks)",
+               std::to_string(first != 0 && last == first), "1");
+        const std::uint32_t q2[4] = {0, cls, s + 0x40, s + 0x80};
+        Expect("GetStaticMethodID: another signature, another ID",
+               std::to_string(abr::RuntimeTestAccess::Jni(rt, 113, q2) != first), "1");
+        Expect("GetMethodID (instance) of the same name/sig is another ID",
+               std::to_string(abr::RuntimeTestAccess::Jni(rt, 33, q) != first), "1");
+        const std::uint32_t f1 = abr::RuntimeTestAccess::Jni(rt, 94, q);
+        Expect("GetFieldID: the same member, the same ID",
+               std::to_string(f1 != 0 && abr::RuntimeTestAccess::Jni(rt, 94, q) == f1), "1");
+    }
+
     // --- GetStringUTFChars: a mock jstring returns its own handle and
     //     ReleaseStringUTFChars must not remove it from jni_strings_. A
     //     tracked real-wrapped guest copy is freed and erased on Release.

@@ -1180,6 +1180,13 @@ private:
     // Allocate one aligned 4-byte object/class/method handle. Caller holds
     // mutex_. Returns false after LOUD-halting; callers must not write then.
     bool JniAllocObjectHandle(std::uint32_t* out);
+    // The method/field cookie for `text` ("Cls.name(sig)ret", "static ...",
+    // "field Cls.name:sig"): one per member for the process, as a JVM's
+    // jmethodID/jfieldID. The Rovio engine asks again on every file it
+    // checks or reads, which once used up the handle arena (Star Wars II
+    // 2.1). Caller holds mutex_; false after LOUD-halting.
+    bool JniMemberCookie(const std::string& text, std::uint32_t* out);
+    std::unordered_map<std::string, std::uint32_t> jni_member_cookies_;  // text -> cookie
   public:
     std::unordered_map<std::uint32_t, std::string> jni_classes_;  // handle -> name
     std::unordered_map<std::uint32_t, std::string> jni_methods_;  // cookie -> desc
