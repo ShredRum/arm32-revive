@@ -7,7 +7,7 @@ New phones (Pixel 7 and later, recent Galaxy, most 2024+ devices) can no
 longer run `armeabi-v7a` apps: the CPU and the system only run 64-bit code.
 That removed a whole era of games, including the original Angry Birds
 series, which their publisher withdrew and never rebuilt. The only
-alternative was a paid subscription "virtual phone". ab-port makes the
+alternative was a paid subscription "virtual phone". arm32-revive makes the
 original APKs run again, natively and offline, as ordinary installed apps.
 
 (The working name of the project, still used inside the code and scripts, is
