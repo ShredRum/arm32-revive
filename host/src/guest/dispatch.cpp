@@ -129,11 +129,12 @@ thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
-// Set by DeliverPendingSignals when a handler it ran lacks SA_RESTART. A
-// blocking call the kernel restarts after an SA_RESTART handler (a futex
-// wait: bionic's mutexes, condition variables and semaphores) goes on
-// waiting instead of returning; one interrupted by any other handler returns
-// as it does on a device (EINTR, or 0 for a condition wait).
+// Set by DeliverPendingSignals when a handler it ran lacks SA_RESTART. An
+// untimed futex wait (bionic's mutexes, condition variables, sem_wait) is
+// restarted by the kernel after an SA_RESTART handler (ERESTARTSYS), so the
+// host's goes on waiting; after any other handler it returns as on a device
+// (EINTR, or 0 for a condition wait). A timed futex wait is never restarted
+// after a handler (ERESTART_RESTARTBLOCK): those return whatever the flag.
 thread_local bool t_sig_interrupts = false;
 // The SA_RESTART bit of the guest's struct sigaction (arm32 Linux).
 constexpr std::uint32_t kSaRestart = 0x10000000u;
@@ -1078,9 +1079,10 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
             std::memcpy(H(a1), &v, 4);
         }
     } else if (id == I::sem_wait_ && SignalsInUse()) {
-        // Interruptible: a handler runs between slices, then EINTR (sem_wait
-        // is never restarted after a handler, whatever SA_RESTART says) --
-        // for an app targeting 24 or later. Below that bionic waits on
+        // Interruptible: a handler runs between slices. The kernel restarts
+        // this untimed futex wait after an SA_RESTART handler; after any
+        // other one it is EINTR -- for an app targeting 24 or later. Below
+        // that bionic waits on
         // (semaphore.cpp, the target-SDK check in sem_wait), and an engine
         // built then takes a -1 for "not acquired" (Unity's Semaphore logs
         // "Failed to wait on a semaphore" and runs on without it).
@@ -1131,14 +1133,12 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
                 break;
             }
             if (SignalDeliverable()) {
-                t_sig_interrupts = false;
+                // A timed futex wait is not restarted after any handler
+                // (ERESTART_RESTARTBLOCK): bionic's sem_timedwait is EINTR.
                 DeliverPendingSignals();
-                if (t_sig_interrupts) {
-                    errno = EINTR;
-                    r = -1;
-                    break;
-                }
-                continue;  // an SA_RESTART handler: the kernel waits on
+                errno = EINTR;
+                r = -1;
+                break;
             }
             if (errno == ETIMEDOUT && !Before(slice, ts)) {
                 break;  // the caller's deadline
@@ -9392,8 +9392,9 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
     // The wait: queued under the cond's own lock BEFORE the guest mutex is
     // let go, so a wake that follows the caller's unlock reaches it. While
     // guest signals are in use it sleeps in short slices; a pending signal
-    // runs its handler, then the wait goes on (SA_RESTART) or returns 0 (as
-    // bionic's does when the futex wait is interrupted, EINTR -> 0). A
+    // runs its handler, then an untimed wait goes on (SA_RESTART) and any
+    // other returns 0 (as bionic's does when the futex wait is interrupted,
+    // EINTR -> 0). A
     // sleeper leaving without a wake (timeout, handler) leaves the queue; a
     // wake that came first is taken instead.
     auto wait = [&](const struct timespec* deadline_mono) -> int {
@@ -9466,13 +9467,13 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
                 break;  // the deadline
             }
             // A handler to run, outside the cond's lock (it may wait on
-            // this cond itself). The futex wait it interrupts is restarted
-            // by the kernel after an SA_RESTART handler (Boehm's suspend
-            // handler is one): then the wait goes on here too, unless a wake
-            // came meanwhile. A handler without SA_RESTART ends the wait
-            // with 0, as bionic's (EINTR -> 0). It used to end it always,
-            // and Unity 4.3 read that as "the background read is late" and
-            // read the APK itself at a stale position (SpongeBob's resS).
+            // this cond itself). As the kernel does with the futex wait it
+            // interrupts: an untimed one is restarted after an SA_RESTART
+            // handler (Boehm's suspend handler is one), so the wait goes on
+            // here too unless a wake came meanwhile (the restarted futex
+            // sees the sequence moved); a timed one (ERESTART_RESTARTBLOCK)
+            // and any wait under a handler without SA_RESTART end with
+            // EINTR, which bionic returns as 0.
             if (t_sig) {
                 t_sig->wait_cv.store(nullptr);
             }
@@ -9481,7 +9482,7 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
             DeliverPendingSignals();
             pthread_mutex_lock(&hc->m);
             r = 0;
-            if (t_sig_interrupts || hc->wakes != wakes_at_sleep) {
+            if (t_sig_interrupts || deadline_mono || hc->wakes != wakes_at_sleep) {
                 break;
             }
             enqueue();
