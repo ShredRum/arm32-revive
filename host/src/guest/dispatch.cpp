@@ -129,13 +129,37 @@ thread_local int t_guest_frames = 0;
 // Guest-signal state of this thread (RegisterSigThread) and its Runtime.
 thread_local std::shared_ptr<Runtime::SigThread> t_sig;
 thread_local Runtime* t_rt = nullptr;
-// Set by DeliverPendingSignals when a handler it ran lacks SA_RESTART. An
-// untimed futex wait (bionic's mutexes, condition variables, sem_wait) is
-// restarted by the kernel after an SA_RESTART handler (ERESTARTSYS), so the
-// host's goes on waiting; after any other handler it returns as on a device
-// (EINTR, or 0 for a condition wait). A timed futex wait is never restarted
-// after a handler (ERESTART_RESTARTBLOCK): those return whatever the flag.
-thread_local bool t_sig_interrupts = false;
+// What ends a guest wait interrupted by a signal, as the kernel does with the
+// futex wait under it: an untimed one is restarted after an SA_RESTART
+// handler (ERESTARTSYS) and ends after any other (EINTR, 0 for a condition
+// wait); a timed one ends after any handler (ERESTART_RESTARTBLOCK). The
+// counts are SigThread::handlers_run[_nonrestart], so a handler run by a
+// proxy or inside a nested wait counts too.
+struct SigWaitMark {
+    std::uint32_t any = 0, nonrestart = 0;
+};
+SigWaitMark SigMarkNow() {
+    SigWaitMark m;
+    if (t_sig) {
+        m.any = t_sig->handlers_run.load(std::memory_order_acquire);
+        m.nonrestart = t_sig->handlers_run_nonrestart.load(std::memory_order_acquire);
+    }
+    return m;
+}
+// True if a handler since `m` ends a wait (timed or not).
+bool SigEndsWait(const SigWaitMark& m, bool timed) {
+    if (!t_sig) {
+        return false;
+    }
+    if (t_sig->handlers_run_nonrestart.load(std::memory_order_acquire) != m.nonrestart) {
+        return true;
+    }
+    return timed && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
+}
+// True if any handler ran since `m` (a proxy may have run it meanwhile).
+bool SigRanSince(const SigWaitMark& m) {
+    return t_sig && t_sig->handlers_run.load(std::memory_order_acquire) != m.any;
+}
 // The SA_RESTART bit of the guest's struct sigaction (arm32 Linux).
 constexpr std::uint32_t kSaRestart = 0x10000000u;
 
@@ -1087,6 +1111,7 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
         // built then takes a -1 for "not acquired" (Unity's Semaphore logs
         // "Failed to wait on a semaphore" and runs on without it).
         const bool eintr = guest_target_sdk_ == 0 || guest_target_sdk_ >= 24;
+        const SigWaitMark mark = SigMarkNow();
         for (;;) {
             const struct timespec slice = RealtimeIn(kSigSliceNs);
             r = ::sem_timedwait(s.get(), &slice);
@@ -1094,13 +1119,12 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
                 break;
             }
             if (SignalDeliverable()) {
-                t_sig_interrupts = false;
                 DeliverPendingSignals();
-                if (eintr && t_sig_interrupts) {
-                    errno = EINTR;
-                    r = -1;
-                    break;
-                }
+            }
+            if (eintr && SigEndsWait(mark, false)) {
+                errno = EINTR;
+                r = -1;
+                break;
             }
         }
     } else if (id == I::sem_wait_) {
@@ -1120,6 +1144,7 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
         struct timespec ts {};
         ts.tv_sec = g[0];
         ts.tv_nsec = g[1];
+        const SigWaitMark mark = SigMarkNow();
         for (;;) {
             struct timespec slice = ts;
             if (SignalsInUse()) {
@@ -1133,9 +1158,11 @@ std::uint32_t Runtime::GuestSem(ImportId id, const std::string& n, std::uint32_t
                 break;
             }
             if (SignalDeliverable()) {
+                DeliverPendingSignals();
+            }
+            if (SigEndsWait(mark, true)) {
                 // A timed futex wait is not restarted after any handler
                 // (ERESTART_RESTARTBLOCK): bionic's sem_timedwait is EINTR.
-                DeliverPendingSignals();
                 errno = EINTR;
                 r = -1;
                 break;
@@ -9348,6 +9375,7 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         // The oldest sleeper (a broadcast: every sleeper) takes a wake; with
         // nobody asleep the wake is gone, as POSIX says.
         pthread_mutex_lock(&hc->m);
+        hc->seq++;
         if (hc->head) {
             hc->last_tid.store(GuestTid(), std::memory_order_relaxed);
         }
@@ -9415,7 +9443,8 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
         // Any wake handed out after this point means the condition may have
         // changed: bionic's restarted futex wait sees the cond's sequence
         // move and returns, so the caller looks at its predicate again.
-        const std::uint64_t wakes_at_sleep = hc->wakes;
+        const std::uint64_t seq_at_sleep = hc->seq;
+        SigWaitMark mark = SigMarkNow();
         if (t_sig) {
             t_sig->wait_wakes.store(hc->wakes, std::memory_order_relaxed);
             t_sig->wait_cv.store(hc.get());
@@ -9453,8 +9482,8 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
                 } else {
                     pthread_cond_wait(&me.cv, &hc->m);
                 }
-                if (!me.woken && SignalDeliverable()) {
-                    signalled = true;
+                if (!me.woken && (SignalDeliverable() || SigRanSince(mark))) {
+                    signalled = true;  // a handler to run, or one a proxy ran
                     break;
                 }
             }
@@ -9478,13 +9507,15 @@ std::uint32_t Runtime::PthreadCond(ImportId id, const std::string& n, std::uint3
                 t_sig->wait_cv.store(nullptr);
             }
             pthread_mutex_unlock(&hc->m);
-            t_sig_interrupts = false;
-            DeliverPendingSignals();
+            if (SignalDeliverable()) {
+                DeliverPendingSignals();
+            }
             pthread_mutex_lock(&hc->m);
             r = 0;
-            if (t_sig_interrupts || deadline_mono || hc->wakes != wakes_at_sleep) {
+            if (SigEndsWait(mark, deadline_mono != nullptr) || hc->seq != seq_at_sleep) {
                 break;
             }
+            mark = SigMarkNow();  // SA_RESTART handlers only: the wait goes on
             enqueue();
             if (t_sig) {
                 t_sig->wait_cv.store(hc.get());
@@ -12560,9 +12591,7 @@ bool Runtime::DeliverPendingSignals() {
         if (act.handler == 1 || (act.handler == 0 && SigDefaultIgnores(sig))) {
             continue;  // SIG_IGN, or ignored by default
         }
-        if (!(act.flags & kSaRestart)) {
-            t_sig_interrupts = true;
-        }
+
         if (act.handler == 0) {
             std::printf("[signal] FATAL signal %u with the default action -- halting\n", sig);
             HaltGuest();
@@ -12618,6 +12647,12 @@ bool Runtime::DeliverPendingSignals() {
         const bool ok = RunNestedOnStack(act.handler, sig, info, uc, uc & ~7u, saved);
         t_proxy_regs = proxy_regs;
         t_sig->blocked.store(old_blocked, std::memory_order_relaxed);
+        // Counted once the handler is over: a wait of this thread then sees
+        // whether it ends (SigEndsWait), whoever ran the handler.
+        if (!(act.flags & kSaRestart)) {
+            t_sig->handlers_run_nonrestart.fetch_add(1, std::memory_order_acq_rel);
+        }
+        t_sig->handlers_run.fetch_add(1, std::memory_order_acq_rel);
         if (!ok) {
             std::printf("[signal] LOUD handler %08x for signal %u did not return (hr=%d) -- "
                         "halting\n", act.handler, sig, cb_last_hr_);

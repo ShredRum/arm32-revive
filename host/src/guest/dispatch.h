@@ -306,6 +306,12 @@ public:
         // The HostCond this thread sleeps on in a guest cond wait (dump).
         std::atomic<const void*> wait_cv{nullptr};
         std::atomic<std::uint64_t> wait_wakes{0};  // the cond's wakes handed out when it slept
+        // Handlers run for this thread, by itself or by a proxy standing in
+        // for it: all of them, and those installed without SA_RESTART. A
+        // wait compares them with the values it started with (a nested wait
+        // in a handler or a proxy cannot hide one from it).
+        std::atomic<std::uint32_t> handlers_run{0};
+        std::atomic<std::uint32_t> handlers_run_nonrestart{0};
     };
     // CallSVC: the thread leaves guest code for a host call / comes back.
     void SigEnterHostCall(const std::array<std::uint32_t, 16>& regs, std::uint32_t cpsr,
@@ -756,6 +762,10 @@ public:
         Waiter* head = nullptr;
         Waiter* tail = nullptr;
         std::uint64_t wakes = 0;  // wakes handed out (dump)
+        // Every signal and broadcast, a sleeper or not (bionic's sequence):
+        // a wait that left the queue to run a handler sees one that came
+        // meanwhile.
+        std::uint64_t seq = 0;
         std::atomic<std::uint32_t> last_tid{0};
     };
     // Product host (apphost): bind a caller-created Jit + tid to this thread
