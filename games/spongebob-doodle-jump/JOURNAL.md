@@ -56,3 +56,47 @@ Status at writing: PC fmt_test ALL OK; a 16-boot sandbox batch running.
 Also to do: 99 Bricks boot batch (same Mono; its old rare early death may be
 the same family); then a calm run to check the level load (the owner saw
 "loading" without end between batch runs, likely just the restarts).
+
+## 2026-11-16 (later): the signal theory was wrong; the real race is Unity's
+
+The batch after 1971ba5 still hung (2 of 12, 1 of 16 boots), and later
+traces showed no signal near the failure at all. 1971ba5 stays (an untimed
+futex wait is restarted after an SA_RESTART handler, so it is closer to a
+device), but it did not fix this.
+
+What happens (timestamped traces of t4/t24 freads, locks, cond ops and
+zlib calls; all removed): Unity 4.3's async file reader is one thread (t4)
+serving a queue of NativeFile requests for every stream, with ONE shared
+"done" cond. `WaitAsync` (libunity 0x396a70, NativeFile vtable +0x24) waits
+on it once, with no predicate loop, and returns the file's result (-1 if
+its read is not done). When another stream's request completes first, the
+waiting inflate thread wakes with -1 and its zip stream (Read at 0x38e3a0)
+falls back to a synchronous read at `base + r4[0x10]`, the offset of its last
+synchronous read, which async reads never advance: it re-reads chunk 1 in
+the middle of the entry and inflate fails ("invalid stored block lengths"
+etc.), forever.
+
+So it is a race in the guest; the host keeps POSIX semantics. It shows here
+because waits are long: t4 waited ~0.6-0.8 ms for the queue mutex before it
+could signal. An adaptive (spinning) guest mutex was tried and did not
+change the rate measurably (1 of 16 vs 2 of 12), so it was not kept. Not
+known yet how often a phone hits it.
+
+## 2026-11-16: endless level loading — fixed (00c8cfc)
+
+Pressing "Play" showed "loading" forever. BhvrMoviePlayer writes the intro
+movie to `Application.temporaryCachePath + "/DJSB_Intro.mp4"`; the path was
+"" ("/DJSB_Intro.mp4", IsolatedStorageException), the opening coroutine
+threw and never called back. Java's getCacheDir answered
+/data/user/0/<pkg>/cache, but Unity lstat's every directory above it first
+and the host knew neither the package root nor /data/user/0, /data/user,
+/data. They exist now (an empty stand-in above the package root).
+
+## 2026-11-16: tilt and the logo hang with sensors — fixed (f0bcd0b)
+
+The host offered no sensors, so tilt did nothing. With the device's sensors
+forwarded, Unity's sensor queue (created WITH a looper callback) stayed
+ready forever: the host had dropped the callback and registered the queue by
+ident, which Unity's main loop ignores, so ALooper_pollAll(0) never timed out
+and no frame was drawn. A guest looper callback now runs through a host one
+(RunNested). The owner confirmed tilt works.
