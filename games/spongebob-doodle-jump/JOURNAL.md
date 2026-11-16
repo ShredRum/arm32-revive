@@ -112,9 +112,34 @@ lock/unlock host calls and hundreds of cacheflushes; a host call costs
 ~0.6-1.1 us (natively ~20-50 ns). The rest are GC stops (tkill, sem_wait up
 to 16 ms waiting for the suspend handshake).
 
-Plan (core work, all titles gain): run the hot libc imports (memset, memcpy,
-strcmp, strlen, an uncontended mutex) in guest code without a host call, as
-tlsthunk does for pthread_getspecific; then a faster GC suspend handshake.
+The plan then was to run hot libc imports in guest code; measured, dropped
+(below).
 Also open: the logo hang (Unity's async-read race) hit 2 boots of 3 on the
 phone; a phone log of a hung boot is still wanted. On the phone the game's
 start also closed Termux and Telegram (memory pressure?), not checked.
+
+## 2026-11-16: micro-freezes, second measurement — libc-in-guest dropped
+
+Sandbox = the owner's phone (Android in Android on the same device).
+
+- One guest->host call (FMT_BENCH, ARM32 bench loops; experiment code not
+  kept): 30-40 ns, not 0.6-1.1 us (HARNESS_PROF's own timing inflated it).
+  Hand-written ARM32 memset/memcpy/strlen/strcmp under Dynarmic beat the host
+  call only up to ~256-512 bytes or ~16-32 characters (6-35 ns against 30-50);
+  above that the host's native code wins (64 KB memset: 5.3 us vs 0.74 us).
+  At ~70k calls in a slow frame that saves ~2 ms of 40-420 ms: not the cause.
+- Temporary Dynarmic counters (removed) over ~70 s of play: whole-cache
+  clears 0; invalidations after cacheflush cheap (<= 5.6 ms per 10 s). The
+  worst frame (230 ms): 2348 blocks translated (69 ms), 584 cacheflushes
+  (3.7 ms invalidating); the rest is guest code (Mono's JIT itself, the game).
+  Many 33-70 ms frames (once 134 and 268 ms) had no translation and no flush
+  at all: cause unknown, not looked into.
+- jitshare stays off (R-007: 4 of 10 broken 99 Bricks boots with the shared
+  cache on 2026-10-28, not re-tested since). Mono-JITed methods run mostly on
+  the game thread, so sharing would likely not shorten these frames.
+- The logo hang (Unity's async-read race) hit 2 boots of 4 on the sandbox
+  today.
+
+Conclusion: the freezes are Mono compiling C# at play time (also present on
+a real 32-bit device, shorter there) plus GC stops; Rovio titles have
+neither. Not pursued further for now.
