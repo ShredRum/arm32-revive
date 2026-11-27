@@ -672,4 +672,10 @@ extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_
 extern "C" void Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded(JNIEnv* env, jclass thiz, jlong a0, jobject a1) {
     abr::AppHost_Call("Java_com_rovio_skynest_payment_google_GooglePlayPaymentProvider_skuDetailsLoaded", "(J[Lcom/rovio/skynest/payment/google/SkuDetails;)V", env, thiz, a0, a1); return;
 }
-// GEN_COUNT=224
+extern "C" void Java_com_rovio_rcs_AgeGenderQuery_onNativeCancel(JNIEnv* env, jobject thiz, jlong a0) {
+    abr::AppHost_Call("Java_com_rovio_rcs_AgeGenderQuery_onNativeCancel", "(J)V", env, thiz, a0); return;
+}
+extern "C" void Java_com_rovio_rcs_AgeGenderQuery_onNativeCompleted(JNIEnv* env, jobject thiz, jlong a0, jint a1, jobject a2, jobject a3) {
+    abr::AppHost_Call("Java_com_rovio_rcs_AgeGenderQuery_onNativeCompleted", "(JILjava/lang/String;Ljava/lang/String;)V", env, thiz, a0, a1, a2, a3); return;
+}
+// GEN_COUNT=226
